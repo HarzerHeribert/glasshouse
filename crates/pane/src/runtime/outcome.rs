@@ -101,8 +101,8 @@ pub enum CellOutcome {
     /// It ran off the end, or asked to hand back. The model gets the table
     /// and another turn, and the isolate stays warm (§1, §9.3).
     Yielded { turn: CellTurn },
-    /// It executed a top-level `return`. The task ends with this value (§1),
-    /// and `terminal` is what the person reads (§9.2).
+    /// It executed a top-level `return`. Text and scalars end the task; a
+    /// structured value is bounded notebook output (§1, §9.2).
     Returned {
         value: Value,
         terminal: Terminal,
@@ -114,8 +114,8 @@ pub enum CellOutcome {
     Threw { error: ErrorValue, turn: CellTurn },
 }
 
-/// The task's terminal response — `runtime-contract.md` §9.2 — read at the
-/// isolate boundary in full, never through `marshal`'s sample.
+/// A top-level return rendered at the isolate boundary. Text is a terminal
+/// response; bounded JSON is notebook output for the next turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminal {
     /// A returned string: the response, verbatim.
@@ -126,9 +126,7 @@ pub enum Terminal {
     Json { text: String, cut: bool },
 }
 
-/// How many bytes of a non-string result's JSON the response carries before
-/// it is cut — a *render* cap that never yields, unlike the response cap on a
-/// returned string, which always does (§9.2).
+/// How many bytes of notebook JSON the output carries before it is cut.
 pub const TERMINAL_JSON_CAP: usize = 2 * 1024;
 
 impl Terminal {
@@ -164,10 +162,23 @@ impl CellOutcome {
         }
     }
 
-    /// Whether the task is over — the one question the session loop asks of
-    /// this value (§1: `return` ends the task, a yield and a throw do not).
+    /// Whether the task is over. Structured values are notebook output for
+    /// another inference turn; text and scalar results are terminal.
     pub fn ends_the_task(&self) -> bool {
-        matches!(self, CellOutcome::Returned { .. })
+        match self {
+            CellOutcome::Returned { value, .. } => !matches!(
+                value,
+                Value::Array(_)
+                    | Value::File(_)
+                    | Value::TestReport(_)
+                    | Value::Null
+                    | Value::Undefined
+                    | Value::Object(_)
+                    | Value::Collection(_)
+                    | Value::Error(_)
+            ),
+            CellOutcome::Yielded { .. } | CellOutcome::Threw { .. } => false,
+        }
     }
 }
 
@@ -348,15 +359,34 @@ mod tests {
     }
 
     #[test]
-    fn only_a_return_ends_the_task() {
+    fn structured_returns_continue_and_scalar_or_text_returns_end_the_task() {
         assert!(!CellOutcome::Yielded { turn: turn() }.ends_the_task());
         assert!(
-            CellOutcome::Returned {
+            !CellOutcome::Returned {
                 value: Value::Null,
                 terminal: Terminal::Json {
                     text: "null".into(),
                     cut: false
                 },
+                turn: turn()
+            }
+            .ends_the_task()
+        );
+        assert!(
+            CellOutcome::Returned {
+                value: Value::Number(3.0),
+                terminal: Terminal::Json {
+                    text: "3".into(),
+                    cut: false
+                },
+                turn: turn()
+            }
+            .ends_the_task()
+        );
+        assert!(
+            CellOutcome::Returned {
+                value: Value::string("done"),
+                terminal: Terminal::Text("done".into()),
                 turn: turn()
             }
             .ends_the_task()

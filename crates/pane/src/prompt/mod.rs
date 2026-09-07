@@ -37,13 +37,14 @@ pub const PREAMBLE: &str = concat!(
     "them. Each new user request starts a fresh runtime. Earlier requests are\n",
     "history, not unfinished work. Work on the current request, including its\n",
     "requested tests. Running off the end or `yieldNow(reason)` gives results\n",
-    "and another turn. A top-level `return` ends the task; return an answer\n",
-    "grounded in results you observed.\n\n",
+    "and another turn. Returning an object, array or tool object displays\n",
+    "notebook output and also gives another turn. A top-level returned string\n",
+    "ends the task; use one for the final answer grounded in observed results.\n\n",
     "A prose response with no `execute_cell` call ends the task as the answer.\n",
     "Use prose-only output only when the request is finished; do not use it to\n",
     "announce work you still intend to perform.\n",
     "To interpret a file, inspect and yield first, then answer from the feedback.\n",
-    "You may return values computed directly from objects.\n\n",
+    "Use structured returns for inspection when useful; they do not finish the task.\n\n",
     "A thrown error carries its position and completed bindings. Continue from\n",
     "that state; failed or skipped calls did not succeed. PermissionDenied is\n",
     "final: code cannot widen the session's sandbox grant.",
@@ -116,16 +117,16 @@ pub enum ExhaustedReason {
 
 /// The one sentence that replaces the preamble when the task is exhausted —
 /// §6's last paragraph, naming the reason. The only permitted action is a
-/// top-level `return`.
+/// top-level returned string.
 pub fn exhausted_preamble(reason: ExhaustedReason) -> &'static str {
     match reason {
         ExhaustedReason::TaskBudget => {
-            "The task budget is exhausted; the only action this turn may take is a top-level \
-             `return`."
+            "The task budget is exhausted; the only action this turn may take is returning a \
+             final answer string at top level."
         }
         ExhaustedReason::ThreeTurnsWithoutAProgram => {
-            "Three turns without a program; the only action this turn may take is a top-level \
-             `return`."
+            "Three turns without a program; the only action this turn may take is returning a \
+             final answer string at top level."
         }
     }
 }
@@ -254,6 +255,9 @@ pub struct CellResult {
     /// line under the cell line. Never rendered beside an error: a throw is
     /// not a yield, whatever else the caller filled in.
     pub yield_reason: Option<String>,
+    /// Bounded structured value returned for notebook inspection. This is
+    /// shown to the model and user, then the task continues.
+    pub output: Option<String>,
     pub handle_table: String,
     pub stdout_tail: Option<String>,
     pub budget: Budget,
@@ -354,6 +358,11 @@ fn render_result_with_state(result: &CellResult, include_state: bool) -> String 
             .map(|item| format!("{} {}", item.status.mark(), item.text))
             .collect();
         out.push_str(&rows.join("\n"));
+    }
+
+    if let Some(output) = &result.output {
+        out.push_str("\n\n## Output\n");
+        out.push_str(output);
     }
 
     if let Some(stdout) = &result.stdout_tail {

@@ -19,16 +19,17 @@ program is a **cell**. All cells of one task share **one persistent module
 scope in one V8 isolate**, REPL-style: a top-level `const`, `let`, `function`
 or `class` declared in cell *n* is in scope in cell *n+1*.
 
-A cell ends one of two ways, and the difference is the whole control flow:
+A cell ends one of two ways, and the returned type decides task completion:
 
 - it **falls off the end** → the runtime **yields**. It renders the handle
   table, the model gets another turn, the isolate stays warm.
-- it executes a top-level `return` → the task **ends** with that value as the
-  result. Nothing further is asked of the model.
+- it executes a top-level `return` → a string or scalar **ends** the task; a
+  structured value is rendered as notebook output and the model gets another
+  turn. The model contract directs final answers to strings.
 
-This is the `Yielded` / `Result` distinction Codex's `code-mode-protocol`
-ships (`codex-rs/code-mode-protocol/src/runtime.rs`, `RuntimeResponse`), taken
-because it makes `return` a keyword with one meaning instead of a convention.
+This preserves the `Yielded` / `Result` distinction while adding a mechanical
+completion type: diagnostics stay inspectable and only prose can become the
+user's final answer.
 
 ## 2. A handle is a binding the model itself named
 
@@ -193,9 +194,9 @@ const prodFiles = new Set(hits.filter(m => !isTest(m)).map(m => m.path));
 return { total: hits.length, in_tests: inTests.length, prod_files: prodFiles.size };
 ```
 
-`return` executes, so the task ends with `{total: 1195, in_tests: 290,
-prod_files: 62}`. Neither the 122 KB nor the 64 KB was ever a conversation
-token.
+The object is shown as notebook output and becomes bounded evidence for the
+next turn, where the model can return a concise string. Neither the 122 KB nor
+the 64 KB was ever a conversation token.
 
 ## 7. What this contract does not decide
 
@@ -226,12 +227,13 @@ document's.
 
 ## 9. Ending a task from inside the program
 
-§1 gives a cell two endings and this section is what they mean once a person is
-reading the answer: **falling off the end yields**, and **a top-level `return`
-ends the task with that value**. Neither is new here. What is new is that a
-returned value is the task's **terminal response** — rendered to the person and
-persisted as the assistant's turn — and that pane sends **no further request**
-after it. One inference can therefore both do the work and answer for it.
+§1 gives a cell two control-flow endings, but only one returned type completes
+the task: **falling off the end yields**, a **structured top-level `return` is
+notebook output and yields**, and a **string or scalar top-level `return` is
+terminal**. Pane renders notebook output to the person and supplies it to the
+next inference turn. It persists a terminal value as the assistant's turn and
+sends no further request after it. The model is directed to use strings for
+final answers, while scalar completion preserves the original runtime contract.
 
 The failure semantics come first, because they are the reason the section
 exists.
@@ -275,13 +277,20 @@ one `turn` line with the assistant's role — the same line an assistant message
 has always written, so `resume` rebuilds it from the file alone with no new
 reader and no new kind.
 
-A `return` of any **other** value ends the task with that value as its result
-(§6's worked turn ends `{total: 1195, in_tests: 290, prod_files: 62}` and is
-unchanged). It is rendered through §3's preview rule and recorded the same way.
-It is a result, not a response: nothing paraphrases it and no further request is
-sent.
+A `return` of a structured value — an object, array, collection or host tool
+object — is notebook output. It is rendered as bounded JSON with values,
+recorded on the cell, supplied as `## Output` in feedback and followed by
+another provider request. Nothing paraphrases it. This makes the runtime
+enforce the notebook distinction even when a model uses `return {diagnostic:
+value}` to inspect state. Numbers and booleans remain scalar terminal results;
+the model contract asks for a string when answering a person.
 
-**Ruled 2026-09-06 (the user's decision to implement directly):** `return`'s meaning depends on the returned type — a string answers, anything else is the task's result — because §6's worked turn and `contract.rs`'s frozen vocabulary both already say so; `model-contract.md` §2 tells the model which to use.
+**Corrected 2026-09-07 after live subscription dogfood:** the earlier ruling
+made non-string returns terminal. Gemini used `return {matchesCount,
+sampleMatches}` as ordinary notebook inspection and Pane stopped before giving
+the requested recommendations. The runtime now reserves completion for strings
+and treats every structured return as non-terminal output; this is a mechanical
+type boundary rather than a prompt-compliance assumption.
 
 **A response is never silently truncated.** Over the turn's response cap the
 cell **yields** with the cap as its reason (§9.3) rather than rendering part of

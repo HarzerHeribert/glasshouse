@@ -5578,6 +5578,7 @@ Closed these waves: **1304 → 1305**.
 | package | tier | result |
 |---|---|---|
 | subscription broker core, routing, CLI and integration | Red; three parallel research/implementation lanes plus an independent verifier | Four integration commits and one live fix. Focused suites and 114/114 binary tests green; verifier ACCEPT. Three provider OAuth accounts connected and three real Pane turns succeeded through the Glasshouse gateway. |
+| Pane structured-return completion correction | Red, primary after live Gemini dogfood | One runtime predicate shared by foreground and subagent loops. Exact diagnostic-object regression proves another request and final prose; bounded output reaches both model and TUI. Full Pane sweep exposed one stale model-picker fixture, corrected and re-run; TUI live 10/10 and Clippy clean. |
 
 **Finding.** Fixture-sidecar tests proved lifecycle and byte relay but did not parse the generated YAML or delay model registration. Live use found both defects in minutes. A managed third-party sidecar package must include one real binary startup before its evidence can support a production claim, even when all protocol fixtures are green.
 

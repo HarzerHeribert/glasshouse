@@ -13,6 +13,7 @@ fn result(cell: u64, table: &str) -> CellResult {
             frames: vec![],
         }),
         yield_reason: None,
+        output: None,
         stdout_tail: Some(
             "source text\n\n## Handles\nliteral heading\n\n## Budget\nliteral budget".into(),
         ),

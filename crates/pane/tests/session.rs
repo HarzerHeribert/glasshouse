@@ -1173,8 +1173,10 @@ fn a_scripted_two_cell_task_runs_through_the_binary_and_returns() {
     );
     let cell_two = "```pane\nconst isTest = (m) => m.path.includes(\"/tests/\");\nconst inTests = hits.filter(isTest);\nconst prodFiles = new Set(hits.filter(m => !isTest(m)).map(m => m.path));\nreturn { total: hits.length, in_tests: inTests.length, prod_files: prodFiles.size };\n```";
 
-    let (base_url, bodies) = start_answering_provider(2, move |body| {
-        if body.contains("## Handles") && body.contains("hits") {
+    let (base_url, bodies) = start_answering_provider(3, move |body| {
+        if body.contains("## Output") {
+            assistant_reply("Two files match; one is a test and one is production.")
+        } else if body.contains("## Handles") && body.contains("hits") {
             assistant_reply(cell_two)
         } else {
             assistant_reply(&cell_one)
@@ -1216,7 +1218,11 @@ fn a_scripted_two_cell_task_runs_through_the_binary_and_returns() {
     );
 
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2, "the binary sent the second turn itself");
+    assert_eq!(
+        bodies.len(),
+        3,
+        "structured output bought a final prose turn"
+    );
     let result_block = last_user_text(&bodies[1]);
     assert!(
         result_block.starts_with("[cell 1 yielded in"),
@@ -1227,6 +1233,7 @@ fn a_scripted_two_cell_task_runs_through_the_binary_and_returns() {
         "a handle's payload reached the conversation: {}",
         bodies[1]
     );
+    assert!(last_user_text(&bodies[2]).contains("## Output"));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for key in ["\"total\"", "\"in_tests\"", "\"prod_files\""] {
@@ -1746,18 +1753,20 @@ fn a_throw_never_becomes_a_terminal_response() {
     assert!(!answer.contains("CONFIDENT SENTENCE"), "{answer}");
 }
 
-/// Addendum 3: a non-string result is rendered as its JSON **with values**
-/// -- a person reading `{matches: 3, files: 2}` needs the 3 and the 2 -- and
-/// one over 2 KiB is cut on a character boundary, says so, and is followed
-/// by the type-only preview of the whole value.
+/// A structured return is notebook output with values and triggers another
+/// inference turn. This is the live Gemini failure: it returned a diagnostic
+/// object while gathering evidence and Pane used to end the whole task.
 #[test]
-fn a_returned_object_is_rendered_as_its_json_with_values() {
+fn a_returned_object_is_output_and_the_task_continues() {
     let root = scratch_dir("terminal-json-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply(
-        "```pane\nreturn { matches: 3, files: 2, names: [\"a.rs\", \"b.rs\"] };\n```",
-    )]);
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply(
+            "```pane\nreturn { matches: 3, files: 2, names: [\"a.rs\", \"b.rs\"] };\n```",
+        ),
+        assistant_reply("The evidence supports two concise recommendations."),
+    ]);
 
     let output = run_session(
         &root,
@@ -1772,16 +1781,27 @@ fn a_returned_object_is_rendered_as_its_json_with_values() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "structured output must buy another turn");
+    let feedback = last_user_text(&bodies[1]);
+    assert!(feedback.contains("## Output"), "{feedback}");
+    assert!(
+        feedback.contains(r#"{"matches":3,"files":2,"names":["a.rs","b.rs"]}"#),
+        "{feedback}"
+    );
     let lines = rollout_lines(&rollout);
-    let last = lines.last().unwrap();
-    assert_eq!(last["role"], "assistant", "{lines:?}");
+    let final_answer = lines
+        .iter()
+        .rev()
+        .find(|line| line["kind"] == "turn" && line["role"] == "assistant")
+        .expect("final assistant turn");
     assert_eq!(
-        last["text"],
-        r#"{"matches":3,"files":2,"names":["a.rs","b.rs"]}"#
+        final_answer["text"],
+        "The evidence supports two concise recommendations."
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(r#" {"matches":3,"files":2"#),
+        stdout.contains("\"matches\": 3"),
         "the values, not their types, reach the screen:\n{stdout}"
     );
 
@@ -1789,9 +1809,10 @@ fn a_returned_object_is_rendered_as_its_json_with_values() {
     // cut at 2,048 falls inside a character and must back off to 2,046.
     let root = scratch_dir("terminal-json-cut-root");
     let rollout = root.join("rollout.jsonl");
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply(
-        "```pane\nreturn { b: \"€\".repeat(3000), n: 1 };\n```",
-    )]);
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nreturn { b: \"€\".repeat(3000), n: 1 };\n```"),
+        assistant_reply("done"),
+    ]);
     let output = run_session(
         &root,
         &rollout,
@@ -1801,8 +1822,14 @@ fn a_returned_object_is_rendered_as_its_json_with_values() {
         Some(&absent),
     );
     assert!(output.status.success());
-    let lines = rollout_lines(&rollout);
-    let text = lines.last().unwrap()["text"].as_str().unwrap().to_string();
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let feedback = last_user_text(&bodies[1]);
+    let text = feedback
+        .split("## Output\n")
+        .nth(1)
+        .expect("output section")
+        .to_string();
     let (json, rest) = text
         .split_once('\n')
         .expect("a cut result says so on the next line");

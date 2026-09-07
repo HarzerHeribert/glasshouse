@@ -403,6 +403,8 @@ pub struct CellView {
     pub table: Option<String>,
     /// Already bounded by the runtime; display only, never an extra model message.
     pub stdout: Option<String>,
+    /// A non-terminal structured value returned for notebook inspection.
+    pub output: Option<String>,
     /// Recorded tool outcomes, not calls inferred from generated source.
     pub execution: Option<String>,
     /// Host call count from the runtime record; never inferred from display lines.
@@ -1430,6 +1432,10 @@ fn notebook_lines(
                     {
                         push_folded_region(&mut lines, stdout, 6, true);
                     }
+                    if let Some(output) = view.and_then(|v| v.output.as_deref()) {
+                        turn_header(&mut lines, "OUTPUT".into(), MUTED);
+                        lines.extend(markdown::render(&pretty_json(output), width));
+                    }
                     if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
                         push_changes(&mut lines, changes, true);
                     }
@@ -1542,6 +1548,10 @@ fn notebook_lines(
                 if let Some(stdout) = view.and_then(|view| view.stdout.as_deref()) {
                     turn_header(&mut lines, "OUTPUT".into(), MUTED);
                     push_folded_region(&mut lines, stdout, 6, compact);
+                }
+                if let Some(output) = view.and_then(|view| view.output.as_deref()) {
+                    turn_header(&mut lines, format!("OUTPUT  [{cell}]"), MUTED);
+                    lines.extend(markdown::render(&pretty_json(output), width));
                 }
                 if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
                     push_changes(&mut lines, changes, compact);

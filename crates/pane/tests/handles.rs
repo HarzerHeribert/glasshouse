@@ -399,7 +399,10 @@ fn a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield() {
         tests = real_root.join("tests").to_string_lossy()
     );
     let second = runtime.run_cell(&cell_two);
-    assert!(second.ends_the_task(), "a top-level return ends the task");
+    assert!(
+        !second.ends_the_task(),
+        "structured output continues the task"
+    );
     let CellOutcome::Returned { value, .. } = &second else {
         panic!("expected a return: {second:?}");
     };

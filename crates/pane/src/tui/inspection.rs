@@ -21,6 +21,7 @@ impl Inspection {
         view.executed_source.is_some()
             || view.execution.is_some()
             || view.error.is_some()
+            || view.output.is_some()
             || view.returned.is_some()
     }
 
@@ -137,6 +138,11 @@ fn content(conversation: &Conversation, notebook: &Notebook, cell: usize) -> Vec
         &mut lines,
         "CONSOLE OUTPUT · recorded cell output",
         view.stdout.as_deref(),
+    );
+    section(
+        &mut lines,
+        "NOTEBOOK OUTPUT · task continues",
+        view.output.as_deref(),
     );
     section(
         &mut lines,

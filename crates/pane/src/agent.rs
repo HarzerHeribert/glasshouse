@@ -223,6 +223,7 @@ pub fn run(
         if let CellOutcome::Returned {
             value, terminal, ..
         } = &outcome
+            && outcome.ends_the_task()
         {
             let answer = terminal.render(value);
             if let Some((id, _, _)) = &native {
@@ -320,6 +321,12 @@ fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
         elapsed_ms: turn.elapsed_ms,
         error,
         yield_reason: turn.yield_reason.clone(),
+        output: match outcome {
+            CellOutcome::Returned {
+                value, terminal, ..
+            } if !outcome.ends_the_task() => Some(terminal.render(value)),
+            _ => None,
+        },
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         budget: Budget {

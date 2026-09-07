@@ -116,6 +116,7 @@ fn the_worked_turn_renders_byte_for_byte() {
         elapsed_ms: 412,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: handle_table.clone(),
         stdout_tail: None,
         budget: Budget {
@@ -248,6 +249,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
         elapsed_ms: 5,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -270,6 +272,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
         elapsed_ms: 5,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: "x  number\n1".to_string(),
         stdout_tail: Some("hello".to_string()),
         budget: Budget {
@@ -295,6 +298,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             frames: vec!["cell 3, line 2".to_string()],
         }),
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -327,6 +331,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
         elapsed_ms: 1,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -345,6 +350,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
         elapsed_ms: 1,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -429,6 +435,7 @@ fn an_unattributed_throw_omits_the_position_line() {
             frames: vec!["cell 3, line 2".to_string()],
         }),
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -467,6 +474,7 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
         elapsed_ms: 5,
         error,
         yield_reason: Some("the tests did not run; the target is missing".to_string()),
+        output: None,
         handle_table: "x  number\n1".to_string(),
         stdout_tail: None,
         budget: Budget {
@@ -538,6 +546,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
                 .collect(),
         }),
         yield_reason: None,
+        output: None,
         handle_table: turn.table.clone(),
         stdout_tail: None,
         budget: Budget {
@@ -577,6 +586,7 @@ fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> Stri
         elapsed_ms: 12,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: "hits  Array  120 rows · preview 8 tok".to_string(),
         stdout_tail: Some("the cell printed this".to_string()),
         budget: Budget {
@@ -636,6 +646,7 @@ fn compaction_never_drops_an_error() {
             frames: Vec::new(),
         }),
         yield_reason: None,
+        output: None,
         handle_table: "hits  Array".to_string(),
         stdout_tail: None,
         budget: Budget {

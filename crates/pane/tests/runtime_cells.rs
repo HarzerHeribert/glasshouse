@@ -173,7 +173,7 @@ fn a_top_level_binding_persists_into_the_next_cell_and_a_redeclaration_replaces_
 }
 
 #[test]
-fn a_cell_that_falls_off_the_end_yields_and_a_top_level_return_ends_the_task() {
+fn structured_returns_continue_and_scalar_or_text_returns_end_the_task() {
     let fixture = Fixture::new("endings");
     let glasshouse = Glasshouse::None;
     let session = SessionId::new("endings-session");
@@ -190,7 +190,7 @@ fn a_cell_that_falls_off_the_end_yields_and_a_top_level_return_ends_the_task() {
     assert!(!yielded.ends_the_task());
 
     let returned_outcome = runtime.run_cell("return { total: a + b };\n");
-    assert!(returned_outcome.ends_the_task());
+    assert!(!returned_outcome.ends_the_task());
     match returned(&returned_outcome) {
         Value::Object(object) => {
             assert_eq!(object.key_count(), 1);
@@ -199,10 +199,13 @@ fn a_cell_that_falls_off_the_end_yields_and_a_top_level_return_ends_the_task() {
         other => panic!("expected an object, got {other:?}"),
     }
 
-    // A bare `return` ends the task too, with undefined.
+    // A bare return is also notebook output rather than a final answer.
     let bare = runtime.run_cell("return;\n");
-    assert!(bare.ends_the_task());
+    assert!(!bare.ends_the_task());
     assert_eq!(returned(&bare), &Value::Undefined);
+
+    let answer = runtime.run_cell("return \"done\";\n");
+    assert!(answer.ends_the_task());
 }
 
 #[test]
@@ -1196,8 +1199,8 @@ fn no_door_shadows_deletes_or_redefines_a_host_function() {
     assert_eq!(runtime.handle_names(), vec!["gone"], "{survived:?}");
 }
 
-/// §1's "a top-level `return` ends the task" is decided by the value the
-/// cell's promise fulfils with, not by a flag the program can set.
+/// §1's string return is decided by the value the cell's promise fulfils
+/// with, not by a flag the program can set.
 ///
 /// `__pane_cell.e()` used to set that flag, so one line of the model's own
 /// program turned its `return` into a yield and the task never ended.
@@ -1223,7 +1226,7 @@ fn a_forged_epilogue_does_not_turn_a_return_into_a_yield() {
     assert!(!stashed.ends_the_task(), "{stashed:?}");
     let replayed = runtime.run_cell("return marker;\n");
     assert!(
-        replayed.ends_the_task(),
+        matches!(replayed, CellOutcome::Returned { .. }),
         "an earlier cell's marker yielded a later one: {replayed:?}"
     );
 
@@ -3182,6 +3185,7 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
         elapsed_ms: 1,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {

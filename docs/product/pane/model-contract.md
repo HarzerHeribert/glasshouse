@@ -53,14 +53,15 @@ A plain-language assistant response with no native call ends the request as its 
     them. Each new user request starts a fresh runtime. Earlier requests are
     history, not unfinished work. Work on the current request, including its
     requested tests. Running off the end or `yieldNow(reason)` gives results
-    and another turn. A top-level `return` ends the task; return an answer
-    grounded in results you observed.
+    and another turn. Returning an object, array or tool object displays
+    notebook output and also gives another turn. A top-level returned string
+    ends the task; use one for the final answer grounded in observed results.
 
     A prose response with no `execute_cell` call ends the task as the answer.
     Use prose-only output only when the request is finished; do not use it to
     announce work you still intend to perform.
     To interpret a file, inspect and yield first, then answer from the feedback.
-    You may return values computed directly from objects.
+    Use structured returns for inspection when useful; they do not finish the task.
 
     A thrown error carries its position and completed bindings. Continue from
     that state; failed or skipped calls did not succeed. PermissionDenied is
@@ -184,9 +185,9 @@ A prose response with no native call is the final answer, matching ordinary
 assistant tool-call semantics. It must not announce future work; if work remains,
 the same assistant response carries one `execute_cell` call. The legacy final
 `<!-- pane:done -->` line is still accepted and hidden for saved sessions, but
-new prompts do not require it. A program's top-level `return` is the other
-completion signal. Conversational replies stay prose and require no executable
-cell.
+new prompts do not require it. A program's top-level returned string is the
+other completion signal. Conversational replies stay prose and require no
+executable cell.
 
 ### Repairing a parse-failed cell
 
@@ -240,7 +241,7 @@ start (default 8,000); total provider-reported tokens for the task (default
 cells used against their cap (default 40). At 90%
 of the task budget the line gains `— finish or return`; when it is exhausted
 the next turn's preamble is replaced by one sentence saying the only permitted
-action is a top-level `return`.
+action is a top-level returned string.
 
 ## 7. The worked turn, as bytes
 

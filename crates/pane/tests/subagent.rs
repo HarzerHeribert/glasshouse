@@ -176,6 +176,50 @@ fn subagent_uses_native_cell_handoff_across_turns() {
     assert_eq!(result.stdout, "native 42");
 }
 
+#[test]
+fn subagent_continues_after_structured_notebook_output() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("structured-output");
+    let reply = |id: &str, code: &str| {
+        serde_json::json!({
+            "role":"assistant", "content":[{"type":"tool_use","id":id,"name":"execute_cell","input":{"code":code}}],
+            "usage":{"input_tokens":11,"output_tokens":7}
+        })
+    };
+    let base = start_native_provider_sequence(vec![
+        reply("inspect", "return {matchesCount: 0, sampleMatches: []};"),
+        reply(
+            "answer",
+            "return \"recommendations follow from the inspection\";",
+        ),
+    ]);
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base);
+    }
+    let _handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "recommend changes",
+        &AgentOptions {
+            turns: 4,
+            model: "test-model".into(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let events = wait_for_event(&fixture.session, Duration::from_secs(20));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    let done = events
+        .iter()
+        .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        .expect("structured output must not finish the subagent");
+    let result = bg::payload(&fixture.session, done.payload.as_str()).unwrap();
+    assert_eq!(result.status, "returned");
+    assert_eq!(result.stdout, "recommendations follow from the inspection");
+}
+
 fn wait_for_event(session: &SessionId, within: Duration) -> Vec<pane::events::Event> {
     let deadline = Instant::now() + within;
     loop {

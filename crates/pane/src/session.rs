@@ -1063,8 +1063,8 @@ struct Step {
 
 /// Runs one task to its end: every turn's program goes to this task's own
 /// isolate and every outcome comes back as the next user message, with no
-/// person in the loop, until a top-level `return`, the cell cap or the task
-/// budget ends it.
+/// person in the loop, until a terminal return, the cell cap or the task
+/// budget ends it. The model is directed to return final answers as strings.
 ///
 /// **One [`Runtime`] per task, built from the session's one compiled
 /// [`Profile`].** `sandbox-grants.md` §1.5 is that the profile is computed
@@ -1419,8 +1419,8 @@ fn run_task_inner(
 
         // The flag is read before this turn decorates it, so the turn that
         // carries the exhausted preamble is sent, answered and only then
-        // ends the task -- §6's "the only permitted action is a top-level
-        // `return`" needs that turn to actually happen.
+        // ends the task -- §6's required final string needs that turn to
+        // actually happen.
         let completed = step.answer.is_none();
         let stop = completed || final_turn || poisoned;
         incomplete = poisoned || (stop && !completed);
@@ -1874,6 +1874,7 @@ fn act_on(
         elapsed_ms: turn.elapsed_ms,
         error: None,
         yield_reason: None,
+        output: None,
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         budget: budget.line(),
@@ -1888,10 +1889,17 @@ fn act_on(
         // other value as its JSON -- never `marshal`'s sample.
         CellOutcome::Returned {
             value, terminal, ..
-        } => {
+        } if outcome.ends_the_task() => {
             let text = terminal.render(value);
             view.returned = Some(text.clone());
             response = Some(text);
+        }
+        CellOutcome::Returned {
+            value, terminal, ..
+        } => {
+            let text = terminal.render(value);
+            view.output = Some(text.clone());
+            result.output = Some(text);
         }
         CellOutcome::Threw { error, .. } => {
             view.error = Some(CellError {
@@ -1928,9 +1936,12 @@ fn act_on(
         }
         answer
     };
-    let answer = (!outcome.ends_the_task()).then(|| feedback(prompt::render_result(&result)));
-    let historical =
-        (!outcome.ends_the_task()).then(|| feedback(prompt::render_result_history(&result)));
+    let answer = response
+        .is_none()
+        .then(|| feedback(prompt::render_result(&result)));
+    let historical = response
+        .is_none()
+        .then(|| feedback(prompt::render_result_history(&result)));
 
     let native_result = native.map(|(id, _, _)| {
         let with_return = |mut text: String| {
