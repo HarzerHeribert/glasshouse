@@ -5580,3 +5580,12 @@ Closed these waves: **1304 → 1305**.
 | subscription broker core, routing, CLI and integration | Red; three parallel research/implementation lanes plus an independent verifier | Four integration commits and one live fix. Focused suites and 114/114 binary tests green; verifier ACCEPT. Three provider OAuth accounts connected and three real Pane turns succeeded through the Glasshouse gateway. |
 
 **Finding.** Fixture-sidecar tests proved lifecycle and byte relay but did not parse the generated YAML or delay model registration. Live use found both defects in minutes. A managed third-party sidecar package must include one real binary startup before its evidence can support a production claim, even when all protocol fixtures are green.
+
+### Wave 149 — 2026-09-07: the real subscription catalogue reaches Pane's model picker
+
+| package | tier | result |
+|---|---|---|
+| Pane provider carousel | UI, Astra high | 196 Pane unit/PTY/render tests green; eight themes and 1–160-column bounds; exact selected model observed on the next request. |
+| broker model catalogue | Red, Sol high; primary fix-forward | Three live authenticated catalogues reported 11 Google, 16 Anthropic and 9 OpenAI models. 2,207 library tests, 116 binary tests and 54 focused integration tests green; Clippy clean. |
+
+**Finding.** A catalogue can be complete globally and still be wrong for the active route. The first live picker exposed 444 API-provider models while its own `gemini-3.8-flash-high` was absent. Catalogue entries now carry provider, account and selectability separately; Pane shows every subscription but applies only models belonging to the gateway's pinned entitlement.
