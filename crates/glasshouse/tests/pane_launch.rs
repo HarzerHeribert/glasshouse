@@ -147,30 +147,50 @@ fn pane_launches_over_a_pty_and_is_visible_in_the_session_list() {
     let (mut process, output) = PtyProcess::spawn(command).expect("spawn glasshouse launch pane");
     let output = Output::start(output);
 
-    // A line typed into the session, terminated the way a real terminal
-    // sends Enter -- see `harness::Message::typed`'s own doc for why `\r`
-    // and not `\n`.
-    const TYPED: &str = "hello, pane";
-    process
-        .write_input(format!("{TYPED}\r").as_bytes())
-        .expect("type a line into the session");
-
+    // The retired echo stub accepted input before its event loop existed. A
+    // real full-screen session does not, so wait until Pane has drawn before
+    // testing its input path.
     let deadline = Instant::now() + TIMEOUT;
-    let mut seen = String::new();
+    let mut ready = String::new();
     while Instant::now() < deadline {
-        seen = output.text();
-        if seen.contains(TYPED) {
+        ready = output.text();
+        if ready.contains("PANE /") {
             break;
         }
         std::thread::sleep(POLL);
     }
     assert!(
-        seen.contains(TYPED),
-        "typed input never came back through the session.\n--- output ---\n{seen}\n--- end ---"
+        ready.contains("PANE /"),
+        "pane never drew its interface under `glasshouse launch`.\n--- output ---\n{ready}\n--- end ---"
     );
 
-    // `pane::echo_line` returns after one line, so the process exits on its
-    // own; `glasshouse launch` must propagate that clean exit.
+    // Use a local command with deterministic visible feedback. Seeing the
+    // typed bytes alone could be terminal echo; seeing Pane's response proves
+    // its editor and command loop received Enter through Glasshouse's PTY.
+    const COMMAND: &str = "/sidebar hide";
+    process
+        .write_input(format!("{COMMAND}\r").as_bytes())
+        .expect("type a local command into the session");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        seen = output.text();
+        if seen.contains("Sidebar: /sidebar auto|show|hide") {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        seen.contains("Sidebar: /sidebar auto|show|hide"),
+        "pane did not act on typed input.\n--- output ---\n{seen}\n--- end ---"
+    );
+
+    // A real Pane session stays open. Ask it to leave through its own command,
+    // then verify `glasshouse launch` propagates that clean exit.
+    process
+        .write_input(b"/exit\r")
+        .expect("ask the pane session to exit");
     let deadline = Instant::now() + TIMEOUT;
     let status = loop {
         if let Some(status) = process.try_wait().expect("poll the launch") {
