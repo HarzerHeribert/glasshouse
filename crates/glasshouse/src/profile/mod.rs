@@ -206,6 +206,8 @@ pub struct LaunchProfile {
     pub harness: IntegrationId,
     pub backend: BackendResource,
     pub model: Option<String>,
+    /// Exact configured subscription entitlement for a gateway profile.
+    pub entitlement: Option<String>,
     pub expected_protocol: Option<WireProtocol>,
     pub approval: ApprovalSelection,
     /// Phase 9H line 518: pin a gateway-backed session to the provider it is
@@ -251,6 +253,7 @@ impl LaunchProfile {
             harness,
             backend: BackendResource::Native,
             model: None,
+            entitlement: None,
             expected_protocol: None,
             approval: ApprovalSelection::Default,
             pin_gateway_backend: false,
@@ -1330,6 +1333,27 @@ pub fn gateway_upstream(
     }
 
     Ok(Upstream::with_failover(backends)?)
+}
+
+/// Build a gateway upstream owned by one exact subscription entitlement.
+pub fn subscription_broker_upstream(
+    broker: crate::gateway::subscription_broker::RunningSubscriptionBroker,
+) -> Result<Upstream, crate::gateway::UpstreamError> {
+    let base = broker.base_url().to_owned();
+    let routes = GATEWAY_INGRESS_PROTOCOLS
+        .iter()
+        .map(|protocol| {
+            Route::new(
+                protocol.slug().to_owned(),
+                ingress_targets(*protocol),
+                &base,
+            )
+            .with_tools(ToolSemantics::Verified)
+        })
+        .collect();
+    Upstream::with_failover(vec![UpstreamBackend::from_subscription_broker(
+        routes, broker,
+    )?])
 }
 
 /// One [`Route`] per ingress protocol `provider` actually serves, in the

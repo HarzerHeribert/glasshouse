@@ -3,6 +3,8 @@
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
+
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff, ProjectCheckpoints};
 use glasshouse::config::response::ResponseRequest;
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
@@ -198,7 +200,16 @@ pub(crate) fn gateway_upstream(
     project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     secrets: &dyn glasshouse::secret::SecretStore,
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
+    paths: &glasshouse::RuntimePaths,
 ) -> anyhow::Result<glasshouse::gateway::Upstream> {
+    if let Some(entitlement) = entitlement {
+        let broker = glasshouse::gateway::subscription_broker::RunningSubscriptionBroker::start(
+            paths,
+            entitlement.name(),
+        )?;
+        return Ok(glasshouse::profile::subscription_broker_upstream(broker)?);
+    }
     let mut providers = Vec::new();
     for name in effective.provider_names() {
         providers.push(effective.configured_provider(&name)?.value);
@@ -218,6 +229,83 @@ pub(crate) fn gateway_upstream(
     Ok(glasshouse::profile::gateway_upstream(
         &providers, secrets, &free,
     )?)
+}
+
+/// Resolve the exact subscription account for a gateway profile before any
+/// process starts. An explicit routed/stored name outranks the profile pin;
+/// absent either, the existing API-key gateway path remains selected.
+pub(crate) fn gateway_entitlement(
+    effective: &EffectiveConfig<'_>,
+    profile: &glasshouse::profile::LaunchProfile,
+    exact: Option<&str>,
+) -> anyhow::Result<Option<glasshouse::config::ResolvedEntitlement>> {
+    let requested = exact.or(profile.entitlement.as_deref());
+    let Some(name) = requested else {
+        return Ok(None);
+    };
+    let all = effective.configured_entitlements()?;
+    if let (Some(stored), Some(pinned)) = (exact, profile.entitlement.as_deref())
+        && stored != pinned
+    {
+        anyhow::bail!(
+            "stored gateway entitlement `{stored}` no longer matches profile `{}` entitlement `{pinned}`",
+            profile.name
+        );
+    }
+    let entry = all
+        .into_iter()
+        .find(|entry| entry.name() == name)
+        .with_context(|| format!("gateway entitlement `{name}` is not configured"))?;
+    if entry.backing().subscription_broker().is_none() {
+        anyhow::bail!("gateway entitlement `{name}` is not backed by a subscription broker");
+    }
+    if !entry.rules().serves_harness(profile.harness) {
+        anyhow::bail!(
+            "gateway entitlement `{name}` does not permit harness `{}`",
+            profile.harness.slug()
+        );
+    }
+    if let (Some(model), Some(glasshouse::config::EntitlementModels::Declared { models, .. })) =
+        (profile.model.as_deref(), entry.models())
+        && !models.iter().any(|candidate| candidate == model)
+    {
+        anyhow::bail!("gateway entitlement `{name}` does not serve requested model `{model}`");
+    }
+    Ok(Some(entry))
+}
+
+fn validate_recorded_broker_resume(
+    effective: &EffectiveConfig<'_>,
+    profile_name: Option<&str>,
+    entitlement_name: Option<&str>,
+    harness: glasshouse::integrations::IntegrationId,
+) -> anyhow::Result<()> {
+    let Some(entitlement_name) = entitlement_name else {
+        return Ok(());
+    };
+    let configured = effective.configured_entitlements()?;
+    let is_broker = configured.iter().any(|entry| {
+        entry.name() == entitlement_name && entry.backing().subscription_broker().is_some()
+    });
+    if !is_broker {
+        return Ok(());
+    }
+    let profile_name = profile_name.with_context(|| {
+        format!("stored subscription-broker entitlement `{entitlement_name}` has no launch profile; refusing to select a replacement")
+    })?;
+    let profile = effective.launch_profile(profile_name, harness).with_context(|| {
+        format!("stored subscription-broker entitlement `{entitlement_name}` requires deleted or incompatible launch profile `{profile_name}`; refusing to select a replacement")
+    })?.value;
+    if !matches!(
+        profile.backend,
+        glasshouse::profile::BackendResource::GlasshouseGateway
+    ) {
+        anyhow::bail!(
+            "stored subscription-broker entitlement `{entitlement_name}` no longer has a gateway-backed launch profile; refusing to select a replacement"
+        );
+    }
+    gateway_entitlement(effective, &profile, Some(entitlement_name))?;
+    Ok(())
 }
 
 /// The routing evidence ledger for this project — only when a gateway will
@@ -280,6 +368,7 @@ fn resolve_resume_overlay(
     // record already exists, so there is no ordering to get right the way
     // `launch_session` has to wait for `store.create`.
     session_id: &session::SessionId,
+    serving_entitlement: Option<&str>,
     // Map line 1735. Built by `resume_session`, which is where the recorder
     // this eventually writes into is opened; this function only starts the
     // gateway, so it is a parameter rather than something resolved here.
@@ -303,9 +392,51 @@ fn resolve_resume_overlay(
     // credential is never carried across processes, let alone across the gap
     // between the original launch and this resume.
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let stored_is_broker = serving_entitlement.is_some_and(|name| {
+        effective.configured_entitlements().is_ok_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.name() == name && entry.backing().subscription_broker().is_some()
+            })
+        })
+    });
+    if matches!(
+        launch_profile.backend,
+        glasshouse::profile::BackendResource::GlasshouseGateway
+    ) && serving_entitlement.is_some_and(|name| {
+        effective
+            .configured_entitlements()
+            .is_ok_and(|entries| !entries.iter().any(|entry| entry.name() == name))
+    }) {
+        anyhow::bail!(
+            "stored gateway entitlement is no longer configured; refusing to reselect an account"
+        );
+    }
+    if launch_profile.entitlement.is_some() && serving_entitlement.is_none() {
+        anyhow::bail!(
+            "the stored gateway session has no serving entitlement; refusing to reselect a subscription account"
+        );
+    }
+    let broker_entitlement = if matches!(
+        launch_profile.backend,
+        glasshouse::profile::BackendResource::GlasshouseGateway
+    ) && (launch_profile.entitlement.is_some() || stored_is_broker)
+    {
+        gateway_entitlement(effective, &launch_profile, serving_entitlement)?
+    } else {
+        None
+    };
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         std::slice::from_ref(&launch_profile),
-        || gateway_upstream(user, project, effective, &secrets),
+        || {
+            gateway_upstream(
+                user,
+                project,
+                effective,
+                &secrets,
+                broker_entitlement.as_ref(),
+                runtime.paths(),
+            )
+        },
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths(),
         )),
@@ -1266,6 +1397,12 @@ pub(crate) fn resume_session(
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let selection = session::select::select(Some(resumable.harness.as_str()), effective)?;
+    validate_recorded_broker_resume(
+        &effective,
+        record.launch_profile.as_deref(),
+        record.entitlement.as_deref(),
+        selection.id(),
+    )?;
 
     let Some(mut args) = selection.resume_args(
         &resumable.native_session_id,
@@ -1298,7 +1435,7 @@ pub(crate) fn resume_session(
     // reports for it. Before this, a resume applied none of the six facts it
     // displays.
     //
-    // A profile that no longer resolves — deleted from configuration, its
+    // A non-broker profile that no longer resolves — deleted from configuration, its
     // harness executable now missing, a bypass acknowledgement withdrawn
     // since the original launch — is reported and skipped rather than
     // refused: `open_for_resume` has already established this session is
@@ -1306,9 +1443,29 @@ pub(crate) fn resume_session(
     // rather than invent" as though it were a fresh launch. The user gets a
     // plain native resume and a line on stderr explaining why, not a session
     // that no longer opens at all.
+    // `validate_recorded_broker_resume` above is the deliberate exception:
+    // an account-specific broker session may never fall through this path.
     // Map line 1735: built before the gateway `resolve_resume_overlay` starts,
     // installed below beside the recorder — see `DegradeRelay`.
     let degrade_relay = DegradeRelay::new();
+    let requires_exact_broker = record.launch_profile.as_deref().is_some_and(|name| {
+        effective
+            .launch_profile(name, selection.id())
+            .is_ok_and(|resolved| {
+                matches!(
+                    resolved.value.backend,
+                    glasshouse::profile::BackendResource::GlasshouseGateway
+                ) && (resolved.value.entitlement.is_some()
+                    || record.entitlement.as_deref().is_some_and(|stored| {
+                        effective.configured_entitlements().is_ok_and(|entries| {
+                            match entries.iter().find(|entry| entry.name() == stored) {
+                                Some(entry) => entry.backing().subscription_broker().is_some(),
+                                None => true,
+                            }
+                        })
+                    }))
+            })
+    });
     let overlay_resolution = record.launch_profile.as_deref().and_then(|name| {
         match resolve_resume_overlay(
             &effective,
@@ -1318,10 +1475,14 @@ pub(crate) fn resume_session(
             name,
             runtime,
             &record.id,
+            record.entitlement.as_deref(),
             degrade_relay.sink(),
         ) {
             Ok(resolved) => Some(resolved),
             Err(err) => {
+                if requires_exact_broker {
+                    return None;
+                }
                 eprintln!(
                     "glasshouse: resuming session `{}` without launch profile `{name}`'s overlay: \
                      {err:#}",
@@ -1331,6 +1492,12 @@ pub(crate) fn resume_session(
             }
         }
     });
+    if requires_exact_broker && overlay_resolution.is_none() {
+        anyhow::bail!(
+            "stored subscription-broker entitlement is missing or incompatible; refusing to reselect an account for resumed session `{}`",
+            crate::commands::shared::short_id(&resumable.id)
+        );
+    }
 
     // Phase 56 line 1954 on the path that continues a session — reached by
     // `glasshouse resume` and by a launch the router steered into an existing
@@ -1357,20 +1524,35 @@ pub(crate) fn resume_session(
             .and_then(|name| effective.launch_profile(name, selection.id()).ok())
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(selection.id()));
-        let gateway_provider = matches!(
+        let gateway_backed = matches!(
             profile.backend,
             glasshouse::profile::BackendResource::GlasshouseGateway
-        )
-        .then(|| {
-            overlay_resolution
-                .as_ref()
-                .and_then(|(_, _, gateway)| gateway.as_ref())
-        })
-        .flatten()
-        .map(|gateway| gateway.serving_provider());
-        let lookup = match gateway_provider {
-            Some(provider) => effective.entitlement_for_provider(provider),
-            None => effective.entitlement_for(profile.harness, &profile.backend),
+        );
+        let gateway_provider = gateway_backed
+            .then(|| {
+                overlay_resolution
+                    .as_ref()
+                    .and_then(|(_, _, gateway)| gateway.as_ref())
+            })
+            .flatten()
+            .map(|gateway| gateway.serving_provider());
+        let stored_is_broker = record.entitlement.as_deref().is_some_and(|name| {
+            effective.configured_entitlements().is_ok_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.name() == name && entry.backing().subscription_broker().is_some()
+                })
+            })
+        });
+        let lookup = if gateway_backed && (profile.entitlement.is_some() || stored_is_broker) {
+            gateway_entitlement(&effective, &profile, record.entitlement.as_deref())
+        } else if let Some(provider) = gateway_provider {
+            effective
+                .entitlement_for_provider(provider)
+                .map_err(Into::into)
+        } else {
+            effective
+                .entitlement_for(profile.harness, &profile.backend)
+                .map_err(Into::into)
         };
         match lookup {
             Ok(entitlement) => {
@@ -1578,5 +1760,67 @@ pub(crate) fn exit_code_for(status: &ExitStatus) -> ExitCode {
     match u8::try_from(status.code()) {
         Ok(0) | Err(_) => ExitCode::FAILURE,
         Ok(code) => ExitCode::from(code),
+    }
+}
+
+#[cfg(test)]
+mod broker_selection_tests {
+    use super::*;
+    use glasshouse::integrations::IntegrationId;
+
+    fn effective(text: &str) -> (UserConfig, glasshouse::profile::LaunchProfile) {
+        let user: UserConfig = toml::from_str(text).unwrap();
+        let profile = EffectiveConfig::new(&user, None)
+            .launch_profile("gateway", IntegrationId::Pane)
+            .unwrap()
+            .value;
+        (user, profile)
+    }
+
+    #[test]
+    fn legacy_api_gateway_without_an_entitlement_pin_stays_on_provider_path() {
+        let (user, profile) = effective(
+            "version = 1\n\n[profiles.gateway]\nharness = \"pane\"\nbackend = { kind = \"glasshouse-gateway\" }\n",
+        );
+        assert!(
+            gateway_entitlement(&EffectiveConfig::new(&user, None), &profile, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gateway_pin_resolves_exact_broker_and_rejects_an_api_credit_account() {
+        let (user, profile) = effective(
+            "version = 1\n\n[profiles.gateway]\nharness = \"pane\"\nbackend = { kind = \"glasshouse-gateway\" }\nentitlement = \"work\"\n\n[entitlements.work]\nsubscription_broker = \"cliproxyapi\"\nallow_harnesses = [\"pane\"]\n\n[entitlements.api]\nprovider = \"openrouter\"\n",
+        );
+        let selected = gateway_entitlement(&EffectiveConfig::new(&user, None), &profile, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.name(), "work");
+        let error = gateway_entitlement(&EffectiveConfig::new(&user, None), &profile, Some("api"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no longer matches") || error.contains("not backed"));
+    }
+
+    #[test]
+    fn stored_broker_entitlement_refuses_a_deleted_profile_before_fallback() {
+        let user: UserConfig = toml::from_str(
+            "version = 1\n\n[entitlements.work]\nsubscription_broker = \"cliproxyapi\"\nallow_harnesses = [\"pane\"]\n",
+        )
+        .unwrap();
+        let error = validate_recorded_broker_resume(
+            &EffectiveConfig::new(&user, None),
+            Some("deleted"),
+            Some("work"),
+            IntegrationId::Pane,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("deleted or incompatible launch profile `deleted`"),
+            "{error}"
+        );
     }
 }

@@ -1136,25 +1136,41 @@ pub(crate) fn launch_session(
         .as_ref()
         .and_then(|routed| routed.chosen().entitlement())
         .map(|entitlement| entitlement.name().to_owned());
-    // `mut`: the `GlasshouseGateway` arm below overwrites this once the
-    // gateway has started and its serving provider is known — see the
-    // consult after `start_if_required_with_degrade_sink`. For every other
-    // backend this is the final value.
-    let mut entitlement = match &chosen_entitlement_name {
-        Some(name) => match effective.entitlements() {
-            Ok(pool) => pool.into_iter().find(|entry| entry.name() == name),
+    let is_gateway_backend = matches!(
+        launch_profile.backend,
+        glasshouse::profile::BackendResource::GlasshouseGateway
+    );
+    let mut entitlement = if is_gateway_backend {
+        match crate::commands::resume::gateway_entitlement(
+            &effective,
+            &launch_profile,
+            chosen_entitlement_name.as_deref(),
+        ) {
+            Ok(entry) => entry,
             Err(err) => {
                 eprintln!("glasshouse: {err}");
                 return Ok(ExitCode::FAILURE);
             }
-        },
-        None => match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
-            Ok(entitlement) => entitlement,
-            Err(err) => {
-                eprintln!("glasshouse: {err}");
-                return Ok(ExitCode::FAILURE);
+        }
+    } else {
+        match &chosen_entitlement_name {
+            Some(name) => match effective.entitlements() {
+                Ok(pool) => pool.into_iter().find(|entry| entry.name() == name),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            None => {
+                match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
+                    Ok(entitlement) => entitlement,
+                    Err(err) => {
+                        eprintln!("glasshouse: {err}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                }
             }
-        },
+        }
     };
     // Every backend but the gateway asks and announces right here, before
     // anything else is resolved. A `GlasshouseGateway` profile cannot be
@@ -1162,11 +1178,7 @@ pub(crate) fn launch_session(
     // because no provider is assigned until the gateway starts below — so
     // its consult, refusal and announcement happen once that provider is
     // known (see `start_if_required_with_degrade_sink`, further down).
-    let is_gateway_backend = matches!(
-        launch_profile.backend,
-        glasshouse::profile::BackendResource::GlasshouseGateway
-    );
-    if !is_gateway_backend {
+    if !is_gateway_backend || entitlement.is_some() {
         if let Some(message) = crate::commands::routing_destinations::entitlement_refusal_message(
             entitlement.as_ref(),
             launch_profile.harness,
@@ -1287,7 +1299,16 @@ pub(crate) fn launch_session(
     let degrade_relay = crate::commands::resume::DegradeRelay::new();
     let gateway = match glasshouse::gateway::start_if_required_with_degrade_sink(
         std::slice::from_ref(&launch_profile),
-        || crate::commands::resume::gateway_upstream(&user, project.as_ref(), &effective, &secrets),
+        || {
+            crate::commands::resume::gateway_upstream(
+                &user,
+                project.as_ref(),
+                &effective,
+                &secrets,
+                entitlement.as_ref().filter(|_| is_gateway_backend),
+                runtime.paths(),
+            )
+        },
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths(),
         )),
@@ -1324,21 +1345,11 @@ pub(crate) fn launch_session(
         }
     };
 
-    // Phase 56/1954, the gateway shape: now that the gateway has started,
-    // its serving provider is known (`Gateway::serving_provider`), and this
-    // asks the same question the direct/native path already asked above —
-    // the same `EntitlementRules::refusal` check, the same refusal text
-    // (`entitlement_refusal_message`), the same announcement — for the one
-    // launch that could not be asked before the gateway existed.
-    // `pool_entitlements_for` still returns nothing for `GlasshouseGateway`
-    // (map line 1954's cause 3 stays true of the *router*), so
-    // `chosen_entitlement_name` above is never `Some` for this backend; this
-    // is the whole of the gateway's consult.
-    if is_gateway_backend {
+    if is_gateway_backend && entitlement.is_none() {
         let gateway_provider = gateway.as_ref().map(|gateway| gateway.serving_provider());
         entitlement = match gateway_provider {
             Some(provider) => match effective.entitlement_for_provider(provider) {
-                Ok(entitlement) => entitlement,
+                Ok(entry) => entry,
                 Err(err) => {
                     eprintln!("glasshouse: {err}");
                     return Ok(ExitCode::FAILURE);
@@ -1361,6 +1372,11 @@ pub(crate) fn launch_session(
         );
     }
 
+    // An unpinned gateway is intentionally the legacy API-provider shape:
+    // broker use is opt-in per profile or selected explicitly by routing.
+    // Only this legacy branch waits for the gateway's serving provider;
+    // broker identity was already resolved, announced, and started by its
+    // exact entitlement name above.
     // 56A line 1969: the overlay may only resolve the serving account's own
     // credential — see `EntitlementScopedSecrets`. With zero or one
     // configured entitlement the foreign list is empty or names other

@@ -3152,9 +3152,15 @@ fn a_configured_free_model_backs_the_gateway_at_no_cost() {
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
 
-    let upstream =
-        crate::commands::resume::gateway_upstream(&user, project.as_ref(), &effective, &secrets)
-            .unwrap();
+    let upstream = crate::commands::resume::gateway_upstream(
+        &user,
+        project.as_ref(),
+        &effective,
+        &secrets,
+        None,
+        fixture.runtime.paths(),
+    )
+    .unwrap();
     let rendered = format!("{upstream:?}");
 
     unsafe {

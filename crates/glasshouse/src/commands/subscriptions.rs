@@ -25,11 +25,21 @@ pub(crate) fn status(runtime: &Runtime) -> Result<String> {
     let entitlements = configured_entitlements(runtime)?;
     let mut rows = Vec::new();
     for entitlement in entitlements {
+        if entitlement.backing().subscription_broker()
+            != Some(glasshouse::config::SubscriptionBroker::CliProxyApi)
+        {
+            continue;
+        }
         let Some(provider) = provider_for_entitlement(entitlement.kind(), entitlement.vendor())
         else {
             continue;
         };
-        let state = if auth_present(&auth_dir(runtime.paths(), provider, entitlement.name()))? {
+        validate_account_ancestors(runtime.paths(), entitlement.name())?;
+        let state = if auth_present(
+            &runtime
+                .paths()
+                .subscription_broker_auth_dir(entitlement.name()),
+        )? {
             "present"
         } else {
             "absent"
@@ -56,8 +66,9 @@ pub(crate) fn login(
     entitlement: &str,
 ) -> Result<String> {
     validate_entitlement(runtime, provider, entitlement)?;
+    validate_account_ancestors(runtime.paths(), entitlement)?;
     let binary = resolve_broker_binary(runtime.paths(), std::env::var_os(BROKER_BINARY_ENV))?;
-    let account = prepare_account(runtime.paths(), provider, entitlement)?;
+    let account = prepare_account(runtime.paths(), entitlement)?;
     let flag = login_flag(provider);
 
     run_login_process(
@@ -70,6 +81,11 @@ pub(crate) fn login(
         ],
         LOGIN_TIMEOUT,
     )?;
+    if !auth_present(&runtime.paths().subscription_broker_auth_dir(entitlement))? {
+        bail!(
+            "CLIProxyAPI login exited without creating authentication for entitlement `{entitlement}`"
+        );
+    }
     Ok(format!("{}\t{entitlement}\tpresent\n", provider.as_str()))
 }
 
@@ -87,7 +103,8 @@ pub(crate) fn logout(
     entitlement: &str,
 ) -> Result<String> {
     validate_entitlement(runtime, provider, entitlement)?;
-    let dir = auth_dir(runtime.paths(), provider, entitlement);
+    validate_account_ancestors(runtime.paths(), entitlement)?;
+    let dir = runtime.paths().subscription_broker_auth_dir(entitlement);
     remove_auth_dir(&dir)?;
     ensure_private_dir(&dir)?;
     Ok(format!("{}\t{entitlement}\tabsent\n", provider.as_str()))
@@ -115,6 +132,11 @@ fn validate_entitlement(
         .iter()
         .find(|entry| entry.name() == name)
         .with_context(|| format!("entitlement `{name}` is not configured"))?;
+    if entitlement.backing().subscription_broker()
+        != Some(glasshouse::config::SubscriptionBroker::CliProxyApi)
+    {
+        bail!("entitlement `{name}` is not backed by CLIProxyAPI");
+    }
     validate_kind_vendor(provider, name, entitlement.kind(), entitlement.vendor())
 }
 
@@ -177,37 +199,16 @@ struct AccountPaths {
     config: PathBuf,
 }
 
-fn prepare_account(
-    paths: &RuntimePaths,
-    provider: SubscriptionProvider,
-    entitlement: &str,
-) -> Result<AccountPaths> {
-    let root = account_dir(paths, provider, entitlement);
-    let auth = root.join("auth");
+fn prepare_account(paths: &RuntimePaths, entitlement: &str) -> Result<AccountPaths> {
+    let root = paths.subscription_broker_entitlement_dir(entitlement);
+    let auth = paths.subscription_broker_auth_dir(entitlement);
     let config = root.join("cliproxyapi.json");
+    ensure_private_dir(&paths.subscription_brokers_dir())?;
     ensure_private_dir(&root)?;
     ensure_private_dir(&auth)?;
     let document = serde_json::to_vec(&serde_json::json!({ "auth-dir": auth }))?;
     atomic_write(&config, &document, private_file_permissions())?;
     Ok(AccountPaths { root, config })
-}
-
-fn accounts_root(paths: &RuntimePaths) -> PathBuf {
-    paths
-        .data_dir()
-        .join("subscription-broker")
-        .join("accounts")
-}
-
-fn account_dir(paths: &RuntimePaths, provider: SubscriptionProvider, entitlement: &str) -> PathBuf {
-    let digest = Sha256::digest(entitlement.as_bytes());
-    accounts_root(paths)
-        .join(provider.as_str())
-        .join(hex::encode(digest))
-}
-
-fn auth_dir(paths: &RuntimePaths, provider: SubscriptionProvider, entitlement: &str) -> PathBuf {
-    account_dir(paths, provider, entitlement).join("auth")
 }
 
 fn auth_present(dir: &Path) -> Result<bool> {
@@ -226,6 +227,25 @@ fn auth_present(dir: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn validate_account_ancestors(paths: &RuntimePaths, entitlement: &str) -> Result<()> {
+    for path in [
+        paths.subscription_brokers_dir(),
+        paths.subscription_broker_entitlement_dir(entitlement),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                bail!("subscription broker private directory `{path:?}` is not a real directory")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not inspect `{path:?}`"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn remove_auth_dir(dir: &Path) -> Result<()> {
@@ -254,14 +274,29 @@ fn run_login_process<'a>(
     args: impl IntoIterator<Item = &'a OsStr>,
     timeout: Duration,
 ) -> Result<ExitStatus> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .current_dir(&account.root)
+        .env_clear()
         .stdin(Stdio::inherit())
         // CLIProxyAPI owns its OAuth UI. Glasshouse deliberately never reads,
         // copies, or reprints process output that could contain credentials.
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for name in [
+        "HOME",
+        "PATH",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "BROWSER",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("could not start CLIProxyAPI `{binary:?}`"))?;
     let deadline = Instant::now() + timeout;
@@ -357,12 +392,9 @@ fn resolve_broker_binary(paths: &RuntimePaths, override_path: Option<OsString>) 
             "CLIProxyAPI is not adopted; run `glasshouse subscriptions adopt-binary <PATH>` or set {BROKER_BINARY_ENV}"
         )
     })?;
-    if version.is_empty()
-        || version.contains('/')
-        || version.contains('\\')
-        || version == "."
-        || version == ".."
-    {
+    if !version.strip_prefix("sha256-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
         bail!("the adopted CLIProxyAPI version marker is invalid");
     }
     let path = root.join(version).join(adopted_binary_name());
@@ -439,6 +471,11 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             .mode(0o700)
             .create(path)
             .with_context(|| format!("could not create private directory `{path:?}`"))?;
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("could not inspect private directory `{path:?}`"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("subscription broker private directory `{path:?}` is not a real directory");
+        }
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("could not secure private directory `{path:?}`"))?;
     }
@@ -453,13 +490,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn account_paths_are_provider_and_entitlement_separated() {
+    fn account_paths_are_entitlement_separated_and_provider_independent() {
         let paths = RuntimePaths::new("/tmp/data", "/tmp/config");
-        let a = auth_dir(&paths, SubscriptionProvider::Anthropic, "personal");
-        let b = auth_dir(&paths, SubscriptionProvider::Anthropic, "work");
-        let c = auth_dir(&paths, SubscriptionProvider::Openai, "personal");
+        let a = paths.subscription_broker_auth_dir("personal");
+        let b = paths.subscription_broker_auth_dir("work");
+        let c = paths.subscription_broker_auth_dir("personal");
         assert_ne!(a, b);
-        assert_ne!(a, c);
+        assert_eq!(a, c);
         assert!(a.ends_with("auth"));
         assert!(!a.to_string_lossy().contains("personal"));
     }
@@ -493,7 +530,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
         let paths = RuntimePaths::new(temp.path().join("data"), temp.path().join("config"));
-        let account = prepare_account(&paths, SubscriptionProvider::Anthropic, "personal").unwrap();
+        let account = prepare_account(&paths, "personal").unwrap();
         run_login_process(
             &fake,
             &account,
@@ -535,6 +572,7 @@ mod tests {
             0o751
         );
         assert_eq!(resolve_broker_binary(&paths, None).unwrap(), adopted);
+        assert_eq!(paths.cliproxyapi_executable(), adopted);
         assert!(
             adopted
                 .parent()
@@ -597,7 +635,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data"), temp.path().join("config"));
-        let account = prepare_account(&paths, SubscriptionProvider::Anthropic, "personal").unwrap();
+        let account = prepare_account(&paths, "personal").unwrap();
         let failed = temp.path().join("failed");
         fs::write(
             &failed,

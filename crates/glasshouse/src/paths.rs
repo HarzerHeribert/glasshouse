@@ -133,6 +133,20 @@ impl RuntimePaths {
         } else {
             "CLIProxyAPI"
         };
+        let root = self.managed_tools_dir().join("cliproxyapi");
+        let marker = root.join("current");
+        if let Ok(version) = std::fs::read_to_string(&marker) {
+            if valid_cliproxyapi_version(&version) {
+                return root.join(version).join(if cfg!(windows) {
+                    "cliproxyapi.exe"
+                } else {
+                    "cliproxyapi"
+                });
+            }
+            return root.join(".invalid-current-marker");
+        } else if marker.exists() {
+            return root.join(".unreadable-current-marker");
+        }
         self.managed_tools_dir().join(name)
     }
 
@@ -145,12 +159,24 @@ impl RuntimePaths {
     ///
     /// Hex encoding preserves identity without putting user-controlled path
     /// separators into a filesystem path.
-    pub(crate) fn subscription_broker_entitlement_dir(&self, entitlement: &str) -> PathBuf {
+    pub fn subscription_broker_entitlement_dir(&self, entitlement: &str) -> PathBuf {
         self.subscription_brokers_dir().join(format!(
             "entitlement-{}",
             hex::encode(entitlement.as_bytes())
         ))
     }
+
+    /// Stable OAuth state shared by subscription login and broker serving.
+    pub fn subscription_broker_auth_dir(&self, entitlement: &str) -> PathBuf {
+        self.subscription_broker_entitlement_dir(entitlement)
+            .join("auth")
+    }
+}
+
+fn valid_cliproxyapi_version(version: &str) -> bool {
+    version.strip_prefix("sha256-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 /// Refuse a path whose first component is a literal `~`, rather than

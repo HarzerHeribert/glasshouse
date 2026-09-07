@@ -22,10 +22,10 @@ fn absent_executable_refuses_with_names_and_no_managed_path() {
 mod process {
     use std::ffi::OsString;
     use std::fs;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use tempfile::TempDir;
@@ -36,6 +36,8 @@ mod process {
         _temp: TempDir,
         executable: PathBuf,
         capture: PathBuf,
+        request_capture: PathBuf,
+        request_count: PathBuf,
     }
 
     impl Fake {
@@ -43,6 +45,8 @@ mod process {
             let temp = tempfile::tempdir().unwrap();
             let executable = temp.path().join("fake-cliproxyapi");
             let capture = temp.path().join("sanitized-config");
+            let request_capture = temp.path().join("request");
+            let request_count = temp.path().join("request-count");
             fs::write(
                 &executable,
                 r#"#!/usr/bin/env python3
@@ -73,8 +77,54 @@ listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind(("127.0.0.1", port))
 listener.listen()
+if mode == "rogue":
+    pid = os.fork()
+    if pid > 0:
+        time.sleep(0.12)
+        sys.exit(24)
+    listener.settimeout(0.1)
+    rogue_deadline = time.time() + 0.45
 while True:
-    connection, _ = listener.accept()
+    try:
+        connection, _ = listener.accept()
+    except socket.timeout:
+        if mode == "rogue" and time.time() >= rogue_deadline:
+            sys.exit(0)
+        continue
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        request += chunk
+    head, _, body = request.partition(b"\r\n\r\n")
+    content_length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            content_length = int(line.split(b":", 1)[1].strip())
+    while len(body) < content_length:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    request = head + b"\r\n\r\n" + body
+    if b"GET /v1/models" in request and b"Authorization: Bearer " in request:
+        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+    elif b"POST /v1/messages" in request:
+        with open(os.environ["FAKE_REQUEST"], "wb") as handle:
+            handle.write(request)
+        count_path = os.environ["FAKE_REQUEST_COUNT"]
+        count = int(open(count_path).read()) if os.path.exists(count_path) else 0
+        with open(count_path, "w") as handle:
+            handle.write(str(count + 1))
+        if b'"stream":true' in body:
+            payload = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
+        else:
+            payload = b'{"content":[{"type":"text","text":"exact"}]}'
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
+    else:
+        connection.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     connection.close()
 "#,
             )
@@ -84,6 +134,8 @@ while True:
                 _temp: temp,
                 executable,
                 capture,
+                request_capture,
+                request_count,
             }
         }
 
@@ -98,6 +150,14 @@ while True:
                     self.capture.clone().into_os_string(),
                 ),
                 (OsString::from("FAKE_MODE"), OsString::from(mode)),
+                (
+                    OsString::from("FAKE_REQUEST"),
+                    self.request_capture.clone().into_os_string(),
+                ),
+                (
+                    OsString::from("FAKE_REQUEST_COUNT"),
+                    self.request_count.clone().into_os_string(),
+                ),
             ]
         }
     }
@@ -173,7 +233,16 @@ while True:
             .mode()
             & 0o777;
         assert_eq!(auth_mode, 0o700);
-        assert_no_secret_in_tree(data.path(), broker.internal_api_key());
+        let at_rest = fs::read_to_string(&broker.config_path).unwrap();
+        assert!(at_rest.contains(broker.internal_api_key()));
+        assert_eq!(
+            fs::metadata(&broker.config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let rendered = format!("{broker:?}");
         assert!(rendered.contains(REDACTED));
         assert!(!rendered.contains(broker.internal_api_key()));
@@ -209,6 +278,19 @@ while True:
         assert!(exited.contains("exited before readiness"));
         assert!(exited.contains("23"));
         assert_instances_empty(&paths, "exit-account");
+
+        let rogue = RunningSubscriptionBroker::start_with(
+            &paths,
+            "rogue-account",
+            &fake.executable,
+            Duration::from_secs(2),
+            &fake.env("rogue"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(rogue.contains("exited before readiness"), "{rogue}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_instances_empty(&paths, "rogue-account");
     }
 
     #[test]
@@ -261,31 +343,81 @@ while True:
         assert!(second.auth_dir().is_dir());
     }
 
+    #[test]
+    fn outer_gateway_preserves_anthropic_tool_bytes_and_exact_streaming_responses() {
+        let data = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let broker = start(
+            &data,
+            &fake,
+            "exact-account",
+            "ready",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let inner_key = broker.internal_api_key().to_owned();
+        let base = broker.base_url().to_owned();
+        let backend = crate::gateway::upstream::UpstreamBackend::from_subscription_broker(
+            vec![crate::gateway::Route::new(
+                "anthropic-messages".to_owned(),
+                &["/messages"],
+                &base,
+            )],
+            broker,
+        )
+        .unwrap();
+        let upstream = crate::gateway::Upstream::with_failover(vec![backend]).unwrap();
+        let gateway = crate::gateway::Gateway::start(upstream).unwrap();
+        let body = r#"{"model":"claude-sonnet-4-5","system":"system-order","messages":[{"role":"user","content":[{"type":"text","text":"first"}]},{"role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"write","input":{"code":"fn main() { println!(\"ok\"); }"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":"done"}]}],"stream":false}"#;
+        let mut stream = TcpStream::connect(gateway.address()).unwrap();
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            gateway.token().expose(),
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(
+            response.split_once("\r\n\r\n").unwrap().1,
+            r#"{"content":[{"type":"text","text":"exact"}]}"#
+        );
+        let received = fs::read_to_string(&fake.request_capture).unwrap();
+        assert!(
+            received
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {inner_key}"))
+        );
+        assert!(!received.contains(gateway.token().expose()));
+        assert!(received.contains(body));
+        let streaming_body = r#"{"model":"claude-sonnet-4-5","system":"system-order","messages":[{"role":"user","content":"stream"}],"stream":true}"#;
+        let mut stream = TcpStream::connect(gateway.address()).unwrap();
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            gateway.token().expose(),
+            streaming_body.len(),
+            streaming_body
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert_eq!(
+            response.split_once("\r\n\r\n").unwrap().1,
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        assert_eq!(fs::read_to_string(&fake.request_count).unwrap(), "2");
+        let address = base.trim_start_matches("http://").to_owned();
+        drop(gateway);
+        assert!(TcpStream::connect(address).is_err());
+    }
+
     fn assert_instances_empty(paths: &RuntimePaths, entitlement: &str) {
         let instances = paths
             .subscription_broker_entitlement_dir(entitlement)
             .join("instances");
         let mut entries = fs::read_dir(instances).unwrap();
         assert!(entries.next().is_none());
-    }
-
-    fn assert_no_secret_in_tree(root: &Path, secret: &str) {
-        fn visit(path: &Path, secret: &[u8]) {
-            for entry in fs::read_dir(path).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if entry.file_type().unwrap().is_dir() {
-                    visit(&path, secret);
-                } else {
-                    let mut bytes = Vec::new();
-                    fs::File::open(path)
-                        .unwrap()
-                        .read_to_end(&mut bytes)
-                        .unwrap();
-                    assert!(!bytes.windows(secret.len()).any(|window| window == secret));
-                }
-            }
-        }
-        visit(root, secret.as_bytes());
     }
 }

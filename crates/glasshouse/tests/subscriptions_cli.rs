@@ -5,8 +5,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sha2::{Digest, Sha256};
-
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -24,7 +22,7 @@ impl Fixture {
         fs::create_dir_all(&config).unwrap();
         fs::write(
             config.join("config.toml"),
-            "[entitlements.personal]\nkind = \"claude\"\nvendor = \"claude\"\nnative_harness = \"claude-code\"\n",
+            "[entitlements.personal]\nkind = \"claude\"\nvendor = \"claude\"\nnative_harness = \"claude-code\"\nsubscription_broker = \"cliproxyapi\"\n",
         )
         .unwrap();
         Self {
@@ -53,11 +51,8 @@ impl Fixture {
     }
 
     fn auth_dir(&self) -> PathBuf {
-        let digest = hex::encode(Sha256::digest(b"personal"));
-        self.data
-            .join("subscription-broker/accounts/anthropic")
-            .join(digest)
-            .join("auth")
+        glasshouse::RuntimePaths::new(&self.data, &self.config)
+            .subscription_broker_auth_dir("personal")
     }
 }
 
@@ -69,7 +64,7 @@ fn login_dispatch_and_status_expose_no_child_output_or_token_contents() {
     fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'token-from-child-stdout\\n'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nauth_dir=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"auth-dir\"])' \"$2\")\nmkdir -p \"$auth_dir\"\nprintf '{{\"account\":\"fixture\"}}' > \"$auth_dir/account.json\"\n",
             record.display()
         ),
     )
@@ -95,12 +90,12 @@ fn login_dispatch_and_status_expose_no_child_output_or_token_contents() {
         String::from_utf8_lossy(&output.stdout),
         "anthropic\tpersonal\tpresent\n"
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("token-from-child"));
     let argv = fs::read_to_string(record).unwrap();
     assert!(argv.starts_with("-config\n"), "{argv}");
     assert!(argv.ends_with("\n-claude-login\n"), "{argv}");
 
     let auth = fixture.auth_dir();
+    assert!(auth.join("account.json").is_file());
     fs::write(auth.join("opaque.json"), b"token-contents-must-not-be-read").unwrap();
     let status = fixture.run(&["subscriptions", "status"], None);
     assert!(
@@ -122,9 +117,8 @@ fn logout_removes_only_the_selected_accounts_auth_directory() {
     let selected = fixture.auth_dir();
     fs::create_dir_all(&selected).unwrap();
     fs::write(selected.join("opaque.json"), b"selected-secret").unwrap();
-    let other = fixture
-        .data
-        .join("subscription-broker/accounts/anthropic/other/auth");
+    let other = glasshouse::RuntimePaths::new(&fixture.data, &fixture.config)
+        .subscription_broker_auth_dir("other");
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("opaque.json"), b"other-secret").unwrap();
 

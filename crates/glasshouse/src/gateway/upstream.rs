@@ -25,6 +25,7 @@ use ureq::Agent;
 use ureq::config::AutoHeaderValue;
 use ureq::http::{HeaderValue, Uri};
 
+use super::subscription_broker::RunningSubscriptionBroker;
 use crate::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use crate::secret::Secret;
 
@@ -194,7 +195,7 @@ pub struct UpstreamBackend {
     /// with nowhere to forward to is refused at construction.
     routes: Vec<Route>,
     /// The provider credential, resolved in-process and never leaving it.
-    credential: Secret,
+    credential: BackendCredential,
     /// Which credential this is, **by name** — the environment variable or
     /// the store service and account it was resolved through.
     ///
@@ -207,6 +208,11 @@ pub struct UpstreamBackend {
     /// as the user marked it. [`Cost::Metered`] when nobody marked anything,
     /// which is the fail-closed direction.
     cost: Cost,
+}
+
+enum BackendCredential {
+    Provider(Secret),
+    SubscriptionBroker(Box<RunningSubscriptionBroker>),
 }
 
 impl UpstreamBackend {
@@ -251,9 +257,52 @@ impl UpstreamBackend {
         Ok(Self {
             provider,
             routes,
-            credential,
+            credential: BackendCredential::Provider(credential),
             credential_id,
             cost,
+        })
+    }
+
+    /// Consume an exact account-specific broker. Keeping the process inside
+    /// the credential boundary makes its lifetime identical to the backend's.
+    pub(crate) fn from_subscription_broker(
+        routes: Vec<Route>,
+        broker: RunningSubscriptionBroker,
+    ) -> Result<Self, UpstreamError> {
+        let credential_id = broker.credential_id().clone();
+        let provider = broker.provider_name().to_owned();
+        if routes.is_empty() {
+            return Err(UpstreamError::NoProtocolServed { provider });
+        }
+        for route in &routes {
+            let uri: Uri =
+                route
+                    .base_url
+                    .parse()
+                    .map_err(|_| UpstreamError::BaseUrlNotAbsolute {
+                        provider: provider.clone(),
+                        protocol: route.protocol.clone(),
+                    })?;
+            if !uri
+                .scheme_str()
+                .is_some_and(|scheme| REQUIRED_SCHEMES.contains(&scheme))
+                || uri.host().is_none()
+            {
+                return Err(UpstreamError::BaseUrlNotAbsolute {
+                    provider,
+                    protocol: route.protocol.clone(),
+                });
+            }
+        }
+        if HeaderValue::from_str(&bearer_text(broker.internal_api_key())).is_err() {
+            return Err(UpstreamError::CredentialNotHeaderSafe { provider });
+        }
+        Ok(Self {
+            provider,
+            routes,
+            credential: BackendCredential::SubscriptionBroker(Box::new(broker)),
+            credential_id,
+            cost: Cost::Free,
         })
     }
 
@@ -300,8 +349,11 @@ impl UpstreamBackend {
     /// renders a request's headers — but it costs one call and removes a
     /// whole class of future accident.
     pub(super) fn authorization(&self) -> HeaderValue {
-        let mut value = HeaderValue::from_str(&bearer(&self.credential))
-            .expect("checked when the backend was built");
+        let text = match &self.credential {
+            BackendCredential::Provider(secret) => bearer(secret),
+            BackendCredential::SubscriptionBroker(broker) => bearer_text(broker.internal_api_key()),
+        };
+        let mut value = HeaderValue::from_str(&text).expect("checked when the backend was built");
         value.set_sensitive(true);
         value
     }
@@ -601,7 +653,11 @@ impl std::fmt::Debug for Upstream {
 
 /// `Bearer <credential>`, the one place the resolved value is read.
 fn bearer(credential: &Secret) -> String {
-    format!("Bearer {}", credential.expose())
+    bearer_text(credential.expose())
+}
+
+fn bearer_text(credential: &str) -> String {
+    format!("Bearer {credential}")
 }
 
 /// The one HTTP client the gateway uses, configured for pass-through.

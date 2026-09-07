@@ -50,6 +50,10 @@ pub struct ProfileConfig {
     backend: ProfileBackend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// Exact subscription entitlement for a gateway profile. This is a
+    /// reference to `[entitlements.<name>]`, never copied account material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entitlement: Option<String>,
     /// The expected wire protocol, as a [`crate::harness::WireProtocol`]
     /// slug (`"anthropic-messages"`, `"openai-responses"`, or
     /// `"openai-chat"`).
@@ -135,6 +139,10 @@ pub enum ProfileConfigError {
         crate::profile::response::preset_names()
     )]
     UnknownResponsePreset { name: String, preset: String },
+    #[error(
+        "launch profile `{name}` sets `entitlement`, but only a glasshouse-gateway backend can select a subscription entitlement"
+    )]
+    EntitlementRequiresGateway { name: String },
 }
 impl ProfileConfig {
     pub fn new(harness: IntegrationId) -> Self {
@@ -142,6 +150,7 @@ impl ProfileConfig {
             harness: harness.slug().to_owned(),
             backend: ProfileBackend::default(),
             model: None,
+            entitlement: None,
             expected_protocol: None,
             approval: ProfileApproval::default(),
             pin_gateway_backend: false,
@@ -170,6 +179,15 @@ impl ProfileConfig {
 
     pub fn set_model(&mut self, model: Option<String>) -> &mut Self {
         self.model = model;
+        self
+    }
+
+    pub fn entitlement(&self) -> Option<&str> {
+        self.entitlement.as_deref()
+    }
+
+    pub fn set_entitlement(&mut self, entitlement: Option<String>) -> &mut Self {
+        self.entitlement = entitlement;
         self
     }
 
@@ -272,6 +290,13 @@ impl ProfileConfig {
             }
             ProfileBackend::GlasshouseGateway => crate::profile::BackendResource::GlasshouseGateway,
         };
+        if self.entitlement.is_some()
+            && !matches!(backend, crate::profile::BackendResource::GlasshouseGateway)
+        {
+            return Err(ProfileConfigError::EntitlementRequiresGateway {
+                name: name.to_owned(),
+            });
+        }
 
         let approval = match self.approval {
             ProfileApproval::Default => crate::profile::ApprovalSelection::Default,
@@ -296,6 +321,7 @@ impl ProfileConfig {
             harness,
             backend,
             model: self.model.clone(),
+            entitlement: self.entitlement.clone(),
             expected_protocol,
             approval,
             pin_gateway_backend: self.pin_gateway_backend,

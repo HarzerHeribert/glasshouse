@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -29,6 +29,7 @@ const API_KEY_BYTES: usize = 32;
 const INSTANCE_ID_BYTES: usize = 16;
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(20);
+const READY_STABILITY: Duration = Duration::from_millis(250);
 
 /// The in-memory credential accepted only by one loopback sidecar.
 ///
@@ -70,6 +71,7 @@ pub struct RunningSubscriptionBroker {
     auth_dir: PathBuf,
     instance_dir: PathBuf,
     executable_name: OsString,
+    config_path: PathBuf,
 }
 
 impl RunningSubscriptionBroker {
@@ -77,7 +79,14 @@ impl RunningSubscriptionBroker {
     /// or the Glasshouse-managed pinned executable.
     pub fn start(paths: &RuntimePaths, entitlement: &str) -> Result<Self> {
         let executable = discover_executable(paths, std::env::var_os(ENV_CLIPROXYAPI_BIN))?;
-        Self::start_with(paths, entitlement, &executable, READY_TIMEOUT, &[])
+        let mut last = None;
+        for _ in 0..3 {
+            match Self::start_with(paths, entitlement, &executable, READY_TIMEOUT, &[]) {
+                Ok(running) => return Ok(running),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.expect("bounded startup attempted at least once"))
     }
 
     fn start_with(
@@ -97,7 +106,7 @@ impl RunningSubscriptionBroker {
         }
 
         let entitlement_dir = paths.subscription_broker_entitlement_dir(entitlement);
-        let auth_dir = entitlement_dir.join("auth");
+        let auth_dir = paths.subscription_broker_auth_dir(entitlement);
         let instances_dir = entitlement_dir.join("instances");
         for directory in [
             paths.subscription_brokers_dir(),
@@ -128,6 +137,7 @@ impl RunningSubscriptionBroker {
         command
             .arg("-config")
             .arg(&config_path)
+            .arg("-local-model")
             .current_dir(&instance_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -161,6 +171,7 @@ impl RunningSubscriptionBroker {
             auth_dir,
             instance_dir,
             executable_name,
+            config_path,
         };
 
         if let Err(error) = running.wait_until_ready(port, timeout) {
@@ -168,20 +179,12 @@ impl RunningSubscriptionBroker {
             return Err(error);
         }
 
-        // CLIProxyAPI has loaded the configuration before it binds. Removing
-        // it here makes the API key an ephemeral bootstrap value rather than
-        // a credential left at rest. Failure to remove it is a startup
-        // failure: continuing would violate the broker's secret boundary.
-        if let Err(error) = fs::remove_file(&config_path) {
-            running.terminate();
-            return Err(error).context("could not remove the private CLIProxyAPI bootstrap config");
-        }
-
         Ok(running)
     }
 
     fn wait_until_ready(&mut self, port: u16, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
+        let mut authenticated_once = false;
         loop {
             if let Some(status) = self
                 .child
@@ -196,9 +199,30 @@ impl RunningSubscriptionBroker {
                 );
             }
 
-            if TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok() {
-                return Ok(());
+            if let Ok(mut stream) = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let request = format!(
+                    "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+                    self.internal_key.expose()
+                );
+                if stream.write_all(request.as_bytes()).is_ok() {
+                    let mut response = [0_u8; 256];
+                    if let Ok(read) = stream.read(&mut response)
+                        && std::str::from_utf8(&response[..read]).is_ok_and(|head| {
+                            head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")
+                        })
+                    {
+                        if authenticated_once {
+                            return Ok(());
+                        }
+                        authenticated_once = true;
+                        thread::sleep(READY_STABILITY.min(timeout));
+                        continue;
+                    }
+                }
             }
+            authenticated_once = false;
             if Instant::now() >= deadline {
                 bail!(
                     "CLIProxyAPI executable {:?} did not become ready within the bounded startup timeout",
@@ -219,13 +243,17 @@ impl RunningSubscriptionBroker {
         &self.credential_id
     }
 
+    pub(super) fn provider_name(&self) -> &'static str {
+        PROVIDER_NAME
+    }
+
     /// The one narrow handoff into `UpstreamBackend` construction.
     ///
     /// This value must remain inside Glasshouse. It is public only because
     /// `gateway` is a library surface and the typed broker result has to
     /// supply both halves needed by the existing public backend constructor;
     /// callers must give it directly to the backend credential boundary.
-    pub fn internal_api_key(&self) -> &str {
+    pub(super) fn internal_api_key(&self) -> &str {
         self.internal_key.expose()
     }
 
@@ -244,6 +272,7 @@ impl RunningSubscriptionBroker {
             }
             let _ = child.wait();
         }
+        let _ = fs::remove_file(&self.config_path);
         let _ = fs::remove_dir_all(&self.instance_dir);
     }
 }

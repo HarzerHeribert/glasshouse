@@ -47,11 +47,13 @@ fn pool_entitlements_for<'p>(
     pool: &'p [glasshouse::config::ResolvedEntitlement],
     harness: glasshouse::integrations::IntegrationId,
     backend: &glasshouse::profile::BackendResource,
+    pinned: Option<&str>,
 ) -> Vec<&'p glasshouse::config::ResolvedEntitlement> {
     use glasshouse::config::EntitlementBacking;
     use glasshouse::profile::BackendResource;
 
     pool.iter()
+        .filter(|entry| pinned.is_none_or(|name| entry.name() == name))
         .filter(|entry| match backend {
             BackendResource::Native => entry.backing().matches_native_harness(harness),
             BackendResource::DirectProvider { provider } => {
@@ -448,7 +450,12 @@ pub(crate) fn routing_destinations(
         // which account actually served it — the serving account of an
         // existing session is 56A-4's rebinding ground — so the destination
         // honestly carries none rather than a guess.
-        let matches = pool_entitlements_for(&pool, harness, &profile.backend);
+        let matches = pool_entitlements_for(
+            &pool,
+            harness,
+            &profile.backend,
+            profile.entitlement.as_deref(),
+        );
         let entitlement = match matches.as_slice() {
             [only] => Some(routing_entitlement(
                 only,
@@ -561,7 +568,12 @@ pub(crate) fn routing_destinations(
         // here — a denied entitlement's candidate is refused by name by the
         // router's own hard constraint, which already exists and must stay
         // the one place that decides.
-        let matches = pool_entitlements_for(&pool, harness, &profile.backend);
+        let matches = pool_entitlements_for(
+            &pool,
+            harness,
+            &profile.backend,
+            profile.entitlement.as_deref(),
+        );
         if matches.len() > 1 {
             for resolved in matches {
                 let backend = backend_for_entitlement(&backend, resolved);
@@ -1745,6 +1757,7 @@ mod subscription_broker_tests {
             &pool,
             IntegrationId::Pane,
             &BackendResource::GlasshouseGateway,
+            None,
         );
         assert_eq!(
             matches.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
@@ -1754,6 +1767,14 @@ mod subscription_broker_tests {
             entry.backing().subscription_broker() == Some(SubscriptionBroker::CliProxyApi)
                 && entry.backing().source() == glasshouse::routing::EntitlementSource::Subscription
         }));
+        let pinned = pool_entitlements_for(
+            &pool,
+            IntegrationId::Pane,
+            &BackendResource::GlasshouseGateway,
+            Some("chatgpt-b"),
+        );
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].name(), "chatgpt-b");
     }
 
     #[test]
@@ -1767,7 +1788,8 @@ mod subscription_broker_tests {
         );
         let effective = EffectiveConfig::new(&user, None);
 
-        let native = pool_entitlements_for(&pool, IntegrationId::Codex, &BackendResource::Native);
+        let native =
+            pool_entitlements_for(&pool, IntegrationId::Codex, &BackendResource::Native, None);
         assert_eq!(
             native.len(),
             1,
@@ -1779,6 +1801,7 @@ mod subscription_broker_tests {
             &pool,
             IntegrationId::Pane,
             &BackendResource::GlasshouseGateway,
+            None,
         );
         let telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
         let thresholds = effective.capacity_band_thresholds().value;
