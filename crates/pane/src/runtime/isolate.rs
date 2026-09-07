@@ -484,6 +484,16 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Installs a host-only confirmation seam for already admitted registered
+    /// calls. A decision cannot override the compiled sandbox profile. The
+    /// shipped session does not enable it; no cell can reach this builder.
+    /// Waiting remains subject to the cell's wall-clock and cancellation limits.
+    #[must_use]
+    pub fn with_approval_gate(self, gate: crate::approval::Gate) -> Self {
+        *self.state.approval_gate.borrow_mut() = Some(gate);
+        self
+    }
+
     #[must_use]
     pub fn with_instruction_context(self) -> Self {
         self.state.enable_instruction_context();
@@ -971,7 +981,9 @@ impl Runtime {
             self.heap.guard.isolate.get().cloned(),
             self.wall_clock_limit,
         );
+        *self.state.watchdog_fired.borrow_mut() = Some(Arc::clone(&watchdog.fired));
         let ending = self.execute(&compiled);
+        self.state.watchdog_fired.borrow_mut().take();
         // Both halves are read here, before anything below allocates: taking
         // a preview can itself raise the heap callback, and a hit raised by
         // the runtime's own bookkeeping is not why the cell stopped.
@@ -1006,6 +1018,7 @@ impl Runtime {
             self.heap.guard.isolate.get().cloned(),
             EPILOGUE_WALL_CLOCK_LIMIT,
         );
+        *self.state.watchdog_fired.borrow_mut() = Some(Arc::clone(&epilogue.fired));
         let budget = EpilogueBudget::of(&epilogue);
         self.forget_freed();
         self.refresh_previews(&budget);
@@ -1048,6 +1061,7 @@ impl Runtime {
             self.finish(cell, source, started, ending, stopped, &budget)
         };
         let epilogue = epilogue.disarm();
+        self.state.watchdog_fired.borrow_mut().take();
         // The epilogue's watchdog re-issues its termination until it is
         // disarmed, so this is the cancel that leaves the isolate clean for
         // the next cell.

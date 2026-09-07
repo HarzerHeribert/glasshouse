@@ -395,6 +395,19 @@ pub fn run_traced(
     name: &str,
     args: &Args,
 ) -> Traced {
+    run_traced_with_gate(ctx, token, name, args, None, &|| token.is_cancelled())
+}
+
+/// The exact-call suspension seam. The gate runs after complete argument
+/// admission and before an effect; returning resumes this stack frame only.
+pub(crate) fn run_traced_with_gate(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    name: &str,
+    args: &Args,
+    gate: Option<&crate::approval::Gate>,
+    stopped: &dyn Fn() -> bool,
+) -> Traced {
     let mut checked = CheckedArgs::new();
     let Some(tool) = registry::lookup(name) else {
         return Traced {
@@ -414,7 +427,7 @@ pub fn run_traced(
         ctx,
         tool.name(),
         args.as_json(),
-        || checked_call(ctx, token, tool, args, &mut checked),
+        || checked_call(ctx, token, tool, args, &mut checked, gate, stopped),
         |outcome| tool_response(tool.name(), outcome),
     );
     Traced { outcome, checked }
@@ -579,8 +592,46 @@ fn checked_call(
     tool: &Tool,
     args: &Args,
     trace: &mut CheckedArgs,
+    gate: Option<&crate::approval::Gate>,
+    stopped: &dyn Fn() -> bool,
 ) -> Result<ToolResult, ToolError> {
     let checked = check_arguments(ctx.profile, tool, args, trace)?;
+    if let Some(gate) = gate {
+        if ctx.profile.root().to_str().is_none()
+            || checked
+                .iter()
+                .any(|(_, value)| matches!(value, Checked::Path(path) if path.to_str().is_none()))
+        {
+            return Err(PermissionDenied {
+                tool: tool.name().into(),
+                path: String::new(),
+                rule: "the exact action contains a path that cannot be represented as UTF-8".into(),
+            }
+            .into());
+        }
+        let action = crate::approval::Action::new(tool.name(), ctx.profile.root(), trace.clone());
+        if !gate.admit(action, stopped) {
+            return Err(PermissionDenied {
+                tool: tool.name().into(),
+                path: String::new(),
+                rule: "the host call gate denied or cancelled this exact attempt".into(),
+            }
+            .into());
+        }
+        // The filesystem can change while the callback is suspended. Resolve
+        // the original arguments again; a retargeted symlink gets no authority
+        // from the old answer even when both destinations are in the root.
+        let mut current = CheckedArgs::new();
+        check_arguments(ctx.profile, tool, args, &mut current)?;
+        if *trace != current || stopped() {
+            return Err(PermissionDenied {
+                tool: tool.name().into(),
+                path: String::new(),
+                rule: "the exact action changed or was cancelled while awaiting its answer".into(),
+            }
+            .into());
+        }
+    }
     // Branching here and not inside `spawn_confined` is what makes
     // `Argv::InProcess`'s claim structural: an in-process tool never reaches
     // a `Command`, an `exec_grant` or a sandbox applier, because the only

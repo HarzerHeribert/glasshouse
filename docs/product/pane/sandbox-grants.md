@@ -211,6 +211,51 @@ the project boundary, and the sandbox is what must change.
   ever wanted it is a map line, and invariant 1 says what it may not be: a
   flag the model can reach.
 
+## 8. Exact-call suspension seam (development, not interactive approval)
+
+`Runtime::with_approval_gate` is a host-only callback seam for a future
+interactive approval implementation. The shipped session and TUI do not
+install it. It can only delay or deny a registered call that the existing
+immutable profile already admits. Missing grants, explicit denies and
+never-grantable actions remain refusals and never reach its request channel.
+It does not interpret `permissions.ask`, modify settings, add an OS grant,
+or grant MCP discovery or calls.
+
+The runtime waits inside the current Rust tool callback while a host thread
+answers a request through its own consumed reply sender. A once answer is
+consumed by one attempt, including a failed attempt. Session answers match
+the complete canonical tool name, project root and every checked argument;
+they are never patterns. Re-resolving the original arguments after the wait
+rejects a symlink that changed its canonical target. A disconnected host,
+dropped request, user cancellation or V8 termination denies the suspended
+call. A late answer cannot apply to another request. The existing cell wall
+clock includes this waiting time; it has not been paused or weakened.
+Subagent and background calls never inherit this gate. Remembered-action
+summaries expose the tool and an identity hash, not argument values.
+
+`tests/approval_boundary.rs` exercises this seam inside real V8 cells,
+including a confined Bash append before a suspended write. The append occurs
+once, the write resumes in the same cell, and a repeated write needs a new
+once answer. Other tests cover exact session matching, execution failure,
+denial, disconnect, cancellation, timeout, symlink retargeting and unchanged
+OS confinement. These are callback tests, not TUI/PTY approval acceptance.
+
+Full interactive missing-grant approvals remain blocked on the platform
+appliers. `macos::profile_text` currently renders the project root and the
+`.claude` write carve-out, but does not render the full `Profile::rules()`
+allow/deny set; its `Regime::ProjectRootOnly` explicitly describes that
+limitation. `linux::landlock_rules` and `linux::bwrap_argv` likewise derive
+root-based grants; additive Landlock rules cannot subtract an in-root deny.
+Windows process execution is still refused by `invoke::confine` until its
+applier is operational. Passing a widened clone to these implementations
+would not establish an exact additional capability. A Bash or MCP admission
+alone would also not fix a filesystem deny that the OS layer does not render.
+
+Before connecting the TUI, the implementation must classify hard refusals
+separately from missing/ask decisions, prove exact per-call OS grants and
+deny precedence on each supported platform, define explicit MCP server-start
+approval, and add real terminal tests. No cell-replay fallback is permitted.
+
 CONTRACT
 behaviour:  Every tool a pane program can call runs under an OS sandbox whose file grants are computed once from `.claude/settings.json` `permissions`, with the project root the only writable root and no network at all.
 invariant:  No grant is widened at the model's request, `deny` beats `allow` at every specificity, and a request outside the grant throws `PermissionDenied` inside the program without ever becoming a prompt.

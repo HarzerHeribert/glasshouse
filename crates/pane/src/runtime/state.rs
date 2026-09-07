@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
@@ -133,6 +133,11 @@ pub(crate) struct CellState {
 /// What every host callback can reach.
 pub(crate) struct RuntimeState {
     pub(crate) profile: Profile,
+    /// Host-only suspension seam; absent in ordinary sessions and subagents.
+    pub(crate) approval_gate: RefCell<Option<crate::approval::Gate>>,
+    /// The current watchdog's host-visible flag. V8's termination query may
+    /// stay false until a blocked Rust callback returns to an interrupt check.
+    pub(crate) watchdog_fired: RefCell<Option<Arc<AtomicBool>>>,
     pub(crate) mcp: RefCell<crate::tools::mcp::Mcp>,
     pub(crate) glasshouse: Glasshouse,
     pub(crate) session: SessionId,
@@ -186,6 +191,8 @@ impl RuntimeState {
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
         Self {
             profile: profile.clone(),
+            approval_gate: RefCell::new(None),
+            watchdog_fired: RefCell::new(None),
             mcp: RefCell::new(crate::tools::mcp::Mcp::default()),
             glasshouse: glasshouse.clone(),
             session: session.clone(),

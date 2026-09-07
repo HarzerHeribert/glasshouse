@@ -536,7 +536,29 @@ fn tool_callback(
             glasshouse: &state.glasshouse,
             session: &state.session,
         };
-        invoke::run_traced(&context, &token, tool.name(), &call_args)
+        let gate = (!state.subagent.get())
+            .then(|| state.approval_gate.borrow().clone())
+            .flatten();
+        // V8 termination does not unwind a Rust callback blocked on a reply,
+        // and its query need not turn true before the callback returns. Poll
+        // the watchdog's own flag as well as the user token. A gate entered
+        // outside watched execution is closed rather than an unbounded wait.
+        let isolate = scope.thread_safe_handle();
+        let watchdog = state.watchdog_fired.borrow().clone();
+        invoke::run_traced_with_gate(
+            &context,
+            &token,
+            tool.name(),
+            &call_args,
+            gate.as_ref(),
+            &|| {
+                token.is_cancelled()
+                    || watchdog
+                        .as_ref()
+                        .is_none_or(|fired| fired.load(std::sync::atomic::Ordering::SeqCst))
+                    || isolate.is_execution_terminating()
+            },
+        )
     };
 
     // §9.4: recorded here because this is where every call funnels, and
