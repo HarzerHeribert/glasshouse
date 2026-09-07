@@ -380,7 +380,10 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
         .collect();
     let catalogue = serde_json::json!({"version": 1, "accounts": [
         {"account":"personal", "provider":"openrouter", "scope":"provider-declared", "models":models},
-        {"account":"work", "provider":"openrouter", "scope":"provider-declared", "models":["vendor/model-303"]}
+        {"account":"work", "provider":"openrouter", "scope":"provider-declared", "models":["vendor/model-303"]},
+        {"account":"google-sub", "provider":"google", "scope":"subscription", "models":["gemini/exact"]},
+        {"account":"claude-sub", "provider":"anthropic", "scope":"subscription", "models":["claude/exact"], "selectable":false, "unavailable_reason":"Pinned to another entitlement"},
+        {"account":"openai-sub", "provider":"openai", "scope":"subscription", "models":["gpt/exact"]}
     ]});
     std::fs::write(app.root.join("catalogue.json"), catalogue.to_string()).unwrap();
     let executable = app.root.join("no-glasshouse");
@@ -394,9 +397,21 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/model\r");
-    app.contains("305/305");
+    app.contains("308/308");
+    app.contains("claude/exact");
+    app.contains("locked");
+    app.contains("Pinned to another entitlement");
+    app.send(b"\r");
+    assert!(requests.try_recv().is_err());
+    app.contains("▶");
+    assert!(!app.screen.screen().contents().contains("gemini/exact"));
+    app.send(b"\x1b[C");
+    app.contains("gemini/exact");
+    assert!(!app.screen.screen().contents().contains("claude/exact"));
+    app.send(b"\x1b[D");
+    app.contains("claude/exact");
     app.send(b"OPENROUTER work 303");
-    app.contains("1/305");
+    app.contains("1/308");
     app.contains("openrouter · work");
     app.contains("vendor/model-303");
     assert!(!app.screen.screen().contents().contains("personal"));
@@ -405,12 +420,12 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.send(b"\r");
     assert!(requests.try_recv().is_err());
     app.send(b"\x7f");
-    app.contains("1/305");
+    app.contains("1/308");
     app.send(b"\x15");
-    app.contains("305/305");
+    app.contains("308/308");
     app.send(b"\x1b[200~personal 302\x1b[201~");
     app.contains("vendor/model-302");
-    app.contains("1/305");
+    app.contains("1/308");
     app.resize(40);
     app.contains("vendor/model-302");
     app.send(b"\r");

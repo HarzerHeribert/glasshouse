@@ -643,6 +643,14 @@ fn run(
                 if let Some(panel) = state.panel.as_mut() {
                     if panel.search.is_some() {
                         match key.code {
+                            KeyCode::Left => {
+                                panel.move_provider(false);
+                                continue;
+                            }
+                            KeyCode::Right => {
+                                panel.move_provider(true);
+                                continue;
+                            }
                             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 panel.search_clear();
                                 continue;

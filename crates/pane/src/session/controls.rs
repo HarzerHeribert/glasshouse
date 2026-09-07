@@ -30,6 +30,8 @@ struct Account {
     provider: Option<String>,
     models: Vec<String>,
     scope: String,
+    selectable: Option<bool>,
+    unavailable_reason: Option<String>,
 }
 
 pub(super) fn models(session: &Session<'_>) {
@@ -45,56 +47,28 @@ pub(super) fn models(session: &Session<'_>) {
 }
 
 fn model_panel(catalogue: Option<Catalogue>, current: &str) -> Panel {
-    let mut panel = Panel::text(format!("Models by provider · Current: {current}"), "");
+    let title = format!("Models by provider · Current: {current}");
     match catalogue {
-        Some(mut catalogue) if catalogue.version == 1 => {
-            catalogue.accounts.sort_by(|a, b| {
-                a.provider
-                    .as_deref()
-                    .unwrap_or("native harness")
-                    .cmp(b.provider.as_deref().unwrap_or("native harness"))
-                    .then_with(|| a.account.cmp(&b.account))
-                    .then_with(|| a.scope.cmp(&b.scope))
-            });
-            for mut account in catalogue.accounts {
-                panel.rows.push(PanelRow {
-                    text: format!(
-                        "{} · {} · {}",
-                        account.provider.as_deref().unwrap_or("native harness"),
-                        account.account,
-                        account.scope
-                    ),
-                    command: None,
-                });
-                account.models.sort();
-                account.models.dedup();
-                if account.models.is_empty() {
-                    panel.rows.push(PanelRow {
-                        text: "  No selectable model IDs reported".into(),
-                        command: None,
-                    });
-                }
-                for model in account.models {
-                    // A catalogue row is a model ID, never an injected command argument.
-                    if model.is_empty() || model.chars().any(char::is_whitespace) {
-                        continue;
-                    }
-                    panel.rows.push(PanelRow {
-                        text: format!("  {model}"),
-                        command: Some(format!("/model {model}")),
-                    });
-                }
-            }
-        }
-        _ => panel.rows.push(PanelRow {
-            text: "Catalogue unavailable. Update Glasshouse or use /model <id>.".into(),
-            command: None,
-        }),
+        Some(catalogue) if catalogue.version == 1 => Panel::models(
+            title,
+            catalogue
+                .accounts
+                .into_iter()
+                .map(|account| tui::ModelGroup {
+                    provider: account.provider.unwrap_or_else(|| "native harness".into()),
+                    account: account.account,
+                    scope: account.scope,
+                    models: account.models,
+                    selectable: account.selectable,
+                    unavailable_reason: account.unavailable_reason,
+                })
+                .collect(),
+        ),
+        _ => Panel::text(
+            title,
+            "Catalogue unavailable. Update Glasshouse or use /model <id>.",
+        ),
     }
-    if panel.rows.iter().any(|r| r.command.is_some()) {
-        panel = panel.searchable();
-    }
-    panel
 }
 
 pub(super) fn command(
@@ -455,7 +429,7 @@ mod tests {
                 {"account":"b-account", "provider":"a-provider", "scope":"declared", "models":["shared/id"]}
             ]
         })).unwrap();
-        let panel = model_panel(Some(catalogue), "current");
+        let mut panel = model_panel(Some(catalogue), "current");
         let headings: Vec<_> = panel
             .rows
             .iter()
@@ -466,8 +440,7 @@ mod tests {
             headings,
             [
                 "a-provider · b-account · declared",
-                "a-provider · z-account · declared",
-                "z-provider · a-account · declared"
+                "a-provider · z-account · declared"
             ]
         );
         let commands: Vec<_> = panel
@@ -477,14 +450,12 @@ mod tests {
             .collect();
         assert_eq!(
             commands,
-            [
-                "/model shared/id",
-                "/model B/model",
-                "/model shared/id",
-                "/model shared/id"
-            ]
+            ["/model shared/id", "/model B/model", "/model shared/id"]
         );
         assert_eq!(panel.selected, 1);
+        panel.move_provider(true);
+        assert_eq!(panel.rows[0].text, "z-provider · a-account · declared");
+        assert_eq!(panel.rows[1].command.as_deref(), Some("/model shared/id"));
     }
 
     #[test]

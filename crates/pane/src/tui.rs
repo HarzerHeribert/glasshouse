@@ -6,7 +6,7 @@ pub use inspection::Inspection;
 mod markdown;
 mod ribbon;
 mod telemetry;
-pub use controls::{Mode, Panel, PanelRow, StatusLine};
+pub use controls::{Mode, ModelGroup, Panel, PanelRow, StatusLine};
 pub use telemetry::Pulse;
 
 use crate::commands::{BUILT_INS, BuiltIn};
@@ -676,7 +676,7 @@ pub fn render_screen(
             Block::default().style(Style::default().fg(Color::White).bg(Color::Reset)),
             regions.transcript,
         );
-        controls::render_panel(frame, regions.transcript, panel);
+        controls::render_panel(frame, regions.transcript, panel, state.theme);
     }
     ribbon::activity(frame, regions.activity, state);
     if let Some(notice) = &state.notice {

@@ -44,7 +44,20 @@ pub struct Panel {
 #[derive(Debug, Clone, Default)]
 pub struct PanelSearch {
     query: String,
-    source: Vec<PanelRow>,
+    source: Vec<ModelGroup>,
+    matched: Vec<ModelGroup>,
+    providers: Vec<String>,
+    active: usize,
+    choices: Vec<usize>,
+}
+#[derive(Debug, Clone)]
+pub struct ModelGroup {
+    pub provider: String,
+    pub account: String,
+    pub scope: String,
+    pub models: Vec<String>,
+    pub selectable: Option<bool>,
+    pub unavailable_reason: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct PanelRow {
@@ -69,15 +82,39 @@ impl Panel {
         }
     }
 
-    /// Search model rows with the preceding provider/account heading as context.
-    /// Keep the source catalogue intact, including duplicate IDs on distinct accounts.
-    pub fn searchable(mut self) -> Self {
-        self.search = Some(PanelSearch {
-            query: String::new(),
-            source: self.rows.clone(),
+    pub fn models(title: impl Into<String>, mut groups: Vec<ModelGroup>) -> Self {
+        groups.sort_by(|a, b| {
+            (&a.provider, &a.account, &a.scope).cmp(&(&b.provider, &b.account, &b.scope))
         });
-        self.filter();
-        self
+        for group in &mut groups {
+            group.models.retain(|id| {
+                !id.is_empty() && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+            });
+            group.models.sort();
+            group.models.dedup();
+        }
+        let mut panel = Self {
+            title: title.into(),
+            search: Some(PanelSearch {
+                source: groups,
+                ..PanelSearch::default()
+            }),
+            ..Self::default()
+        };
+        panel.filter();
+        panel
+    }
+
+    pub fn move_provider(&mut self, forward: bool) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.active = if forward {
+            (search.active + 1).min(search.providers.len().saturating_sub(1))
+        } else {
+            search.active.saturating_sub(1)
+        };
+        self.provider_rows();
     }
 
     pub fn search_insert(&mut self, text: &str) -> bool {
@@ -106,53 +143,109 @@ impl Panel {
     }
 
     fn filter(&mut self) {
-        let Some(search) = &self.search else { return };
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let previous = search.providers.get(search.active).cloned();
         let query = search.query.to_lowercase();
         let terms: Vec<_> = query.split_whitespace().collect();
+        search.matched = search
+            .source
+            .iter()
+            .filter_map(|group| {
+                let prefix = format!("{} {}", group.provider, group.account).to_lowercase();
+                let models: Vec<_> = group
+                    .models
+                    .iter()
+                    .filter(|id| {
+                        let haystack = format!("{prefix} {}", id.to_lowercase());
+                        terms.iter().all(|term| haystack.contains(term))
+                    })
+                    .cloned()
+                    .collect();
+                (!models.is_empty()).then(|| ModelGroup {
+                    models,
+                    ..group.clone()
+                })
+            })
+            .collect();
+        search.providers = search
+            .matched
+            .iter()
+            .map(|group| group.provider.clone())
+            .collect();
+        search.providers.dedup();
+        search.active = previous
+            .and_then(|name| search.providers.iter().position(|p| p == &name))
+            .unwrap_or(0);
+        self.provider_rows();
+    }
+
+    fn provider_rows(&mut self) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
         self.rows.clear();
-        let mut heading: Option<&PanelRow> = None;
-        let mut heading_added = false;
-        for row in &search.source {
-            if row.command.is_none() {
-                heading = Some(row);
-                heading_added = false;
-                continue;
+        search.choices.clear();
+        for group in search
+            .matched
+            .iter()
+            .filter(|group| Some(&group.provider) == search.providers.get(search.active))
+        {
+            self.rows.push(PanelRow {
+                text: format!(
+                    "{} · {} · {}",
+                    group.provider,
+                    group.account,
+                    if group.selectable == Some(false) {
+                        group
+                            .unavailable_reason
+                            .as_deref()
+                            .unwrap_or("locked to another route")
+                    } else {
+                        &group.scope
+                    }
+                ),
+                command: None,
+            });
+            for id in &group.models {
+                search.choices.push(self.rows.len());
+                self.rows.push(PanelRow {
+                    text: format!(
+                        "  {}{id}",
+                        if group.selectable == Some(false) {
+                            "× "
+                        } else {
+                            ""
+                        }
+                    ),
+                    command: (group.selectable != Some(false)).then(|| format!("/model {id}")),
+                });
             }
-            let haystack =
-                format!("{} {}", heading.map_or("", |r| &r.text), row.text).to_lowercase();
-            if !terms.iter().all(|term| haystack.contains(term)) {
-                continue;
-            }
-            if !heading_added {
-                if let Some(heading) = heading {
-                    self.rows.push(heading.clone());
-                }
-                heading_added = true;
-            }
-            self.rows.push(row.clone());
         }
         if self.rows.is_empty() {
             self.rows.push(PanelRow {
-                text: "No models match. Clear search with Ctrl-U.".into(),
+                text: "No models match. Ctrl-U clears search.".into(),
                 command: None,
             });
         }
-        self.selected = self
-            .rows
-            .iter()
-            .position(|r| r.command.is_some())
-            .unwrap_or(0);
+        self.selected = search.choices.first().copied().unwrap_or(0);
     }
 
     pub fn move_selection(&mut self, forward: bool, count: usize) {
         for _ in 0..count {
             let next = if forward {
-                (self.selected + 1..self.rows.len())
-                    .find(|&i| self.search.is_none() || self.rows[i].command.is_some())
+                (self.selected + 1..self.rows.len()).find(|&i| {
+                    self.search
+                        .as_ref()
+                        .is_none_or(|search| search.choices.contains(&i))
+                })
             } else {
-                (0..self.selected)
-                    .rev()
-                    .find(|&i| self.search.is_none() || self.rows[i].command.is_some())
+                (0..self.selected).rev().find(|&i| {
+                    self.search
+                        .as_ref()
+                        .is_none_or(|search| search.choices.contains(&i))
+                })
             };
             if let Some(next) = next {
                 self.selected = next
@@ -162,12 +255,12 @@ impl Panel {
         }
     }
 }
-pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
+pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: super::Theme) {
     let block = if panel.search.is_some() {
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .title(format!(" {} ", panel.title))
-            .title_bottom(" ↑↓ choose · Enter apply · Esc close ")
+            .title_bottom(" ↑↓ model · Enter apply · Esc close ")
     } else {
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -179,8 +272,9 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(search) = &panel.search {
-        let matches = panel.rows.iter().filter(|r| r.command.is_some()).count();
-        let total = search.source.iter().filter(|r| r.command.is_some()).count();
+        render_providers(frame, &mut inner, search, theme);
+        let matches: usize = search.matched.iter().map(|g| g.models.len()).sum();
+        let total: usize = search.source.iter().map(|g| g.models.len()).sum();
         let prompt = if search.query.is_empty() {
             "type to filter"
         } else {
@@ -189,13 +283,14 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
         let group = panel
             .rows
             .iter()
+            .enumerate()
             .take(panel.selected + 1)
             .rev()
-            .find(|row| row.command.is_none())
-            .map_or("", |row| row.text.as_str());
+            .find(|(i, _)| !search.choices.contains(i))
+            .map_or("", |(_, row)| row.text.as_str());
         let lines = [
             format!("Search: {prompt}  · {matches}/{total}"),
-            "Ctrl-U clear · account route unchanged".into(),
+            "← → provider · Ctrl-U clear · route unchanged".into(),
             if matches > 0 {
                 group.to_string()
             } else {
@@ -240,7 +335,7 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
                     {
                         theme.accent()
                     } else if i == panel.selected {
-                        super::ACCENT
+                        theme.accent()
                     } else {
                         Color::White
                     },
@@ -251,54 +346,182 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
+fn render_providers(frame: &mut Frame, area: &mut Rect, search: &PanelSearch, theme: super::Theme) {
+    if area.height < 3 || area.width < 6 || search.providers.is_empty() {
+        return;
+    }
+    let available = usize::from(area.width.saturating_sub(4));
+    let visible = (available / 22).max(1).min(search.providers.len());
+    let first = search
+        .active
+        .saturating_sub(visible / 2)
+        .min(search.providers.len().saturating_sub(visible));
+    let card_width = (available.saturating_sub(visible - 1) / visible) as u16;
+    for (slot, provider) in search
+        .providers
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+    {
+        let selected = slot == search.active;
+        let card = Rect::new(
+            area.x + 2 + (slot - first) as u16 * (card_width + 1),
+            area.y,
+            card_width,
+            3,
+        );
+        let locked = search
+            .matched
+            .iter()
+            .filter(|group| &group.provider == provider)
+            .all(|group| group.selectable == Some(false));
+        let style = if selected && !locked {
+            Style::default().bg(theme.accent()).fg(Color::Black)
+        } else {
+            Style::default().bg(theme.dock()).fg(theme.accent())
+        };
+        let count: usize = search
+            .matched
+            .iter()
+            .filter(|group| &group.provider == provider)
+            .map(|group| group.models.len())
+            .sum();
+        let label = super::abbreviate(provider, card_width.saturating_sub(4) as usize);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(format!(" {} {label}", if selected { "◆" } else { "·" })),
+                Line::from(format!(
+                    " {count} models{}",
+                    if locked { " · locked" } else { "" }
+                )),
+                Line::from(if selected { " ━━━━━" } else { "" }),
+            ])
+            .style(style),
+            card,
+        );
+    }
+    if first > 0 {
+        frame.render_widget(
+            Paragraph::new("◀").style(Style::default().fg(theme.accent())),
+            Rect::new(area.x, area.y + 1, 1, 1),
+        );
+    }
+    if first + visible < search.providers.len() {
+        frame.render_widget(
+            Paragraph::new("▶").style(Style::default().fg(theme.accent())),
+            Rect::new(area.right() - 1, area.y + 1, 1, 1),
+        );
+    }
+    area.y += 3;
+    area.height -= 3;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn catalogue() -> Panel {
+        Panel::models(
+            "Models",
+            (0..5)
+                .map(|i| ModelGroup {
+                    provider: format!("provider-{i}"),
+                    account: format!("account-{i}"),
+                    scope: "declared".into(),
+                    models: vec![format!("model-{i}/exact"), "shared/flash".into()],
+                    selectable: None,
+                    unavailable_reason: None,
+                })
+                .collect(),
+        )
+    }
 
     #[test]
-    fn search_matches_provider_account_and_model_without_losing_groups_or_selection() {
-        let mut panel = Panel {
-            rows: vec![
-                PanelRow {
-                    text: "OpenRouter · personal".into(),
-                    command: None,
-                },
-                PanelRow {
-                    text: "deepseek/flash".into(),
-                    command: Some("/model deepseek/flash".into()),
-                },
-                PanelRow {
-                    text: "gemini/flash".into(),
-                    command: Some("/model gemini/flash".into()),
-                },
-                PanelRow {
-                    text: "OpenRouter · work".into(),
-                    command: None,
-                },
-                PanelRow {
-                    text: "deepseek/flash".into(),
-                    command: Some("/model deepseek/flash".into()),
-                },
-            ],
-            ..Panel::default()
-        }
-        .searchable();
-        panel.move_selection(true, 2);
-        assert_eq!(panel.selected, 4, "navigation must skip account headings");
-        panel.search_insert("OPENROUTER work FLASH");
-        assert_eq!(panel.rows.len(), 2);
-        assert_eq!(panel.rows[0].text, "OpenRouter · work");
+    fn carousel_search_crosses_providers_and_preserves_exact_selection() {
+        let mut panel = catalogue();
+        assert!(panel.rows[0].text.contains("provider-0"));
+        panel.move_provider(true);
+        assert!(panel.rows[0].text.contains("provider-1"));
+        panel.search_insert("ACCOUNT-4 exact");
+        assert_eq!(panel.search.as_ref().unwrap().providers, ["provider-4"]);
         assert_eq!(
             panel.rows[panel.selected].command.as_deref(),
-            Some("/model deepseek/flash")
+            Some("/model model-4/exact")
         );
         panel.search_insert("x");
         assert!(panel.rows[0].text.starts_with("No models match"));
-        assert!(panel.rows[panel.selected].command.is_none());
         panel.search_backspace();
         assert_eq!(panel.rows.len(), 2);
         panel.search_clear();
-        assert_eq!(panel.rows.len(), 5);
+        panel.search_insert("flash");
+        assert_eq!(panel.search.as_ref().unwrap().providers.len(), 5);
+        panel.move_provider(true);
+        assert_eq!(
+            panel.rows[panel.selected].command.as_deref(),
+            Some("/model shared/flash")
+        );
+    }
+
+    #[test]
+    fn locked_accounts_are_searchable_but_have_no_apply_command() {
+        let mut panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "google".into(),
+                account: "other-sub".into(),
+                scope: "subscription".into(),
+                models: vec!["gemini/exact".into(), "gemini/second".into()],
+                selectable: Some(false),
+                unavailable_reason: Some("Pinned to another account".into()),
+            }],
+        );
+        assert!(panel.rows[0].text.contains("Pinned to another account"));
+        assert!(panel.rows.iter().all(|row| row.command.is_none()));
         assert_eq!(panel.selected, 1);
+        panel.move_selection(true, 1);
+        assert_eq!(panel.selected, 2, "locked models remain inspectable");
+        panel.search_insert("other-sub exact");
+        assert_eq!(panel.rows.len(), 2);
+        assert!(panel.rows[panel.selected].command.is_none());
+    }
+
+    #[test]
+    fn provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow() {
+        for theme in super::super::Theme::ALL {
+            let mut panel = catalogue();
+            let mut wide = Terminal::new(TestBackend::new(80, 22)).unwrap();
+            wide.draw(|frame| render_panel(frame, frame.area(), &panel, theme))
+                .unwrap();
+            assert_eq!(wide.backend().buffer()[(2, 1)].bg, theme.accent());
+            assert_eq!(wide.backend().buffer()[(27, 1)].bg, theme.dock());
+            let mut terminal = Terminal::new(TestBackend::new(44, 22)).unwrap();
+            for (moves, left, right) in [(0, false, true), (2, true, true), (2, true, false)] {
+                for _ in 0..moves {
+                    panel.move_provider(true);
+                }
+                terminal
+                    .draw(|frame| render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(2, 3)].symbol() == "◀", left);
+                assert_eq!(buffer[(41, 3)].symbol() == "▶", right);
+                assert_eq!(buffer[(4, 2)].bg, theme.accent());
+                assert_eq!(buffer[(4, 2)].fg, Color::Black);
+                assert_eq!(buffer[(0, 3)].symbol(), " ");
+                assert_eq!(buffer[(43, 3)].symbol(), " ");
+            }
+        }
+        for width in [1, 5, 12, 40, 80, 160] {
+            for height in [1, 4, 8, 24] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_panel(frame, frame.area(), &catalogue(), super::super::Theme::Neon)
+                    })
+                    .unwrap();
+            }
+        }
     }
 }
