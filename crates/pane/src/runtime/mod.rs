@@ -9,6 +9,7 @@
 pub mod bindings;
 pub mod cell;
 pub(crate) mod excerpt;
+pub mod handlers;
 pub mod handles;
 pub mod isolate;
 pub mod marshal;

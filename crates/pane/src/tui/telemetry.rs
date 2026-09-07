@@ -182,6 +182,10 @@ pub(super) fn rail(
     lines.push(Line::default());
     lines.push(label("02 / TASK BUDGET"));
     lines.extend(budget(notebook, width.min(30)));
+    lines.push(muted(format!(
+        "handlers {}",
+        notebook.handlers.iter().filter(|h| h.active).count()
+    )));
     if let Some(status) = &notebook.supervisor {
         lines.push(muted(super::supervisor_line(status)));
     }

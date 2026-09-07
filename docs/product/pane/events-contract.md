@@ -139,6 +139,8 @@ for one is refused rather than starting one it would have to kill.
     on(pattern, program)   → Handler handle
     off(handle)            → void
 
+`program` is a TypeScript source string, compiled once at registration and retained as a callable in the task's existing isolate. The source is kept for rollout inspection, never replayed to restore state. A task may register at most 64 handlers, each with at most 65,536 source bytes. A handler's display name is its first bound name; an unbound registration uses `handler<N>`. `/handlers off <name>` entered during a running cell is queued for the next cell boundary.
+
 `on` registers a program the runtime runs against every future batch matching `pattern` — §3's
 `{kind, source}` shape — **before** the batch reaches the model. Events the handler acks never reach
 the model's batch: routine noise is drained by a program the model wrote once.

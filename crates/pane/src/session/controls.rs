@@ -102,6 +102,12 @@ pub(super) fn command(
     transcript: &Transcript,
 ) -> bool {
     match name {
+        "handlers" => {
+            if argument.is_some() {
+                session_println!("No active task; handlers are released when its task ends.");
+            }
+            show(session, tui::handlers_panel(&transcript.notebook.handlers));
+        }
         "effort" => {
             if let Some(value) = argument {
                 if let Some(effort) = wire::Effort::parse(value) {

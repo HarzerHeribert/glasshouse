@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -75,6 +75,7 @@ enum Input {
 }
 
 pub(super) struct LiveUi {
+    handler_cancellations: Arc<Mutex<Vec<String>>>,
     updates: mpsc::Sender<Update>,
     inputs: mpsc::Receiver<Input>,
     thread: Option<JoinHandle<()>>,
@@ -88,6 +89,8 @@ impl LiveUi {
         let (updates, receiver) = mpsc::channel();
         let (input_sender, inputs) = mpsc::channel();
         let (ready_sender, ready) = mpsc::sync_channel(1);
+        let handler_cancellations = Arc::new(Mutex::new(Vec::new()));
+        let commands = handler_cancellations.clone();
         let thread = thread::spawn(move || {
             let result = run(
                 state,
@@ -96,6 +99,7 @@ impl LiveUi {
                 receiver,
                 &input_sender,
                 ready_sender,
+                commands,
             );
             if let Err(error) = result {
                 let _ = input_sender.send(Input::Failed(error.to_string()));
@@ -106,10 +110,14 @@ impl LiveUi {
             .map_err(|_| "terminal thread exited during setup".to_string())??;
         OUTPUT.with(|slot| *slot.borrow_mut() = Some(updates.clone()));
         Ok(Self {
+            handler_cancellations,
             updates,
             inputs,
             thread: Some(thread),
         })
+    }
+    pub(super) fn handler_cancellations(&self) -> Vec<String> {
+        std::mem::take(&mut *super::lock(&self.handler_cancellations))
     }
     pub(super) fn next(&self) -> Result<Option<String>, String> {
         match self.inputs.recv() {
@@ -323,6 +331,7 @@ fn run(
     updates: mpsc::Receiver<Update>,
     inputs: &mpsc::Sender<Input>,
     ready: mpsc::SyncSender<Result<(), String>>,
+    handler_cancellations: Arc<Mutex<Vec<String>>>,
 ) -> io::Result<()> {
     let mut pending_events = VecDeque::new();
     let setup = (|| {
@@ -651,6 +660,12 @@ fn run(
                                     state.theme = theme;
                                     state.panel = None;
                                     state.notice = Some(format!("Theme: {}", theme.name()));
+                                } else if let Some(name) = command.strip_prefix("/handlers off ") {
+                                    super::lock(&handler_cancellations).push(name.to_string());
+                                    state.panel = None;
+                                    state.notice = Some(format!(
+                                        "handler {name}: cancellation queued for the next cell boundary"
+                                    ));
                                 } else if !busy {
                                     state.panel = None;
                                     busy = true;
@@ -819,6 +834,36 @@ fn run(
                                         })
                                         .collect(),
                                 });
+                            }
+                        }
+                        continue;
+                    }
+                    if editor.text.split_whitespace().next() == Some("/handlers") {
+                        let text = editor.take();
+                        let parts: Vec<_> = text.split_whitespace().collect();
+                        match parts.as_slice() {
+                            ["/handlers"] => {
+                                state.panel = Some(tui::handlers_panel(&notebook.handlers))
+                            }
+                            ["/handlers", "off", name] => {
+                                if busy
+                                    && notebook
+                                        .handlers
+                                        .iter()
+                                        .any(|h| h.name == *name && h.active)
+                                {
+                                    super::lock(&handler_cancellations).push((*name).to_string());
+                                    state.notice = Some(format!(
+                                        "handler {name}: cancellation queued for the next cell boundary"
+                                    ));
+                                } else {
+                                    state.notice = Some(format!(
+                                        "handler {name}: no active handler with that name"
+                                    ));
+                                }
+                            }
+                            _ => {
+                                state.notice = Some("Use /handlers or /handlers off <name>".into())
                             }
                         }
                         continue;

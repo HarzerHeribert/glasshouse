@@ -483,6 +483,12 @@ pub struct Runtime {
     syntax_failure: Option<crate::runtime::repair::SyntaxFailure>,
 }
 
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.state.handlers.clear();
+    }
+}
+
 impl Runtime {
     /// Installs a host-only confirmation seam for already admitted registered
     /// calls. A decision cannot override the compiled sandbox profile. The
@@ -760,6 +766,11 @@ impl Runtime {
     /// window and decides nothing about what carries forward; handing the old
     /// batch back rather than rolling it here is what keeps that true.
     pub fn deliver_batch(&mut self, batch: Batch) -> Option<Batch> {
+        self.state
+            .handlers
+            .delivery
+            .set(self.state.handlers.delivery.get() + 1);
+        self.state.handlers.processed.set(false);
         let entry = batch.preview(PREVIEW_TOKEN_CAP);
         let cell = self.state.cell.get();
         let store = self.batch_store();
@@ -790,6 +801,121 @@ impl Runtime {
         previous
     }
 
+    /// Runs each matching standing program at most once for this delivery.
+    /// Call before composing model feedback. The remaining batch is the only
+    /// delivery path, including after a partially acknowledged failure.
+    pub fn run_handlers(&mut self) -> Vec<(String, CellOutcome)> {
+        let handlers = self.state.handlers.clone();
+        if handlers.processed.replace(true) {
+            return Vec::new();
+        }
+        let store = self.batch_store();
+        let mut runs = Vec::new();
+        let count = handlers.entries.borrow().len();
+        for index in 0..count {
+            let candidate = {
+                let entries = handlers.entries.borrow();
+                let h = &entries[index];
+                let matches = h.registered < handlers.delivery.get()
+                    && h.info.active
+                    && store
+                        .with(|batch| {
+                            !batch
+                                .where_(h.kind.as_deref(), h.source_filter.as_deref())
+                                .is_empty()
+                        })
+                        .unwrap_or(false);
+                if matches {
+                    h.program.as_ref().map(|program| {
+                        (
+                            h.id.clone(),
+                            h.info.name.clone(),
+                            h.source.clone(),
+                            program.clone(),
+                        )
+                    })
+                } else {
+                    None
+                }
+            };
+            let Some((id, name, source, program)) = candidate else {
+                continue;
+            };
+            handlers.running.set(true);
+            let outcome = self.run_program(&source, Some(program));
+            handlers.running.set(false);
+            {
+                let mut entries = handlers.entries.borrow_mut();
+                entries[index].info.runs += 1;
+                if store.with(|batch| batch.rest().is_empty()).unwrap_or(false) {
+                    entries[index].info.drained += 1;
+                }
+            }
+            let failed = if let CellOutcome::Threw { error, .. } = &outcome {
+                Some(error.class.clone())
+            } else {
+                outcome
+                    .turn()
+                    .record
+                    .calls
+                    .iter()
+                    .find_map(|call| match &call.ended {
+                        crate::runtime::outcome::Ended::Denied { .. } => {
+                            Some("PermissionDenied".into())
+                        }
+                        crate::runtime::outcome::Ended::Threw { class } if class == "Cancelled" => {
+                            Some(class.clone())
+                        }
+                        _ => None,
+                    })
+            };
+            if let Some(class) = failed {
+                handlers.off_id(&id, Some(class));
+            }
+            store.with(|batch| batch.retain_unacked());
+            runs.push((name, outcome));
+        }
+        // The next program refreshes the JS batch API inside its watchdog.
+        // Updating only the host preview here cannot run a model's accessor.
+        if store.with(|batch| batch.n == 0).unwrap_or(false) {
+            self.state.table.borrow_mut().free("batch");
+        } else if let Some(preview) = store.with(|batch| batch.preview(PREVIEW_TOKEN_CAP)) {
+            self.state.table.borrow_mut().declare_rendered(
+                "batch",
+                Value::string(&preview),
+                self.cell(),
+                HandleMeta {
+                    type_label: Some("Events.Batch".into()),
+                    size_estimate: preview.len() as u64,
+                    provenance: None,
+                },
+                preview,
+            );
+        }
+        runs
+    }
+
+    pub fn handlers(&self) -> Vec<crate::runtime::handlers::HandlerInfo> {
+        self.state
+            .handlers
+            .entries
+            .borrow()
+            .iter()
+            .map(|h| h.info.clone())
+            .collect()
+    }
+    pub fn off_handler(&mut self, name: &str) -> bool {
+        self.state.handlers.off(name, None)
+    }
+    pub fn take_handler_notices(&mut self) -> Vec<String> {
+        self.state.handlers.notices.take()
+    }
+    pub fn batch_remaining(&mut self) -> usize {
+        self.batch_store()
+            .with(|batch| batch.rest().len())
+            .unwrap_or(0)
+    }
+
     /// The live batch's Rust side, in the isolate's third slot — installed on
     /// first delivery, so a session that raises no event never allocates one
     /// and the constructor is unchanged.
@@ -806,6 +932,7 @@ impl Runtime {
     /// event, and the only one this type performs itself.
     pub fn end_task(&mut self) {
         self.syntax_failure = None;
+        self.state.handlers.clear();
         // A poisoned runtime's isolate ignored every termination the watchdog
         // issued, and [`Runtime::poisoned`] promises nothing re-enters it.
         // The handles go with the task either way: the table below is the
@@ -914,6 +1041,14 @@ impl Runtime {
     /// throw in the same turn slot. Nothing about a cell is an error of the
     /// runtime's.
     pub fn run_cell(&mut self, source: &str) -> CellOutcome {
+        self.run_program(source, None)
+    }
+
+    fn run_program(
+        &mut self,
+        source: &str,
+        saved: Option<v8::Global<v8::Function>>,
+    ) -> CellOutcome {
         self.syntax_failure = None;
         let started = Instant::now();
         let cell = self.state.begin_cell();
@@ -941,7 +1076,16 @@ impl Runtime {
         self.restore_heap_limit();
         self.external.reset();
 
-        let compiled = match cell::compile(source, cell) {
+        let compiled = match if saved.is_some() {
+            Ok(CompiledCell {
+                javascript: String::new(),
+                declared: Vec::new(),
+                script_name: String::new(),
+                free_names: Vec::new(),
+            })
+        } else {
+            cell::compile(source, cell)
+        } {
             Ok(compiled) => compiled,
             Err(error) => {
                 if matches!(error, cell::CellError::Parse { .. }) {
@@ -977,12 +1121,22 @@ impl Runtime {
             );
         }
 
-        let watchdog = Watchdog::arm(
+        let watchdog = Watchdog::arm_cancellable(
             self.heap.guard.isolate.get().cloned(),
             self.wall_clock_limit,
+            self.state
+                .handlers
+                .running
+                .get()
+                .then(|| self.state.token.borrow().clone()),
         );
         *self.state.watchdog_fired.borrow_mut() = Some(Arc::clone(&watchdog.fired));
-        let ending = self.execute(&compiled);
+        let ending =
+            if self.state.handlers.running.get() && self.state.token.borrow().is_cancelled() {
+                Ending::Threw(plain_error("Cancelled", "the handler was cancelled"))
+            } else {
+                self.execute(&compiled, saved.as_ref())
+            };
         self.state.watchdog_fired.borrow_mut().take();
         // Both halves are read here, before anything below allocates: taking
         // a preview can itself raise the heap callback, and a hit raised by
@@ -1082,59 +1236,83 @@ impl Runtime {
 
     /// Everything that happens inside the isolate, so every V8 handle is
     /// released before the turn is assembled.
-    fn execute(&mut self, compiled: &CompiledCell) -> Ending {
+    fn execute(
+        &mut self,
+        compiled: &CompiledCell,
+        saved: Option<&v8::Global<v8::Function>>,
+    ) -> Ending {
         let response_byte_cap = self.trace().response_byte_cap.get();
+        let has_batch = self.isolate.get_slot::<Rc<BatchStore>>().is_some();
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
         v8::tc_scope!(let try_catch, scope);
-
-        let Some(source) = v8::String::new(try_catch, &compiled.javascript) else {
-            return Ending::Threw(plain_error(
-                "RangeError",
-                "the cell is too large to compile",
-            ));
-        };
-        let Some(name) = v8::String::new(try_catch, &compiled.script_name) else {
-            return Ending::Threw(plain_error("RangeError", "the cell could not be named"));
-        };
-        let origin = v8::ScriptOrigin::new(
-            try_catch,
-            name.into(),
-            0,
-            0,
-            false,
-            -1,
-            None,
-            false,
-            false,
-            false,
-            None,
-        );
-
-        let Some(script) = v8::Script::compile(try_catch, source, Some(&origin)) else {
-            // A terminated cell has no exception to read, and reading one
-            // while V8 is unwinding a termination is not safe.
+        if has_batch {
+            // Filtering by a preceding handler changed n/rest. Refresh under
+            // this program's watchdog because writing globalThis.batch can
+            // invoke a setter installed by an earlier program.
+            bindings::install_batch(try_catch);
             if try_catch.has_terminated() {
                 return Ending::Terminated;
             }
-            let exception = try_catch.exception();
-            return Ending::Threw(caught_error(try_catch, exception));
-        };
-        let Some(wrapper) = script.run(try_catch) else {
-            // A terminated cell has no exception to read, and reading one
-            // while V8 is unwinding a termination is not safe.
-            if try_catch.has_terminated() {
-                return Ending::Terminated;
+            if try_catch.has_caught() {
+                let exception = try_catch.exception();
+                return Ending::Threw(caught_error(try_catch, exception));
             }
-            let exception = try_catch.exception();
-            return Ending::Threw(caught_error(try_catch, exception));
-        };
-        let Ok(wrapper) = v8::Local::<v8::Function>::try_from(wrapper) else {
-            return Ending::Threw(plain_error(
-                "TypeError",
-                "the cell did not compile to a callable",
-            ));
+        }
+
+        let wrapper = if let Some(saved) = saved {
+            v8::Local::new(try_catch, saved)
+        } else {
+            let Some(source) = v8::String::new(try_catch, &compiled.javascript) else {
+                return Ending::Threw(plain_error(
+                    "RangeError",
+                    "the cell is too large to compile",
+                ));
+            };
+            let Some(name) = v8::String::new(try_catch, &compiled.script_name) else {
+                return Ending::Threw(plain_error("RangeError", "the cell could not be named"));
+            };
+            let origin = v8::ScriptOrigin::new(
+                try_catch,
+                name.into(),
+                0,
+                0,
+                false,
+                -1,
+                None,
+                false,
+                false,
+                false,
+                None,
+            );
+
+            let Some(script) = v8::Script::compile(try_catch, source, Some(&origin)) else {
+                // A terminated cell has no exception to read, and reading one
+                // while V8 is unwinding a termination is not safe.
+                if try_catch.has_terminated() {
+                    return Ending::Terminated;
+                }
+                let exception = try_catch.exception();
+                return Ending::Threw(caught_error(try_catch, exception));
+            };
+            let Some(wrapper) = script.run(try_catch) else {
+                // A terminated cell has no exception to read, and reading one
+                // while V8 is unwinding a termination is not safe.
+                if try_catch.has_terminated() {
+                    return Ending::Terminated;
+                }
+                let exception = try_catch.exception();
+                return Ending::Threw(caught_error(try_catch, exception));
+            };
+            let Ok(wrapper) = v8::Local::<v8::Function>::try_from(wrapper) else {
+                return Ending::Threw(plain_error(
+                    "TypeError",
+                    "the cell did not compile to a callable",
+                ));
+            };
+
+            wrapper
         };
 
         let host = bindings::host_object(try_catch);
@@ -1174,7 +1352,9 @@ impl Runtime {
                 // §1's two endings, decided by the value rather than by a
                 // flag: the generated body ends `return __pane_cell.e()`, and
                 // only the host can mint what that answers with.
-                if bindings::is_end_marker(try_catch, value, self.state.cell.get()) {
+                if self.state.handlers.running.get()
+                    || bindings::is_end_marker(try_catch, value, self.state.cell.get())
+                {
                     Ending::Yielded { reason: None }
                 } else {
                     // Inside the watchdog on purpose: reading a result walks
@@ -1450,6 +1630,13 @@ impl Runtime {
             // reported, and V8 reports only some of them.
             _ if stopped.heap_hit || stopped.heap_crossed => {
                 Ending::Threw(self.out_of_memory(HEAP_CEILING, budget))
+            }
+            Ending::Terminated
+                if self.state.handlers.running.get()
+                    && self.state.token.borrow().is_cancelled()
+                    && !stopped.timed_out =>
+            {
+                Ending::Threw(plain_error("Cancelled", "the handler was cancelled"))
             }
             Ending::Terminated if stopped.timed_out => {
                 Ending::Threw(timed_out(started.elapsed(), self.wall_clock_limit))
@@ -2088,6 +2275,13 @@ struct Watchdog {
 
 impl Watchdog {
     fn arm(isolate: Option<v8::IsolateHandle>, limit: Duration) -> Self {
+        Self::arm_cancellable(isolate, limit, None)
+    }
+    fn arm_cancellable(
+        isolate: Option<v8::IsolateHandle>,
+        limit: Duration,
+        token: Option<CancellationToken>,
+    ) -> Self {
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let fired = Arc::new(AtomicBool::new(false));
         let gave_up = Arc::new(AtomicBool::new(false));
@@ -2099,17 +2293,30 @@ impl Watchdog {
             let gave_up = Arc::clone(&gave_up);
             std::thread::spawn(move || {
                 let (lock, finished) = &*done;
-                let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                let (mut guard, timeout) = finished
-                    .wait_timeout_while(guard, limit, |done| !*done)
-                    .unwrap_or_else(PoisonError::into_inner);
-                if !timeout.timed_out() || *guard {
-                    return;
+                let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                loop {
+                    if *guard {
+                        return;
+                    }
+                    if token.as_ref().is_some_and(CancellationToken::is_cancelled)
+                        || armed.elapsed() >= limit
+                    {
+                        break;
+                    }
+                    let wait = if token.is_some() {
+                        Duration::from_millis(20).min(limit.saturating_sub(armed.elapsed()))
+                    } else {
+                        limit.saturating_sub(armed.elapsed())
+                    };
+                    let (next, _) = finished
+                        .wait_timeout_while(guard, wait, |done| !*done)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard = next;
                 }
                 // Ordered before the terminate so the flag is visible to
                 // `disarm`, which cannot run until this thread releases the
                 // lock it is still holding.
-                fired.store(true, Ordering::SeqCst);
+                fired.store(armed.elapsed() >= limit, Ordering::SeqCst);
                 isolate.terminate_execution();
                 loop {
                     let (next, _) = finished

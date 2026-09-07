@@ -178,6 +178,15 @@ impl Batch {
             .collect()
     }
 
+    /// Remove acknowledged handler input before the model can inspect it.
+    pub(crate) fn retain_unacked(&mut self) {
+        self.entries
+            .retain(|entry| !self.acked.contains(&entry.event.id));
+        self.acked.clear();
+        self.n = self.entries.len();
+        self.rolled_in = self.entries.iter().filter(|entry| entry.age > 0).count();
+    }
+
     /// A payload by event id — `Err` when the id is not in this batch, which
     /// for any id that ever existed can only mean [`Batch::roll`] dropped it.
     pub fn payload(&self, id: EventId) -> Result<&PayloadRef, PayloadDropped> {

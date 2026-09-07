@@ -339,6 +339,10 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
         })
         .chain(
             [
+                (
+                    "/handlers".to_string(),
+                    "inspect standing handlers · /handlers off <name>",
+                ),
                 ("/help".to_string(), "show available commands"),
                 ("/exit".to_string(), "leave Pane"),
                 ("/sidebar".to_string(), "auto, show or hide telemetry"),
@@ -484,10 +488,39 @@ pub enum SupervisorStatus {
 /// total, and the supervisor's latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Notebook {
+    pub handlers: Vec<crate::runtime::handlers::HandlerInfo>,
     pub requests: Vec<crate::telemetry::RequestMeasurement>,
     pub cells: Vec<CellView>,
     pub tokens: Option<TaskTokens>,
     pub supervisor: Option<SupervisorStatus>,
+}
+
+pub fn handlers_panel(handlers: &[crate::runtime::handlers::HandlerInfo]) -> Panel {
+    let mut panel = Panel::text(
+        "Standing handlers",
+        if handlers.is_empty() {
+            "No handlers in this task."
+        } else {
+            "Task-scoped · /handlers off <name>"
+        },
+    );
+    for h in handlers {
+        panel.rows.push(PanelRow {
+            text: format!(
+                "{} · {} · {} runs · {} drained{}",
+                h.name,
+                if h.active { "active" } else { "stale" },
+                h.runs,
+                h.drained,
+                h.error
+                    .as_ref()
+                    .map(|e| format!(" · {e}"))
+                    .unwrap_or_default()
+            ),
+            command: h.active.then(|| format!("/handlers off {}", h.name)),
+        });
+    }
+    panel
 }
 
 impl Notebook {

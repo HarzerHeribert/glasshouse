@@ -4231,3 +4231,127 @@ fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
         .sum();
     assert_eq!(calls, 1, "only the post-guidance write should be recorded");
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn standing_handler_drains_a_future_batch_without_an_extra_model_request() {
+    let root = scratch_dir("standing-handler-drain");
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(echo*)"]}}"#,
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    let (url, requests) = start_answering_provider(2, move |_| {
+        match turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => assistant_reply(
+                "```pane\nlet seen = 0; const noise = on({kind:'bg.done'}, 'seen += batch.rest().length; batch.ack(batch.rest().map(e => e.id));'); const job = bg.run('echo handled');\n```",
+            ),
+            _ => {
+                // Let the real background process finish while the model request is in flight.
+                thread::sleep(std::time::Duration::from_millis(800));
+                assistant_reply("```pane\nreturn `seen=${seen}; remaining=${batch.n}`;\n```")
+            }
+        }
+    });
+    let output = run_session(
+        &root,
+        &rollout,
+        "standing-handler-drain",
+        "handle background noise",
+        &url,
+        Some(&root.join("absent-glasshouse")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "a drained batch generated inference"
+    );
+    let lines: Vec<serde_json::Value> = fs::read_to_string(&rollout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let cells: Vec<_> = lines
+        .iter()
+        .filter(|l| l["kind"] == "cell" && l.get("handler").is_none())
+        .collect();
+    let handlers: Vec<_> = lines.iter().filter(|l| l["handler"] == "noise").collect();
+    assert_eq!(handlers.len(), 1, "{lines:?}");
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[1]["cell"], 2);
+    assert!(
+        lines.iter().any(|l| l["text"] == "seen=1; remaining=0"),
+        "{lines:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn disabled_handler_notice_reaches_the_first_preview_once_before_next_inference() {
+    let root = scratch_dir("standing-handler-notice");
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(echo*)"]}}"#,
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    let (url, requests) = start_answering_provider(3, move |_| {
+        match turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => assistant_reply(
+                "```pane\nconst broken = on({kind:'bg.done'}, 'throw new Error(\"private error body\");'); const job = bg.run('echo notice');\n```",
+            ),
+            1 => {
+                thread::sleep(std::time::Duration::from_millis(800));
+                assistant_reply("```pane\nconst continued = 1;\n```")
+            }
+            _ => assistant_reply("```pane\nreturn 'done';\n```"),
+        }
+    });
+    let output = run_session(
+        &root,
+        &rollout,
+        "standing-handler-notice",
+        "surface handler failure",
+        &url,
+        Some(&root.join("absent-glasshouse")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests.lock().unwrap();
+    assert!(!requests[1].contains("handler broken disabled: Error"));
+    let last: serde_json::Value = serde_json::from_str(&requests[2]).unwrap();
+    let messages = last["messages"].as_array().unwrap();
+    let feedback = messages.last().unwrap().to_string();
+    assert_eq!(
+        feedback.matches("handler broken disabled: Error").count(),
+        1,
+        "{last}"
+    );
+    assert!(
+        feedback.contains("Events.Batch"),
+        "notice did not share the first batch preview: {last}"
+    );
+    assert!(!feedback.contains("private error body"));
+    let handlers = fs::read_to_string(&rollout)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|l| l["handler"] == "broken")
+        .count();
+    assert_eq!(handlers, 1, "disabled handler retried on next delivery");
+    fs::remove_dir_all(root).unwrap();
+}

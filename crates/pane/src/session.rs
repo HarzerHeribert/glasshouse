@@ -885,6 +885,7 @@ fn is_session_control(name: &str) -> bool {
             | "model"
             | "effort"
             | "mode"
+            | "handlers"
             | "handles"
             | "budget"
             | "context"
@@ -1046,6 +1047,30 @@ struct Step {
 /// once at session start; this borrows it and compiles nothing, so a second
 /// task cannot widen the first's grants and a program cannot widen its own.
 fn run_task(
+    task: &str,
+    session: &Session<'_>,
+    transcript: &mut Transcript,
+    rollout: &mut Rollout,
+) -> Result<(), String> {
+    transcript.notebook.handlers.clear();
+    let result = run_task_inner(task, session, transcript, rollout);
+    transcript.notebook.handlers.clear();
+    if let Some(ui) = session.ui {
+        ui.handler_cancellations();
+        ui.publish(
+            transcript,
+            &ServedBy::default(),
+            if result.is_ok() {
+                tui::Activity::Complete
+            } else {
+                tui::Activity::Failed
+            },
+        );
+    }
+    result
+}
+
+fn run_task_inner(
     task: &str,
     session: &Session<'_>,
     transcript: &mut Transcript,
@@ -1229,13 +1254,25 @@ fn run_task(
         // sees the events on the very next turn. **No event ever gets a turn
         // of its own** (line 2481): a turn is composed for a user message,
         // and a batch rides the one that was already going to happen.
-        if let Some(batch) = next_batch(&mut window, session.id, EVENT_WAIT)
-            && let Some(previous) = runtime.deliver_batch(batch)
-        {
-            // §3: the previous batch's unacked events roll into the window
-            // that just opened. The runtime hands the batch back rather than
-            // rolling it itself -- it owns no window.
-            window.carry_forward(previous.roll());
+        if let Some(ui) = session.ui {
+            for name in ui.handler_cancellations() {
+                let found = runtime.off_handler(&name);
+                session_println!(
+                    "handler {name}: {}",
+                    if found { "off" } else { "not found" }
+                );
+            }
+        }
+        if let Some(batch) = next_batch(&mut window, session.id, EVENT_WAIT) {
+            if let Some(previous) = runtime.deliver_batch(batch) {
+                window.carry_forward(previous.roll());
+            }
+            for (name, outcome) in runtime.run_handlers() {
+                let _line = session.interrupt.writing();
+                rollout
+                    .record_handler(&name, &outcome.turn().record)
+                    .map_err(|e| format!("could not record the handler run: {e}"))?;
+            }
         }
 
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
@@ -1250,6 +1287,23 @@ fn run_task(
             session.interrupt,
             session.profile,
         )?;
+        transcript.notebook.handlers = runtime.handlers();
+        let notices = runtime.take_handler_notices().join("\n");
+        if !notices.is_empty() {
+            if let Some(answer) = &mut step.answer {
+                answer.push_str(&format!("\n{notices}"));
+            }
+            if let Some(history) = &mut step.historical {
+                history.push_str(&format!("\n{notices}"));
+            }
+            if let Some(result) = &mut step.native_result {
+                for block in &mut result.content {
+                    if let Block::ToolResult { content, .. } = block {
+                        content.push_str(&format!("\n{notices}"));
+                    }
+                }
+            }
+        }
         if let Some((before, after)) = step.rollback.take() {
             session
                 .rollbacks
@@ -1413,6 +1467,7 @@ fn run_task(
     }
 
     runtime.end_task();
+    transcript.notebook.handlers.clear();
     // §5: a background job outlives no task. Every live job is cancelled
     // through `bg::cancel`'s ladder -- `invoke`'s own group kill -- and its
     // thread is joined, so nothing this task started is still running when

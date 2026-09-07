@@ -447,3 +447,83 @@ fn fragmented_mouse_reports_do_not_become_prompt_text() {
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
+
+#[test]
+fn handlers_can_be_inspected_and_cancelled_during_an_active_task() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (waiting, requests) = mpsc::channel();
+    let (release, allowed) = mpsc::channel();
+    thread::spawn(move || {
+        for turn in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            if turn == 1 {
+                waiting.send(()).unwrap();
+                allowed.recv_timeout(Duration::from_secs(15)).unwrap();
+            }
+            let text = if turn == 0 {
+                "```pane\nconst noise = on({}, 'batch.ack(batch.rest().map(e => e.id));');\n```"
+            } else {
+                "```pane\nreturn 'HANDLER CONTROL DONE';\n```"
+            };
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":20}}}),
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}}),
+                serde_json::json!({"type":"message_delta","usage":{"output_tokens":12}}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            let body = events
+                .iter()
+                .map(|e| format!("data: {e}\n\n"))
+                .collect::<String>();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"register noise handler\r");
+    requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.send(b"/handlers\r");
+    app.contains("Standing handlers");
+    app.contains("noise");
+    app.contains("active");
+    app.send(b"\x1b");
+    app.wait("handler panel closed", |screen| {
+        !screen.contents().contains("Standing handlers")
+    });
+    app.send(b"/handlers off noise\r");
+    app.contains("cancellation queued");
+    release.send(()).unwrap();
+    app.contains("HANDLER CONTROL DONE");
+    app.send(b"/handles\r");
+    app.contains("Last handle preview");
+    app.contains("stale");
+    app.send(b"\x1b");
+    app.wait("handle panel closed", |screen| {
+        !screen.contents().contains("Last handle preview")
+    });
+    app.send(b"/handlers\r");
+    app.contains("No handlers in this task");
+    app.send(b"\x1b");
+    app.wait("empty handler panel closed", |screen| {
+        !screen.contents().contains("Standing handlers")
+    });
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}

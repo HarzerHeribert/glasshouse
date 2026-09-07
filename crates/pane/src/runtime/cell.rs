@@ -68,8 +68,8 @@ const IMPLICIT_FUNCTION_BINDINGS: [&str; 1] = ["arguments"];
 /// `console` is deliberately absent: it is not a capability, shadowing it
 /// costs the model only its own logging, and a program that assigns to it is
 /// doing something it can undo.
-pub const HOST_FUNCTIONS: [&str; 9] = [
-    "read", "glob", "grep", "bash", "keep", "free", "handles", "yieldNow", "mcp",
+pub const HOST_FUNCTIONS: [&str; 11] = [
+    "read", "glob", "grep", "bash", "keep", "free", "handles", "yieldNow", "mcp", "on", "off",
 ];
 
 /// The one runtime binding a generated cell carries: the host object whose

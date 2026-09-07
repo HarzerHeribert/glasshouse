@@ -90,6 +90,14 @@ pub struct Binding {
 /// Every host global that is not a registered tool.
 pub const RUNTIME: &[Binding] = &[
     Binding {
+        global: "on",
+        declaration: "type Handler = {name: string};\ndeclare function on(pattern: {kind?: string; source?: string}, program: string): Handler;\n// Register TypeScript source for matching future batches before model inference.\n// Example: const noise = on({kind: \"hook.*\"}, \"batch.ack(batch.where({kind: \\\"hook.*\\\"}).map(e => e.id));\");\n// The saved program shares this task's persistent scope, sandbox and cell timeout.\n// Acknowledged events are removed before you see the batch. A throw or refusal\n// disables the handler without retry. Nested on() throws HandlerNesting.\n// At most 64 handlers per task, with at most 65536 source bytes each. No resume.",
+    },
+    Binding {
+        global: "off",
+        declaration: "declare function off(handler: Handler): void;\n// Cancel a standing handler, idempotently. The person can use /handlers off <binding-name>.",
+    },
+    Binding {
         global: "mcp",
         declaration: "declare const mcp: {\n  list(): {name: string; server: string; tool: string; description: string; inputSchema: object}[];\n  call(name: string, arguments: object): {content: unknown[]; isError?: boolean; structuredContent?: object};\n};\n// Call mcp.list() to discover project MCP tools and their JSON input schemas.\n// Use the returned exact name in mcp.call(name, arguments). Calls may have effects;\n// inspect isError. Keep results as handles and select the fields you need;\n// do not print full content. Only granted, local stdio tools are discoverable.",
     },

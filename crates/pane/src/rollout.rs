@@ -257,6 +257,15 @@ impl Rollout {
         self.append_line(&line)
     }
 
+    /// A standing run is distinct from a model cell and advances no turn counter.
+    pub fn record_handler(&mut self, name: &str, record: &CellRecord) -> io::Result<()> {
+        let mut line = serde_json::to_value(record)?;
+        line["kind"] = "cell".into();
+        line["session_id"] = self.session_id.as_str().into();
+        line["handler"] = name.into();
+        self.append_line(&line)
+    }
+
     /// Persist display-only cell evidence so restart can restore inspection
     /// without parsing rendered prose or replaying source.
     pub fn record_view(&mut self, ordinal: usize, view: &CellView) -> io::Result<()> {

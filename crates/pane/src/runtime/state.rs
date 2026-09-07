@@ -132,6 +132,7 @@ pub(crate) struct CellState {
 
 /// What every host callback can reach.
 pub(crate) struct RuntimeState {
+    pub(crate) handlers: Rc<crate::runtime::handlers::Handlers>,
     pub(crate) profile: Profile,
     /// Host-only suspension seam; absent in ordinary sessions and subagents.
     pub(crate) approval_gate: RefCell<Option<crate::approval::Gate>>,
@@ -190,6 +191,7 @@ pub(crate) struct RuntimeState {
 impl RuntimeState {
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
         Self {
+            handlers: crate::runtime::handlers::Handlers::new(),
             profile: profile.clone(),
             approval_gate: RefCell::new(None),
             watchdog_fired: RefCell::new(None),
@@ -259,7 +261,7 @@ impl RuntimeState {
         self.visible_sources
             .borrow_mut()
             .extend(self.pending_sources.borrow_mut().drain());
-        let cell = self.cell.get() + 1;
+        let cell = self.cell.get() + u64::from(!self.handlers.running.get());
         self.cell.set(cell);
         let mut current = self.current.borrow_mut();
         current.console.clear();

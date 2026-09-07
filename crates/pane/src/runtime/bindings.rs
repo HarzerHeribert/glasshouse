@@ -224,6 +224,13 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, global, name, function.into());
     }
 
+    if let Some(function) = v8::Function::builder(on_callback).build(scope) {
+        set_fixed_key(scope, global, "on", function.into());
+    }
+    if let Some(function) = v8::Function::builder(off_callback).build(scope) {
+        set_fixed_key(scope, global, "off", function.into());
+    }
+
     let mcp = v8::Object::new(scope);
     if let Some(function) = v8::Function::builder(mcp_list_callback).build(scope) {
         set_fixed_key(scope, mcp, "list", function.into());
@@ -1428,6 +1435,17 @@ fn capture(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>, la
             .freed
             .retain(|freed| freed != name);
     }
+    if !late
+        && let Some(id) = handler_name(scope, value)
+        && let Some(h) = state
+            .handlers
+            .entries
+            .borrow_mut()
+            .iter_mut()
+            .find(|h| h.id == id && h.info.name == h.id)
+    {
+        h.info.name = name.to_string();
+    }
     let (preview, meta) = preview_of(scope, &state, value);
     state.capture(name, preview, meta);
 }
@@ -1439,6 +1457,22 @@ pub(crate) fn preview_of(
     state: &Rc<RuntimeState>,
     value: v8::Local<v8::Value>,
 ) -> (Value, HandleMeta) {
+    if let Some(name) = handler_name(scope, value) {
+        let active = state
+            .handlers
+            .entries
+            .borrow()
+            .iter()
+            .any(|h| h.id == name && h.info.active);
+        return (
+            Value::string(if active { "active" } else { "stale" }),
+            HandleMeta {
+                type_label: Some("Handler".into()),
+                size_estimate: 0,
+                provenance: None,
+            },
+        );
+    }
     if let Some(call) = recorded_call(scope, state, value) {
         return (call.preview, call.meta);
     }
@@ -2416,6 +2450,127 @@ fn construct<'s>(
     let found = global.get(scope, key.into())?;
     let constructor = v8::Local::<v8::Function>::try_from(found).ok()?;
     constructor.new_instance(scope, args).map(Into::into)
+}
+
+fn handler_tag<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
+    let name = v8::String::new(scope, "pane.handler").unwrap();
+    v8::Private::for_api(scope, Some(name))
+}
+fn handler_name(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<String> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    let tag = handler_tag(scope);
+    let name = object.get_private(scope, tag)?;
+    name.is_string().then(|| name.to_rust_string_lossy(scope))
+}
+fn handler_error(scope: &mut v8::PinScope, class: &str, message: &str) {
+    let text = v8::String::new(scope, message).unwrap();
+    let error = v8::Exception::error(scope, text);
+    if let Ok(object) = v8::Local::<v8::Object>::try_from(error) {
+        let name = js_string(scope, class);
+        set_key(scope, object, "name", name);
+    }
+    scope.throw_exception(error);
+}
+fn on_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let state = state(scope);
+    if state.handlers.running.get() {
+        handler_error(
+            scope,
+            "HandlerNesting",
+            "a handler cannot register a handler",
+        );
+        return;
+    }
+    if state.handlers.entries.borrow().len() >= 64 {
+        handler_error(
+            scope,
+            "HandlerLimit",
+            "a task may register at most 64 handlers",
+        );
+        return;
+    }
+    if !args.get(1).is_string() {
+        handler_error(
+            scope,
+            "TypeError",
+            "on(pattern, program) requires a TypeScript program string",
+        );
+        return;
+    }
+    let (kind, source_filter) = read_filter(scope, args.get(0));
+    let source = args.get(1).to_rust_string_lossy(scope);
+    if source.len() > 65536 {
+        handler_error(
+            scope,
+            "HandlerLimit",
+            "a handler program may contain at most 65536 bytes",
+        );
+        return;
+    }
+    let compiled = match crate::runtime::cell::compile(&source, state.cell.get()) {
+        Ok(compiled) => compiled,
+        Err(_) => {
+            handler_error(
+                scope,
+                "SyntaxError",
+                "the handler program could not be compiled",
+            );
+            return;
+        }
+    };
+    let Some(javascript) = v8::String::new(scope, &compiled.javascript) else {
+        return;
+    };
+    let Some(script) = v8::Script::compile(scope, javascript, None) else {
+        return;
+    };
+    let Some(value) = script.run(scope) else {
+        return;
+    };
+    let Ok(program) = v8::Local::<v8::Function>::try_from(value) else {
+        return;
+    };
+    let name = format!("handler{}", state.handlers.entries.borrow().len() + 1);
+    state
+        .handlers
+        .entries
+        .borrow_mut()
+        .push(crate::runtime::handlers::Handler {
+            registered: state.handlers.delivery.get(),
+            id: name.clone(),
+            info: crate::runtime::handlers::HandlerInfo {
+                name: name.clone(),
+                runs: 0,
+                drained: 0,
+                error: None,
+                active: true,
+            },
+            kind,
+            source_filter,
+            source,
+            program: Some(v8::Global::new(scope, program)),
+        });
+    let handle = v8::Object::new(scope);
+    let tag = handler_tag(scope);
+    let value = js_string(scope, &name);
+    handle.set_private(scope, tag, value);
+    set_fixed_key(scope, handle, "name", value);
+    retval.set(handle.into());
+}
+fn off_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    if let Some(name) = handler_name(scope, args.get(0)) {
+        state(scope).handlers.off_id(&name, None);
+    } else {
+        handler_error(scope, "TypeError", "off expects a Handler handle");
+    }
 }
 
 #[cfg(test)]
