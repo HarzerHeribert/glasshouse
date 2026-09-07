@@ -102,6 +102,20 @@ impl Panel {
             ..Self::default()
         };
         panel.filter();
+        if let Some(search) = panel.search.as_mut()
+            && let Some(provider) = search
+                .matched
+                .iter()
+                .find(|group| group.selectable != Some(false))
+                .map(|group| group.provider.clone())
+            && let Some(index) = search
+                .providers
+                .iter()
+                .position(|candidate| candidate == &provider)
+        {
+            search.active = index;
+            panel.provider_rows();
+        }
         panel
     }
 
@@ -485,6 +499,36 @@ mod tests {
         panel.search_insert("other-sub exact");
         assert_eq!(panel.rows.len(), 2);
         assert!(panel.rows[panel.selected].command.is_none());
+    }
+
+    #[test]
+    fn the_current_selectable_provider_opens_ahead_of_locked_subscriptions() {
+        let panel = Panel::models(
+            "Models",
+            vec![
+                ModelGroup {
+                    provider: "anthropic".into(),
+                    account: "claude-sub".into(),
+                    scope: "account-declared".into(),
+                    models: vec!["claude/exact".into()],
+                    selectable: Some(false),
+                    unavailable_reason: Some("another route is active".into()),
+                },
+                ModelGroup {
+                    provider: "google".into(),
+                    account: "gemini-sub".into(),
+                    scope: "account-declared".into(),
+                    models: vec!["gemini/exact".into()],
+                    selectable: Some(true),
+                    unavailable_reason: None,
+                },
+            ],
+        );
+        assert!(panel.rows[0].text.starts_with("google · gemini-sub"));
+        assert_eq!(
+            panel.rows[panel.selected].command.as_deref(),
+            Some("/model gemini/exact")
+        );
     }
 
     #[test]
