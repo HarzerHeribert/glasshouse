@@ -117,6 +117,40 @@ impl RuntimePaths {
     pub fn provider_cache_dir(&self) -> PathBuf {
         self.data_dir.join("providers")
     }
+
+    /// Glasshouse-managed third-party executables.
+    ///
+    /// These are data rather than user-authored configuration: Glasshouse may
+    /// install or replace a pinned tool without rewriting `config.toml`.
+    pub fn managed_tools_dir(&self) -> PathBuf {
+        self.data_dir.join("tools")
+    }
+
+    /// The managed CLIProxyAPI executable used by the subscription broker.
+    pub fn cliproxyapi_executable(&self) -> PathBuf {
+        let name = if cfg!(windows) {
+            "CLIProxyAPI.exe"
+        } else {
+            "CLIProxyAPI"
+        };
+        self.managed_tools_dir().join(name)
+    }
+
+    /// Private state roots for the one-sidecar-per-entitlement broker.
+    pub fn subscription_brokers_dir(&self) -> PathBuf {
+        self.data_dir.join("subscription-brokers")
+    }
+
+    /// Stable, traversal-safe state root for one entitlement.
+    ///
+    /// Hex encoding preserves identity without putting user-controlled path
+    /// separators into a filesystem path.
+    pub(crate) fn subscription_broker_entitlement_dir(&self, entitlement: &str) -> PathBuf {
+        self.subscription_brokers_dir().join(format!(
+            "entitlement-{}",
+            hex::encode(entitlement.as_bytes())
+        ))
+    }
 }
 
 /// Refuse a path whose first component is a literal `~`, rather than
@@ -148,6 +182,28 @@ pub(crate) fn reject_literal_tilde(path: &Path, source: &str) -> Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_paths_are_managed_and_entitlements_cannot_escape_their_root() {
+        let paths = RuntimePaths::new("/private/data", "/private/config");
+        assert_eq!(paths.managed_tools_dir(), Path::new("/private/data/tools"));
+        assert_eq!(
+            paths.cliproxyapi_executable(),
+            Path::new("/private/data/tools").join(if cfg!(windows) {
+                "CLIProxyAPI.exe"
+            } else {
+                "CLIProxyAPI"
+            })
+        );
+
+        let account = paths.subscription_broker_entitlement_dir("../../account-a");
+        assert!(account.starts_with(paths.subscription_brokers_dir()));
+        assert_eq!(
+            account.parent(),
+            Some(paths.subscription_brokers_dir().as_path())
+        );
+        assert!(!account.to_string_lossy().contains("../"));
+    }
 
     #[test]
     fn a_literal_tilde_flag_override_is_refused_for_data_and_config_dir() {

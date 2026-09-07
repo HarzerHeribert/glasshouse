@@ -61,6 +61,10 @@ fn relay_sources() -> Vec<(&'static str, &'static str)> {
         ("gateway/http.rs", include_str!("http.rs")),
         ("gateway/ingress.rs", include_str!("ingress.rs")),
         ("gateway/session.rs", include_str!("session/mod.rs")),
+        (
+            "gateway/subscription_broker.rs",
+            include_str!("subscription_broker.rs"),
+        ),
         ("gateway/upstream.rs", include_str!("upstream.rs")),
         // The 2026-09-03 ruling's reader. It is here rather than beside the
         // codecs on purpose: it holds no parser, so the scan below is a real
@@ -961,7 +965,7 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
     assert!(!production_code(tested).contains("crate::session"));
     // ... and the file list it runs over is not empty, which would make
     // every assertion in it vacuous.
-    assert_eq!(gateway_sources().len(), 11);
+    assert_eq!(gateway_sources().len(), 12);
 }
 
 /// No file of the **relay** may deserialize anything. The whole of
@@ -1018,7 +1022,7 @@ fn no_part_of_the_relay_deserializes_anything() {
         codecs_parse,
         "translate/ no longer deserializes anything, so the split above proves nothing"
     );
-    assert_eq!(relay_sources().len(), 6);
+    assert_eq!(relay_sources().len(), 7);
 
     // ... and the scan fires on the change it exists to catch, rather
     // than passing because the needle was misspelled.

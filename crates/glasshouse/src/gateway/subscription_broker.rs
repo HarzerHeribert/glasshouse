@@ -1,0 +1,435 @@
+//! Lifecycle boundary around one pinned CLIProxyAPI subscription sidecar.
+//!
+//! Glasshouse remains the public gateway and scheduler. This process is a
+//! loopback-only protocol/authentication adapter for exactly one entitlement;
+//! it never receives the disposable key given to a harness.
+
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+
+use crate::paths::RuntimePaths;
+use crate::routing::CredentialId;
+use crate::secret::{REDACTED, SecretRef};
+
+/// Explicit override for the pinned CLIProxyAPI executable.
+pub const ENV_CLIPROXYAPI_BIN: &str = "GLASSHOUSE_CLIPROXYAPI_BIN";
+
+const PROVIDER_NAME: &str = "cliproxyapi";
+const CREDENTIAL_SERVICE: &str = "glasshouse-subscription-broker";
+const API_KEY_BYTES: usize = 32;
+const INSTANCE_ID_BYTES: usize = 16;
+const READY_TIMEOUT: Duration = Duration::from_secs(5);
+const READY_POLL: Duration = Duration::from_millis(20);
+
+/// The in-memory credential accepted only by one loopback sidecar.
+///
+/// There is deliberately no `Display`, serde implementation, clone, hash, or
+/// public accessor. The crate-private accessor is the single seam a later
+/// routing integration uses to construct the existing `UpstreamBackend`.
+struct BrokerApiKey(String);
+
+impl BrokerApiKey {
+    fn generate() -> Result<Self> {
+        let mut bytes = [0_u8; API_KEY_BYTES];
+        getrandom::fill(&mut bytes)
+            .context("could not read cryptographic randomness for the subscription broker")?;
+        Ok(Self(hex::encode(bytes)))
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BrokerApiKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(REDACTED)
+    }
+}
+
+/// A live one-entitlement CLIProxyAPI sidecar.
+///
+/// Dropping this value kills and reaps the process and removes its ephemeral
+/// serving directory. The stable per-entitlement auth directory survives so
+/// OAuth refresh state remains available to the next instance of that same
+/// entitlement.
+pub struct RunningSubscriptionBroker {
+    child: Option<Child>,
+    base_url: String,
+    internal_key: BrokerApiKey,
+    credential_id: CredentialId,
+    auth_dir: PathBuf,
+    instance_dir: PathBuf,
+    executable_name: OsString,
+}
+
+impl RunningSubscriptionBroker {
+    /// Start one sidecar for `entitlement` using the override, when present,
+    /// or the Glasshouse-managed pinned executable.
+    pub fn start(paths: &RuntimePaths, entitlement: &str) -> Result<Self> {
+        let executable = discover_executable(paths, std::env::var_os(ENV_CLIPROXYAPI_BIN))?;
+        Self::start_with(paths, entitlement, &executable, READY_TIMEOUT, &[])
+    }
+
+    fn start_with(
+        paths: &RuntimePaths,
+        entitlement: &str,
+        executable: &Path,
+        timeout: Duration,
+        child_env: &[(OsString, OsString)],
+    ) -> Result<Self> {
+        validate_entitlement(entitlement)?;
+        let executable_name = diagnostic_name(executable);
+        if !executable.is_file() {
+            bail!(
+                "CLIProxyAPI executable {:?} is not a regular file",
+                executable_name
+            );
+        }
+
+        let entitlement_dir = paths.subscription_broker_entitlement_dir(entitlement);
+        let auth_dir = entitlement_dir.join("auth");
+        let instances_dir = entitlement_dir.join("instances");
+        for directory in [
+            paths.subscription_brokers_dir(),
+            entitlement_dir,
+            auth_dir.clone(),
+            instances_dir.clone(),
+        ] {
+            ensure_private_directory(&directory)?;
+        }
+
+        let instance_dir = instances_dir.join(format!("run-{}", random_hex(INSTANCE_ID_BYTES)?));
+        ensure_private_directory(&instance_dir)?;
+        let config_path = instance_dir.join("config.yaml");
+
+        let reserved = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .context("could not reserve a loopback port for CLIProxyAPI")?;
+        let port = reserved
+            .local_addr()
+            .context("could not inspect the reserved CLIProxyAPI port")?
+            .port();
+
+        let internal_key = BrokerApiKey::generate()?;
+        let config = render_config(port, &auth_dir, internal_key.expose())?;
+        write_private_file(&config_path, config.as_bytes())?;
+        drop(reserved);
+
+        let mut command = Command::new(executable);
+        command
+            .arg("-config")
+            .arg(&config_path)
+            .current_dir(&instance_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env_clear();
+        for (name, value) in child_env {
+            command.env(name, value);
+        }
+
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&instance_dir);
+                return Err(error).with_context(|| {
+                    format!("could not start CLIProxyAPI executable {executable_name:?}")
+                });
+            }
+        };
+
+        let mut running = Self {
+            child: Some(child),
+            base_url: format!("http://127.0.0.1:{port}"),
+            internal_key,
+            credential_id: CredentialId::new(
+                PROVIDER_NAME,
+                SecretRef::OsCredential {
+                    service: CREDENTIAL_SERVICE.to_owned(),
+                    account: entitlement.to_owned(),
+                },
+            ),
+            auth_dir,
+            instance_dir,
+            executable_name,
+        };
+
+        if let Err(error) = running.wait_until_ready(port, timeout) {
+            running.terminate();
+            return Err(error);
+        }
+
+        // CLIProxyAPI has loaded the configuration before it binds. Removing
+        // it here makes the API key an ephemeral bootstrap value rather than
+        // a credential left at rest. Failure to remove it is a startup
+        // failure: continuing would violate the broker's secret boundary.
+        if let Err(error) = fs::remove_file(&config_path) {
+            running.terminate();
+            return Err(error).context("could not remove the private CLIProxyAPI bootstrap config");
+        }
+
+        Ok(running)
+    }
+
+    fn wait_until_ready(&mut self, port: u16, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .expect("a starting broker owns its child")
+                .try_wait()
+                .context("could not inspect the CLIProxyAPI process")?
+            {
+                bail!(
+                    "CLIProxyAPI executable {:?} exited before readiness with {status}",
+                    self.executable_name
+                );
+            }
+
+            if TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "CLIProxyAPI executable {:?} did not become ready within the bounded startup timeout",
+                    self.executable_name
+                );
+            }
+            thread::sleep(READY_POLL.min(timeout));
+        }
+    }
+
+    /// Loopback origin used to build the sidecar's existing gateway routes.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Printable identity of the entitlement-specific internal credential.
+    pub fn credential_id(&self) -> &CredentialId {
+        &self.credential_id
+    }
+
+    /// The one narrow handoff into `UpstreamBackend` construction.
+    ///
+    /// This value must remain inside Glasshouse. It is public only because
+    /// `gateway` is a library surface and the typed broker result has to
+    /// supply both halves needed by the existing public backend constructor;
+    /// callers must give it directly to the backend credential boundary.
+    pub fn internal_api_key(&self) -> &str {
+        self.internal_key.expose()
+    }
+
+    /// Stable directory containing only this entitlement's OAuth material.
+    pub fn auth_dir(&self) -> &Path {
+        &self.auth_dir
+    }
+
+    fn terminate(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            match child.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                }
+            }
+            let _ = child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.instance_dir);
+    }
+}
+
+impl Drop for RunningSubscriptionBroker {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+impl fmt::Debug for RunningSubscriptionBroker {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunningSubscriptionBroker")
+            .field("base_url", &self.base_url)
+            .field("internal_key", &REDACTED)
+            .field("credential_id", &self.credential_id.label())
+            .field("auth_dir", &self.auth_dir)
+            .field("executable", &self.executable_name)
+            .finish_non_exhaustive()
+    }
+}
+
+fn validate_entitlement(entitlement: &str) -> Result<()> {
+    if entitlement.trim().is_empty() {
+        bail!("a subscription broker entitlement name cannot be empty");
+    }
+    if entitlement.len() > 256 {
+        bail!("a subscription broker entitlement name is too long");
+    }
+    Ok(())
+}
+
+fn discover_executable(paths: &RuntimePaths, override_path: Option<OsString>) -> Result<PathBuf> {
+    if let Some(path) = override_path.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        bail!(
+            "CLIProxyAPI executable {:?} named by {ENV_CLIPROXYAPI_BIN} was not found",
+            diagnostic_name(&path)
+        );
+    }
+
+    let managed = paths.cliproxyapi_executable();
+    if managed.is_file() {
+        return Ok(managed);
+    }
+    bail!(
+        "CLIProxyAPI executable {:?} is absent from Glasshouse's managed tools directory; set {ENV_CLIPROXYAPI_BIN} to an explicit executable",
+        diagnostic_name(&managed)
+    )
+}
+
+fn diagnostic_name(path: &Path) -> OsString {
+    path.file_name()
+        .unwrap_or_else(|| OsStr::new("CLIProxyAPI"))
+        .to_os_string()
+}
+
+fn random_hex(bytes: usize) -> Result<String> {
+    let mut random = vec![0_u8; bytes];
+    getrandom::fill(&mut random)
+        .context("could not read cryptographic randomness for a subscription broker instance")?;
+    Ok(hex::encode(random))
+}
+
+fn render_config(port: u16, auth_dir: &Path, internal_key: &str) -> Result<String> {
+    let auth_dir = auth_dir
+        .to_str()
+        .context("the subscription broker auth directory is not valid UTF-8")?;
+    let auth_dir = yaml_double_quoted(auth_dir);
+    let internal_key = yaml_double_quoted(internal_key);
+
+    Ok(format!(
+        "host: \"127.0.0.1\"\n\
+         port: {port}\n\
+         tls:\n\
+           enable: false\n\
+         remote-management:\n\
+           allow-remote: false\n\
+           secret-key: \"\"\n\
+           disable-control-panel: true\n\
+           disable-auto-update-panel: true\n\
+         auth-dir: {auth_dir}\n\
+         api-keys: [{internal_key}]\n\
+         debug: false\n\
+         pprof:\n\
+           enable: false\n\
+           addr: \"127.0.0.1:0\"\n\
+         plugins:\n\
+           enabled: false\n\
+           dir: \"plugins-disabled\"\n\
+           configs: {{}}\n\
+         commercial-mode: true\n\
+         request-log: false\n\
+         logging-to-file: false\n\
+         logs-max-total-size-mb: 0\n\
+         error-logs-max-files: 0\n\
+         usage-statistics-enabled: false\n\
+         request-retry: 0\n\
+         max-retry-credentials: 1\n\
+         max-retry-interval: 0\n\
+         disable-claude-cloak-mode: true\n\
+         quota-exceeded:\n\
+           switch-project: false\n\
+           switch-preview-model: false\n\
+           antigravity-credits: false\n\
+         routing:\n\
+           strategy: \"fill-first\"\n\
+           session-affinity: false\n\
+         passthrough-headers: false\n\
+         save-cooldown-status: false\n\
+         ws-auth: true\n\
+         nonstream-keepalive-interval: 0\n\
+         streaming:\n\
+           keepalive-seconds: 0\n\
+           bootstrap-retries: 0\n"
+    ))
+}
+
+/// Encode one string as a YAML double-quoted scalar without bringing a body
+/// parser into the gateway relay module.
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if control.is_control() => {
+                use std::fmt::Write as _;
+                write!(&mut out, "\\u{:04x}", control as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            ordinary => out.push(ordinary),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).context("could not create a private subscription broker directory")?;
+    let metadata = fs::symlink_metadata(path)
+        .context("could not inspect a private subscription broker directory")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("a subscription broker private directory is not a real directory");
+    }
+    set_owner_only_directory(path)?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .context("could not create the private CLIProxyAPI bootstrap config")?;
+    file.write_all(contents)
+        .context("could not write the private CLIProxyAPI bootstrap config")?;
+    file.sync_all()
+        .context("could not finish the private CLIProxyAPI bootstrap config")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .context("could not make a subscription broker directory owner-only")
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

@@ -17,6 +17,7 @@
 mod http;
 mod ingress;
 pub mod session;
+pub mod subscription_broker;
 pub mod translate;
 pub mod upstream;
 mod usage;
