@@ -410,34 +410,97 @@ pub fn run_traced(
         };
     };
 
+    let outcome = observed_call(
+        ctx,
+        tool.name(),
+        args.as_json(),
+        || checked_call(ctx, token, tool, args, &mut checked),
+        |outcome| tool_response(tool.name(), outcome),
+    );
+    Traced { outcome, checked }
+}
+
+/// The same hook lifecycle for a dynamic MCP call. Arbitrary argument values
+/// never enter the hook payload; the actual result's bounded preview does.
+pub(crate) fn run_mcp(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    client: &mut crate::tools::mcp::Mcp,
+    name: &str,
+    arguments: Value,
+) -> Result<ToolResult, ToolError> {
+    // Only a discovered name is safe to copy into observations. An unknown
+    // caller-supplied name may itself be a credential or other arbitrary text.
+    let observed_name = client
+        .registered_name(name)
+        .unwrap_or("mcp.call")
+        .to_string();
+    observed_call(
+        ctx,
+        &observed_name,
+        json!({"arguments": "[redacted]"}),
+        || client.call(ctx.profile, token, name, arguments),
+        |outcome| tool_response(&observed_name, outcome),
+    )
+}
+
+/// Discovery can spawn and initialize project code, so it is observed even
+/// though its retained result is a descriptor list rather than a ToolResult.
+pub(crate) fn list_mcp(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    client: &mut crate::tools::mcp::Mcp,
+) -> Result<Vec<crate::tools::mcp::Descriptor>, ToolError> {
+    observed_call(
+        ctx,
+        "mcp.list",
+        json!({}),
+        || client.list(ctx.profile, token),
+        |outcome| {
+            let text = match outcome {
+                Ok(descriptors) => {
+                    serde_json::to_string(descriptors).expect("MCP descriptors contain JSON values")
+                }
+                Err(error) => error.to_string(),
+            };
+            json!({"type":"text", "text":truncate(&text, PREVIEW_BYTES)})
+        },
+    )
+}
+
+/// One correlation id and exactly one pre/post pair, including refusals and
+/// transport failures. Both static and MCP tools use the context-firewall seam.
+fn observed_call<T>(
+    ctx: &ToolContext<'_>,
+    name: &str,
+    input: Value,
+    operation: impl FnOnce() -> Result<T, ToolError>,
+    response: impl FnOnce(&Result<T, ToolError>) -> Value,
+) -> Result<T, ToolError> {
     let call = next_call_id();
-    let input = args.as_json();
     emit(
         ctx,
         json!({
             "hook_event_name": "PreToolUse",
             "session_id": ctx.session.as_str(),
             "tool_use_id": call,
-            "tool_name": tool.name(),
+            "tool_name": name,
             "tool_input": input,
         }),
     );
-
-    let outcome = checked_call(ctx, token, tool, args, &mut checked);
-
+    let outcome = operation();
     emit(
         ctx,
         json!({
             "hook_event_name": "PostToolUse",
             "session_id": ctx.session.as_str(),
             "tool_use_id": call,
-            "tool_name": tool.name(),
+            "tool_name": name,
             "tool_input": input,
-            "tool_response": tool_response(tool, &outcome),
+            "tool_response": response(&outcome),
         }),
     );
-
-    Traced { outcome, checked }
+    outcome
 }
 
 /// The `tool_response` the `PostToolUse` payload carries.
@@ -447,7 +510,7 @@ pub fn run_traced(
 /// exit_code}` and every other tool as `{type: "text", text}`. A refusal
 /// renders in the shape its own tool would have, so the event parses either
 /// way and the refusal is the observed output rather than a missing one.
-fn tool_response(tool: &Tool, outcome: &Result<ToolResult, ToolError>) -> Value {
+fn tool_response(name: &str, outcome: &Result<ToolResult, ToolError>) -> Value {
     let (stdout, stderr, exit_code) = match outcome {
         Ok(result) => (
             result.preview(),
@@ -460,7 +523,7 @@ fn tool_response(tool: &Tool, outcome: &Result<ToolResult, ToolError>) -> Value 
             None,
         ),
     };
-    if tool.name().eq_ignore_ascii_case("bash") {
+    if name.eq_ignore_ascii_case("bash") {
         json!({
             "stdout": stdout,
             "stderr": stderr,
@@ -1297,7 +1360,7 @@ fn collect(handle: JoinHandle<Vec<u8>>) -> String {
 /// a cancelled call, and joining them would make cancellation wait on a
 /// grandchild that inherited the pipe — the one thing a bounded cancellation
 /// must not do.
-fn kill_and_reap(child: &mut Child) {
+pub(crate) fn kill_and_reap(child: &mut Child) {
     #[cfg(unix)]
     kill_group(child.id());
     let _ = child.kill();
@@ -1338,7 +1401,7 @@ fn kill_group(pid: u32) {
 /// nothing there has been run. Spawning there "for now" would be the one
 /// unconfined path this module exists to not have.
 #[cfg(target_os = "macos")]
-fn confine(
+pub(crate) fn confine(
     profile: &Profile,
     binary: &Path,
     tool: &str,
@@ -1356,7 +1419,7 @@ fn confine(
 }
 
 #[cfg(target_os = "linux")]
-fn confine(
+pub(crate) fn confine(
     profile: &Profile,
     binary: &Path,
     tool: &str,
@@ -1383,7 +1446,7 @@ fn confine(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn confine(
+pub(crate) fn confine(
     profile: &Profile,
     binary: &Path,
     tool: &str,

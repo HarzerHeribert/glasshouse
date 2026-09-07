@@ -90,6 +90,10 @@ pub struct Binding {
 /// Every host global that is not a registered tool.
 pub const RUNTIME: &[Binding] = &[
     Binding {
+        global: "mcp",
+        declaration: "declare const mcp: {\n  list(): {name: string; server: string; tool: string; description: string; inputSchema: object}[];\n  call(name: string, arguments: object): {content: unknown[]; isError?: boolean; structuredContent?: object};\n};\n// Call mcp.list() to discover project MCP tools and their JSON input schemas.\n// Use the returned exact name in mcp.call(name, arguments). Calls may have effects;\n// inspect isError. Keep results as handles and select the fields you need;\n// do not print full content. Only granted, local stdio tools are discoverable.",
+    },
+    Binding {
         global: "keep",
         declaration: "declare function keep(name: string, value: unknown): void;\n\
                       // Bind `value` under `name` so it outlives this cell. Redeclaring a\n\

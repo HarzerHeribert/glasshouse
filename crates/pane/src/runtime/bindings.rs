@@ -224,6 +224,15 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, global, name, function.into());
     }
 
+    let mcp = v8::Object::new(scope);
+    if let Some(function) = v8::Function::builder(mcp_list_callback).build(scope) {
+        set_fixed_key(scope, mcp, "list", function.into());
+    }
+    if let Some(function) = v8::Function::builder(mcp_call_callback).build(scope) {
+        set_fixed_key(scope, mcp, "call", function.into());
+    }
+    set_fixed_key(scope, global, "mcp", mcp.into());
+
     if let Some(function) = v8::Function::builder(keep_callback).build(scope) {
         set_fixed_key(scope, global, "keep", function.into());
     }
@@ -304,6 +313,147 @@ pub(crate) fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s,
 }
 
 // --- registered tools -------------------------------------------------
+
+fn mcp_list_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let state = state(scope);
+    // MCP executables are opaque, like bash: deliver applicable guidance
+    // before the first discovery can start project code.
+    if state.instruction_boundary("bash", &Args::new()) {
+        trace(scope).request_yield(Some(
+            "project instructions must be delivered before MCP discovery; no server started".into(),
+        ));
+        scope.terminate_execution();
+        return;
+    }
+    let context = ToolContext {
+        profile: &state.profile,
+        glasshouse: &state.glasshouse,
+        session: &state.session,
+    };
+    let result = invoke::list_mcp(&context, &state.token.borrow(), &mut state.mcp.borrow_mut());
+    record_mcp_call(scope, "mcp.list", &result);
+    match result {
+        Ok(descriptors) => {
+            let json =
+                serde_json::to_value(descriptors).expect("MCP descriptors contain JSON values");
+            let value = json_to_v8(scope, &json);
+            tag_mcp_result(scope, &state, "mcp.list", value, &json.to_string());
+            retval.set(value);
+        }
+        Err(ToolError::Denied(denied)) => throw_denied(scope, &denied),
+        Err(ToolError::Cancelled { tool }) => throw_cancelled(scope, &tool),
+        Err(error) => throw_tool_error(scope, &error.to_string()),
+    }
+}
+
+fn mcp_call_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    if !args.get(0).is_string() || !args.get(1).is_object() {
+        throw_tool_error(
+            scope,
+            "mcp.call requires a discovered name and a JSON arguments object",
+        );
+        return;
+    }
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let Some(arguments) = v8::json::stringify(scope, args.get(1)) else {
+        return;
+    };
+    let Ok(arguments) = serde_json::from_str(&arguments.to_rust_string_lossy(scope)) else {
+        throw_tool_error(scope, "MCP arguments must be JSON");
+        return;
+    };
+    let state = state(scope);
+    if state.instruction_boundary("bash", &Args::new()) {
+        trace(scope).request_yield(Some(
+            "project instructions must be delivered before MCP invocation; the call did not run"
+                .into(),
+        ));
+        scope.terminate_execution();
+        return;
+    }
+    let context = ToolContext {
+        profile: &state.profile,
+        glasshouse: &state.glasshouse,
+        session: &state.session,
+    };
+    let result = invoke::run_mcp(
+        &context,
+        &state.token.borrow(),
+        &mut state.mcp.borrow_mut(),
+        &name,
+        arguments,
+    );
+    record_mcp_call(scope, "mcp.call", &result);
+    match result {
+        Ok(result) => {
+            let (value, _) = build_structured_result(scope, &result);
+            tag_mcp_result(scope, &state, &name, value, &result.stdout);
+            retval.set(value);
+        }
+        Err(ToolError::Denied(denied)) => throw_denied(scope, &denied),
+        Err(ToolError::Cancelled { tool }) => throw_cancelled(scope, &tool),
+        Err(error) => throw_tool_error(scope, &error.to_string()),
+    }
+}
+
+fn record_mcp_call<T>(scope: &mut v8::PinScope, name: &str, result: &Result<T, ToolError>) {
+    let ended = match result {
+        Ok(_) => Ended::Ok,
+        Err(ToolError::Denied(d)) => Ended::Denied {
+            rule: d.rule.clone(),
+        },
+        Err(ToolError::Cancelled { .. }) => Ended::Threw {
+            class: "Cancelled".into(),
+        },
+        Err(_) => Ended::Threw {
+            class: "ToolError".into(),
+        },
+    };
+    // MCP arguments may contain credentials; the trajectory records status
+    // without copying arbitrary argument values.
+    trace(scope).record(CallRecord {
+        tool: name.into(),
+        args: std::collections::BTreeMap::new(),
+        evidence: None,
+        ended,
+    });
+}
+
+fn tag_mcp_result(
+    scope: &mut v8::PinScope,
+    state: &Rc<RuntimeState>,
+    name: &str,
+    value: v8::Local<v8::Value>,
+    payload: &str,
+) {
+    let preview = marshal::marshal(scope, value);
+    let meta = HandleMeta {
+        type_label: Some(
+            if name == "mcp.list" {
+                "MCP.Tool[]"
+            } else {
+                "MCP.Result"
+            }
+            .into(),
+        ),
+        size_estimate: payload.len() as u64,
+        provenance: Some(provenance(name, &Args::new(), payload, false)),
+    };
+    let id = state.record_call(RecordedCall { preview, meta });
+    if let Ok(object) = v8::Local::<v8::Object>::try_from(value) {
+        let tag = call_tag(scope);
+        let marker = v8::Number::new(scope, id as f64);
+        object.set_private(scope, tag, marker.into());
+    }
+}
 
 fn tool_callback(
     scope: &mut v8::PinScope,

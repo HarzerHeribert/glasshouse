@@ -133,6 +133,7 @@ pub(crate) struct CellState {
 /// What every host callback can reach.
 pub(crate) struct RuntimeState {
     pub(crate) profile: Profile,
+    pub(crate) mcp: RefCell<crate::tools::mcp::Mcp>,
     pub(crate) glasshouse: Glasshouse,
     pub(crate) session: SessionId,
     pub(crate) cell: std::cell::Cell<u64>,
@@ -185,6 +186,7 @@ impl RuntimeState {
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
         Self {
             profile: profile.clone(),
+            mcp: RefCell::new(crate::tools::mcp::Mcp::default()),
             glasshouse: glasshouse.clone(),
             session: session.clone(),
             cell: std::cell::Cell::new(0),

@@ -7,6 +7,7 @@
 
 pub mod exact_edit;
 pub mod invoke;
+pub mod mcp;
 pub mod registry;
 
 /// The cancellation facility is a property of the tools surface rather than

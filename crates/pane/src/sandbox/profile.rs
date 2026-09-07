@@ -565,6 +565,22 @@ impl Profile {
             .any(|pattern| match_segment(pattern, name, false))
     }
 
+    /// Discovery may start only when an existing allow names this server's
+    /// namespace (or a broader glob), and the candidate is not denied. This
+    /// does not admit a call: every advertised tool is checked separately.
+    pub fn admits_mcp_server(&self, server: &str) -> bool {
+        self.mcp_allow.iter().any(|pattern| {
+            let Some((server_pattern, tool_pattern)) = pattern
+                .strip_prefix("mcp__")
+                .and_then(|rest| rest.split_once("__"))
+            else {
+                return self.admits_mcp_tool(&format!("mcp__{server}__*"));
+            };
+            match_segment(server_pattern, server, false)
+                && self.admits_mcp_tool(&format!("mcp__{server}__{tool_pattern}"))
+        })
+    }
+
     /// The first question of §2: may this command line be attempted at all?
     ///
     /// Answering `Ok` grants no file access whatsoever — the process it

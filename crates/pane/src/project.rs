@@ -7,6 +7,7 @@
 //! writing.
 
 pub mod instructions;
+pub mod mcp;
 pub mod orientation;
 pub mod source_context;
 
