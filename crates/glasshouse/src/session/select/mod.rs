@@ -99,10 +99,10 @@ impl HarnessSelection {
     /// win, and a user who typed something deserves for it to be the thing
     /// that survives.
     ///
-    /// No harness needs a start argument today, so for now this is exactly the
-    /// user's own list. It is nonetheless the seam both production start paths
-    /// go through, because the alternative is two call sites that each have to
-    /// remember the rule the day a harness does need one.
+    /// Pane's required `session --root .` comes from its adapter here; for the
+    /// other harnesses this begins with an empty list. This is the seam both
+    /// production start paths use, so adapter requirements cannot be skipped
+    /// by one of them.
     pub fn start_args<I, S>(&self, native_session: Option<&str>, user_args: I) -> Vec<OsString>
     where
         I: IntoIterator<Item = S>,

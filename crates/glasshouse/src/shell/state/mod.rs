@@ -476,6 +476,9 @@ pub(crate) fn describe_event(event: &LifecycleEvent) -> String {
 
 /// Everything the shell displays.
 pub struct ShellState {
+    theme: super::appearance::Theme,
+    artwork_frame: u64,
+    motion_paused: bool,
     project_name: String,
     project_root: PathBuf,
     version: String,
@@ -537,6 +540,9 @@ impl ShellState {
         sessions: Vec<SessionRecord>,
     ) -> Self {
         Self {
+            theme: super::appearance::Theme::default(),
+            artwork_frame: 0,
+            motion_paused: false,
             project_name: project_name.into(),
             project_root: project_root.into(),
             version: version.into(),
@@ -556,6 +562,27 @@ impl ShellState {
             project_memory: None,
             activity: Vec::new(),
         }
+    }
+
+    pub(super) fn theme(&self) -> super::appearance::Theme {
+        self.theme
+    }
+    pub(super) fn artwork_frame(&self) -> u64 {
+        self.artwork_frame / 6
+    }
+    pub(super) fn motion_paused(&self) -> bool {
+        self.motion_paused
+    }
+    pub(super) fn advance_artwork(&mut self) -> bool {
+        if self.motion_paused
+            || self.mode != Mode::Control
+            || self.overlay.is_some()
+            || !self.viewport_grid.is_empty()
+        {
+            return false;
+        }
+        self.artwork_frame = self.artwork_frame.wrapping_add(1);
+        self.artwork_frame.is_multiple_of(6)
     }
 
     pub fn project_name(&self) -> &str {
@@ -820,6 +847,23 @@ impl ShellState {
             KeyCode::BackTab | KeyCode::Left => self.previous_session(),
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('s') => Action::OpenSettings,
+            KeyCode::Char('t') if !ctrl => {
+                self.theme = self.theme.next();
+                self.set_status(format!(
+                    "theme {} · t next palette · a motion",
+                    self.theme.name()
+                ));
+                Action::Redraw
+            }
+            KeyCode::Char('a') if !ctrl => {
+                self.motion_paused = !self.motion_paused;
+                self.set_status(if self.motion_paused {
+                    "motion paused · a resumes"
+                } else {
+                    "motion on · a pauses"
+                });
+                Action::Redraw
+            }
             KeyCode::Char('p') => Action::OpenProjectOverview,
             KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),

@@ -23,12 +23,8 @@ use crate::integrations::IntegrationId;
 /// `ANTHROPIC_VERSION` — the Anthropic Messages API and nothing else.
 const PROTOCOLS: &[WireProtocol] = &[WireProtocol::AnthropicMessages];
 
-/// `crates/pane/src/wire.rs`: `MODEL` is a `pub const`; no flag, environment
-/// variable or file changes it — so the override list is verified *and*
-/// empty, which is a different fact from `Unverified` (nobody checked).
-/// The catalogue invariant allows exactly this for `model_override` and for
-/// nothing else (`harness::tests::a_verified_backend_declaration_is_never_an_empty_list`).
-const MODEL_OVERRIDE: &[ModelOverride] = &[];
+/// `pane session --help`: `--model <MODEL>` selects the initial request model.
+const MODEL_OVERRIDE: &[ModelOverride] = &[ModelOverride::CommandLine("--model")];
 
 /// The root a pane child reads its Anthropic endpoint from.
 ///
@@ -65,9 +61,9 @@ impl HarnessAdapter for Pane {
     }
 
     fn start(&self) -> Invocation {
-        // `crates/pane/src/main.rs`: `main` takes no arguments and reads
-        // directly from `stdin`. Bare `pane` is the only invocation there is.
-        Invocation::bare()
+        // Glasshouse already starts the child in the canonical project cwd;
+        // pane still requires its session subcommand and an explicit root.
+        Invocation::of(["session", "--root", "."])
     }
 
     fn resume(&self, native_session: &str) -> Option<Invocation> {
@@ -103,13 +99,6 @@ impl HarnessAdapter for Pane {
             return None;
         }
 
-        // `crates/pane/src/wire.rs::MODEL` is a constant nothing can
-        // override — see [`MODEL_OVERRIDE`] — so a caller-named model has
-        // no destination. `require_model_if_the_harness_selects_through_it`
-        // never asks for one here because `direct_provider_requires_model`
-        // stays this trait's default `false`.
-        let _ = request.model;
-
         let env = vec![(
             OsString::from(BASE_URL_ENV),
             OsString::from(request.base_url),
@@ -126,8 +115,13 @@ impl HarnessAdapter for Pane {
             names.push(CREDENTIAL_ENV);
         }
 
+        let args = request
+            .model
+            .map(|model| vec![OsString::from("--model"), OsString::from(model)])
+            .unwrap_or_default();
+
         Some(DirectProviderPlan {
-            args: Vec::new(),
+            args,
             env,
             credential,
             // `crates/pane/src/wire.rs` reads its endpoint and credential
@@ -199,8 +193,7 @@ impl HarnessAdapter for Pane {
                 ),
                 model_override: Declared::verified(
                     MODEL_OVERRIDE,
-                    "crates/pane/src/wire.rs: MODEL is a pub const; no argument, \
-                     environment variable or file selects a model",
+                    "`pane session --help`: `--model <MODEL>` selects the initial request model",
                 ),
                 selection: Declared::verified(
                     BACKEND_SELECTION,
@@ -237,6 +230,16 @@ mod tests {
     }
 
     #[test]
+    fn pane_starts_a_session_in_the_project_working_directory() {
+        assert_eq!(
+            Pane.start().args(),
+            ["session", "--root", "."].map(OsString::from)
+        );
+        assert!(!Pane.start().args().iter().any(|arg| arg == "--yolo"));
+        assert!(Pane.resume("native-id").is_none());
+    }
+
+    #[test]
     fn pane_declares_the_two_environment_names_its_wire_reads() {
         assert_eq!(BASE_URL_ENV, "ANTHROPIC_BASE_URL");
         assert_eq!(CREDENTIAL_ENV, "ANTHROPIC_AUTH_TOKEN");
@@ -262,6 +265,31 @@ mod tests {
             plan.credential,
             Some(CredentialPlacement::Environment(CREDENTIAL_ENV.to_owned()))
         );
+    }
+
+    #[test]
+    fn pane_passes_the_selected_model_to_direct_and_gateway_plans() {
+        assert_eq!(MODEL_OVERRIDE, &[ModelOverride::CommandLine("--model")]);
+        for provider_name in ["direct-provider", "glasshouse-gateway"] {
+            let request = DirectProviderRequest {
+                provider_name,
+                protocol: WireProtocol::AnthropicMessages,
+                base_url: "http://127.0.0.1:9",
+                model: Some("demo/model"),
+                credential_var: Some("PROVIDER_KEY"),
+                headers: &[],
+            };
+            let plan = Pane.direct_provider_launch(&request).unwrap();
+            assert_eq!(
+                plan.args,
+                ["--model", "demo/model"].map(OsString::from),
+                "{provider_name}"
+            );
+            assert_eq!(
+                plan.credential,
+                Some(CredentialPlacement::Environment(CREDENTIAL_ENV.to_owned()))
+            );
+        }
     }
 
     #[test]

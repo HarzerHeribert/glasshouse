@@ -599,7 +599,7 @@ impl Shell {
     /// causal one rather than a delay: the banner cannot be on screen unless
     /// raw mode is already on.
     fn wait_for_first_frame(&mut self) {
-        let banner = format!("glasshouse {}", glasshouse::VERSION);
+        let banner = "GLASSHOUSE".to_owned();
         let cols = self.parser.screen().size().1;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         while Instant::now() < deadline {

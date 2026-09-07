@@ -512,9 +512,9 @@ fn a_verified_backend_declaration_is_never_an_empty_list() {
         if let Some(protocols) = backends.protocols.value() {
             assert!(!protocols.is_empty(), "{}", adapter.id().slug());
         }
-        // `model_override` alone may be verified-empty: a harness whose
-        // model is a constant in its own wire (pane) has *no* override
-        // mechanism, and that is a checked fact, not an unchecked one.
+        // `model_override` alone may be verified-empty: a harness can have
+        // no override mechanism, and that can still be a checked fact rather
+        // than an unchecked one.
         // `protocols` and `selection` can never be empty — a harness speaks
         // something and is reached somehow.
         let _ = backends.model_override.value();
@@ -545,18 +545,24 @@ fn an_unverified_capability_is_not_treated_as_present() {
 // --- starting and resuming ------------------------------------------
 
 #[test]
-fn no_supported_harness_needs_an_argument_to_start_today() {
-    // Every one of them opens an interactive session when run bare, and
-    // Glasshouse has already put the child in the project root. If this
-    // ever stops being true for a harness, that is a decision to make
-    // deliberately rather than to discover in a session that came up
-    // wrong.
+fn every_supported_harness_uses_its_exact_safe_start_invocation() {
+    // Glasshouse has already put the child in the project root. Pane still
+    // requires an explicit session subcommand and root; the other harnesses
+    // open an interactive session when run bare.
     for adapter in all() {
-        assert!(
-            adapter.start().is_bare(),
-            "{} now needs a start argument; update its adapter and this test together",
-            adapter.id().slug()
-        );
+        if adapter.id() == IntegrationId::Pane {
+            assert_eq!(
+                adapter.start().args(),
+                ["session", "--root", "."].map(std::ffi::OsString::from),
+                "pane must start a confined session in Glasshouse's project cwd"
+            );
+        } else {
+            assert!(
+                adapter.start().is_bare(),
+                "{} now needs a start argument; update its adapter and this test together",
+                adapter.id().slug()
+            );
+        }
     }
 }
 

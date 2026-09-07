@@ -14,9 +14,9 @@
 //! and emulator the viewport's own size, not the terminal's outer one — see
 //! [`view::viewport_slot`].
 
+mod appearance;
 pub mod state;
 pub mod view;
-
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -429,7 +429,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 // waiting on the reply hangs looking like it did nothing.
                 live.answer_terminal_queries();
 
-                let mut redraw = false;
+                let mut redraw = state.advance_artwork();
                 let exits = live.poll_exits();
                 let any_exited = !exits.is_empty();
                 for (id, status) in exits {
@@ -2267,7 +2267,7 @@ fn drain_provider_probes(
     inbox: &std::sync::mpsc::Receiver<ProviderProbeResult>,
     state: &mut ShellState,
 ) -> bool {
-    let mut redraw = false;
+    let mut redraw = state.advance_artwork();
     // Every result waiting, not just the first — two providers can have
     // requests outstanding at once.
     while let Ok(result) = inbox.try_recv() {

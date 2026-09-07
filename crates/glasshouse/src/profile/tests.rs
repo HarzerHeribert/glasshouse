@@ -644,6 +644,7 @@ fn a_gateway_serving_messages_resolves_a_pane_profile() {
     let gateway = running_gateway();
     let mut profile = profile_for(IntegrationId::Pane);
     profile.backend = BackendResource::GlasshouseGateway;
+    profile.model = Some("demo/model".to_owned());
 
     let overlay = resolve_with_gateway(
         &profile,
@@ -652,6 +653,12 @@ fn a_gateway_serving_messages_resolves_a_pane_profile() {
         &GatewayPairing::default(),
     )
     .expect("a pane profile resolves against a gateway that serves Messages");
+
+    assert_eq!(
+        overlay.args(),
+        ["--model", "demo/model"].map(std::ffi::OsString::from),
+        "the resolved profile's model must reach Pane's real command line"
+    );
 
     let env: Vec<(String, String)> = overlay
         .env()
