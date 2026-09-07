@@ -130,9 +130,9 @@ impl HarnessAdapter for Antigravity {
         OfficialModelSupport {
             native_families: Declared::verified(
                 NATIVE_FAMILIES,
-                "`agy models` (Antigravity CLI 1.1.21, run 2026-08-27) lists eleven \
-                 `gemini-*` entries under Google's own CLI, ahead of the models it labels \
-                 as other vendors'",
+                "`agy models` (signed-in Antigravity CLI 1.1.27, run 2026-09-07) lists \
+                 `gemini-3.8-flash-high`, `gemini-3.8-flash-medium` and \
+                 `gemini-3.8-flash-low` in Google's own model family",
             ),
             supported_models: Declared::verified(
                 SUPPORTED_MODELS,

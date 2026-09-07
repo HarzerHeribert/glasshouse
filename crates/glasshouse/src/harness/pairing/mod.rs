@@ -651,6 +651,11 @@ const CLAUDE_HELP: &str = "`claude --help` (Claude Code 2.1.246, read 2026-08-27
 const AGY_MODELS: &str = "`agy models` (Antigravity CLI 1.1.21, run 2026-08-27) lists it among \
                           the models Google's own CLI offers, under that display name";
 
+/// Signed-in `agy models` evidence supplied on 2026-09-07.
+const AGY_MODELS_2026_09_07: &str = "`agy models` (signed-in Antigravity CLI 1.1.27, run 2026-09-07) \
+    lists `gemini-3.8-flash-high`, `gemini-3.8-flash-medium` and `gemini-3.8-flash-low` \
+    in Google's own Gemini model family";
+
 /// The models this project has actually read an attribution for.
 ///
 /// Small on purpose. Every entry names the artifact it came from, in the same
@@ -705,6 +710,24 @@ pub fn catalogue() -> &'static [CatalogueEntry] {
             developer: "google",
             family: "gemini",
             evidence: AGY_MODELS,
+        },
+        CatalogueEntry {
+            id: "gemini-3.8-flash-high",
+            developer: "google",
+            family: "gemini",
+            evidence: AGY_MODELS_2026_09_07,
+        },
+        CatalogueEntry {
+            id: "gemini-3.8-flash-medium",
+            developer: "google",
+            family: "gemini",
+            evidence: AGY_MODELS_2026_09_07,
+        },
+        CatalogueEntry {
+            id: "gemini-3.8-flash-low",
+            developer: "google",
+            family: "gemini",
+            evidence: AGY_MODELS_2026_09_07,
         },
         CatalogueEntry {
             id: "claude-sonnet-4-6",

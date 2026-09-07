@@ -39,6 +39,43 @@ fn a_vendor_native_pairing_needs_the_family_and_the_developer() {
     assert_eq!(pairing.family(), Some("fable"));
 }
 
+#[test]
+fn antigravity_gemini_38_flash_variants_are_google_native() {
+    for model in [
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+    ] {
+        let pairing = classify(&query(IntegrationId::Antigravity, model), &none());
+        assert_eq!(pairing.class(), PairingClass::VendorNative, "{model}");
+        assert_eq!(pairing.developer().slug(), Some("google"), "{model}");
+        assert_eq!(pairing.family(), Some("gemini"), "{model}");
+        assert_eq!(pairing.model_behaviour(), ModelBehaviourFit::Unverified);
+        assert!(catalogued(model).unwrap().evidence.contains("2026-09-07"));
+    }
+}
+
+#[test]
+fn antigravity_model_refresh_preserves_other_vendor_support_and_unknown_ids() {
+    for (model, developer, family) in [
+        ("claude-sonnet-4-6", Some("anthropic"), Some("sonnet")),
+        ("claude-opus-4-6-thinking", Some("anthropic"), Some("opus")),
+        ("gpt-oss-120b-medium", None, None),
+    ] {
+        let pairing = classify(&query(IntegrationId::Antigravity, model), &none());
+        assert_eq!(pairing.class(), PairingClass::VendorSupported, "{model}");
+        assert_eq!(pairing.developer().slug(), developer, "{model}");
+        assert_eq!(pairing.family(), family, "{model}");
+    }
+    let unknown = classify(
+        &query(IntegrationId::Antigravity, "gemini-3.8-flash-unlisted"),
+        &none(),
+    );
+    assert_eq!(unknown.class(), PairingClass::Unknown);
+    assert!(unknown.developer().is_unknown());
+    assert_eq!(unknown.family(), None);
+}
+
 /// The same family, in a harness whose vendor does not declare it. Google
 /// publishes Antigravity; `sonnet` is not a family Antigravity declares
 /// as its own, so this is not vendor-native however Anthropic-shaped the
