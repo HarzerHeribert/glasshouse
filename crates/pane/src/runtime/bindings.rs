@@ -1445,9 +1445,10 @@ fn capture(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>, la
             .entries
             .borrow_mut()
             .iter_mut()
-            .find(|h| h.id == id && h.info.name == h.id)
+            .find(|h| h.id == id && !h.name_bound)
     {
         h.info.name = name.to_string();
+        h.name_bound = true;
     }
     let (preview, meta) = preview_of(scope, &state, value);
     state.capture(name, preview, meta);
@@ -2623,6 +2624,16 @@ fn on_callback(
     let Ok(program) = v8::Local::<v8::Function>::try_from(value) else {
         return;
     };
+    // Pattern getters and wrapper construction can reenter JavaScript. Never
+    // hold a RefCell borrow across them, and recheck at the insertion boundary.
+    if state.handlers.entries.borrow().len() >= 64 {
+        handler_error(
+            scope,
+            "HandlerLimit",
+            "a task may register at most 64 handlers",
+        );
+        return;
+    }
     let name = format!("handler{}", state.handlers.entries.borrow().len() + 1);
     state
         .handlers
@@ -2631,6 +2642,7 @@ fn on_callback(
         .push(crate::runtime::handlers::Handler {
             registered: state.handlers.delivery.get(),
             id: name.clone(),
+            name_bound: false,
             info: crate::runtime::handlers::HandlerInfo {
                 name: name.clone(),
                 runs: 0,

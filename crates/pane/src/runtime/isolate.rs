@@ -776,16 +776,9 @@ impl Runtime {
         let store = self.batch_store();
         let previous = store.replace(batch);
 
-        // A poisoned isolate is never re-entered (see [`Runtime::poisoned`]),
-        // so the name is not bound there. The table row still stands: it is
-        // the host's own record, and the model is owed the batch's preview
-        // whether or not its scope survived.
-        if !self.poisoned() {
-            v8::scope!(let handle_scope, &mut self.isolate);
-            let context = v8::Local::new(handle_scope, &self.context);
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
-            bindings::install_batch(scope);
-        }
+        // Delivery changes only Rust-owned state. The next program refreshes
+        // the JS binding inside its watchdog and exception boundary: even a
+        // seemingly ordinary global assignment can invoke a model's setter.
 
         self.state.table.borrow_mut().declare_rendered(
             "batch",
@@ -809,7 +802,9 @@ impl Runtime {
         if handlers.processed.replace(true) {
             return Vec::new();
         }
-        let store = self.batch_store();
+        let Some(store) = self.isolate.get_slot::<Rc<BatchStore>>().cloned() else {
+            return Vec::new();
+        };
         let mut runs = Vec::new();
         let count = handlers.entries.borrow().len();
         for index in 0..count {
@@ -921,18 +916,20 @@ impl Runtime {
 
     pub fn take_batch(&mut self) -> Option<Batch> {
         self.state.table.borrow_mut().free("batch");
-        self.batch_store().take()
+        self.isolate.get_slot::<Rc<BatchStore>>()?.take()
     }
 
     pub fn batch_rolling_depth(&mut self) -> usize {
-        self.batch_store()
-            .with(|batch| batch.rolling_depth())
+        self.isolate
+            .get_slot::<Rc<BatchStore>>()
+            .and_then(|store| store.with(|batch| batch.rolling_depth()))
             .unwrap_or(0)
     }
 
     pub fn batch_remaining(&mut self) -> usize {
-        self.batch_store()
-            .with(|batch| batch.rest().len())
+        self.isolate
+            .get_slot::<Rc<BatchStore>>()
+            .and_then(|store| store.with(|batch| batch.rest().len()))
             .unwrap_or(0)
     }
 
@@ -1046,7 +1043,10 @@ impl Runtime {
         if compiled.free_names.is_empty() {
             return None;
         }
-        let globals = self.global_names();
+        let mut globals = self.global_names();
+        // This host binding is refreshed under the execution watchdog, after
+        // this compile-time check. Deleting it must not hide that declaration.
+        globals.insert("batch".into());
         compiled
             .free_names
             .iter()

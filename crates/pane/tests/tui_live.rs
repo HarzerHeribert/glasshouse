@@ -509,7 +509,20 @@ fn handlers_can_be_inspected_and_cancelled_during_an_active_task() {
     });
     app.send(b"/handlers off noise\r");
     app.contains("cancellation queued");
+    app.send(b"/handlers\r");
+    app.contains("Standing handlers");
+    app.contains("noise");
+    app.resize(40);
+    app.contains("Standing handlers");
     release.send(()).unwrap();
+    // Keep the panel open across task completion, including on a narrow
+    // terminal. Reopening it would conceal a stale snapshot regression.
+    app.contains("No handlers in this task");
+    app.send(b"\x1b");
+    app.wait("completed handler panel closed", |screen| {
+        !screen.contents().contains("Standing handlers")
+    });
+    app.resize(80);
     app.contains("HANDLER CONTROL DONE");
     app.send(b"/handles\r");
     app.contains("Last handle preview");

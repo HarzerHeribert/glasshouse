@@ -61,6 +61,178 @@ fn returned_number(runtime: &mut Runtime, program: &str, expected: f64) {
 }
 
 #[test]
+fn batch_accessors_are_bounded_only_when_the_next_program_runs() {
+    const PROBE: &str = "PANE_HANDLER_ACCESSOR_PROBE";
+    if let Ok(mode) = std::env::var(PROBE) {
+        let cancelled = mode == "cancel";
+        let throwing = mode.starts_with("throw");
+        let ordinary = mode.ends_with("cell");
+        let mut r = runtime(if cancelled {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(150)
+        });
+        let setter = if throwing {
+            "throw new Error('bad setter');"
+        } else {
+            "for (;;) {}"
+        };
+        register(
+            &mut r,
+            "{}",
+            &format!(
+                "Object.defineProperty(globalThis, 'batch', {{configurable:true, set(v) {{ {setter} }} }});"
+            ),
+        );
+        batch(&mut r);
+        let first = r.run_handlers();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].1, CellOutcome::Yielded { .. }));
+        let delivered = std::time::Instant::now();
+        batch(&mut r);
+        assert!(delivered.elapsed() < Duration::from_secs(1));
+        let canceller = cancelled.then(|| {
+            let token = CancellationToken::new();
+            r.set_token(token.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(40));
+                token.cancel();
+            })
+        });
+        let started = std::time::Instant::now();
+        let outcome = if ordinary {
+            r.off_handler("noise");
+            r.run_cell("return batch.n;")
+        } else {
+            let mut runs = r.run_handlers();
+            assert_eq!(runs.len(), 1);
+            assert!(!r.handlers()[0].active);
+            runs.remove(0).1
+        };
+        if let Some(canceller) = canceller {
+            canceller.join().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let expected = if cancelled {
+            "Cancelled"
+        } else if throwing {
+            "Error"
+        } else {
+            "RuntimeTimeout"
+        };
+        assert!(
+            matches!(&outcome, CellOutcome::Threw { error, .. } if error.class == expected),
+            "{outcome:?}"
+        );
+        return;
+    }
+
+    // A regression must fail the test, not hang the entire suite inside V8.
+    for mode in [
+        "loop-handler",
+        "loop-cell",
+        "throw-handler",
+        "throw-cell",
+        "cancel",
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "batch_accessors_are_bounded_only_when_the_next_program_runs",
+                "--nocapture",
+            ])
+            .env(PROBE, mode)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "{mode} escaped the runtime deadline: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn delivery_keeps_batch_visible_to_preflight_after_the_global_was_deleted() {
+    let mut r = runtime(Duration::from_secs(2));
+    returned_number(&mut r, "return batch.n;", 0.0);
+    yielded(r.run_cell("delete globalThis.batch;"));
+    batch(&mut r);
+    returned_number(&mut r, "return batch.n;", 2.0);
+}
+
+#[test]
+fn no_event_bookkeeping_does_not_create_a_delivery_or_refresh_the_global() {
+    let mut r = runtime(Duration::from_secs(2));
+    returned_number(&mut r, "return batch.n;", 0.0);
+    yielded(r.run_cell("globalThis.batchWrites = 0; Object.defineProperty(globalThis, 'batch', {configurable: true, set(v) { globalThis.batchWrites++; }});"));
+    assert!(r.take_batch().is_none());
+    assert_eq!(r.batch_rolling_depth(), 0);
+    assert_eq!(r.batch_remaining(), 0);
+    assert!(r.run_handlers().is_empty());
+    assert!(!r.handle_names().iter().any(|name| name == "batch"));
+    returned_number(&mut r, "return globalThis.batchWrites;", 0.0);
+    batch(&mut r);
+    returned_number(&mut r, "return globalThis.batchWrites;", 1.0);
+}
+
+#[test]
+fn getter_reentry_cannot_register_a_sixty_fifth_handler() {
+    let mut r = runtime(Duration::from_secs(2));
+    let outcome = r.run_cell(
+        "for(let i=0;i<63;i++) on({}, ''); on({get kind(){on({}, ''); return 'hook.*';}}, '');",
+    );
+    assert!(
+        matches!(&outcome, CellOutcome::Threw { error, .. } if error.class == "HandlerLimit"),
+        "{outcome:?}"
+    );
+    assert_eq!(r.handlers().len(), 64);
+    batch(&mut r);
+    assert_eq!(r.run_handlers().len(), 64);
+    assert_eq!(r.cell(), 1);
+    let outcome = r.run_cell("on({}, '');");
+    assert!(
+        matches!(&outcome, CellOutcome::Threw { error, .. } if error.class == "HandlerLimit"),
+        "{outcome:?}"
+    );
+    assert_eq!(r.handlers().len(), 64);
+}
+
+#[test]
+fn a_first_binding_equal_to_the_generated_id_cannot_be_renamed_by_an_alias() {
+    let mut r = runtime(Duration::from_secs(2));
+    yielded(r.run_cell("const handler1 = on({}, ''); const alias = handler1;"));
+    assert_eq!(r.handlers()[0].name, "handler1");
+    yielded(r.run_cell("const later = alias;"));
+    assert_eq!(r.handlers()[0].name, "handler1");
+    assert!(!r.off_handler("alias"));
+    assert!(!r.off_handler("later"));
+    let panel = pane::tui::handlers_panel(&r.handlers());
+    assert_eq!(
+        panel.rows[1].command.as_deref(),
+        Some("/handlers off handler1")
+    );
+    assert!(r.off_handler("handler1"));
+    assert!(!r.handlers()[0].active);
+}
+
+#[test]
 fn future_matches_share_scope_filter_ack_and_do_not_replay_or_charge_cells() {
     let mut r = runtime(Duration::from_secs(2));
     yielded(r.run_cell("let count = 0;"));

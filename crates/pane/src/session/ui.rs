@@ -397,6 +397,7 @@ fn run(
                     {
                         state.completion_tick = Some(0);
                     }
+                    refresh_handler_panel(&mut state.panel, &notebook.handlers, &n.handlers);
                     conversation = c;
                     notebook = n;
                     if s.is_known() {
@@ -919,9 +920,120 @@ fn run(
     Ok(())
 }
 
+/// The panel is an open view of task state, not a copy frozen at `/handlers`.
+fn refresh_handler_panel(
+    panel: &mut Option<tui::Panel>,
+    before: &[crate::runtime::handlers::HandlerInfo],
+    after: &[crate::runtime::handlers::HandlerInfo],
+) {
+    let Some(held) = panel.as_mut() else { return };
+    let mut refreshed = tui::handlers_panel(after);
+    if held.title != refreshed.title {
+        return;
+    }
+    // Row zero is explanatory text. Keep the same handler selected through
+    // counter/status changes; a missing row returns selection to that header.
+    if let Some(index) = held.selected.checked_sub(1)
+        && let Some(selected) = before.get(index)
+    {
+        refreshed.selected = if after.get(index).is_some_and(|h| h.name == selected.name) {
+            index + 1
+        } else {
+            after
+                .iter()
+                .position(|h| h.name == selected.name)
+                .map_or(0, |index| index + 1)
+        };
+    }
+    *held = refreshed;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_open_handler_panel_tracks_runs_disable_cancel_and_clear_with_selection() {
+        use crate::runtime::handlers::HandlerInfo;
+        let mut before = vec![
+            HandlerInfo {
+                name: "first".into(),
+                runs: 0,
+                drained: 0,
+                error: None,
+                active: true,
+            },
+            HandlerInfo {
+                name: "second".into(),
+                runs: 0,
+                drained: 0,
+                error: None,
+                active: true,
+            },
+        ];
+        let mut panel = Some(tui::handlers_panel(&before));
+        panel.as_mut().unwrap().selected = 2;
+        for phase in 0..4 {
+            let mut after = before.clone();
+            match phase {
+                0 => {
+                    after[1].runs = 1;
+                    after[1].drained = 1;
+                }
+                1 => {
+                    after[1].active = false;
+                    after[1].error = Some("RuntimeTimeout".into());
+                }
+                2 => {
+                    after[0].active = false;
+                }
+                _ => after.clear(),
+            }
+            refresh_handler_panel(&mut panel, &before, &after);
+            let held = panel.as_ref().unwrap();
+            assert_eq!(held.selected, if after.is_empty() { 0 } else { 2 });
+            if phase == 0 {
+                assert!(held.rows[2].text.contains("1 runs · 1 drained"));
+            }
+            if phase == 1 {
+                assert!(held.rows[2].text.contains("stale"));
+                assert!(held.rows[2].text.contains("RuntimeTimeout"));
+                assert!(held.rows[2].command.is_none());
+            }
+            if phase == 2 {
+                assert!(held.rows[1].text.contains("stale"));
+                assert!(held.rows[1].command.is_none());
+            }
+            if phase == 3 {
+                assert_eq!(held.rows.len(), 1);
+                assert!(held.rows[0].text.contains("No handlers in this task"));
+            }
+            before = after;
+        }
+    }
+
+    #[test]
+    fn handler_panel_selection_follows_a_surviving_row_and_leaves_other_panels_alone() {
+        use crate::runtime::handlers::HandlerInfo;
+        let before: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| HandlerInfo {
+                name: name.into(),
+                runs: 0,
+                drained: 0,
+                error: None,
+                active: true,
+            })
+            .collect();
+        let mut panel = Some(tui::handlers_panel(&before));
+        panel.as_mut().unwrap().selected = 2;
+        refresh_handler_panel(&mut panel, &before, &before[1..]);
+        assert_eq!(panel.as_ref().unwrap().selected, 1);
+        assert!(panel.as_ref().unwrap().rows[1].text.starts_with("second"));
+        let mut other = Some(tui::Panel::text("Other", "keep"));
+        refresh_handler_panel(&mut other, &before, &[]);
+        assert_eq!(other.unwrap().rows[0].text, "keep");
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }

@@ -15,6 +15,8 @@ pub struct HandlerInfo {
 pub(crate) struct Handler {
     pub registered: u64,
     pub id: String,
+    /// Independent of the display string: the first binding may equal `id`.
+    pub name_bound: bool,
     pub info: HandlerInfo,
     pub kind: Option<String>,
     pub source_filter: Option<String>,
