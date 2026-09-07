@@ -267,6 +267,10 @@ fn the_prompt_teaches_the_literal_multiline_content_form() {
     assert!(system.contains("caller's $WORKTREE"), "{system}");
     assert!(system.contains("${BASH_SOURCE[0]}"), "{system}");
     assert!(system.contains("$WORKTREE"), "{system}");
+    assert!(
+        system.contains("one double-quoted JavaScript string per logical line"),
+        "{system}"
+    );
 }
 
 #[test]

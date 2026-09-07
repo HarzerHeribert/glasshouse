@@ -187,7 +187,10 @@ impl CellError {
         match self {
             CellError::UndefinedName { name, .. } => format!(
                 "`{name}` is not defined: the cell reads it, binds it nowhere, and no handle or \
-                 host function has that name. Nothing ran. `handles()` lists what you can address."
+                 host function has that name. Nothing ran. `handles()` lists what you can address. \
+                 If this name came from file or script text, use `write`/`edit` line arrays with \
+                 one double-quoted JavaScript string per logical line; do not use a template \
+                 literal or heredoc."
             ),
             CellError::Parse { message, .. } => message.clone(),
             CellError::NotErasable { construct, .. } => format!(

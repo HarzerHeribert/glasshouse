@@ -3293,6 +3293,10 @@ fn an_undefined_name_is_reported_before_the_cell_runs() {
     let error = threw(&outcome);
     assert_eq!(error.class, "ReferenceError");
     assert!(error.message.contains("`totl` is not defined"), "{error:?}");
+    assert!(
+        error.message.contains("use `write`/`edit` line arrays"),
+        "the deterministic recovery path must be in the same error: {error:?}"
+    );
     assert_eq!(error.line, Some(2), "the model's own line");
     assert!(
         outcome.turn().record.calls.is_empty(),

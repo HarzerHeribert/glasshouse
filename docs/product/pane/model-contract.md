@@ -43,7 +43,10 @@ A plain-language assistant response with no native call ends the request as its 
     `context({path, symbol})` is the first source-reading tool; do not `read` or
     print the whole source first. Its complete target is delivered automatically.
     In the next cell use `edit({path, old, replacement})`; do not name a variable
-    `new`. Pane binds the edit to the sole visible source version. Use
+    `new`. Pane binds the edit to the sole visible source version. For file or
+    script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:
+    one double-quoted JavaScript string per logical line, never a template literal.
+    Pane supplies line separators. Use
     compact structured summaries or bounded excerpts instead of broad prints.
     `glob` may return directories, so select a file before `read`. A `bash`
     result succeeded only when its
