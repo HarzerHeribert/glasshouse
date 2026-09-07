@@ -997,8 +997,8 @@ impl<'a> EffectiveConfig<'a> {
     /// Every entitlement this configuration describes (Phase 56 line 1946),
     /// rules already resolved (line 1947): the configured entries by name,
     /// project over user whole (not per field), plus a default entry for
-    /// every harness's own sign-in that no configured entry claims through
-    /// `native_harness` — [`crate::routing::EntitlementRules::UNRESTRICTED`],
+    /// every harness's own sign-in that no configured native or broker entry
+    /// claims through `native_harness` — [`crate::routing::EntitlementRules::UNRESTRICTED`],
     /// so a user who configured nothing keeps every native launch announcing
     /// an entitlement with no rule.
     ///
@@ -1060,7 +1060,7 @@ impl<'a> EffectiveConfig<'a> {
         {
             let claimed = resolved
                 .iter()
-                .any(|entry| entry.backing == EntitlementBacking::NativeHarness(harness));
+                .any(|entry| entry.backing.matches_native_harness(harness));
             if claimed {
                 continue;
             }
@@ -1171,7 +1171,12 @@ impl<'a> EffectiveConfig<'a> {
         let mut matching: Vec<ResolvedEntitlement> = self
             .entitlements()?
             .into_iter()
-            .filter(|entry| entry.backing == wanted)
+            .filter(|entry| match &wanted {
+                EntitlementBacking::NativeHarness(harness) => {
+                    entry.backing.matches_native_harness(*harness)
+                }
+                _ => entry.backing == wanted,
+            })
             .collect();
         match matching.len() {
             0 => Ok(None),
@@ -1184,6 +1189,9 @@ impl<'a> EffectiveConfig<'a> {
                     }
                     EntitlementBacking::Provider(provider) => {
                         EntitlementLookupError::AmbiguousProvider { provider, names }
+                    }
+                    EntitlementBacking::SubscriptionBroker { .. } => {
+                        unreachable!("`wanted` is built from a backend and is never a broker")
                     }
                     EntitlementBacking::Unstated => {
                         unreachable!("`wanted` is built from a backend and is never Unstated")

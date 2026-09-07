@@ -40,9 +40,9 @@ fn entitled_fresh_destination_id(
 /// `harness` — `EffectiveConfig::entitlement_for`'s matching rule without
 /// its one-account assumption, because the axis exists exactly for the case
 /// where several entries legitimately match (two Claude accounts behind one
-/// provider), each of which becomes its own candidate. The gateway's
-/// upstream is assigned when a session starts, so no entry matches it here
-/// (56A-4's ground, unchanged).
+/// provider), each of which becomes its own candidate. A gateway-backed
+/// profile matches broker-backed entitlements because the entitlement chooses
+/// which account-specific sidecar the later launch path will start.
 fn pool_entitlements_for<'p>(
     pool: &'p [glasshouse::config::ResolvedEntitlement],
     harness: glasshouse::integrations::IntegrationId,
@@ -51,15 +51,14 @@ fn pool_entitlements_for<'p>(
     use glasshouse::config::EntitlementBacking;
     use glasshouse::profile::BackendResource;
 
-    let wanted = match backend {
-        BackendResource::Native => EntitlementBacking::NativeHarness(harness),
-        BackendResource::DirectProvider { provider } => {
-            EntitlementBacking::Provider(provider.clone())
-        }
-        BackendResource::GlasshouseGateway => return Vec::new(),
-    };
     pool.iter()
-        .filter(|entry| *entry.backing() == wanted)
+        .filter(|entry| match backend {
+            BackendResource::Native => entry.backing().matches_native_harness(harness),
+            BackendResource::DirectProvider { provider } => {
+                entry.backing() == &EntitlementBacking::Provider(provider.clone())
+            }
+            BackendResource::GlasshouseGateway => entry.backing().subscription_broker().is_some(),
+        })
         .collect()
 }
 
@@ -81,7 +80,9 @@ fn routing_entitlement(
         EntitlementBacking::Provider(provider) => {
             glasshouse::provider::resources::budget_exhausted_for(provider, effective, telemetry)
         }
-        EntitlementBacking::NativeHarness(_) | EntitlementBacking::Unstated => None,
+        EntitlementBacking::NativeHarness(_)
+        | EntitlementBacking::SubscriptionBroker { .. }
+        | EntitlementBacking::Unstated => None,
     };
 
     resolved
@@ -1713,4 +1714,83 @@ pub(crate) fn session_pairing(
     });
 
     classify(&query, &overrides)
+}
+
+#[cfg(test)]
+mod subscription_broker_tests {
+    use super::*;
+    use glasshouse::config::{SubscriptionBroker, UserConfig};
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::profile::BackendResource;
+
+    fn broker_pool(config: &str) -> (UserConfig, Vec<glasshouse::config::ResolvedEntitlement>) {
+        let user: UserConfig = toml::from_str(config).expect("broker entitlement config parses");
+        let pool = EffectiveConfig::new(&user, None)
+            .entitlements()
+            .expect("broker entitlement pool resolves");
+        (user, pool)
+    }
+
+    #[test]
+    fn gateway_keeps_two_same_vendor_broker_accounts_as_separate_candidates() {
+        let (_user, pool) = broker_pool(
+            "version = 1\n\n\
+             [entitlements.chatgpt-a]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
+             subscription_broker = \"cliproxyapi\"\n\n\
+             [entitlements.chatgpt-b]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
+             subscription_broker = \"cliproxyapi\"\n",
+        );
+
+        let matches = pool_entitlements_for(
+            &pool,
+            IntegrationId::Pane,
+            &BackendResource::GlasshouseGateway,
+        );
+        assert_eq!(
+            matches.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+            ["chatgpt-a", "chatgpt-b"]
+        );
+        assert!(matches.iter().all(|entry| {
+            entry.backing().subscription_broker() == Some(SubscriptionBroker::CliProxyApi)
+                && entry.backing().source() == glasshouse::routing::EntitlementSource::Subscription
+        }));
+    }
+
+    #[test]
+    fn broker_native_access_reuses_the_configured_entitlement_and_gateway_rules_still_gate() {
+        let (user, pool) = broker_pool(
+            "version = 1\n\n\
+             [entitlements.chatgpt-a]\nsubscription_broker = \"cliproxyapi\"\n\
+             native_harness = \"codex\"\nallow_harnesses = [\"pane\"]\n\n\
+             [entitlements.chatgpt-b]\nsubscription_broker = \"cliproxyapi\"\n\
+             deny_harnesses = [\"pane\"]\n",
+        );
+        let effective = EffectiveConfig::new(&user, None);
+
+        let native = pool_entitlements_for(&pool, IntegrationId::Codex, &BackendResource::Native);
+        assert_eq!(
+            native.len(),
+            1,
+            "the dual path must not synthesize a second Codex account"
+        );
+        assert_eq!(native[0].name(), "chatgpt-a");
+
+        let gateway = pool_entitlements_for(
+            &pool,
+            IntegrationId::Pane,
+            &BackendResource::GlasshouseGateway,
+        );
+        let telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
+        let thresholds = effective.capacity_band_thresholds().value;
+        let routed: Vec<_> = gateway
+            .iter()
+            .map(|entry| routing_entitlement(entry, &thresholds, &effective, &telemetry))
+            .collect();
+        assert!(routed[0].constraint(IntegrationId::Pane, None).is_ok());
+        assert!(routed[1].constraint(IntegrationId::Pane, None).is_err());
+        assert_eq!(
+            routed[0].source(),
+            glasshouse::routing::EntitlementSource::Subscription
+        );
+    }
 }

@@ -47,7 +47,7 @@ pub use effective::{EffectiveConfig, ProfileDisabled};
 pub use entitlement::{
     EntitlementBacking, EntitlementConfig, EntitlementCredential, EntitlementKind,
     EntitlementLookupError, EntitlementModels, EntitlementTelemetry, EntitlementVendor,
-    ResolvedEntitlement, TelemetryScope,
+    ResolvedEntitlement, SubscriptionBroker, TelemetryScope,
 };
 pub use hooks::{IntegrationConfig, IntegrationTable};
 pub use loading::{

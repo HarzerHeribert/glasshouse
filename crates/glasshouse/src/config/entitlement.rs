@@ -86,6 +86,23 @@ impl EntitlementVendor {
         }
     }
 }
+/// A local broker that turns one subscription account into a loopback
+/// inference endpoint. The value is a broker *kind*, never a URL, token, auth
+/// directory, command, or credential. Those runtime details remain owned by
+/// the broker process boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SubscriptionBroker {
+    /// The pinned CLIProxyAPI sidecar supported by the first implementation.
+    #[serde(rename = "cliproxyapi")]
+    CliProxyApi,
+}
+impl SubscriptionBroker {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CliProxyApi => "cliproxyapi",
+        }
+    }
+}
 /// An entitlement's own authentication — map lines 1962 and 1973: **a
 /// reference, never a value**, in exactly [`crate::secret::SecretRef`]'s two
 /// shapes.
@@ -470,7 +487,9 @@ impl<'de> Deserialize<'de> for ConfiguredHeadroomBand {
 /// or `provider` (the account behind a configured provider); naming both is
 /// refused ([`EntitlementLookupError::TwoBackings`]), naming neither makes a
 /// pool member ([`EffectiveConfig::entitlement_resources`]) no launch
-/// profile charges yet.
+/// profile charges yet. A `subscription_broker` is a third backing, and may
+/// be paired with `native_harness` because those are two routes to one
+/// subscription account. A provider remains mutually exclusive with both.
 ///
 /// Sits in a stack of five separately replaceable layers — harness, protocol
 /// adapter, authentication (`credential`), this entry, and inference model —
@@ -494,6 +513,8 @@ pub struct EntitlementConfig {
     credential: Option<EntitlementCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_harness: Option<ConfiguredHarness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_broker: Option<SubscriptionBroker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -597,6 +618,15 @@ impl EntitlementConfig {
 
     pub fn set_native_harness(&mut self, value: Option<IntegrationId>) -> &mut Self {
         self.native_harness = value.map(ConfiguredHarness::new);
+        self
+    }
+
+    pub fn subscription_broker(&self) -> Option<SubscriptionBroker> {
+        self.subscription_broker
+    }
+
+    pub fn set_subscription_broker(&mut self, value: Option<SubscriptionBroker>) -> &mut Self {
+        self.subscription_broker = value;
         self
     }
 
@@ -723,15 +753,27 @@ impl EntitlementConfig {
         name: &str,
         layer: Layer,
     ) -> Result<ResolvedEntitlement, EntitlementLookupError> {
-        let backing = match (self.native_harness, &self.provider) {
-            (Some(_), Some(_)) => {
+        let backing = match (
+            self.native_harness,
+            self.subscription_broker,
+            &self.provider,
+        ) {
+            (Some(_), _, Some(_)) | (None, Some(_), Some(_)) => {
                 return Err(EntitlementLookupError::TwoBackings {
                     name: name.to_owned(),
                 });
             }
-            (Some(harness), None) => EntitlementBacking::NativeHarness(harness.id()),
-            (None, Some(provider)) => EntitlementBacking::Provider(provider.clone()),
-            (None, None) => EntitlementBacking::Unstated,
+            (Some(harness), Some(broker), None) => EntitlementBacking::SubscriptionBroker {
+                broker,
+                native_harness: Some(harness.id()),
+            },
+            (None, Some(broker), None) => EntitlementBacking::SubscriptionBroker {
+                broker,
+                native_harness: None,
+            },
+            (Some(harness), None, None) => EntitlementBacking::NativeHarness(harness.id()),
+            (None, None, Some(provider)) => EntitlementBacking::Provider(provider.clone()),
+            (None, None, None) => EntitlementBacking::Unstated,
         };
         // A harness's own sign-in authenticates through the harness itself;
         // an entry claiming to be one while naming its own credential would
@@ -742,6 +784,15 @@ impl EntitlementConfig {
             return Err(EntitlementLookupError::NativeSignInWithOwnCredential {
                 name: name.to_owned(),
             });
+        }
+        if matches!(backing, EntitlementBacking::SubscriptionBroker { .. })
+            && self.credential.is_some()
+        {
+            return Err(
+                EntitlementLookupError::SubscriptionBrokerWithOwnCredential {
+                    name: name.to_owned(),
+                },
+            );
         }
         Ok(ResolvedEntitlement {
             name: name.to_owned(),
@@ -804,18 +855,45 @@ pub enum EntitlementBacking {
     /// The account behind a configured `[providers.<name>]` entry
     /// ([`crate::profile::BackendResource::DirectProvider`] naming it).
     Provider(String),
+    /// A subscription account served through a Glasshouse-managed local
+    /// broker. `native_harness` is an additional route to this same account,
+    /// not a second backing or a second entitlement.
+    SubscriptionBroker {
+        broker: SubscriptionBroker,
+        native_harness: Option<IntegrationId>,
+    },
     /// The entry names neither. Listed, never matched, never charged.
     Unstated,
 }
 impl EntitlementBacking {
+    pub fn subscription_broker(&self) -> Option<SubscriptionBroker> {
+        match self {
+            Self::SubscriptionBroker { broker, .. } => Some(*broker),
+            _ => None,
+        }
+    }
+
+    pub fn native_harness(&self) -> Option<IntegrationId> {
+        match self {
+            Self::NativeHarness(harness) => Some(*harness),
+            Self::SubscriptionBroker { native_harness, .. } => *native_harness,
+            _ => None,
+        }
+    }
+
+    pub fn matches_native_harness(&self, harness: IntegrationId) -> bool {
+        self.native_harness() == Some(harness)
+    }
+
     /// What pays for this account, as the **router** may branch on it — map
     /// line 1970's *"subscription to subscription to API credits"*, and the
     /// user's ruling of 2026-08-31: *"A api key or a subscription isn't that
     /// the distinction?"* It is, and the distinction is already structural
     /// here rather than a field somebody typed:
-    /// [`Self::NativeHarness`] authenticates **through the harness**, which
-    /// is a subscription, and [`Self::Provider`] carries a credential of its
-    /// own, which is an API key. The loader **enforces** the separation —
+    /// [`Self::NativeHarness`] authenticates **through the harness**, and
+    /// [`Self::SubscriptionBroker`] through its private local sidecar; both
+    /// are subscriptions. [`Self::Provider`] carries a credential of its own,
+    /// which is an API key. The loader **enforces** the separation —
     /// an entry that is both is refused as
     /// [`EntitlementLookupError::NativeSignInWithOwnCredential`], map line
     /// 1973's isolation rule — so nothing here is a guess.
@@ -824,7 +902,9 @@ impl EntitlementBacking {
     /// 5 intact: routing branches on the *backing*, never on the *kind*.
     pub fn source(&self) -> crate::routing::EntitlementSource {
         match self {
-            Self::NativeHarness(_) => crate::routing::EntitlementSource::Subscription,
+            Self::NativeHarness(_) | Self::SubscriptionBroker { .. } => {
+                crate::routing::EntitlementSource::Subscription
+            }
             Self::Provider(_) => crate::routing::EntitlementSource::ApiCredits,
             Self::Unstated => crate::routing::EntitlementSource::Unstated,
         }
@@ -1038,6 +1118,16 @@ impl ResolvedEntitlement {
             EntitlementBacking::NativeHarness(_) => {
                 self.models = Some(EntitlementModels::HarnessDecided);
             }
+            EntitlementBacking::SubscriptionBroker { native_harness, .. } => {
+                // Broker telemetry is account-scoped by entitlement name. A
+                // native route can additionally let the harness decide its
+                // model when no broker catalogue has been observed yet.
+                let telemetry_key = self.name.clone();
+                self.populate_provider_facets(&telemetry_key, telemetry);
+                if self.models.is_none() && native_harness.is_some() {
+                    self.models = Some(EntitlementModels::HarnessDecided);
+                }
+            }
             EntitlementBacking::Unstated => {}
         }
         self
@@ -1230,6 +1320,17 @@ impl ResolvedEntitlement {
                 format!("{}'s own sign-in", harness.display_name())
             }
             EntitlementBacking::Provider(provider) => format!("behind provider `{provider}`"),
+            EntitlementBacking::SubscriptionBroker {
+                broker,
+                native_harness,
+            } => match native_harness {
+                Some(harness) => format!(
+                    "through subscription broker `{}` or {}'s own sign-in",
+                    broker.as_str(),
+                    harness.display_name()
+                ),
+                None => format!("through subscription broker `{}`", broker.as_str()),
+            },
             EntitlementBacking::Unstated => "no backing stated".to_owned(),
         };
         let mut parts = Vec::new();
@@ -1406,8 +1507,8 @@ impl<'a> EntitlementTelemetry<'a> {
 #[derive(Debug, thiserror::Error)]
 pub enum EntitlementLookupError {
     #[error(
-        "entitlement `{name}` names both `native_harness` and `provider`; an entitlement is \
-         a harness's own sign-in or the account behind a provider, not both"
+        "entitlement `{name}` names `provider` together with a subscription path; an entitlement \
+         is a subscription account or the API-credit account behind a provider, not both"
     )]
     TwoBackings { name: String },
     #[error(
@@ -1444,6 +1545,12 @@ pub enum EntitlementLookupError {
     )]
     NativeSignInWithOwnCredential { name: String },
     #[error(
+        "entitlement `{name}` names `subscription_broker` and its own `credential`; broker \
+         authentication belongs in the broker's private account store, and configuration may \
+         contain only the broker reference"
+    )]
+    SubscriptionBrokerWithOwnCredential { name: String },
+    #[error(
         "entitlements {} all name the same credential ({reference}); one credential is one \
          account, and map line 1963 gives each entitlement its own — give each entry its own \
          reference",
@@ -1455,4 +1562,145 @@ pub enum EntitlementLookupError {
         /// account — never a value.
         reference: String,
     },
+}
+
+#[cfg(test)]
+mod subscription_broker_tests {
+    use super::*;
+
+    #[test]
+    fn broker_configuration_is_a_typed_reference_and_serializes_no_credentials() {
+        let config: EntitlementConfig =
+            toml::from_str("subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n")
+                .expect("the supported broker reference parses");
+        assert_eq!(
+            config.subscription_broker(),
+            Some(SubscriptionBroker::CliProxyApi)
+        );
+        assert_eq!(config.native_harness(), Some(IntegrationId::Codex));
+
+        let written = toml::to_string(&config).expect("broker config serializes");
+        assert!(written.contains("subscription_broker = \"cliproxyapi\""));
+        assert!(written.contains("native_harness = \"codex\""));
+        assert!(!written.contains("credential"), "{written}");
+        assert!(!written.contains("token"), "{written}");
+
+        toml::from_str::<EntitlementConfig>("subscription_broker = \"other\"\n")
+            .expect_err("unknown broker names are refused at the typed boundary");
+        toml::from_str::<EntitlementConfig>(
+            "subscription_broker = { name = \"cliproxyapi\", token = \"planted\" }\n",
+        )
+        .expect_err("a broker reference cannot contain credentials");
+    }
+
+    #[test]
+    fn broker_and_native_are_one_subscription_while_provider_or_credentials_are_refused() {
+        let dual: EntitlementConfig =
+            toml::from_str("subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n")
+                .unwrap();
+        let resolved = dual.to_resolved("chatgpt-a", Layer::User).unwrap();
+        assert_eq!(
+            resolved.backing().source(),
+            crate::routing::EntitlementSource::Subscription
+        );
+        assert!(
+            resolved
+                .backing()
+                .matches_native_harness(IntegrationId::Codex)
+        );
+        assert_eq!(
+            resolved.backing().subscription_broker(),
+            Some(SubscriptionBroker::CliProxyApi)
+        );
+
+        for invalid in [
+            "subscription_broker = \"cliproxyapi\"\nprovider = \"openai\"\n",
+            "subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\nprovider = \"openai\"\n",
+        ] {
+            let config: EntitlementConfig = toml::from_str(invalid).unwrap();
+            assert!(matches!(
+                config.to_resolved("mixed", Layer::User),
+                Err(EntitlementLookupError::TwoBackings { .. })
+            ));
+        }
+
+        let with_credential: EntitlementConfig = toml::from_str(
+            "subscription_broker = \"cliproxyapi\"\ncredential = { env = \"BROKER_TOKEN\" }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            with_credential.to_resolved("mixed", Layer::User),
+            Err(EntitlementLookupError::SubscriptionBrokerWithOwnCredential { .. })
+        ));
+    }
+
+    #[test]
+    fn broker_entitlements_keep_layering_rules_and_account_scoped_telemetry_facets() {
+        use crate::provider::cache::{ModelCache, ModelCatalogue, ModelEntry};
+        use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
+
+        let user: UserConfig = toml::from_str(
+            "version = 1\n\n[entitlements.chatgpt-a]\n\
+             subscription_broker = \"cliproxyapi\"\ndeny_harnesses = [\"pane\"]\n",
+        )
+        .unwrap();
+        let project: ProjectConfig = toml::from_str(
+            "version = 1\n\n[entitlements.chatgpt-a]\n\
+             subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n\
+             allow_harnesses = [\"pane\"]\nspend_ceiling_tokens = 42\n",
+        )
+        .unwrap();
+        let effective = EffectiveConfig::new(&user, Some(&project));
+
+        let native = effective
+            .entitlement_for(
+                IntegrationId::Codex,
+                &crate::profile::BackendResource::Native,
+            )
+            .unwrap()
+            .expect("the broker entitlement also owns the native route");
+        assert_eq!(native.name(), "chatgpt-a");
+        assert_eq!(native.layer(), Layer::Project);
+        assert!(native.rules().serves_harness(IntegrationId::Pane));
+        assert_eq!(native.rules().spend_ceiling_tokens(), Some(42));
+
+        let temp = tempfile::tempdir().unwrap();
+        let quota = GatewayQuotaCache::at(temp.path().join("quota"));
+        quota.store(
+            "chatgpt-a",
+            &RateLimitHeaders::read(vec![
+                ("ratelimit-limit", "100"),
+                ("ratelimit-remaining", "40"),
+                ("ratelimit-reset", "60"),
+            ]),
+            1_800_000_000,
+        );
+        let models = ModelCache::at(temp.path().join("models"));
+        models
+            .store(&ModelCatalogue::new(
+                "chatgpt-a",
+                "http://127.0.0.1",
+                "http://127.0.0.1/v1/models",
+                1_800_000_000,
+                vec![ModelEntry::new("gpt-account-model")],
+            ))
+            .unwrap();
+        let telemetry = EntitlementTelemetry::new(1_800_000_010)
+            .with_gateway_quota(&quota)
+            .with_model_catalogues(&models);
+        let configured = effective
+            .configured_entitlements_with_telemetry(&telemetry)
+            .unwrap();
+        let account = configured
+            .iter()
+            .find(|entry| entry.name() == "chatgpt-a")
+            .unwrap();
+        assert!(account.remaining_capacity().is_some());
+        assert_eq!(account.seconds_until_reset(), Some(50));
+        assert!(matches!(
+            account.models(),
+            Some(EntitlementModels::Declared { models, .. })
+                if models == &["gpt-account-model".to_owned()]
+        ));
+    }
 }
