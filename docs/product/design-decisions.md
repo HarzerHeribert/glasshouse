@@ -20090,3 +20090,13 @@ CLIProxyAPI is used as the proven authentication/protocol adapter rather than re
 The first matched Pane benchmark stopped an incomplete task after cumulative reported tokens crossed its configured task budget, even though the current request occupied only a small fraction of the model context and the model was still repairing its work. The user ruled that Pane should track token spend without capping a task: failure is evidence for intervention and better tools, not permission to manufacture completion at an arbitrary token total.
 
 Pane therefore displays cumulative task spend without a denominator, progress bar or finish warning. Spend never changes the prompt, ends a task, or refuses `agent.run`; a subagent's reported use is added to the parent's telemetry. The cell count, cell wall clock, response byte bound and model context window remain separate reliability limits. Legacy `task_tokens` configuration is accepted as an ignored integer so existing projects keep starting.
+
+## Pane catches model mistakes in the runtime, not in an expanding prompt — the user, 2026-09-07
+
+The first response to a model mistake had been to add another instruction to Pane's stable preamble: special names to avoid, one preferred quoting form, and advice learned from one benchmark. That may repair one model while taxing every later request and can make another model fail differently. With many providers and users there is no finite prompt containing every mistake they may produce.
+
+Pane's stable prompt therefore carries only durable protocol invariants and the declared capabilities needed before the first action. Syntax, schema, runtime state, tool arguments, process status, filesystem identity, source versions and rollout truth are mechanically decidable and belong in Pane. Invalid output never executes. Safe mechanical normalization may happen locally; anything requiring model judgment returns one short, specific sentence in the correlated result on the next turn. Resolved incident advice is not repeated in later context.
+
+The implementation register is `docs/product/pane/improvement-register.md`. Its acceptance corpus varies model, provider, scripting representation, operating-system boundary and task shape. A quirk may enter that corpus without entering the prompt.
+
+The same ruling exposes the supervisor's current limit. Its request path and loop tests exist, but no model is selected by default; the benchmark explicitly disabled it, and configuration only assumes that a named model is cheaper. Pane must resolve an eligible lower-cost model through Glasshouse or an explicit setting, show every look and its serving model, and prove one real intervention before the supervisor counts as operational evidence.

@@ -25,6 +25,12 @@ A plain-language assistant response with no native call ends the request as its 
 
 ## 2. The system preamble, verbatim
 
+This is the currently shipped preamble. Phase 61H's normative migration table
+is `improvement-register.md` under *Prompt boundary*: mechanically enforceable
+tool and recovery advice moves to schemas, validators and one-turn diagnostics,
+leaving only durable protocol invariants here. Until that implementation lands,
+the byte-for-byte text below remains the compatibility contract.
+
     You are Pane, a coding assistant. Answer conversational questions naturally.
     To act with tools, make exactly one `execute_cell` call in an assistant turn.
     Put every operation in that one TypeScript program; `execute_cell` is the only
