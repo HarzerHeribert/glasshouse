@@ -109,7 +109,8 @@ while True:
         body += chunk
     request = head + b"\r\n\r\n" + body
     if b"GET /v1/models" in request and b"Authorization: Bearer " in request:
-        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        payload = b'{"data":[]}' if mode == "empty" else b'{"data":[{"id":"ready"}]}'
+        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
     elif b"POST /v1/messages" in request:
         with open(os.environ["FAKE_REQUEST"], "wb") as handle:
             handle.write(request)
@@ -193,6 +194,17 @@ while True:
         .expect("fake sidecar becomes ready");
 
         let config = fs::read_to_string(&fake.capture).unwrap();
+        for nested in [
+            "tls:\n  enable: false",
+            "remote-management:\n  allow-remote: false\n  secret-key: \"\"",
+            "pprof:\n  enable: false\n  addr: \"127.0.0.1:0\"",
+            "plugins:\n  enabled: false",
+            "quota-exceeded:\n  switch-project: false",
+            "routing:\n  strategy: \"fill-first\"",
+            "streaming:\n  keepalive-seconds: 0\n  bootstrap-retries: 0",
+        ] {
+            assert!(config.contains(nested), "malformed nested YAML: {nested:?}");
+        }
         for required in [
             "host: \"127.0.0.1\"",
             "secret-key: \"\"",
@@ -265,6 +277,18 @@ while True:
         .to_string();
         assert!(timeout.contains("bounded startup timeout"));
         assert_instances_empty(&paths, "timeout-account");
+
+        let empty = RunningSubscriptionBroker::start_with(
+            &paths,
+            "empty-account",
+            &fake.executable,
+            Duration::from_millis(350),
+            &fake.env("empty"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty.contains("bounded startup timeout"), "{empty}");
+        assert_instances_empty(&paths, "empty-account");
 
         let exited = RunningSubscriptionBroker::start_with(
             &paths,

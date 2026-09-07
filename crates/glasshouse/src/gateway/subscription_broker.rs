@@ -207,11 +207,9 @@ impl RunningSubscriptionBroker {
                     self.internal_key.expose()
                 );
                 if stream.write_all(request.as_bytes()).is_ok() {
-                    let mut response = [0_u8; 256];
-                    if let Ok(read) = stream.read(&mut response)
-                        && std::str::from_utf8(&response[..read]).is_ok_and(|head| {
-                            head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")
-                        })
+                    let mut response = Vec::with_capacity(4096);
+                    if (&mut stream).take(4096).read_to_end(&mut response).is_ok()
+                        && models_endpoint_is_ready(&response)
                     {
                         if authenticated_once {
                             return Ok(());
@@ -275,6 +273,17 @@ impl RunningSubscriptionBroker {
         let _ = fs::remove_file(&self.config_path);
         let _ = fs::remove_dir_all(&self.instance_dir);
     }
+}
+
+fn models_endpoint_is_ready(response: &[u8]) -> bool {
+    let Ok(response) = std::str::from_utf8(response) else {
+        return false;
+    };
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    (head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"))
+        && body.contains("\"data\":[{")
 }
 
 impl Drop for RunningSubscriptionBroker {
@@ -349,49 +358,54 @@ fn render_config(port: u16, auth_dir: &Path, internal_key: &str) -> Result<Strin
     let internal_key = yaml_double_quoted(internal_key);
 
     Ok(format!(
-        "host: \"127.0.0.1\"\n\
-         port: {port}\n\
-         tls:\n\
-           enable: false\n\
-         remote-management:\n\
-           allow-remote: false\n\
-           secret-key: \"\"\n\
-           disable-control-panel: true\n\
-           disable-auto-update-panel: true\n\
-         auth-dir: {auth_dir}\n\
-         api-keys: [{internal_key}]\n\
-         debug: false\n\
-         pprof:\n\
-           enable: false\n\
-           addr: \"127.0.0.1:0\"\n\
-         plugins:\n\
-           enabled: false\n\
-           dir: \"plugins-disabled\"\n\
-           configs: {{}}\n\
-         commercial-mode: true\n\
-         request-log: false\n\
-         logging-to-file: false\n\
-         logs-max-total-size-mb: 0\n\
-         error-logs-max-files: 0\n\
-         usage-statistics-enabled: false\n\
-         request-retry: 0\n\
-         max-retry-credentials: 1\n\
-         max-retry-interval: 0\n\
-         disable-claude-cloak-mode: true\n\
-         quota-exceeded:\n\
-           switch-project: false\n\
-           switch-preview-model: false\n\
-           antigravity-credits: false\n\
-         routing:\n\
-           strategy: \"fill-first\"\n\
-           session-affinity: false\n\
-         passthrough-headers: false\n\
-         save-cooldown-status: false\n\
-         ws-auth: true\n\
-         nonstream-keepalive-interval: 0\n\
-         streaming:\n\
-           keepalive-seconds: 0\n\
-           bootstrap-retries: 0\n"
+        concat!(
+            "host: \"127.0.0.1\"\n",
+            "port: {port}\n",
+            "tls:\n",
+            "  enable: false\n",
+            "remote-management:\n",
+            "  allow-remote: false\n",
+            "  secret-key: \"\"\n",
+            "  disable-control-panel: true\n",
+            "  disable-auto-update-panel: true\n",
+            "auth-dir: {auth_dir}\n",
+            "api-keys: [{internal_key}]\n",
+            "debug: false\n",
+            "pprof:\n",
+            "  enable: false\n",
+            "  addr: \"127.0.0.1:0\"\n",
+            "plugins:\n",
+            "  enabled: false\n",
+            "  dir: \"plugins-disabled\"\n",
+            "  configs: {{}}\n",
+            "commercial-mode: true\n",
+            "request-log: false\n",
+            "logging-to-file: false\n",
+            "logs-max-total-size-mb: 0\n",
+            "error-logs-max-files: 0\n",
+            "usage-statistics-enabled: false\n",
+            "request-retry: 0\n",
+            "max-retry-credentials: 1\n",
+            "max-retry-interval: 0\n",
+            "disable-claude-cloak-mode: true\n",
+            "quota-exceeded:\n",
+            "  switch-project: false\n",
+            "  switch-preview-model: false\n",
+            "  antigravity-credits: false\n",
+            "routing:\n",
+            "  strategy: \"fill-first\"\n",
+            "  session-affinity: false\n",
+            "passthrough-headers: false\n",
+            "save-cooldown-status: false\n",
+            "ws-auth: true\n",
+            "nonstream-keepalive-interval: 0\n",
+            "streaming:\n",
+            "  keepalive-seconds: 0\n",
+            "  bootstrap-retries: 0\n"
+        ),
+        port = port,
+        auth_dir = auth_dir,
+        internal_key = internal_key,
     ))
 }
 
