@@ -295,6 +295,19 @@ pub struct Usage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
+impl Usage {
+    /// Every provider-reported token class consumed by this exchange.
+    /// Anthropic reports uncached input, cache reads, and cache creation as
+    /// disjoint fields, so omitting either cache class would make a warm
+    /// session appear to consume fewer context tokens than it actually did.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_input_tokens.unwrap_or(0))
+            .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
+    }
+}
+
 /// One assistant turn: the message the runtime and rollout act on, plus the
 /// provider's own usage for the request that produced it.
 ///

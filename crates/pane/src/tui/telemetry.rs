@@ -438,8 +438,9 @@ pub(super) fn expanded(
             metric(request.output_tokens)
         )));
         detail.push(muted(format!(
-            "Cached input {} · cost unreported",
-            metric(request.cached_input_tokens)
+            "Cached input {} · cache write {} · cost unreported",
+            metric(request.cached_input_tokens),
+            metric(request.cache_creation_input_tokens)
         )));
         detail.push(muted(format!(
             "Provider {} · route {}",

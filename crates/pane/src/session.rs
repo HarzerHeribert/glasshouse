@@ -948,10 +948,7 @@ impl TaskBudget {
         match (served.input_tokens, served.output_tokens) {
             (None, None) => match usage {
                 Some(usage) => {
-                    self.used = self
-                        .used
-                        .saturating_add(usage.input_tokens)
-                        .saturating_add(usage.output_tokens);
+                    self.used = self.used.saturating_add(usage.total_tokens());
                     self.reported = true;
                 }
                 None => {
@@ -963,7 +960,18 @@ impl TaskBudget {
                 self.used = self
                     .used
                     .saturating_add(input.unwrap_or(0))
-                    .saturating_add(output.unwrap_or(0));
+                    .saturating_add(output.unwrap_or(0))
+                    .saturating_add(
+                        served
+                            .cached_input_tokens
+                            .or_else(|| usage.and_then(|row| row.cache_read_input_tokens))
+                            .unwrap_or(0),
+                    )
+                    .saturating_add(
+                        usage
+                            .and_then(|row| row.cache_creation_input_tokens)
+                            .unwrap_or(0),
+                    );
                 self.reported = true;
             }
         }
@@ -2236,6 +2244,45 @@ mod tests {
         assert_eq!(tool_invocation("tool"), Some(""));
         assert_eq!(tool_invocation("tooling"), None);
         assert_eq!(tool_invocation("memory"), None);
+    }
+
+    #[test]
+    fn task_budget_counts_cache_reads_and_creation_without_inventing_them() {
+        let usage = wire::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: Some(70),
+            cache_creation_input_tokens: Some(20),
+        };
+        let mut direct = TaskBudget::new(1_000, 10);
+        direct.add(&ServedBy::default(), Some(&usage), 999);
+        assert_eq!(direct.used, 105);
+
+        let mut gateway = TaskBudget::new(1_000, 10);
+        gateway.add(
+            &ServedBy {
+                input_tokens: Some(3),
+                output_tokens: Some(4),
+                cached_input_tokens: Some(80),
+                ..ServedBy::default()
+            },
+            Some(&usage),
+            999,
+        );
+        assert_eq!(gateway.used, 107);
+
+        let mut absent = TaskBudget::new(1_000, 10);
+        absent.add(
+            &ServedBy::default(),
+            Some(&wire::Usage {
+                input_tokens: 3,
+                output_tokens: 4,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }),
+            999,
+        );
+        assert_eq!(absent.used, 7);
     }
 
     #[test]

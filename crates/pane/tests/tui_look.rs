@@ -893,8 +893,8 @@ fn telemetry_distinguishes_proposals_measurements_and_actual_execution() {
             Some(&pane::wire::Usage {
                 input_tokens: 100,
                 output_tokens: 20,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(80),
+                cache_creation_input_tokens: Some(15),
             }),
         )],
         cells: vec![CellView {
@@ -913,6 +913,7 @@ fn telemetry_distinguishes_proposals_measurements_and_actual_execution() {
             "REQUEST 01",
             "read roman.py",
             "cost unreported",
+            "Cached input 80 · cache write 15",
             "proposed",
             "observed",
         ] {

@@ -207,6 +207,7 @@ impl ServedBy {
             || self.quota_context.is_some()
             || self.input_tokens.is_some()
             || self.output_tokens.is_some()
+            || self.cached_input_tokens.is_some()
     }
 }
 

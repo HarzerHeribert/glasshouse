@@ -107,7 +107,7 @@ pub fn run(
             Err(error) => return finish(&error.to_string(), "failed", turn, tokens),
         };
         if let Some(usage) = &sent.usage {
-            tokens += usage.input_tokens + usage.output_tokens;
+            tokens = tokens.saturating_add(usage.total_tokens());
         }
         let text = message_text(&sent.message);
         let calls: Vec<_> = sent
