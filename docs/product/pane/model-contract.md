@@ -125,11 +125,13 @@ whole-file and new-file operation.
 
 For literal multiline content, `write` also accepts `lines: string[]` instead
 of `content`, and `edit` accepts `oldLines` and `replacementLines` instead of
-their string forms. Pane joins a nonempty line array with `\n` and adds one
-final newline; an empty array is an empty file. Exactly one form must be given
-for each value. This keeps syntax such as `${BASH_SOURCE[0]}` and `$WORKTREE`
-literal without requiring a JavaScript template literal; the string forms
-remain available when byte-exact newline control matters.
+their string forms. Each item is one logical line. Pane accepts and removes one
+trailing `\n` or `\r\n` from an item, refuses an embedded line ending, joins
+the items with `\n`, and adds one final newline; an empty array is an empty
+file. Exactly one form must be given for each value. Double-quoted JavaScript
+strings keep syntax such as `${BASH_SOURCE[0]}`, apostrophes and `$WORKTREE`
+literal without a template literal; the string forms remain available when
+byte-exact newline control matters.
 
 The result of `read` has an `excerpt({start?, lines?})` method over its already
 loaded `lines` array. It adds no filesystem access. `start` is one-based;

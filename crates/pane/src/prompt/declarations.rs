@@ -36,7 +36,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "write",
         return_type: "string",
-        summary: "Replace one whole file, creating parents. Pass exactly one of `content` or `lines`; `lines` adds a final newline and safely carries literal script text, e.g. `await write({path: \"run.sh\", lines: [\"#!/bin/bash\", 'src=\"${BASH_SOURCE[0]}\"', 'echo \"$WORKTREE\"']})`. Prefer `edit` for an existing region.",
+        summary: "Replace one whole file, creating parents. Pass exactly one of `content` or `lines`. For scripts, prefer `lines`: each item is one logical line, Pane adds the separators/final newline, and a trailing newline on an item is harmless. Use double-quoted JS strings, never template literals: `await write({path: \"run.sh\", lines: [\"#!/bin/bash\", \"src=\\\"${BASH_SOURCE[0]}\\\"\", \"echo \\\"caller's $WORKTREE\\\"\"]})`. Prefer `edit` for an existing region.",
     },
     Entry {
         name: "bash",
@@ -51,7 +51,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "edit",
         return_type: "{path: string; before_sha256: string; after_sha256: string; changed_lines: {start: number; before: number; after: number}}",
-        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`, or use `oldLines` and `replacementLines` for newline-terminated literal blocks. Pass exactly one form for each side. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
+        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`, or use `oldLines` and `replacementLines` for literal blocks. Each array item is one logical line; do not build a multiline template literal. Pass exactly one form for each side. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
     },
 ];
 

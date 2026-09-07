@@ -262,6 +262,9 @@ fn the_prompt_teaches_the_literal_multiline_content_form() {
     );
     assert!(system.contains("oldLines?: string[]"), "{system}");
     assert!(system.contains("replacementLines?: string[]"), "{system}");
+    assert!(system.contains("each item is one logical line"), "{system}");
+    assert!(system.contains("never template literals"), "{system}");
+    assert!(system.contains("caller's $WORKTREE"), "{system}");
     assert!(system.contains("${BASH_SOURCE[0]}"), "{system}");
     assert!(system.contains("$WORKTREE"), "{system}");
 }

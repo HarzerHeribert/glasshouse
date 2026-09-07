@@ -1307,6 +1307,29 @@ fn write_lines_preserve_literal_script_variables_and_add_a_final_newline() {
     )
     .expect("an empty line array should write an empty file");
     assert_eq!(std::fs::read(&empty).unwrap(), b"");
+
+    let normalized = fixture.root.join("normalized.txt");
+    invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*normalized.to_string_lossy())
+            .with_lines("lines", ["one\n", "two\r\n"]),
+    )
+    .expect("one trailing line ending per item should be harmless");
+    assert_eq!(std::fs::read_to_string(&normalized).unwrap(), "one\ntwo\n");
+
+    let embedded = fixture.root.join("embedded.txt");
+    let error = invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*embedded.to_string_lossy())
+            .with_lines("lines", ["one\ntwo"]),
+    )
+    .expect_err("an embedded line ending is ambiguous and must be refused");
+    assert!(error.to_string().contains("one logical line"), "{error}");
+    assert!(!embedded.exists(), "a refused write mutated the filesystem");
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

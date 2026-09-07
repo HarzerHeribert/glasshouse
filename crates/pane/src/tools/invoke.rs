@@ -1156,7 +1156,27 @@ fn check_arguments(
                 );
             }
             (ArgKind::Lines, Some(Argument::Lines(lines))) => {
-                let mut value = lines.join("\n");
+                let mut normalized = Vec::with_capacity(lines.len());
+                for (index, line) in lines.iter().enumerate() {
+                    let line = line
+                        .strip_suffix("\r\n")
+                        .or_else(|| line.strip_suffix('\n'))
+                        .unwrap_or(line);
+                    if line.contains(['\r', '\n']) {
+                        return Err(PermissionDenied {
+                            tool: tool.name().to_string(),
+                            path: arg.name().to_string(),
+                            rule: format!(
+                                "`{}` argument `{}` item {} contains an embedded newline; each item must be one logical line",
+                                tool.name(),
+                                arg.name(),
+                                index
+                            ),
+                        });
+                    }
+                    normalized.push(line);
+                }
+                let mut value = normalized.join("\n");
                 if !lines.is_empty() {
                     value.push('\n');
                 }
