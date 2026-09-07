@@ -1,5 +1,7 @@
 /target
 /.agent-runtime/
+/.pane/
+/.playwright-mcp/
 
 # Python bytecode from repository tooling.
 __pycache__/
