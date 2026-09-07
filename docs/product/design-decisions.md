@@ -20076,3 +20076,11 @@ the second.**
 Acted on in the README the same day: it now opens on the two products and the
 ladder, states the boundary rule above, and moves the fleet story to its own
 section after both. The `--help` split is not done.
+
+## Subscription OAuth belongs to Glasshouse; harnesses receive only its gateway key
+
+_Recorded 2026-09-07 from the owner's clarification and live proof._
+
+Glasshouse is the credential and entitlement authority. It adopts a verified, pinned CLIProxyAPI executable and runs one loopback-only sidecar per selected entitlement, with stable OAuth state isolated by entitlement and ephemeral process state removed on exit. Pane and other gateway-backed harnesses remain key-driven: they see only Glasshouse's disposable local key and never implement provider OAuth or receive a provider token. Profile-level entitlement pins make this opt-in and preserve the exact account across resume; an unpinned existing gateway profile keeps its previous API-provider path.
+
+CLIProxyAPI is used as the proven authentication/protocol adapter rather than reimplementing three provider OAuth flows. Glasshouse keeps scheduling authority: the inner broker has retry, account switching and prompt cloaking disabled. The pinned broker requires its owner-only 0600 runtime config for its watcher, so the random loopback-only inner key may exist there only for the child lifetime; OAuth tokens remain in the entitlement auth directory and are never copied into that file or a project.
