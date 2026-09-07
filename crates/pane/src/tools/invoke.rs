@@ -525,8 +525,21 @@ fn checked_call(
     if tool.argv() == Argv::InProcess {
         return perform_in_process(ctx.profile, token, tool, &checked);
     }
-    let argv = build_argv(tool, &checked)?;
+    let mut argv = build_argv(tool, &checked)?;
+    let broad_search = resolved_path(&checked, "path").is_some_and(|path| {
+        !explicitly_roots_component(ctx.profile.root(), path, ".pane")
+            && !explicitly_roots_component(ctx.profile.root(), path, ".git")
+    });
+    if tool.name() == "grep" && broad_search {
+        // Git internals are an entire generated tree and grep can avoid
+        // traversing them. The rollout is one exact path rather than a
+        // basename-wide exclusion, so it is removed from output below.
+        argv.insert(1, "--exclude-dir=.git".into());
+    }
     let mut result = spawn_confined(ctx.profile, token, tool, &argv)?;
+    if tool.name() == "grep" && broad_search {
+        result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
+    }
     if tool.name() == "read" && result.exit_code == Some(0) {
         result.modified = resolved_path(&checked, "path")
             .and_then(|path| std::fs::metadata(path).ok())
@@ -640,6 +653,10 @@ fn glob_paths(
     if pattern.is_empty() {
         return Ok(String::new());
     }
+    let include_pane_artifacts =
+        explicitly_roots_component(profile.root(), root, ".pane") || pattern.contains(&".pane");
+    let include_git =
+        explicitly_roots_component(profile.root(), root, ".git") || pattern.contains(&".git");
 
     let mut pending = vec![root.to_path_buf()];
     let mut matches = Vec::new();
@@ -675,6 +692,12 @@ fn glob_paths(
                 error: error.to_string(),
             })?;
             let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if (!include_git && contains_component(relative, ".git"))
+                || (!include_pane_artifacts && is_pane_artifact(relative))
+            {
+                continue;
+            }
             let Ok(checked) = profile.check(tool, Access::Read, &path) else {
                 continue;
             };
@@ -696,6 +719,70 @@ fn glob_paths(
         .into_iter()
         .map(|path| format!("{}\n", path.display()))
         .collect())
+}
+
+/// Whether a caller deliberately rooted search inside a generated hidden
+/// tree. Direct targeting is an opt-in; a project-root search remains broad.
+fn explicitly_roots_component(project: &Path, search_root: &Path, wanted: &str) -> bool {
+    search_root
+        .strip_prefix(project)
+        .ok()
+        .is_some_and(|relative| contains_component(relative, wanted))
+}
+
+fn contains_component(path: &Path, wanted: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == wanted)
+}
+
+/// Generated paths omitted from broad discovery. `.pane` itself is not
+/// excluded: user configuration there remains searchable.
+fn is_search_artifact(relative: &Path) -> bool {
+    contains_component(relative, ".git") || is_pane_artifact(relative)
+}
+
+fn is_pane_artifact(relative: &Path) -> bool {
+    let components: Vec<_> = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components
+        .windows(2)
+        .any(|pair| pair == [".pane", "rollout.jsonl"])
+}
+
+/// The filename prefix from one `grep -r -n` result. This mirrors the
+/// runtime match parser: a colon belongs to the path unless the following
+/// non-empty field is an ASCII line number.
+fn grep_match_path(line: &str) -> Option<&str> {
+    let mut start = 0usize;
+    while let Some(offset) = line[start..].find(':') {
+        let colon = start + offset;
+        let rest = &line[colon + 1..];
+        if let Some(next) = rest.find(':') {
+            let digits = &rest[..next];
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Some(&line[..colon]);
+            }
+        }
+        start = colon + 1;
+        if start >= line.len() {
+            break;
+        }
+    }
+    None
+}
+
+fn filter_grep_artifacts(project: &Path, output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| {
+            grep_match_path(line)
+                .and_then(|path| Path::new(path).strip_prefix(project).ok())
+                .is_none_or(|relative| !is_search_artifact(relative))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 fn glob_components(pattern: &[&str], path: &[String]) -> bool {

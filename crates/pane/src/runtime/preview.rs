@@ -301,9 +301,10 @@ pub const PREVIEW_TOKEN_CAP: usize = 256;
 /// tokens — `runtime-contract.md` §3.
 pub const TABLE_TOKEN_CAP: usize = 2048;
 
-/// A cell's `console` output is cut to its last this-many tokens —
-/// `runtime-contract.md` §3's `[stdout]` paragraph.
-pub const STDOUT_TOKEN_CAP: usize = 512;
+/// A cell's `console` output is cut to its last this-many estimated tokens.
+/// This remains a hard bound, while leaving enough room for one modest source
+/// file or several ordinary inspection results in the same cell.
+pub const STDOUT_TOKEN_CAP: usize = 8 * 1024;
 
 /// Element counts a shrinking array preview steps through, in order —
 /// `runtime-contract.md` §3: "4 → 2 → 0".

@@ -1,5 +1,6 @@
 //! One thread owns the terminal and keys; the task thread only sends view state.
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
@@ -9,12 +10,17 @@ use std::time::{Duration, Instant};
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{self, Activity, Notebook, ScreenState, SidebarVisibility};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+
+mod terminal_input;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DRAWING: Mutex<()> = Mutex::new(());
@@ -38,6 +44,7 @@ pub(super) fn restore_terminal() {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -54,6 +61,7 @@ enum Update {
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
     Model(String),
     Delta(String),
+    ToolDelta(String),
     Mode(tui::Mode),
     Effort(crate::wire::Effort),
     Panel(tui::Panel),
@@ -127,6 +135,9 @@ impl LiveUi {
     pub(super) fn append_delta(&self, text: &str) {
         let _ = self.updates.send(Update::Delta(text.into()));
     }
+    pub(super) fn tool_delta(&self, fragment: &str) {
+        let _ = self.updates.send(Update::ToolDelta(fragment.into()));
+    }
     pub(super) fn effort(&self, effort: crate::wire::Effort) {
         let _ = self.updates.send(Update::Effort(effort));
     }
@@ -175,13 +186,25 @@ impl Editor {
             .unwrap_or(self.cursor)
     }
     fn insert(&mut self, text: &str) {
-        // Strip terminal control bytes; newlines and tabs are composition.
-        let text: String = text
-            .chars()
-            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-            .collect();
-        self.text.insert_str(self.cursor, &text);
-        self.cursor += text.len();
+        // Terminal transports may turn pasted LF into CR. Preserve either
+        // newline convention as one LF, while stripping other controls.
+        let mut text = text.chars().peekable();
+        let mut normalized = String::with_capacity(text.size_hint().0);
+        while let Some(c) = text.next() {
+            match c {
+                '\r' => {
+                    if text.peek() == Some(&'\n') {
+                        text.next();
+                    }
+                    normalized.push('\n');
+                }
+                '\n' | '\t' => normalized.push(c),
+                c if !c.is_control() => normalized.push(c),
+                _ => {}
+            }
+        }
+        self.text.insert_str(self.cursor, &normalized);
+        self.cursor += normalized.len();
         self.selected = 0;
     }
     fn recall(&mut self, older: bool) {
@@ -301,11 +324,17 @@ fn run(
     inputs: &mpsc::Sender<Input>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) -> io::Result<()> {
+    let mut pending_events = VecDeque::new();
     let setup = (|| {
         let _guard = super::lock(&DRAWING);
         enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
-        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         Terminal::new(CrosstermBackend::new(io::stdout()))
     })();
     let _restore = Restore;
@@ -327,6 +356,8 @@ fn run(
     let mut dirty = true;
     let mut last_tick = Instant::now();
     let mut task_started: Option<Instant> = None;
+    let mut previous_rows = 0usize;
+    let mut viewport_height = 10usize;
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
             break;
@@ -364,6 +395,7 @@ fn run(
                     }
                     state.activity = activity;
                     state.streaming_text = None;
+                    state.streaming_tool_input = None;
                     if served.is_known() {
                         state.connected = Some(true);
                     }
@@ -393,6 +425,15 @@ fn run(
                         .streaming_text
                         .get_or_insert_with(String::new)
                         .push_str(&text);
+                    state.activity = Activity::Streaming;
+                    busy = true;
+                }
+                Update::ToolDelta(fragment) => {
+                    state.pulse.receive(fragment.len());
+                    state
+                        .streaming_tool_input
+                        .get_or_insert_with(String::new)
+                        .push_str(&fragment);
                     state.activity = Activity::Streaming;
                     busy = true;
                 }
@@ -434,6 +475,30 @@ fn run(
             if !ACTIVE.load(Ordering::SeqCst) {
                 break;
             }
+            let size = terminal.size()?;
+            let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+            let regions = tui::screen_regions(area, &state);
+            viewport_height = usize::from(regions.transcript.height).max(1);
+            let rows = tui::conversation_rows(
+                &conversation,
+                &super::empty_handles(),
+                &notebook,
+                &state,
+                regions.transcript.width,
+            );
+            if previous_rows > 0 {
+                state.scrollback =
+                    tui::anchor_scrollback(state.scrollback, previous_rows, rows, viewport_height);
+            }
+            previous_rows = rows;
+            if let Some(inspection) = state.inspection.as_mut() {
+                inspection.clamp(
+                    &conversation,
+                    &notebook,
+                    regions.transcript.width,
+                    regions.transcript.height,
+                );
+            }
             terminal.draw(|frame| {
                 tui::render_screen(
                     frame,
@@ -447,12 +512,39 @@ fn run(
             io::stdout().flush()?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(if moving { 40 } else { 100 }))? {
+        if pending_events.is_empty()
+            && !event::poll(Duration::from_millis(if moving { 40 } else { 100 }))?
+        {
             continue;
         }
-        match event::read()? {
+        let Some(input_event) = terminal_input::read(&mut pending_events)? else {
+            continue;
+        };
+        match input_event {
             Event::Resize(_, _) => {
                 dirty = true;
+            }
+            Event::Mouse(mouse) => {
+                let up = mouse.kind == MouseEventKind::ScrollUp;
+                if up || mouse.kind == MouseEventKind::ScrollDown {
+                    if let Some(inspection) = state.inspection.as_mut() {
+                        inspection.scroll = if up {
+                            inspection.scroll.saturating_sub(3)
+                        } else {
+                            inspection.scroll.saturating_add(3)
+                        };
+                    } else if state.panel.is_none() && !state.telemetry_open {
+                        state.scrollback = if up {
+                            state
+                                .scrollback
+                                .saturating_add(3)
+                                .min(previous_rows.saturating_sub(viewport_height))
+                        } else {
+                            state.scrollback.saturating_sub(3)
+                        };
+                    }
+                    dirty = true;
+                }
             }
             Event::Paste(text) => {
                 editor.insert(&text);
@@ -460,6 +552,54 @@ fn run(
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 dirty = true;
+                if let Some(inspection) = state.inspection.as_mut() {
+                    let handled = match key.code {
+                        KeyCode::Esc => {
+                            state.inspection = None;
+                            true
+                        }
+                        KeyCode::Left => {
+                            inspection.adjacent(false, &notebook);
+                            true
+                        }
+                        KeyCode::Right => {
+                            inspection.adjacent(true, &notebook);
+                            true
+                        }
+                        KeyCode::Up => {
+                            inspection.scroll = inspection.scroll.saturating_sub(1);
+                            true
+                        }
+                        KeyCode::Down => {
+                            inspection.scroll = inspection.scroll.saturating_add(1);
+                            true
+                        }
+                        KeyCode::PageUp => {
+                            inspection.scroll = inspection
+                                .scroll
+                                .saturating_sub(viewport_height.saturating_sub(3));
+                            true
+                        }
+                        KeyCode::PageDown => {
+                            inspection.scroll = inspection
+                                .scroll
+                                .saturating_add(viewport_height.saturating_sub(3));
+                            true
+                        }
+                        KeyCode::Home => {
+                            inspection.scroll = 0;
+                            true
+                        }
+                        KeyCode::End => {
+                            inspection.scroll = usize::MAX;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        continue;
+                    }
+                }
                 if state.telemetry_open && state.panel.is_none() {
                     match key.code {
                         KeyCode::Esc => {
@@ -547,6 +687,7 @@ fn run(
                         }
                         KeyCode::Char('t') => {
                             state.telemetry_open = !state.telemetry_open;
+                            state.inspection = None;
                             state.panel = None;
                             continue;
                         }
@@ -561,6 +702,14 @@ fn run(
                             };
                             continue;
                         }
+                        KeyCode::Home => {
+                            state.scrollback = previous_rows.saturating_sub(viewport_height);
+                            continue;
+                        }
+                        KeyCode::End => {
+                            state.scrollback = 0;
+                            continue;
+                        }
                         KeyCode::Char('d') if !busy && editor.text.is_empty() => {
                             let _ = inputs.send(Input::Exit);
                             return Ok(());
@@ -570,16 +719,47 @@ fn run(
                 }
                 match key.code {
                     KeyCode::PageUp => {
-                        state.scrollback = state.scrollback.saturating_add(10);
+                        state.scrollback = state
+                            .scrollback
+                            .saturating_add(viewport_height.saturating_sub(2))
+                            .min(previous_rows.saturating_sub(viewport_height));
                         continue;
                     }
                     KeyCode::PageDown => {
-                        state.scrollback = state.scrollback.saturating_sub(10);
+                        state.scrollback = state
+                            .scrollback
+                            .saturating_sub(viewport_height.saturating_sub(2));
                         continue;
                     }
                     _ => {}
                 }
                 if editor.key(key) && !editor.text.trim().is_empty() {
+                    if matches!(
+                        editor.text.split_whitespace().next(),
+                        Some("/cell" | "/cells" | "/chat")
+                    ) {
+                        let text = editor.take();
+                        let mut words = text.split_whitespace();
+                        let command = words.next().unwrap_or_default();
+                        if command == "/chat" {
+                            state.inspection = None;
+                            state.telemetry_open = false;
+                        } else {
+                            let cell = match words.next() {
+                                Some(value) => value.parse::<usize>().unwrap_or(0),
+                                None => tui::Inspection::latest(&notebook).unwrap_or(0),
+                            };
+                            state.inspection = tui::Inspection::open(cell, &notebook);
+                            state.telemetry_open = false;
+                            state.panel = None;
+                            state.notice = if state.inspection.is_none() {
+                                Some("No recorded cell at that number yet. Use /cells after an action.".into())
+                            } else {
+                                None
+                            };
+                        }
+                        continue;
+                    }
                     if editor.text.trim() == "/telemetry" {
                         editor.take();
                         state.telemetry_open = !state.telemetry_open;
@@ -711,6 +891,13 @@ mod tests {
         assert_eq!(editor.text, "ab");
         editor.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
         assert_eq!(editor.text, "a\nb");
+    }
+    #[test]
+    fn paste_normalizes_terminal_newlines_without_admitting_controls() {
+        let mut editor = Editor::default();
+        editor.insert("first\rsecond\r\nthird\nfourth\tcolumn\x00\x1bfinal");
+        assert_eq!(editor.text, "first\nsecond\nthird\nfourth\tcolumnfinal");
+        assert_eq!(editor.cursor, editor.text.len());
     }
     #[test]
     fn selection_changes_what_tab_completes() {

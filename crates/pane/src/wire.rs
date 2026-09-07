@@ -1,5 +1,5 @@
-//! The Anthropic Messages wire format: turning a [`contract::Conversation`]
-//! into a request body, and a response back into a [`contract::Message`].
+//! The Anthropic Messages wire format: turning a [`crate::contract::Conversation`]
+//! into a request body, and a response back into a [`crate::contract::Message`].
 //!
 //! `docs/product/pane/model-contract.md` §8 fixes the one invariant this
 //! module exists for: the request body is byte-identical whether
@@ -8,10 +8,12 @@
 //! far side. [`request_body`] is why that invariant holds by construction --
 //! it has no parameter through which a base URL could reach the body.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::contract::{Block, Conversation, Message, Role};
 
@@ -85,6 +87,8 @@ struct RequestBody<'a> {
     max_tokens: u32,
     system: &'a str,
     messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Value>>,
     /// `Some(true)` only on the streaming path.
     ///
     /// **Skipped when absent, which is what keeps the non-streaming body byte
@@ -106,6 +110,17 @@ struct WireMessage {
 enum WireBlock {
     Text {
         text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
     },
     /// A response block type this module does not send and does not act
     /// on -- 61D's sandbox does not exist, so a `tool_use` block here is
@@ -133,7 +148,7 @@ pub fn request_body_configured(
     effort: Effort,
 ) -> Vec<u8> {
     configure_effort(
-        build_request_body(model, MAX_TOKENS, conversation),
+        build_request_body(model, MAX_TOKENS, conversation, true),
         model,
         effort,
     )
@@ -170,6 +185,20 @@ fn to_wire_message(message: &Message) -> WireMessage {
 fn to_wire_block(block: &Block) -> WireBlock {
     match block {
         Block::Text(text) => WireBlock::Text { text: text.clone() },
+        Block::ToolUse { id, name, input } => WireBlock::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        },
+        Block::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => WireBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        },
     }
 }
 
@@ -177,6 +206,8 @@ fn to_wire_block(block: &Block) -> WireBlock {
 struct ResponseBody {
     role: String,
     content: Vec<WireBlock>,
+    #[serde(default)]
+    stop_reason: Option<String>,
     #[serde(default)]
     usage: Option<UsageRow>,
 }
@@ -232,7 +263,7 @@ pub enum WireError {
     /// connection, or any other transport-level failure below HTTP status.
     Http(Box<ureq::Error>),
     /// The server answered with a non-2xx status. `body_head` is the first
-    /// [`BODY_HEAD_LIMIT`] bytes of its response body, escaped onto one
+    /// `BODY_HEAD_LIMIT` bytes of its response body, escaped onto one
     /// line -- never anything from the request.
     Status { status: u16, body_head: String },
     /// The response body was not the JSON shape a Messages response has.
@@ -308,7 +339,7 @@ impl std::error::Error for WireError {
 }
 
 /// Renders a provider's response body as an error's `body_head`: the first
-/// [`BODY_HEAD_LIMIT`] bytes, cut on a char boundary, with control
+/// `BODY_HEAD_LIMIT` bytes, cut on a char boundary, with control
 /// characters escaped so the whole thing prints on one line, `…` appended
 /// when the body was longer, and a fixed placeholder for an empty body.
 fn body_head(body: &str) -> String {
@@ -423,7 +454,7 @@ pub fn send_turn_with(
     extra_header: Option<(&str, &str)>,
 ) -> Result<Message, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = build_request_body(model, max_tokens, conversation);
+    let body = build_request_body(model, max_tokens, conversation, false);
 
     let mut request = ureq::post(&url)
         .config()
@@ -456,12 +487,22 @@ pub fn send_turn_with(
 }
 
 /// Shared serialization for default, selected-model, and supervisor requests.
-fn build_request_body(model: &str, max_tokens: u32, conversation: &Conversation) -> Vec<u8> {
+fn build_request_body(
+    model: &str,
+    max_tokens: u32,
+    conversation: &Conversation,
+    native_cell: bool,
+) -> Vec<u8> {
     let body = RequestBody {
         model,
         max_tokens,
         system: &conversation.system,
         messages: conversation.messages.iter().map(to_wire_message).collect(),
+        tools: native_cell.then(|| vec![serde_json::json!({
+            "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
+            "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+            "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
+        })]),
         stream: None,
     };
     serde_json::to_vec(&body).expect("Conversation has no non-serialisable field")
@@ -472,18 +513,36 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
     if parsed.role != "assistant" {
         return Err(WireError::UnexpectedRole(parsed.role));
     }
-    let content = parsed
-        .content
-        .into_iter()
-        .filter_map(|block| match block {
-            WireBlock::Text { text } => Some(Block::Text(text)),
-            WireBlock::Other => None,
-        })
-        .collect();
+    if parsed.stop_reason.as_deref() == Some("max_tokens")
+        && parsed
+            .content
+            .iter()
+            .any(|block| matches!(block, WireBlock::ToolUse { .. }))
+    {
+        return Err(WireError::Stream(
+            "provider stopped at max_tokens while constructing a tool call".into(),
+        ));
+    }
+    let mut content = Vec::new();
+    for block in parsed.content {
+        match block {
+            WireBlock::Text { text } => content.push(Block::Text(text)),
+            WireBlock::ToolUse { id, name, input } => {
+                content.push(Block::ToolUse { id, name, input })
+            }
+            WireBlock::ToolResult { .. } => {
+                return Err(WireError::Stream(
+                    "assistant response contained a user-only tool_result block".into(),
+                ));
+            }
+            WireBlock::Other => {}
+        }
+    }
     Ok(Turn {
         message: Message {
             role: Role::Assistant,
             content,
+            historical: None,
         },
         usage: to_usage(parsed.usage),
     })
@@ -499,9 +558,36 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
 /// without a server.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
-    text: String,
+    blocks: BTreeMap<u64, PendingBlock>,
     usage: Option<UsageRow>,
     saw_stop: bool,
+    stopped_at_max_tokens: bool,
+}
+
+#[derive(Debug)]
+enum PendingBlock {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+        partial: String,
+        saw_delta: bool,
+        stopped: bool,
+    },
+    Ignored,
+}
+
+/// Presentation-only progress from a stream. Recorded messages retain typed
+/// blocks; callers must not append these fragments to conversation history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    Text(String),
+    /// Raw incremental JSON input bytes, for progress only. Never render as
+    /// code and never append to conversation history.
+    ToolInput(String),
+    /// Complete decoded source after the provider closed valid tool input.
+    ToolReady(String),
 }
 
 impl StreamAccumulator {
@@ -509,16 +595,65 @@ impl StreamAccumulator {
         Self::default()
     }
 
-    /// Feeds one SSE `data:` payload; returns the text it added, so a caller
-    /// can render the reply as it arrives.
+    /// Feeds one SSE `data:` payload and returns presentation progress. Tool
+    /// source appears only once its complete JSON input has validated.
     ///
     /// An event this does not know is ignored rather than refused — the
     /// Messages stream gains event types over time, and a `ping` or a
     /// `thinking` block is not a reason to fail a turn that is arriving
     /// correctly.
-    pub fn event(&mut self, data: &str) -> Result<Option<String>, WireError> {
+    pub fn event(&mut self, data: &str) -> Result<Option<StreamDelta>, WireError> {
         let value: serde_json::Value = serde_json::from_str(data).map_err(WireError::Json)?;
         match value.get("type").and_then(|t| t.as_str()) {
+            Some("content_block_start") => {
+                let index = value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| WireError::Stream("content block start has no index".into()))?;
+                let block = value
+                    .get("content_block")
+                    .ok_or_else(|| WireError::Stream("content block start has no block".into()))?;
+                let pending = match block.get("type").and_then(Value::as_str) {
+                    Some("text") => PendingBlock::Text(
+                        block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    ),
+                    Some("tool_use") => PendingBlock::ToolUse {
+                        id: block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| WireError::Stream("tool_use has no id".into()))?
+                            .into(),
+                        name: block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| WireError::Stream("tool_use has no name".into()))?
+                            .into(),
+                        input: block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                        partial: String::new(),
+                        saw_delta: false,
+                        stopped: false,
+                    },
+                    Some("tool_result") => {
+                        return Err(WireError::Stream(
+                            "assistant stream contained a user-only tool_result block".into(),
+                        ));
+                    }
+                    _ => PendingBlock::Ignored,
+                };
+                if self.blocks.insert(index, pending).is_some() {
+                    return Err(WireError::Stream(format!(
+                        "duplicate content block index {index}"
+                    )));
+                }
+                Ok(None)
+            }
             Some("content_block_delta") => {
                 // Only `text_delta`: a `signature_delta` or a
                 // `thinking_delta` is part of a block this harness does not
@@ -529,14 +664,92 @@ impl StreamAccumulator {
                     .and_then(|d| d.get("type"))
                     .and_then(|t| t.as_str())
                     .is_some_and(|t| t == "text_delta");
-                if !is_text {
-                    return Ok(None);
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                if is_text {
+                    let Some(text) = delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
+                    else {
+                        return Ok(None);
+                    };
+                    match self
+                        .blocks
+                        .entry(index)
+                        .or_insert_with(|| PendingBlock::Text(String::new()))
+                    {
+                        PendingBlock::Text(held) => held.push_str(text),
+                        _ => {
+                            return Err(WireError::Stream(format!(
+                                "text delta targets non-text block {index}"
+                            )));
+                        }
+                    }
+                    return Ok(Some(StreamDelta::Text(text.to_string())));
                 }
-                let Some(text) = delta.and_then(|d| d.get("text")).and_then(|t| t.as_str()) else {
-                    return Ok(None);
-                };
-                self.text.push_str(text);
-                Ok(Some(text.to_string()))
+                if delta.and_then(|d| d.get("type")).and_then(Value::as_str)
+                    == Some("input_json_delta")
+                {
+                    let fragment = delta
+                        .and_then(|d| d.get("partial_json"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            WireError::Stream("input_json_delta has no partial_json".into())
+                        })?;
+                    match self.blocks.get_mut(&index) {
+                        Some(PendingBlock::ToolUse {
+                            stopped: false,
+                            partial,
+                            saw_delta,
+                            ..
+                        }) => {
+                            partial.push_str(fragment);
+                            *saw_delta = true;
+                        }
+                        Some(PendingBlock::ToolUse { stopped: true, .. }) => {
+                            return Err(WireError::Stream(format!(
+                                "input delta arrived after tool_use block {index} stopped"
+                            )));
+                        }
+                        _ => {
+                            return Err(WireError::Stream(format!(
+                                "input delta targets no tool_use block {index}"
+                            )));
+                        }
+                    }
+                    return Ok(Some(StreamDelta::ToolInput(fragment.to_string())));
+                }
+                Ok(None)
+            }
+            Some("content_block_stop") => {
+                let index = value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| WireError::Stream("content block stop has no index".into()))?;
+                if let Some(PendingBlock::ToolUse {
+                    input,
+                    partial,
+                    saw_delta,
+                    stopped,
+                    ..
+                }) = self.blocks.get_mut(&index)
+                {
+                    if *stopped {
+                        return Err(WireError::Stream(format!(
+                            "duplicate stop for tool_use block {index}"
+                        )));
+                    }
+                    if *saw_delta {
+                        *input = serde_json::from_str(partial).map_err(|_| {
+                            WireError::Stream(format!(
+                                "tool_use block {index} ended with malformed input JSON"
+                            ))
+                        })?;
+                    }
+                    *stopped = true;
+                    return Ok(input
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .map(|code| StreamDelta::ToolReady(code.to_string())));
+                }
+                Ok(None)
             }
             Some("message_start") => {
                 if let Some(role) = value
@@ -553,6 +766,14 @@ impl StreamAccumulator {
             // The final `usage` lands here, and it is the one that carries
             // the output tokens; `message_start`'s is a header with zeroes.
             Some("message_delta") => {
+                if value
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    == Some("max_tokens")
+                {
+                    self.stopped_at_max_tokens = true;
+                }
                 self.read_usage(value.get("usage"));
                 Ok(None)
             }
@@ -594,15 +815,40 @@ impl StreamAccumulator {
                 "no message_stop arrived; the connection ended mid-reply".to_string(),
             ));
         }
-        let content = if self.text.is_empty() {
-            Vec::new()
-        } else {
-            vec![Block::Text(self.text)]
-        };
+        if self.stopped_at_max_tokens
+            && self
+                .blocks
+                .values()
+                .any(|block| matches!(block, PendingBlock::ToolUse { .. }))
+        {
+            return Err(WireError::Stream(
+                "provider stopped at max_tokens while constructing a tool call".into(),
+            ));
+        }
+        let mut content = Vec::new();
+        for (index, block) in self.blocks {
+            match block {
+                PendingBlock::Text(text) if !text.is_empty() => content.push(Block::Text(text)),
+                PendingBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    stopped: true,
+                    ..
+                } => content.push(Block::ToolUse { id, name, input }),
+                PendingBlock::ToolUse { .. } => {
+                    return Err(WireError::Stream(format!(
+                        "tool_use block {index} never completed"
+                    )));
+                }
+                _ => {}
+            }
+        }
         Ok(Turn {
             message: Message {
                 role: Role::Assistant,
                 content,
+                historical: None,
             },
             usage: to_usage(self.usage),
         })
@@ -620,7 +866,7 @@ impl StreamAccumulator {
 pub fn send_turn_streaming(
     conversation: &Conversation,
     model: &str,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
     send_turn_streaming_configured(conversation, model, Effort::Auto, on_delta)
 }
@@ -628,7 +874,7 @@ pub fn send_turn_streaming_configured(
     conversation: &Conversation,
     model: &str,
     effort: Effort,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
     use std::io::{BufRead, BufReader};
 
@@ -638,6 +884,11 @@ pub fn send_turn_streaming_configured(
         max_tokens: MAX_TOKENS,
         system: &conversation.system,
         messages: conversation.messages.iter().map(to_wire_message).collect(),
+        tools: Some(vec![serde_json::json!({
+            "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
+            "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+            "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
+        })]),
         stream: Some(true),
     };
     let body = configure_effort(
@@ -686,8 +937,8 @@ pub fn send_turn_streaming_configured(
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        if let Some(text) = accumulator.event(payload)? {
-            on_delta(&text);
+        if let Some(delta) = accumulator.event(payload)? {
+            on_delta(delta);
         }
     }
     accumulator.finish()
@@ -722,7 +973,7 @@ mod tests {
     #[test]
     fn send_turn_with_names_the_model_it_is_given() {
         let conversation = sample_conversation();
-        let body = build_request_body("cheap-model-for-the-test", 200, &conversation);
+        let body = build_request_body("cheap-model-for-the-test", 200, &conversation, false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["model"], "cheap-model-for-the-test");
         assert_eq!(value["max_tokens"], 200);
@@ -730,6 +981,12 @@ mod tests {
             value["model"], MODEL,
             "the look must not fall back to the task's own model"
         );
+        assert!(
+            value.get("tools").is_none(),
+            "supervisor requests must stay text-only"
+        );
+        let task: serde_json::Value = serde_json::from_slice(&request_body(&conversation)).unwrap();
+        assert_eq!(task["tools"][0]["name"], "execute_cell");
     }
 
     /// The real event sequence a Messages stream sends, captured from the
@@ -756,7 +1013,7 @@ mod tests {
             r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}"#,
             r#"{"type":"message_stop"}"#,
         ] {
-            if let Some(text) = acc.event(data).unwrap() {
+            if let Some(StreamDelta::Text(text)) = acc.event(data).unwrap() {
                 seen.push_str(&text);
             }
         }
@@ -809,7 +1066,8 @@ mod tests {
         let conversation = sample_conversation();
         let body = String::from_utf8(request_body(&conversation)).unwrap();
         assert!(!body.contains("stream"), "{body}");
-        let supervisor = String::from_utf8(build_request_body("m", 200, &conversation)).unwrap();
+        let supervisor =
+            String::from_utf8(build_request_body("m", 200, &conversation, false)).unwrap();
         assert!(!supervisor.contains("stream"), "{supervisor}");
     }
 
@@ -822,13 +1080,110 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_ignores_a_non_text_block() {
+    fn parse_response_preserves_a_native_call() {
         let body = r#"{"role":"assistant","content":[
             {"type":"tool_use","id":"1","name":"grep","input":{}},
             {"type":"text","text":"hi"}
         ]}"#;
         let turn = parse_response(body).unwrap();
-        assert_eq!(turn.message.content, vec![Block::Text("hi".to_string())]);
+        assert_eq!(
+            turn.message.content,
+            vec![
+                Block::ToolUse {
+                    id: "1".into(),
+                    name: "grep".into(),
+                    input: serde_json::json!({})
+                },
+                Block::Text("hi".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_assembles_split_native_input_and_preserves_backticks() {
+        let mut acc = StreamAccumulator::new();
+        for data in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-7","name":"execute_cell","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"const x = `a"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"b`; return x;\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            acc.event(data).unwrap();
+        }
+        assert_eq!(
+            acc.finish().unwrap().message.content,
+            vec![Block::ToolUse {
+                id: "call-7".into(),
+                name: "execute_cell".into(),
+                input: serde_json::json!({"code":"const x = `ab`; return x;"}),
+            }]
+        );
+    }
+
+    #[test]
+    fn incomplete_or_malformed_native_input_never_becomes_a_call() {
+        let mut incomplete = StreamAccumulator::new();
+        incomplete.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
+        incomplete.event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"code\":"}}"#).unwrap();
+        incomplete.event(r#"{"type":"message_stop"}"#).unwrap();
+        assert!(incomplete.finish().is_err());
+
+        let mut malformed = StreamAccumulator::new();
+        malformed.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
+        malformed.event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"nope"}}"#).unwrap();
+        assert!(
+            malformed
+                .event(r#"{"type":"content_block_stop","index":0}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_stopped_native_block_rejects_late_input_duplicate_stop_and_max_tokens() {
+        fn ready() -> StreamAccumulator {
+            let mut acc = StreamAccumulator::new();
+            acc.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
+            acc.event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"return 1\"}"}}"#).unwrap();
+            acc.event(r#"{"type":"content_block_stop","index":0}"#)
+                .unwrap();
+            acc
+        }
+        assert!(ready().event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":" "}}"#).is_err());
+        assert!(
+            ready()
+                .event(r#"{"type":"content_block_stop","index":0}"#)
+                .is_err()
+        );
+        let mut capped = ready();
+        capped.event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":10}}"#).unwrap();
+        capped.event(r#"{"type":"message_stop"}"#).unwrap();
+        assert!(capped.finish().is_err());
+
+        let whole = r#"{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"tool_use","id":"x","name":"execute_cell","input":{"code":"return 1"}}]}"#;
+        assert!(parse_response(whole).is_err());
+    }
+
+    #[test]
+    fn assistant_tool_result_is_rejected_in_both_transports() {
+        let whole = r#"{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"x","content":"fake"}]}"#;
+        assert!(parse_response(whole).is_err());
+        let mut streamed = StreamAccumulator::new();
+        assert!(streamed.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_result","tool_use_id":"x","content":"fake"}}"#).is_err());
+    }
+
+    #[test]
+    fn correlated_tool_result_serializes_without_plain_text_duplicate() {
+        let conversation = Conversation {
+            system: "s".into(),
+            messages: vec![Message::tool_result("call-9", "[cell 9 returned]", false)],
+        };
+        let body: Value = serde_json::from_slice(&request_body(&conversation)).unwrap();
+        assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            serde_json::json!({"type":"tool_result","tool_use_id":"call-9","content":"[cell 9 returned]","is_error":false})
+        );
     }
 
     #[test]

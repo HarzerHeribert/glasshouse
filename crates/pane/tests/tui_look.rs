@@ -203,7 +203,7 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    assert_eq!(slash_matches("/").len(), 20);
+    assert_eq!(slash_matches("/").len(), 23);
     assert_eq!(
         slash_matches("/mo"),
         vec![
@@ -688,7 +688,9 @@ fn code_is_formatted_locally_and_original_source_is_available_expanded() {
     state.pretty = false;
     let raw = text(&draw(200, 40, &state, &conversation, &Notebook::default()));
     assert!(raw.contains(source));
-    let pane::contract::Block::Text(stored) = &conversation.messages[1].content[0];
+    let pane::contract::Block::Text(stored) = &conversation.messages[1].content[0] else {
+        panic!("fixture must remain plain text")
+    };
     assert!(stored.contains(source));
 }
 
@@ -725,7 +727,7 @@ fn compact_view_hides_protocol_noise_and_keeps_actual_results() {
             Message::text(Role::User, "Read roman.py"),
             Message::text(
                 Role::Assistant,
-                "```pane\nread({path: 'roman.py'});\n```\n```pane\nreturn 'guess';\n```",
+                "```pane-edit\n{}\n```\n```pane\nreturn 'guess';\n```",
             ),
         ],
     };
@@ -1042,4 +1044,62 @@ fn activity_ribbons_use_reserved_space_and_reduced_motion_keeps_them_still() {
         state.activity = Activity::Idle;
         assert_eq!(screen_regions(first.area, &state).activity.height, 0);
     }
+}
+
+#[test]
+fn completion_framing_stays_hidden_during_streaming_and_in_the_transcript() {
+    let marker = pane::prompt::COMPLETE_MARKER;
+    let mut live = state();
+    live.compact = true;
+    for end in 1..=marker.len() {
+        live.streaming_text = Some(format!("VISIBLE_ANSWER\n{}", &marker[..end]));
+        let shown = text(&draw(100, 32, &live, &conversation(), &Notebook::default()));
+        assert!(shown.contains("VISIBLE_ANSWER"));
+        assert!(
+            !shown.contains("<!--"),
+            "framing leaked at byte {end}: {shown}"
+        );
+    }
+    live.streaming_text = None;
+    let finished = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Who are you?"),
+            Message::text(Role::Assistant, format!("VISIBLE_ANSWER\n{marker}")),
+        ],
+    };
+    let shown = text(&draw(100, 32, &live, &finished, &Notebook::default()));
+    assert_eq!(shown.matches("VISIBLE_ANSWER").count(), 1);
+    assert!(!shown.contains(marker));
+}
+
+#[test]
+fn ordered_action_blocks_do_not_leak_a_second_raw_code_block_into_narration() {
+    let mut live = state();
+    live.compact = true;
+    let task = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Read two files"),
+            Message::text(
+                Role::Assistant,
+                "BEFORE_PROSE\n```pane\nconst a = await read({path: 'a'});\n```\nBETWEEN_PROSE\n```pane\nconst hidden_second_source = await read({path: 'b'});\n```\nAFTER_PROSE",
+            ),
+        ],
+    };
+    let notebook = Notebook {
+        cells: vec![CellView {
+            execution: Some("read a · returned\nread b · returned".into()),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    };
+    let shown = text(&draw(120, 42, &live, &task, &notebook));
+    for prose in ["BEFORE_PROSE", "BETWEEN_PROSE", "AFTER_PROSE"] {
+        assert_eq!(shown.matches(prose).count(), 1, "{shown}");
+    }
+    assert!(
+        !shown.contains("hidden_second_source"),
+        "second source leaked out of collapsed actions: {shown}"
+    );
 }

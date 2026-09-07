@@ -7,52 +7,57 @@ same worked turn from this side, and the two must agree.
 
 ## 1. The message layout
 
-One Anthropic Messages request per turn. The system block is stable for the
-whole task, with the configured request model appended. A request-only
+One Anthropic Messages request per turn. The base system block is sampled at task start and stays stable between
+inferences, with the configured request model appended. Newly applicable
+directory instructions are appended only at an execution boundary. A request-only
 context block marks the current user request and its fresh runtime; the
 user's saved text is unchanged. The provider can cache the stable prefix. The
 conversation carries alternating assistant cells and runtime results.
 
-    system    : preamble · tool declarations · project instructions
+    system    : preamble · tool declarations · scoped project instructions · environment
     user[0]   : the task
-    assistant : ```pane block (cell 1)
-    user[1]   : cell result 1
-    assistant : ```pane block (cell 2)
+    assistant : native execute_cell tool_use (cell 1)
+    user[1]   : correlated tool_result for cell 1
+    assistant : native execute_cell tool_use (cell 2)
     …
 
-A plain-language assistant answer may end the request without a program. No tool-use blocks, no tool-result blocks,
-no second serialization of any object (61E's last line, and it is structural
-here: the runtime has no code path that writes a payload into a message).
+A plain-language assistant answer ends the request only with the explicit completion marker defined below. Calls and results remain provider-native blocks with the original call id; the result is never duplicated into plain text.
 
 ## 2. The system preamble, verbatim
 
-    You are Pane, a coding assistant. Answer conversational questions directly
-    in prose. To act with tools, write TypeScript in exactly one fenced `pane`
-    block:
+    You are Pane, a coding assistant. Answer conversational questions naturally.
+    To act with tools, call `execute_cell` with one TypeScript program. It is the
+    only provider-native tool. `read`, `glob`, `grep`, `write`, and `bash` are
+    TypeScript functions callable only inside `execute_cell.code`. While you
+    are constructing that call, none of THIS cell has executed. Code inside the
+    cell may await tools and branch on their actual returned values. Batch
+    deterministic dependent operations in one substantial program when useful;
+    there is no smaller arbitrary cell limit. After submitting the call, stop and
+    wait for its correlated tool result before interpreting outcomes. Never invent
+    output: prose, comments, and anticipated branches are not runtime evidence.
 
-    ```pane
-    const file = await read({path: "example.txt"});
-    console.log(file.text);
-    ```
+    A cell is validated before it runs. A parse error runs nothing and may offer
+    `pane-edit`; a return, yield, or throw stops later code. Tool results are live
+    objects. Inspect bounded excerpts rather than printing whole files; the handle
+    table contains previews, not full payloads.
 
-    Use triple backticks, not XML tags. Only `pane` code executes; a syntax
-    error may offer `pane-edit` to amend it.
-    Tool results are live objects. Use their declared fields in code; the
-    handle table shows bounded previews, not full payloads.
+    Bindings persist between cells of this user request; redeclaring replaces
+    them. Each new user request starts a fresh runtime. Earlier requests are
+    history, not unfinished work. Work on the current request, including its
+    requested tests. Running off the end or `yieldNow(reason)` gives results
+    and another turn. A top-level `return` ends the task; return an answer
+    grounded in results you observed.
 
-    Top-level bindings persist between cells of the same user request only;
-    redeclaring replaces them. A new user request starts a fresh runtime.
-    Earlier requests are history, not unfinished work. Answer the current
-    request; a prose answer ends the request without running tools.
-    Running off the end yields results and another turn. `yieldNow(reason)`
-    also yields. A top-level `return` ends the task; return a string to answer
-    the person, grounded in results you actually observed.
-    To interpret file contents, read and yield first, then answer from the
-    next turn's preview. You may return values computed directly from objects.
+    To finish without code, end your prose with this standalone line:
+    <!-- pane:done -->
+    It is hidden from the person. Prose without that line is progress, not
+    completion. Do not finish while merely announcing work you have yet to do.
+    To interpret a file, inspect and yield first, then answer from the feedback.
+    You may return values computed directly from objects.
 
-    A thrown error comes back with its source position and completed bindings.
-    Continue from that state; failed or skipped calls did not succeed.
-    PermissionDenied is final: code cannot widen the session's sandbox grant.
+    A thrown error carries its position and completed bindings. Continue from
+    that state; failed or skipped calls did not succeed. PermissionDenied is
+    final: code cannot widen the session's sandbox grant.
 
 ## 3. Tool declarations are TypeScript, one line of prose each
 
@@ -87,6 +92,26 @@ mapped honestly onto a harness with one action channel:
 `runtime-contract.md` §4 relies on to re-materialise a handle after
 `pane resume`, and it is the tool's own claim, never inferred.
 
+### Bounded source inspection
+
+The result of `read` has an `excerpt({start?, lines?})` method over its already
+loaded `lines` array. It adds no filesystem access. `start` is one-based;
+`lines` defaults to 400 and caps at 1,000. `console.log(file.excerpt(...).text)`
+prints at most 24,576 Unicode scalar values, including the line range and next
+options for the same File. Ordinary lines are paginated whole. A line too
+large for one page is explicitly marked partial and names a bounded UTF-16
+slice of the immediate continuation (at most 1,600 units); the source itself
+remains intact in the handle. Metadata also supplies `start`, `end`,
+`lineCount`, `next`, and `truncatedLines`. A File with no further lines has
+`next: null`.
+
+Console truncation retains a true suffix and says what was omitted. Both the
+per-string bound and the final aggregate tail reserve space for their omission
+marker; an excerpt fitting its documented character limit is preserved by the
+canonical console call, including astral Unicode text. The console still has
+a bounded transcript, so logging many excerpts in one cell may drop earlier
+ones with an explicit notice.
+
 ## 4. The handle table
 
 Rendered fresh every turn, after the tools and before the budget. Empty on
@@ -99,9 +124,11 @@ Provenance is not shown in the table. A stale handle carries the one word
 `stale` and nothing else; the model gets the recorded call in the
 `StaleHandle` message if it touches one.
 
-## 5. The block delimiter
+## 5. The native execution handoff
 
-The model's program is a fenced block whose info string is exactly `pane`:
+The primary action channel is the provider-native `execute_cell` tool. Its input schema is exactly `{code: string}`. The assistant's generation ends at the call; Pane executes only the complete, decoded input and returns a correlated `tool_result` before the model can interpret it. Malformed or truncated JSON never executes. Unknown or multiple calls remain explicit typed calls so the session can reject each without silently dropping it.
+
+Legacy fenced `pane` blocks remain an input compatibility and repair path, not the advertised action channel:
 
     ```pane
     const report = await cargo_test({ target: "firewall_bridge" });
@@ -111,17 +138,28 @@ The model's program is a fenced block whose info string is exactly `pane`:
 constantly, and a parser that executed them would run the model's
 explanations. The language inside is TypeScript; the tag names the channel.
 
-**Exactly one such block per assistant message.** A message with two is a
-protocol error: **neither** runs, and the model is told
-`two pane blocks in one turn; send one`. Running the first and ignoring the
-second is the silently-wrong reading — the second is usually the one the model
-meant.
+**One or more complete `pane` blocks run in source order as one cell.** The
+whole combined source is compiled and preflighted before any call starts.
+A return, explicit yield, or uncaught error stops subsequent code. This is
+not transactional rollback: effects completed before a runtime error remain.
+Ordinary `bash`, `ts`, or other Markdown examples never execute. An unclosed
+Pane block is invalid and runs nothing. Mixed/multiple repair blocks are
+still ambiguous and run nothing. The parser bounds source size and block count.
 
-A message with no executable `pane` block is a direct answer and ends the
-request without running a cell. Markdown examples are displayed, never run.
-Malformed executable attempts (such as `<php-pane>` tags) are rejected and
-receive format feedback; repeated malformed attempts are bounded. Ordinary
-answers must not be sent back to the model demanding executable code.
+A prose answer ends the request only with `<!-- pane:done -->` on its final
+standalone line, outside all code fences. The marker is hidden in the UI but
+retained in the raw response. This is an explicit completion signal, not a
+claim that tests passed. A program's top-level `return` is the other completion
+signal. Unmarked prose receives continuation feedback, without any semantic
+classifier guessing whether a sentence describes completed work. Three
+consecutive replies without a program or completion get one final opportunity;
+failing to complete then ends with an incomplete-task error, not success.
+Conversational replies stay prose and require no executable cell.
+
+The user approved this revision after the 2026-09-06 benchmark exposed a
+response that described regression tests but never wrote them, and seven
+multi-block responses that ran nothing. Existing observations remain frozen;
+the changed protocol is evaluated in a separate benchmark stage.
 
 ### Repairing a parse-failed cell
 
@@ -146,7 +184,7 @@ The original record is immutable; the new record stores the complete amended
 source. A new parse error offers the new cell ID. No corrected source copy is
 added to the next model result. Invalid edits count toward bounded malformed
 reply handling. A message containing both `pane` and `pane-edit`, or multiple
-blocks of either kind, runs neither. The same repair path is available to
+`pane-edit` blocks, runs neither. The same repair path is available to
 subagents. A repair is protocol data, not a reentrant JavaScript function.
 
 ## 6. The result block, and the budget line
@@ -160,7 +198,7 @@ this order and each omitted when empty:
     …the table from §4…
 
     ## stdout
-    …last 512 tokens of the program's console output…
+    …last 8,192 estimated tokens of the program's console output…
 
     ## Budget
     turn cap 8,000 · task 3,412/400,000 · cells 1/40
@@ -242,16 +280,11 @@ UI and never enters a message.
 Two consequences worth stating because they are easy to get wrong later:
 `/model auto` is a *routing* instruction to the gateway, carried in the
 request's model field, and it does not change a byte of the system block; and
-a firewall reduction on the relayed path
-(`crates/glasshouse/src/firewall/mod.rs:284`) can never apply to pane, because
-pane sends no tool-result blocks for it to reduce.
+a firewall reduction on the relayed path must preserve Pane's correlated cell
+result semantics; the same request body is used through the gateway and direct.
 
 ## 9. What this contract does not decide
 
-- **The project instruction block's assembly** — how `CLAUDE.md`, `AGENTS.md`
-  and the skills directories are concatenated into the system block's third
-  section. That is 61C's drop-in package; this contract fixes only its
-  position and that it is inside the cached system block.
 - **Slash-command rendering.** `/handles`, `/budget` and the rest are TUI
   commands; whether any of them injects text is 61C's.
 - **Sampling parameters, thinking budgets and cache breakpoints.** These are
@@ -269,7 +302,31 @@ adds no section to §6's result block, and it never becomes a turn of its own. A
 empty and whose user input is empty does not happen; the runtime waits rather than send the request.
 
 CONTRACT
-behaviour:  The model receives one cached system block of preamble, TypeScript tool declarations and project instructions, and answers each turn with exactly one ```pane fenced TypeScript program; it never sends or receives a tool-use or tool-result block.
-invariant:  The serialised request body is byte-identical with and without the Glasshouse gateway hop, and a message carrying two `pane` blocks executes neither.
-path:       `crates/pane/src/prompt/`: the renderer that assembles the system block, the handle table and the budget line, and the single parser that extracts the one `pane` block from an assistant message.
+behaviour:  The model receives one cached system block of preamble, TypeScript tool declarations and project instructions, and acts through one provider-native `execute_cell` call whose correlated result arrives before another inference.
+invariant:  The serialised request body is byte-identical with and without the Glasshouse gateway hop; incomplete native input and malformed legacy fences execute nothing.
+path:       `crates/pane/src/prompt/` renders the system and feedback; `crates/pane/src/wire.rs` preserves native calls, results and streaming input correlation.
 test:       `crates/pane/tests/prompt_bytes.rs::the_worked_turn_renders_byte_for_byte` — a golden file of §7's four messages, plus `the_gateway_hop_changes_no_byte` asserting equality of the serialised body across both base URLs.
+
+
+### Request history and live state
+
+New runtime feedback has two renderer-produced forms: its full observation
+and its historical form without handle, plan and budget snapshots. Requests
+keep the newest live snapshot for the current task and use the historical form
+for older feedback. Errors, stdout, yield reasons, syntax repair hints and
+supervisor guidance remain. A new task does not present the previous task's
+live handles as current.
+
+This is a request-only projection using trusted renderer provenance. User or
+assistant text resembling a section header is not classified as runtime state;
+stdout with such headings remains intact. The UI and append-only rollout keep
+the full original observations; an optional historical field preserves the
+projection across resume. Older records without this provenance
+are retained conservatively rather than guessed from their text. Historical
+handle previews are intentionally superseded; current live objects remain
+available through handles and explicit inspection.
+
+An overflow of this already-projected request creates one checkpoint and retries
+once, without replaying cells or discarding live runtime bindings. The rollout
+marks that context boundary explicitly; resume starts request history at the
+latest checkpoint while retaining all earlier rows in the append-only log.

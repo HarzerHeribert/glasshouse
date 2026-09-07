@@ -8,6 +8,7 @@
 
 pub mod bindings;
 pub mod cell;
+pub(crate) mod excerpt;
 pub mod handles;
 pub mod isolate;
 pub mod marshal;
@@ -15,3 +16,5 @@ pub mod outcome;
 pub mod preview;
 pub mod repair;
 pub mod state;
+
+pub mod instructions;

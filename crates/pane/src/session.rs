@@ -74,13 +74,9 @@ const EVENT_WAIT: Duration = Duration::from_millis(2_500);
 /// a frame of its deadline, long enough that waiting costs nothing.
 const EVENT_POLL: Duration = Duration::from_millis(25);
 
-/// §5's answer to a message that carried no program.
-const NO_PROGRAM: &str = "no program ran; send one pane block";
-
-/// §5's answer to a message that carried two. **Neither runs**, and the
-/// sentence is the contract's own: running the first is the silently-wrong
-/// reading, because the second is usually the one the model meant.
-const TWO_BLOCKS: &str = "two pane blocks in one turn; send one";
+/// Ordinary prose cannot silently finish unfinished action work.
+const NO_PROGRAM: &str = prompt::CONTINUE_WORK;
+const TWO_BLOCKS: &str = "Mixed or multiple pane-edit blocks are ambiguous; send one repair or ordinary Pane code. Nothing ran.";
 
 /// The class a cancelled call throws with (`bindings.rs`'s `Cancelled`), read
 /// off the cell's own trajectory so the session knows a Ctrl-C was delivered.
@@ -344,6 +340,15 @@ fn write_turn(
     rollout.record_turn(role, text)
 }
 
+fn write_message(
+    interrupt: &Interrupter,
+    rollout: &mut Rollout,
+    message: &Message,
+) -> io::Result<()> {
+    let _line = interrupt.writing();
+    rollout.record_message(message)
+}
+
 fn write_cell(
     interrupt: &Interrupter,
     rollout: &mut Rollout,
@@ -437,18 +442,17 @@ fn default_rollout_path(root: &std::path::Path) -> PathBuf {
 /// Map line 2448 fixes what is loaded, not how it is joined; everything from
 /// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
 /// byte, so there is no second spelling of the contract here to drift from it.
-fn build_system_prompt(project: &ProjectConfig, profile: &Profile) -> String {
-    let instructions = project
-        .instructions
-        .iter()
-        .map(|(_, text)| text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    prompt::render_system(
+fn build_system_prompt(_project: &ProjectConfig, profile: &Profile) -> String {
+    // Configuration/grants remain session-scoped; guidance is read fresh.
+    let instructions = crate::project::instructions::root(profile);
+    let mut system = prompt::render_system(
         &instructions,
         &registry::ALL.iter().collect::<Vec<_>>(),
         &session_facts(profile),
-    )
+    );
+    system.push_str("\n\n");
+    system.push_str(&crate::project::orientation::collect(profile));
+    system
 }
 
 /// The compiled profile, as the model needs to read it.
@@ -487,7 +491,10 @@ fn message_text(message: &Message) -> String {
     message
         .content
         .iter()
-        .map(Block::text)
+        .filter_map(|block| match block {
+            Block::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("")
 }
@@ -504,6 +511,10 @@ fn message_text(message: &Message) -> String {
 struct Transcript {
     conversation: Conversation,
     notebook: Notebook,
+    /// Provider-only reset point after context overflow. The visible and
+    /// persisted conversation remains complete.
+    provider_checkpoint: Option<String>,
+    provider_start: usize,
 }
 
 /// **Nothing in the notebook is a live object.** The runtime hands out a
@@ -605,14 +616,28 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
 
     let resuming = rollout_path.exists();
-    let conversation = if resuming {
-        rollout::resume(&rollout_path)
-            .map_err(|e| format!("could not resume {}: {e}", rollout_path.display()))?
+    let (conversation, provider_checkpoint, provider_start) = if resuming {
+        let conversation = rollout::resume(&rollout_path)
+            .map_err(|e| format!("could not resume {}: {e}", rollout_path.display()))?;
+        let checkpoint = rollout::resume_checkpoint(&rollout_path).map_err(|e| {
+            format!(
+                "could not resume checkpoint {}: {e}",
+                rollout_path.display()
+            )
+        })?;
+        let (provider_checkpoint, provider_start) = checkpoint
+            .map(|(text, start)| (Some(text), start))
+            .unwrap_or((None, 0));
+        (conversation, provider_checkpoint, provider_start)
     } else {
-        Conversation {
-            system: build_system_prompt(&project, &profile),
-            messages: Vec::new(),
-        }
+        (
+            Conversation {
+                system: build_system_prompt(&project, &profile),
+                messages: Vec::new(),
+            },
+            None,
+            0,
+        )
     };
 
     let mut rollout = Rollout::create(&rollout_path, session_id.clone(), &conversation.system)
@@ -621,9 +646,19 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // A resumed conversation's cells are not replayed (`runtime-contract.md`
     // §4), so the notebook starts empty and pads: an earlier cell renders
     // with no view of its own rather than with the next task's.
+    let mut notebook = Notebook::default();
+    if resuming {
+        for (ordinal, view) in rollout::resume_views(&rollout_path)
+            .map_err(|e| format!("could not resume views {}: {e}", rollout_path.display()))?
+        {
+            notebook.set(ordinal, view);
+        }
+    }
     let mut transcript = Transcript {
         conversation,
-        notebook: Notebook::default(),
+        notebook,
+        provider_checkpoint,
+        provider_start,
     };
 
     glasshouse::emit_lifecycle(&glasshouse, &session_id, LifecycleEvent::SessionStart);
@@ -926,6 +961,9 @@ struct Step {
     /// `return` is answered with nothing at all, because nothing further is
     /// asked of the model (`runtime-contract.md` §1).
     answer: Option<String>,
+    /// Same feedback without its replaceable state snapshots.
+    historical: Option<String>,
+    native_result: Option<Message>,
     /// The task's terminal response (`runtime-contract.md` §9.2): rendered
     /// and kept as the assistant's own turn, with no request after it.
     response: Option<String>,
@@ -954,6 +992,25 @@ fn run_task(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
+    transcript.conversation.system = build_system_prompt(session.project, session.profile);
+    {
+        let _line = session.interrupt.writing();
+        rollout
+            .record_context(&transcript.conversation.system)
+            .map_err(|e| format!("could not record task context: {e}"))?;
+    }
+
+    // A checkpoint describes one runtime's live handles. A later task has a
+    // fresh runtime, but must not resend the oversized history that forced
+    // the checkpoint. Replace only the provider summary with a truthful
+    // empty-runtime boundary and retain the complete visible conversation.
+    if transcript.provider_checkpoint.is_some() {
+        transcript.provider_checkpoint = Some(format!(
+            "Earlier conversation was omitted because it no longer fit. This is a new task with a fresh runtime: no prior handles are live and nothing from the earlier task should be continued.\n\n## The task\n{}",
+            task.trim()
+        ));
+        transcript.provider_start = transcript.conversation.messages.len();
+    }
     glasshouse::emit_lifecycle(
         session.glasshouse,
         session.id,
@@ -1018,7 +1075,8 @@ fn run_task(
         DEFAULT_HEAP_LIMIT_BYTES,
         Duration::from_secs(session.config.limits.cell_wall_clock_s),
     )
-    .with_response_byte_cap(session.config.limits.response_bytes);
+    .with_response_byte_cap(session.config.limits.response_bytes)
+    .with_instruction_context();
     let mut budget = TaskBudget::new(
         session.config.limits.task_tokens,
         session.config.limits.cells,
@@ -1029,6 +1087,7 @@ fn run_task(
     // cancelled with it below.
     let mut window = Window::new(WindowConfig::default());
     let mut final_turn = false;
+    let mut incomplete;
     let mut prose_turns = 0u32;
     let supervisor = Supervisor::new();
     let supervisor_active =
@@ -1066,16 +1125,26 @@ fn run_task(
         // becomes a task that can no longer make any request at all. Ending
         // here loses this turn; appending loses the session. Observed
         // 2026-09-06: `messages.13` empty, then 400 on every retry.
-        if assistant_text.trim().is_empty() {
+        if assistant_text.trim().is_empty()
+            && !turn
+                .message
+                .content
+                .iter()
+                .any(|block| matches!(block, Block::ToolUse { .. }))
+        {
             return Err(
                 "the model returned an empty reply; the task ends here rather than repeating it \
                  on every later request"
                     .to_string(),
             );
         }
-        transcript.conversation.messages.push(turn.message);
-        write_turn(session.interrupt, rollout, Role::Assistant, &assistant_text)
+        let assistant_message = turn.message;
+        write_message(session.interrupt, rollout, &assistant_message)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
+        transcript
+            .conversation
+            .messages
+            .push(assistant_message.clone());
 
         budget.add(&served, turn.usage.as_ref(), estimate);
 
@@ -1115,13 +1184,22 @@ fn run_task(
             ui.publish(transcript, &served, tui::Activity::Executing);
         }
         let mut step = act_on(
-            &assistant_text,
+            &assistant_message,
             &mut runtime,
             &mut budget,
             rollout,
             session.interrupt,
             session.profile,
         )?;
+        let instruction_boundary = runtime.pending_instructions();
+        if let Some(pending) = &instruction_boundary {
+            transcript.conversation.system.push_str("\n\n");
+            transcript.conversation.system.push_str(&pending.text);
+            let _line = session.interrupt.writing();
+            rollout
+                .record_context(&transcript.conversation.system)
+                .map_err(|e| format!("could not record directory instructions: {e}"))?;
+        }
         prose_turns = if step.prose { prose_turns + 1 } else { 0 };
         if let Some(record) = step.record.take() {
             if delivered_the_interrupt(&record) {
@@ -1160,24 +1238,13 @@ fn run_task(
             }
         }
 
-        // §9.2: the terminal response is the assistant's own turn -- the same
-        // line an assistant message has always written, so `resume` rebuilds
-        // it with no new reader -- and it is written after the cell line
-        // `act_on` already appended, so the rollout ends cell, then reply.
-        if let Some(response) = &step.response {
-            transcript
-                .conversation
-                .messages
-                .push(Message::text(Role::Assistant, response));
-            write_turn(session.interrupt, rollout, Role::Assistant, response)
-                .map_err(|e| format!("could not record the terminal response: {e}"))?;
-        }
-
         // The flag is read before this turn decorates it, so the turn that
         // carries the exhausted preamble is sent, answered and only then
         // ends the task -- §6's "the only permitted action is a top-level
         // `return`" needs that turn to actually happen.
-        let stop = step.answer.is_none() || final_turn;
+        let completed = step.answer.is_none();
+        let stop = completed || final_turn;
+        incomplete = stop && !completed;
         let exhausted = if budget.spent() {
             Some(ExhaustedReason::TaskBudget)
         } else if prose_turns >= PROSE_TURN_CAP {
@@ -1189,6 +1256,9 @@ fn run_task(
             step.answer = step
                 .answer
                 .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble(reason)));
+            step.historical = step
+                .historical
+                .map(|history| format!("{}\n\n{history}", prompt::exhausted_preamble(reason)));
             final_turn = true;
         }
 
@@ -1199,26 +1269,72 @@ fn run_task(
             && let Some(answer) = step.answer.take()
         {
             step.answer = Some(format!("supervisor: {reason}\n{answer}"));
+            step.historical = step
+                .historical
+                .map(|history| format!("supervisor: {reason}\n{history}"));
         }
 
         step.view.answered = step.answer.is_some();
         transcript.notebook.tokens = budget.tokens();
-        transcript.notebook.set(ordinal, step.view);
+        transcript.notebook.set(ordinal, step.view.clone());
+        {
+            let _line = session.interrupt.writing();
+            rollout
+                .record_view(ordinal, &step.view)
+                .map_err(|e| format!("could not record the cell view: {e}"))?;
+        }
 
-        if let Some(answer) = &step.answer {
+        if let Some(result) = step.native_result.take() {
+            transcript.conversation.messages.push(result.clone());
+            write_message(session.interrupt, rollout, &result)
+                .map_err(|e| format!("could not record the native cell result: {e}"))?;
+        } else if let Some(answer) = &step.answer {
             transcript
                 .conversation
                 .messages
-                .push(Message::text(Role::User, answer));
-            write_turn(session.interrupt, rollout, Role::User, answer)
-                .map_err(|e| format!("could not record the runtime's answer: {e}"))?;
+                .push(match &step.historical {
+                    Some(history) => Message::runtime(answer, history),
+                    None => Message::text(Role::User, answer),
+                });
+            {
+                let _line = session.interrupt.writing();
+                rollout
+                    .record_feedback(Role::User, answer, step.historical.as_deref())
+                    .map_err(|e| format!("could not record the runtime's answer: {e}"))?;
+            }
+        }
+
+        if let Some(pending) = instruction_boundary {
+            if pending.fatal {
+                runtime.end_task();
+                render(transcript, &served, session, tui::Activity::Failed);
+                return Err(format!(
+                    "Directory instructions could not be loaded completely. {}",
+                    pending.text
+                ));
+            }
+            // This acknowledges delivery, never execution or a permission change.
+            runtime.acknowledge_instructions();
+        }
+
+        // A native call must be paired before any later assistant content,
+        // including the synthetic terminal display for a top-level return.
+        if let Some(response) = &step.response {
+            transcript
+                .conversation
+                .messages
+                .push(Message::text(Role::Assistant, response));
+            write_turn(session.interrupt, rollout, Role::Assistant, response)
+                .map_err(|e| format!("could not record the terminal response: {e}"))?;
         }
 
         render(
             transcript,
             &served,
             session,
-            if stop {
+            if incomplete {
+                tui::Activity::Failed
+            } else if stop {
                 tui::Activity::Complete
             } else {
                 tui::Activity::Thinking
@@ -1236,7 +1352,14 @@ fn run_task(
     // thread is joined, so nothing this task started is still running when
     // the isolate that could have read its result is gone.
     bg::shutdown(session.id);
-    Ok(())
+    if incomplete {
+        Err(
+            "The task stopped without confirmed completion; requested work may be unfinished."
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
 }
 
 /// §4's delivery decision for one turn: the batch this turn carries, or
@@ -1278,96 +1401,196 @@ fn next_batch(window: &mut Window, session: &SessionId, budget: Duration) -> Opt
 }
 
 /// `model-contract.md` §5 applied to one assistant message: one `pane` block
-/// is a program and runs, two run neither, and anything else is prose.
+/// blocks form one validated program; only explicit completion ends prose.
 ///
 /// **Nothing in `assistant_text` reaches a shell.** The one thing extracted
 /// from it is a program, and the only thing that ever receives a program is
 /// [`Runtime::run_cell`]; every tool that program calls goes through
 /// `tools::invoke` and the session's sandbox from inside the isolate.
 fn act_on(
-    assistant_text: &str,
+    assistant: &Message,
     runtime: &mut Runtime,
     budget: &mut TaskBudget,
     rollout: &mut Rollout,
     interrupt: &Interrupter,
     profile: &Profile,
 ) -> Result<Step, String> {
-    let (source, repaired_from) = match prompt::extract_program(assistant_text) {
-        Extracted::Program(source) => (source, None),
-        Extracted::Edit(json) => {
-            let patched = runtime
-                .syntax_failure()
-                .ok_or_else(|| "No syntax-failed cell is available in this task.".to_string())
-                .and_then(|failed| {
-                    failed
-                        .apply(&json)
-                        .map(|source| (source, Some(failed.cell)))
-                });
-            match patched {
-                Ok(patched) => patched,
-                Err(error) => {
-                    let hint = runtime
-                        .syntax_failure()
-                        .map(|failed| failed.hint())
-                        .unwrap_or_default();
-                    return Ok(Step {
-                        answer: Some(format!("CellEditError: {error} Nothing ran.\n{hint}")),
-                        response: None,
-                        prose: true,
-                        record: None,
-                        view: CellView {
-                            error: Some(CellError {
-                                class: "CellEditError".into(),
-                                message: error,
-                                line: None,
-                                column: None,
-                            }),
-                            ..CellView::default()
-                        },
-                    });
-                }
-            }
-        }
-        // §5: the task does not advance and the cell counter does not move.
-        // The screen still shows the table, because it is still what the
-        // isolate holds -- an output region saying `(no outputs)` beside live
-        // handles would be the screen disagreeing with the message sent in
-        // the same breath.
-        Extracted::Prose
-            if !assistant_text.contains("<php-pane>") && !assistant_text.contains("```pane") =>
-        {
+    let assistant_text = message_text(assistant);
+    let calls: Vec<_> = assistant
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            Block::ToolUse { id, name, input } => Some((id, name, input)),
+            _ => None,
+        })
+        .collect();
+    if calls.len() > 1 || calls.first().is_some_and(|call| call.1 != "execute_cell") {
+        let explanation = if calls.len() > 1 {
+            "ProtocolError: exactly one execute_cell call is allowed; nothing ran."
+        } else {
+            "ProtocolError: unknown tool call; nothing ran."
+        };
+        let content = calls
+            .iter()
+            .map(|(id, _, _)| Block::ToolResult {
+                tool_use_id: (*id).clone(),
+                content: explanation.to_string(),
+                is_error: true,
+            })
+            .collect();
+        return Ok(Step {
+            answer: Some(explanation.to_string()),
+            historical: None,
+            native_result: Some(Message {
+                role: Role::User,
+                content,
+                historical: None,
+            }),
+            response: None,
+            prose: true,
+            record: None,
+            view: CellView {
+                error: Some(CellError {
+                    class: "ProtocolError".into(),
+                    message: explanation.into(),
+                    line: None,
+                    column: None,
+                }),
+                ..CellView::default()
+            },
+        });
+    }
+    let native = calls.first().copied();
+    let (source, repaired_from) = if let Some((id, _, input)) = native {
+        let source = input
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get("code"))
+            .and_then(serde_json::Value::as_str);
+        let Some(source) = source else {
+            let explanation = "ProtocolError: execute_cell input must be exactly {\"code\": string}; nothing ran.";
             return Ok(Step {
-                answer: None,
-                response: None,
-                prose: false,
-                record: None,
-                view: CellView::default(),
-            });
-        }
-        Extracted::Prose => {
-            let table = runtime.render_handles();
-            return Ok(Step {
-                answer: Some(unchanged_table(&table)),
+                answer: Some(explanation.into()),
+                historical: None,
+                native_result: Some(Message::tool_result(id.clone(), explanation, true)),
                 response: None,
                 prose: true,
                 record: None,
                 view: CellView {
-                    table: Some(table),
+                    error: Some(CellError {
+                        class: "ProtocolError".into(),
+                        message: explanation.into(),
+                        line: None,
+                        column: None,
+                    }),
                     ..CellView::default()
                 },
             });
-        }
-        Extracted::TwoBlocks => {
-            return Ok(Step {
-                answer: Some(TWO_BLOCKS.to_string()),
-                response: None,
-                prose: assistant_text.contains("```pane-edit"),
-                record: None,
-                view: CellView {
-                    table: Some(runtime.render_handles()),
-                    ..CellView::default()
-                },
-            });
+        };
+        (source.to_string(), None)
+    } else {
+        match prompt::extract_program(&assistant_text) {
+            Extracted::Program(source) => (source, None),
+            Extracted::Edit(json) => {
+                let patched = runtime
+                    .syntax_failure()
+                    .ok_or_else(|| "No syntax-failed cell is available in this task.".to_string())
+                    .and_then(|failed| {
+                        failed
+                            .apply(&json)
+                            .map(|source| (source, Some(failed.cell)))
+                    });
+                match patched {
+                    Ok(patched) => patched,
+                    Err(error) => {
+                        let hint = runtime
+                            .syntax_failure()
+                            .map(|failed| failed.hint())
+                            .unwrap_or_default();
+                        return Ok(Step {
+                            answer: Some(format!("CellEditError: {error} Nothing ran.\n{hint}")),
+                            historical: None,
+                            native_result: None,
+                            response: None,
+                            prose: true,
+                            record: None,
+                            view: CellView {
+                                error: Some(CellError {
+                                    class: "CellEditError".into(),
+                                    message: error,
+                                    line: None,
+                                    column: None,
+                                }),
+                                ..CellView::default()
+                            },
+                        });
+                    }
+                }
+            }
+            // §5: the task does not advance and the cell counter does not move.
+            // The screen still shows the table, because it is still what the
+            // isolate holds -- an output region saying `(no outputs)` beside live
+            // handles would be the screen disagreeing with the message sent in
+            // the same breath.
+            Extracted::Prose if prompt::completion_text(&assistant_text).is_some() => {
+                return Ok(Step {
+                    answer: None,
+                    historical: None,
+                    native_result: None,
+                    response: None,
+                    prose: false,
+                    record: None,
+                    view: CellView::default(),
+                });
+            }
+            Extracted::Invalid(error) => {
+                return Ok(Step {
+                    answer: Some(format!("ProtocolError: {error} Nothing ran.")),
+                    historical: None,
+                    native_result: None,
+                    response: None,
+                    prose: true,
+                    record: None,
+                    view: CellView {
+                        error: Some(CellError {
+                            class: "ProtocolError".into(),
+                            message: error,
+                            line: None,
+                            column: None,
+                        }),
+                        ..CellView::default()
+                    },
+                });
+            }
+            Extracted::Prose => {
+                let table = runtime.render_handles();
+                return Ok(Step {
+                    answer: Some(unchanged_table(&table)),
+                    historical: Some(NO_PROGRAM.to_string()),
+                    native_result: None,
+                    response: None,
+                    prose: true,
+                    record: None,
+                    view: CellView {
+                        table: Some(table),
+                        ..CellView::default()
+                    },
+                });
+            }
+            Extracted::TwoBlocks => {
+                return Ok(Step {
+                    answer: Some(TWO_BLOCKS.to_string()),
+                    historical: None,
+                    native_result: None,
+                    response: None,
+                    prose: true,
+                    record: None,
+                    view: CellView {
+                        table: Some(runtime.render_handles()),
+                        ..CellView::default()
+                    },
+                });
+            }
         }
     };
 
@@ -1381,9 +1604,10 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
-        executed_source: repaired_from.map(|_| source.clone()),
+        executed_source: (native.is_some() || repaired_from.is_some()).then(|| source.clone()),
         repaired_from,
         changes,
+        call_count: Some(record.calls.len()),
         execution: Some(if record.calls.is_empty() {
             "No tool calls ran in this cell.".into()
         } else {
@@ -1488,17 +1712,38 @@ fn act_on(
     // §1: the task ends with a `return` and nothing further is asked of the
     // model; a yield and a throw are answered. The outcome's own predicate
     // decides, so there is no second reading of §1 here to drift from it.
-    let answer = (!outcome.ends_the_task()).then(|| {
-        let mut answer = prompt::render_result(&result);
+    let feedback = |mut answer: String| {
         if let Some(failed) = runtime.syntax_failure() {
             answer.push_str("\n\n");
             answer.push_str(&failed.hint());
         }
         answer
-    });
+    };
+    let answer = (!outcome.ends_the_task()).then(|| feedback(prompt::render_result(&result)));
+    let historical =
+        (!outcome.ends_the_task()).then(|| feedback(prompt::render_result_history(&result)));
 
+    let native_result = native.map(|(id, _, _)| {
+        let with_return = |mut text: String| {
+            if let Some(value) = &response {
+                text.push_str("\n\n## Return\n");
+                text.push_str(value);
+            }
+            text
+        };
+        let full = feedback(with_return(prompt::render_result(&result)));
+        let history = feedback(with_return(prompt::render_result_history(&result)));
+        Message::runtime_tool_result(
+            id.clone(),
+            full,
+            matches!(outcome, CellOutcome::Threw { .. }),
+            history,
+        )
+    });
     Ok(Step {
         answer,
+        historical,
+        native_result,
         response,
         prose: false,
         record: Some(record),
@@ -1514,24 +1759,10 @@ fn unchanged_table(table: &str) -> String {
     format!("## Handles\n{shown}\n\n{NO_PROGRAM}")
 }
 
-/// The turn's cost when the gateway reported none: `estimate_tokens` over the
-/// bytes actually sent, which is what makes it comparable turn to turn.
-///
-/// It counts the request and not the reply, so it is a floor rather than a
-/// total -- the sidebar says `estimated` for exactly this reason.
-/// [`send_task_turn`], recovering from a conversation that no longer fits.
-///
-/// **Two rungs, and only an overflow reaches either.** The first is lossless:
-/// drop from every older result the sections the newest one restates in full.
-/// The second is not: throw the conversation away and start from a
-/// checkpoint. Any other error is returned unchanged, so a malformed request
-/// is never retried as though it were too long.
-///
-/// The second rung is the one a text harness cannot take. Its tool results
-/// *are* its transcript, so dropping the transcript drops the work; pane's
-/// objects live in the isolate, so the handle table after the checkpoint is
-/// complete and every name in it still resolves. What is lost is the
-/// narration.
+/// Normal requests already project superseded state out of history. If that
+/// request still overflows, checkpoint once while keeping the runtime alive.
+/// Do not mutate old feedback or retry an identical projected request. Other
+/// errors propagate without compaction or retry.
 fn send_task_turn_recovering(
     transcript: &mut Transcript,
     session: &Session<'_>,
@@ -1539,45 +1770,47 @@ fn send_task_turn_recovering(
     task: &str,
     rollout: &mut Rollout,
 ) -> Result<(wire::Turn, u64), String> {
-    let first = match timed_send_task_turn(&transcript.conversation, session, task) {
+    let provider_view = |transcript: &Transcript| {
+        if let Some(checkpoint) = &transcript.provider_checkpoint {
+            let mut messages = vec![Message::text(Role::User, checkpoint)];
+            messages
+                .extend_from_slice(&transcript.conversation.messages[transcript.provider_start..]);
+            Conversation {
+                system: transcript.conversation.system.clone(),
+                messages,
+            }
+        } else {
+            transcript.conversation.clone()
+        }
+    };
+    let first_request = provider_view(transcript);
+    let first = match timed_send_task_turn(&first_request, session, task) {
         Ok(turn) => return Ok(turn),
         Err(error) if error.is_context_overflow() => error,
         Err(error) => return Err(format!("request failed: {error}")),
     };
 
-    let report = prompt::compact_conversation(&mut transcript.conversation);
-    if !report.is_empty() {
-        session_println!(
-            "context: the conversation did not fit; dropped {} redundant byte(s) from {} earlier              result(s) -- nothing was lost, each was restated in full by a later message",
-            report.bytes,
-            report.messages
-        );
-        match timed_send_task_turn(&transcript.conversation, session, task) {
-            Ok(turn) => return Ok(turn),
-            Err(error) if error.is_context_overflow() => {}
-            Err(error) => return Err(format!("request failed: {error}")),
-        }
-    }
-
-    // Second rung. The notebook is indexed by the conversation, so the two
-    // are replaced together -- a notebook left behind would hang every
-    // earlier cell's view under the wrong cell.
     let checkpoint = prompt::checkpoint(
         task,
         &runtime.plan(),
         &runtime.handle_names(),
         Some(&first.to_string()),
     );
-    transcript.conversation.messages = vec![Message::text(Role::User, &checkpoint)];
-    transcript.notebook = Notebook::default();
-    write_turn(session.interrupt, rollout, Role::User, &checkpoint)
-        .map_err(|e| format!("could not record the checkpoint: {e}"))?;
+    transcript.provider_start = transcript.conversation.messages.len();
+    transcript.provider_checkpoint = Some(checkpoint.clone());
+    {
+        let _line = session.interrupt.writing();
+        rollout
+            .record_checkpoint(&checkpoint)
+            .map_err(|e| format!("could not record the checkpoint: {e}"))?;
+    }
     session_println!(
-        "context: still did not fit, so the conversation was replaced by a checkpoint; {} handle(s) \
-         are still live and nothing was re-run",
+        "context: still did not fit, so provider context was replaced by a checkpoint; {} handle(s) \
+         are still live, visible history was preserved, and nothing was re-run",
         runtime.handle_names().len()
     );
-    timed_send_task_turn(&transcript.conversation, session, task)
+    let retry = provider_view(transcript);
+    timed_send_task_turn(&retry, session, task)
         .map_err(|error| format!("request failed after a checkpoint: {error}"))
 }
 
@@ -1606,7 +1839,13 @@ fn send_task_turn(
             conversation,
             &model,
             session.effort.get(),
-            &mut |text| ui.append_delta(text),
+            &mut |delta| match delta {
+                wire::StreamDelta::Text(text) => ui.append_delta(&text),
+                // Root's UI integration replaces these no-ops with
+                // `tool_delta`; neither fragment belongs in conversation.
+                wire::StreamDelta::ToolInput(fragment) => ui.tool_delta(&fragment),
+                wire::StreamDelta::ToolReady(_) => {}
+            },
         )
     } else {
         wire::send_turn_configured(conversation, &model, session.effort.get())

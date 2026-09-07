@@ -484,6 +484,22 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    #[must_use]
+    pub fn with_instruction_context(self) -> Self {
+        self.state.enable_instruction_context();
+        self
+    }
+
+    pub fn pending_instructions(
+        &self,
+    ) -> Option<crate::runtime::instructions::PendingInstructions> {
+        self.state.pending_instructions()
+    }
+
+    pub fn acknowledge_instructions(&self) {
+        self.state.acknowledge_instructions();
+    }
+
     /// Builds a runtime for one task against the session's compiled profile.
     ///
     /// There is no constructor that does not take a [`Profile`], which is

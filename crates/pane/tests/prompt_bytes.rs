@@ -1,7 +1,7 @@
 //! Acceptance tests for GH-PANE-61E-PROMPT against
 //! `docs/product/pane/model-contract.md`.
 
-use pane::contract::{Block, Conversation, Message, Role, SessionId};
+use pane::contract::{Conversation, Message, Role, SessionId};
 use pane::glasshouse::Glasshouse;
 use pane::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use pane::runtime::handles::{HandleMeta, HandleTable, render_table};
@@ -150,6 +150,42 @@ fn the_preamble_is_the_contracts_verbatim() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(prompt::PREAMBLE, expected);
+}
+
+#[test]
+fn runtime_functions_are_not_advertised_as_provider_native_tools() {
+    assert!(prompt::PREAMBLE.contains("It is the\nonly provider-native tool"));
+    assert!(prompt::PREAMBLE.contains(
+        "`read`, `glob`, `grep`, `write`, and `bash` are\nTypeScript functions callable only inside `execute_cell.code`"
+    ));
+}
+
+#[test]
+fn historical_projection_preserves_native_result_correlation() {
+    let older = Message::runtime_tool_result("call-old", "live old", true, "historical old");
+    let newest = Message::runtime_tool_result("call-new", "live new", false, "historical new");
+    let mut conversation = Conversation {
+        system: String::new(),
+        messages: vec![older, newest],
+    };
+
+    prompt::project_runtime_history(&mut conversation, 0);
+    assert_eq!(
+        conversation.messages[0].content,
+        vec![pane::contract::Block::ToolResult {
+            tool_use_id: "call-old".into(),
+            content: "historical old".into(),
+            is_error: true,
+        }]
+    );
+    assert_eq!(
+        conversation.messages[1].content,
+        vec![pane::contract::Block::ToolResult {
+            tool_use_id: "call-new".into(),
+            content: "live new".into(),
+            is_error: false,
+        }]
+    );
 }
 
 #[test]
@@ -343,7 +379,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
 }
 
 #[test]
-fn exactly_one_pane_block_is_a_program_two_are_an_error_and_a_ts_block_is_prose() {
+fn ordered_pane_blocks_are_a_program_and_a_ts_block_is_prose() {
     assert_eq!(
         prompt::extract_program("```pane\nconst x = 1;\n```"),
         Extracted::Program("const x = 1;".to_string())
@@ -352,7 +388,7 @@ fn exactly_one_pane_block_is_a_program_two_are_an_error_and_a_ts_block_is_prose(
         prompt::extract_program(
             "here you go\n```pane\nconst x = 1;\n```\nand also\n```pane\nconst y = 2;\n```"
         ),
-        Extracted::TwoBlocks
+        Extracted::Program("const x = 1;\n;\nconst y = 2;".into())
     );
     assert_eq!(
         prompt::extract_program("just some prose, no code"),
@@ -643,9 +679,7 @@ fn compaction_spares_the_newest_result_and_every_word_a_person_wrote() {
         "exactly the one older result was compacted"
     );
 
-    let text = |index: usize| match &conversation.messages[index].content[0] {
-        Block::Text(text) => text.clone(),
-    };
+    let text = |index: usize| conversation.messages[index].content[0].text().to_string();
     assert_eq!(text(0), person, "a person's own words were edited");
     assert!(
         !text(2).contains("## Handles"),
@@ -713,7 +747,7 @@ fn repair_fences_are_data_and_cannot_mix_with_executable_code() {
     );
     assert_eq!(
         prompt::extract_program(&format!("```pane-edit\n{edit}")),
-        Extracted::Edit(String::new())
+        Extracted::Invalid("unfinished pane-edit block".into())
     );
     assert_eq!(
         prompt::extract_program("```json\n{}\n```"),

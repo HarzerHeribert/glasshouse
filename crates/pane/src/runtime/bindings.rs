@@ -19,6 +19,7 @@ use crate::bg::{self, RunOptions, WatchOptions};
 use crate::events::batch::Batch;
 use crate::events::{BatchStore, Event, EventId};
 use crate::runtime::cell::{HOST_FUNCTIONS, RESERVED_PREFIX};
+use crate::runtime::excerpt::{self, SampledLine};
 use crate::runtime::handles::HandleMeta;
 use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
@@ -326,6 +327,14 @@ fn tool_callback(
 
     let call_args = read_arguments(scope, args.get(0));
     let state = state(scope);
+    if state.instruction_boundary(tool.name(), &call_args) {
+        trace(scope).request_yield(Some(format!(
+            "project instructions must be delivered before `{}`; the call did not run",
+            tool.name()
+        )));
+        scope.terminate_execution();
+        return;
+    }
     // Cloned rather than borrowed across the call: the call is the longest
     // thing this crate does, and a `RefCell` borrow held across it would
     // outlive every reason to hold it. Every clone names the same flag.
@@ -344,6 +353,9 @@ fn tool_callback(
     // program wrote. Each class below is the class the matching throw
     // constructs, so the line says what the program could have caught.
     let ended = match &traced.outcome {
+        Ok(result) if call_failure(tool.name(), result).is_some() => Ended::Threw {
+            class: "ToolError".to_string(),
+        },
         Ok(_) => Ended::Ok,
         Err(ToolError::Denied(denied)) => Ended::Denied {
             rule: denied.rule.clone(),
@@ -360,6 +372,15 @@ fn tool_callback(
         args: traced.checked,
         ended,
     });
+
+    if traced.outcome.is_ok() && state.instruction_file_written(tool.name(), &call_args) {
+        trace(scope).request_yield(Some(format!(
+            "`{}` completed and changed project instructions; execution stopped before any later call",
+            tool.name()
+        )));
+        scope.terminate_execution();
+        return;
+    }
 
     match traced.outcome {
         Ok(result) => {
@@ -425,7 +446,8 @@ fn typed_result<'s>(
         throw_tool_error(scope, &message);
         // The exception is what the callback answers with; V8 discards a
         // return value once one is pending, and nothing below has run, so no
-        // call is recorded and no handle is minted.
+        // handle is minted. The actual child call was already recorded as a
+        // `ToolError` throw by the common callback.
         return v8::undefined(scope).into();
     }
 
@@ -525,6 +547,12 @@ fn build_file<'s>(
         array.set_index(scope, index as u32, line);
     }
     set_key(scope, object, "lines", array.into());
+    if let Some(function) = v8::Function::builder(file_excerpt_callback)
+        .data(array.into())
+        .build(scope)
+    {
+        set_fixed_key(scope, object, "excerpt", function.into());
+    }
     // Content and admitted metadata arrive together from the tool layer.
     let mtime = result.modified.clone().unwrap_or_else(|| "unknown".into());
     let mtime_value = js_string(scope, &mtime);
@@ -538,6 +566,126 @@ fn build_file<'s>(
         lines: lines.iter().take(2).map(|line| line.to_string()).collect(),
     });
     (object.into(), preview)
+}
+
+fn positive_integer_option(
+    scope: &mut v8::PinScope,
+    options: v8::Local<v8::Value>,
+    name: &str,
+    default: usize,
+) -> Option<usize> {
+    if options.is_undefined() || options.is_null() {
+        return Some(default);
+    }
+    let Ok(object) = v8::Local::<v8::Object>::try_from(options) else {
+        throw_tool_error(scope, "File.excerpt expects one options object");
+        return None;
+    };
+    let key = v8::String::new(scope, name)?;
+    let value = object.get(scope, key.into())?;
+    if value.is_undefined() || value.is_null() {
+        return Some(default);
+    }
+    let Some(number) = value.number_value(scope) else {
+        throw_tool_error(
+            scope,
+            &format!("File.excerpt `{name}` must be a positive integer"),
+        );
+        return None;
+    };
+    if !number.is_finite() || number < 1.0 || number.fract() != 0.0 || number > usize::MAX as f64 {
+        throw_tool_error(
+            scope,
+            &format!("File.excerpt `{name}` must be a positive integer"),
+        );
+        return None;
+    }
+    Some(number as usize)
+}
+
+fn sample_line(scope: &v8::PinScope, line: v8::Local<v8::String>) -> SampledLine {
+    let total = line.length();
+    let mut units = vec![0u16; total.min(excerpt::MAX_LINE_UNITS)];
+    line.write_v2(scope, 0, &mut units, v8::WriteFlags::empty());
+    if total > units.len()
+        && units
+            .last()
+            .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+    {
+        units.pop();
+    }
+    let consumed_units = units.len();
+    SampledLine {
+        text: String::from_utf16_lossy(&units),
+        consumed_units,
+        omitted_units: total.saturating_sub(consumed_units),
+    }
+}
+
+fn file_excerpt_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let Some(start) = positive_integer_option(scope, args.get(0), "start", 1) else {
+        return;
+    };
+    let Some(lines_requested) =
+        positive_integer_option(scope, args.get(0), "lines", excerpt::DEFAULT_LINES)
+    else {
+        return;
+    };
+    let Ok(lines) = v8::Local::<v8::Array>::try_from(args.data()) else {
+        throw_tool_error(scope, "File.excerpt is detached from its read result");
+        return;
+    };
+    let line_count = lines.length() as usize;
+    let count = lines_requested.min(excerpt::MAX_LINES);
+    let mut samples = Vec::with_capacity(count);
+    let first = start.saturating_sub(1).min(line_count);
+    let last = first.saturating_add(count).min(line_count);
+    for index in first..last {
+        let Some(value) = lines.get_index(scope, index as u32) else {
+            break;
+        };
+        let Ok(line) = v8::Local::<v8::String>::try_from(value) else {
+            break;
+        };
+        samples.push(sample_line(scope, line));
+    }
+    let excerpt = excerpt::render(line_count, start, lines_requested, samples);
+    let object = v8::Object::new(scope);
+    let text = js_string(scope, &excerpt.text);
+    set_key(scope, object, "text", text);
+    for (name, value) in [
+        ("start", excerpt.start),
+        ("lineCount", excerpt.line_count),
+        ("truncatedLines", excerpt.truncated_lines),
+    ] {
+        let number = v8::Number::new(scope, value as f64);
+        set_key(scope, object, name, number.into());
+    }
+    match excerpt.end {
+        Some(value) => {
+            let number = v8::Number::new(scope, value as f64);
+            set_key(scope, object, "end", number.into());
+        }
+        None => {
+            let null = v8::null(scope);
+            set_key(scope, object, "end", null.into());
+        }
+    }
+    match excerpt.next {
+        Some(value) => {
+            let number = v8::Number::new(scope, value as f64);
+            set_key(scope, object, "next", number.into());
+        }
+        None => {
+            let null = v8::null(scope);
+            set_key(scope, object, "next", null.into());
+        }
+    }
+    retval.set(object.into());
 }
 
 fn build_grep<'s>(
@@ -1415,6 +1563,14 @@ fn bg_run_callback(
         timeout_ms: read_millis(scope, args.get(1), "timeout"),
     };
     let state = state(scope);
+    let instruction_args = Args::new().with("command", &command);
+    if state.instruction_boundary("bg.run", &instruction_args) {
+        trace(scope).request_yield(Some(
+            "project instructions must be delivered before `bg.run`; the job did not start".into(),
+        ));
+        scope.terminate_execution();
+        return;
+    }
     match bg::run(
         &state.profile,
         &state.glasshouse,
@@ -1450,6 +1606,15 @@ fn bg_watch_callback(
         timeout_ms: read_millis(scope, args.get(1), "timeout"),
     };
     let state = state(scope);
+    let instruction_args = Args::new().with("command", &command);
+    if state.instruction_boundary("bg.watch", &instruction_args) {
+        trace(scope).request_yield(Some(
+            "project instructions must be delivered before `bg.watch`; the watcher did not start"
+                .into(),
+        ));
+        scope.terminate_execution();
+        return;
+    }
     match bg::watch(
         &state.profile,
         &state.glasshouse,
@@ -1586,24 +1751,74 @@ pub(crate) fn install_batch(scope: &mut v8::PinScope) {
 
 // --- console -----------------------------------------------------------
 
-const CONSOLE_ARGUMENT_CHARS: usize = 4096;
+/// One ordinary source-sized string fits intact, but a single argument cannot
+/// consume the whole cell output budget.
+const CONSOLE_ARGUMENT_CHARS: usize = 24 * 1024;
+const CONSOLE_NESTED_STRING_CHARS: usize = 96;
 const CONSOLE_DEPTH: usize = 3;
 const CONSOLE_KEYS: usize = 12;
 
 fn console_string(scope: &mut v8::PinScope, text: v8::Local<v8::String>) -> String {
-    let mut buffer = [0u8; CONSOLE_ARGUMENT_CHARS];
-    let mut consumed = 0;
-    let written = text.write_utf8_v2(
-        scope,
-        &mut buffer,
-        v8::WriteFlags::kReplaceInvalidUtf8,
-        Some(&mut consumed),
-    );
-    let mut result = String::from_utf8_lossy(&buffer[..written]).into_owned();
-    if consumed < text.length() {
-        result.push('…');
+    console_string_bounded(scope, text, CONSOLE_ARGUMENT_CHARS)
+}
+
+fn console_string_bounded(
+    scope: &mut v8::PinScope,
+    text: v8::Local<v8::String>,
+    cap: usize,
+) -> String {
+    let total = text.length();
+    // A JavaScript string is counted in UTF-16 units, while the public cap is
+    // Unicode scalar values. Reading at most two units per allowed scalar is
+    // enough to decide whether the whole value fits.
+    if total <= cap.saturating_mul(2) {
+        let mut units = vec![0u16; total];
+        text.write_v2(scope, 0, &mut units, v8::WriteFlags::empty());
+        let whole = String::from_utf16_lossy(&units);
+        if whole.chars().count() <= cap {
+            return whole;
+        }
     }
-    result
+
+    let mut omitted = total;
+    let mut retained = String::new();
+    for _ in 0..4 {
+        let marker = format!("[console: {omitted} UTF-16 units omitted; showing true suffix] ");
+        let wanted_chars = cap.saturating_sub(marker.chars().count());
+        let read_units = total.min(wanted_chars.saturating_mul(2).saturating_add(1));
+        let read_start = total - read_units;
+        let mut units = vec![0u16; read_units];
+        text.write_v2(
+            scope,
+            read_start as u32,
+            &mut units,
+            v8::WriteFlags::empty(),
+        );
+        if units
+            .first()
+            .is_some_and(|unit| (0xDC00..=0xDFFF).contains(unit))
+        {
+            units.remove(0);
+        }
+        let window = String::from_utf16_lossy(&units);
+        retained = window
+            .chars()
+            .rev()
+            .take(wanted_chars)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let next_omitted = total.saturating_sub(retained.encode_utf16().count());
+        if next_omitted == omitted {
+            break;
+        }
+        omitted = next_omitted;
+    }
+    format!(
+        "[console: {omitted} UTF-16 units omitted; showing true suffix] {}",
+        retained
+    )
 }
 
 /// A bounded inspection of one console argument. Objects are read through
@@ -1616,10 +1831,12 @@ fn inspect_console(
     seen: &mut Vec<i32>,
 ) -> String {
     if value.is_string() {
-        let text = console_string(
-            scope,
-            v8::Local::<v8::String>::try_from(value).expect("string checked"),
-        );
+        let string = v8::Local::<v8::String>::try_from(value).expect("string checked");
+        let text = if depth == 0 {
+            console_string(scope, string)
+        } else {
+            console_string_bounded(scope, string, CONSOLE_NESTED_STRING_CHARS)
+        };
         return if depth == 0 {
             text
         } else {
@@ -1710,7 +1927,7 @@ fn inspect_console_object(
         };
         let key_text = key_value
             .to_string(scope)
-            .map(|key| console_string(scope, key))
+            .map(|key| console_string_bounded(scope, key, CONSOLE_NESTED_STRING_CHARS))
             .unwrap_or_default();
         let Some(descriptor_value) = object.get_own_property_descriptor(scope, key) else {
             continue;

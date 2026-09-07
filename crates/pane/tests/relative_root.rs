@@ -1,0 +1,106 @@
+use pane::contract::SessionId;
+use pane::glasshouse::Glasshouse;
+use pane::sandbox::profile::{Access, Profile};
+use pane::tools::invoke::{self, Args, ToolContext};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+static CWD: Mutex<()> = Mutex::new(());
+
+struct RestoreCwd {
+    original: PathBuf,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl RestoreCwd {
+    fn enter(path: &Path) -> Self {
+        let lock = CWD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+        Self {
+            original,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for RestoreCwd {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.original).unwrap();
+    }
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn dot_root_is_anchored_and_real_tools_do_not_fail_with_enoent() {
+    let root = std::env::temp_dir().join(format!("pane-relative-root-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("roman.py"), "value = 'XIV'\n").unwrap();
+    let _cwd = RestoreCwd::enter(&root);
+
+    let settings = r#"{"permissions":{"allow":["Read(**)","Bash"]}}"#;
+    let profile = Profile::compile(".", Some(settings));
+    assert_eq!(profile.root(), std::fs::canonicalize(&root).unwrap());
+    assert!(profile.root().is_absolute());
+
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("relative-root-regression");
+    let context = ToolContext {
+        profile: &profile,
+        glasshouse: &glasshouse,
+        session: &session,
+    };
+
+    let read = invoke::run(&context, "read", &Args::new().with("path", "roman.py"))
+        .expect("read under --root . must start /bin/cat and read the project");
+    assert_eq!(read.stdout, "value = 'XIV'\n");
+
+    let glob = invoke::run(&context, "glob", &Args::new().with("pattern", "**/*"))
+        .expect("glob under --root . must traverse the project root");
+    assert!(
+        glob.stdout.lines().any(|path| Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == "roman.py")),
+        "{glob:?}"
+    );
+
+    let bash = invoke::run(&context, "bash", &Args::new().with("command", "pwd"))
+        .expect("bash under --root . must have a valid confined current directory");
+    assert_eq!(Path::new(bash.stdout.trim()), profile.root());
+}
+
+#[test]
+fn missing_relative_root_is_anchored_without_falling_back_to_cwd() {
+    let _lock = CWD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cwd = std::env::current_dir().unwrap();
+    let missing = format!("pane-no-such-root-{}", std::process::id());
+    let profile = Profile::compile(&missing, None);
+    assert_eq!(profile.root(), cwd.join(missing));
+    assert_ne!(profile.root(), cwd);
+}
+
+#[test]
+#[cfg(unix)]
+fn drive_relative_spelling_is_not_mistaken_for_a_windows_absolute_root() {
+    let _lock = CWD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cwd = std::env::current_dir().unwrap();
+    let profile = Profile::compile(
+        "C:project",
+        Some(r#"{"permissions":{"allow":["Read(**)","Bash","mcp__demo__*"]}}"#),
+    );
+    assert_ne!(profile.root(), cwd);
+    assert!(
+        profile
+            .diagnostics()
+            .iter()
+            .any(|line| line.contains("drive-relative")),
+        "{:?}",
+        profile.diagnostics()
+    );
+    let refusal = profile
+        .check("Read", Access::Read, Path::new("anything"))
+        .expect_err("an ambiguous root must not receive the implicit root grant");
+    assert!(refusal.rule.contains("drive-relative"), "{refusal:?}");
+    assert!(profile.admits_command("pwd").is_err());
+    assert!(!profile.admits_mcp_tool("mcp__demo__read"));
+}

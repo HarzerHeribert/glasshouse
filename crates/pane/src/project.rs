@@ -6,6 +6,9 @@
 //! is skipped rather than followed, and nothing here ever opens a path for
 //! writing.
 
+pub mod instructions;
+pub mod orientation;
+
 use crate::contract::ProjectConfig;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

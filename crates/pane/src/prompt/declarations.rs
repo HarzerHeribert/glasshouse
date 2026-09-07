@@ -7,6 +7,9 @@
 
 use crate::tools::registry::Purity;
 
+pub const EXECUTE_CELL_NAME: &str = "execute_cell";
+pub const EXECUTE_CELL_DESCRIPTION: &str = "Run one Pane TypeScript cell; this is the only provider-native tool, and runtime functions such as read and bash belong inside its code. While constructing the input, none of this cell has run. Code may branch on results returned by awaited tools inside the cell; after submitting it, stop and wait for the correlated tool result before interpreting outcomes. Prose and comments are not runtime evidence.";
+
 /// One tool's return type and its own descriptive sentence.
 pub struct Entry {
     pub name: &'static str,
@@ -17,8 +20,8 @@ pub struct Entry {
 pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "read",
-        return_type: "{path: string; text: string; lines: string[]; bytes: number; lineCount: number; mtime: string}",
-        summary: "Read one file inside the project.",
+        return_type: "{path: string; text: string; lines: string[]; bytes: number; lineCount: number; mtime: string; excerpt(options?: {start?: number; lines?: number}): {text: string; start: number; end: number | null; lineCount: number; next: number | null; truncatedLines: number}}",
+        summary: "Read one file inside the project. Inspect a modest source in one bounded page with `console.log(file.excerpt({start: 1, lines: 400}).text)`; numbered text is capped at 24,576 characters and names the next page when needed. Long-line markers name the next bounded `file.lines[index].slice(start, end)`.",
     },
     Entry {
         name: "glob",

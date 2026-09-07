@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
+use crate::runtime::instructions::{InstructionContext, PendingInstructions};
 use crate::runtime::outcome::PlanItem;
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::Profile;
@@ -71,7 +72,26 @@ impl ConsoleCapture {
     /// The tail the turn shows, and how many tokens were dropped ahead of it.
     pub(crate) fn tail(&mut self) -> (String, usize) {
         self.trim_to(KEEP_CHARS);
-        (self.buffer.clone(), self.dropped_chars.div_ceil(4))
+        if self.dropped_chars == 0 {
+            return (self.buffer.clone(), 0);
+        }
+        // The omission must be visible in stdout itself: callers that have
+        // not yet plumbed the numeric field still cannot mistake a tail for
+        // complete output. Recompute after reserving the marker because that
+        // reservation itself may drop a few more characters.
+        for _ in 0..2 {
+            let marker = format!(
+                "[console: ~{} tokens omitted before this true tail]\n",
+                self.dropped_chars.div_ceil(4)
+            );
+            self.trim_to(KEEP_CHARS.saturating_sub(marker.chars().count()));
+        }
+        let dropped = self.dropped_chars.div_ceil(4);
+        let marker = format!("[console: ~{dropped} tokens omitted before this true tail]\n");
+        let mut shown = marker;
+        shown.push_str(&self.buffer);
+        debug_assert!(shown.chars().count() <= KEEP_CHARS);
+        (shown, dropped)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -150,6 +170,7 @@ pub(crate) struct RuntimeState {
     /// The model the parent task is using, so a subagent inherits it rather
     /// than silently falling back to the compiled-in default.
     pub(crate) model: RefCell<String>,
+    pub(crate) instructions: RefCell<InstructionContext>,
 }
 
 impl RuntimeState {
@@ -168,7 +189,40 @@ impl RuntimeState {
             subagent: std::cell::Cell::new(false),
             budget_remaining: std::cell::Cell::new(0),
             model: RefCell::new(crate::wire::MODEL.to_string()),
+            instructions: RefCell::new(InstructionContext::default()),
         }
+    }
+
+    pub(crate) fn enable_instruction_context(&self) {
+        self.instructions.borrow_mut().enable(&self.profile);
+    }
+
+    pub(crate) fn instruction_boundary(
+        &self,
+        tool: &str,
+        args: &crate::tools::invoke::Args,
+    ) -> bool {
+        self.instructions
+            .borrow_mut()
+            .gate(&self.profile, tool, args)
+    }
+
+    pub(crate) fn pending_instructions(&self) -> Option<PendingInstructions> {
+        self.instructions.borrow().pending()
+    }
+
+    pub(crate) fn instruction_file_written(
+        &self,
+        tool: &str,
+        args: &crate::tools::invoke::Args,
+    ) -> bool {
+        self.instructions
+            .borrow_mut()
+            .instruction_file_written(&self.profile, tool, args)
+    }
+
+    pub(crate) fn acknowledge_instructions(&self) {
+        self.instructions.borrow_mut().acknowledge();
     }
 
     /// Replaces the plan whole — `todo.write`'s only effect.
