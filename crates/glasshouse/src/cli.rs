@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 const AFTER_HELP: &str = "\
 ENVIRONMENT:
@@ -153,6 +153,15 @@ pub enum Command {
         /// Refresh missing provider model catalogues on this explicit request.
         #[arg(long, requires = "json")]
         refresh: bool,
+    },
+    /// Connect and disconnect subscription accounts through Glasshouse's
+    /// private CLIProxyAPI broker, or inspect their credential presence.
+    ///
+    /// OAuth remains inside the broker process and its private account
+    /// directory. Glasshouse never accepts or displays a token.
+    Subscriptions {
+        #[command(subcommand)]
+        command: SubscriptionsCommand,
     },
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
@@ -1058,6 +1067,49 @@ pub enum Command {
     EditIntent {
         #[command(subcommand)]
         command: EditIntentCommand,
+    },
+}
+
+/// Subscription vendors supported by CLIProxyAPI's first-party login flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SubscriptionProvider {
+    Google,
+    Anthropic,
+    Openai,
+}
+
+impl SubscriptionProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SubscriptionsCommand {
+    /// Report only whether each configured subscription account is present.
+    Status,
+    /// Connect one configured entitlement with the provider's OAuth flow.
+    Login {
+        #[arg(value_enum)]
+        provider: SubscriptionProvider,
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+    },
+    /// Remove the broker credentials for one configured entitlement.
+    Logout {
+        #[arg(value_enum)]
+        provider: SubscriptionProvider,
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+    },
+    /// Adopt a user-supplied, already verified CLIProxyAPI executable.
+    AdoptBinary {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
     },
 }
 

@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 
 use glasshouse::cli::{
     ApiCommand, ContextFirewallCommand, CredentialsCommand, EditIntentCommand, GatewayCommand,
-    McpCommand,
+    McpCommand, SubscriptionsCommand,
 };
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::integrations::cmux;
@@ -77,6 +77,33 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 }
             );
         }
+        Some(Command::Subscriptions { command }) => match command {
+            SubscriptionsCommand::Status => {
+                print!("{}", crate::commands::subscriptions::status(&runtime)?);
+            }
+            SubscriptionsCommand::Login {
+                provider,
+                entitlement,
+            } => {
+                print!(
+                    "{}",
+                    crate::commands::subscriptions::login(&runtime, *provider, entitlement,)?
+                );
+            }
+            SubscriptionsCommand::Logout {
+                provider,
+                entitlement,
+            } => {
+                print!(
+                    "{}",
+                    crate::commands::subscriptions::logout(&runtime, *provider, entitlement,)?
+                );
+            }
+            SubscriptionsCommand::AdoptBinary { path } => {
+                crate::commands::subscriptions::adopt_binary(&runtime, path)?;
+                println!("CLIProxyAPI adopted");
+            }
+        },
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
         }

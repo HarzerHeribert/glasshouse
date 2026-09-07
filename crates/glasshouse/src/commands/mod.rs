@@ -23,3 +23,4 @@ pub(crate) mod setup;
 pub(crate) mod shared;
 pub(crate) mod shim;
 pub(crate) mod status;
+pub(crate) mod subscriptions;
