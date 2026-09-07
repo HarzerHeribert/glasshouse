@@ -319,7 +319,7 @@ fn shift_tab_enters_a_real_nonexecuting_plan_mode() {
     app.send(b"plan this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
-        request["system"]
+        request["system"][0]["text"]
             .as_str()
             .unwrap()
             .contains("Planning mode")

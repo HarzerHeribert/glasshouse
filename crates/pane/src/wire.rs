@@ -85,7 +85,7 @@ pub fn base_url() -> String {
 struct RequestBody<'a> {
     model: &'a str,
     max_tokens: u32,
-    system: &'a str,
+    system: Vec<SystemBlock<'a>>,
     messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Value>>,
@@ -97,6 +97,53 @@ struct RequestBody<'a> {
     /// byte in every ordinary turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+/// Cache only the session's system prompt, before volatile conversation state.
+/// A separate tools breakpoint lets changed project instructions reuse tools.
+#[derive(Serialize)]
+struct SystemBlock<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+    cache_control: CacheControl,
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl<'a> RequestBody<'a> {
+    fn new(
+        model: &'a str,
+        max_tokens: u32,
+        conversation: &'a Conversation,
+        native_cell: bool,
+    ) -> Self {
+        Self {
+            model,
+            max_tokens,
+            system: if conversation.system.is_empty() {
+                Vec::new()
+            } else {
+                vec![SystemBlock {
+                    kind: "text",
+                    text: &conversation.system,
+                    cache_control: CacheControl { kind: "ephemeral" },
+                }]
+            },
+            messages: conversation.messages.iter().map(to_wire_message).collect(),
+            tools: native_cell.then(|| vec![serde_json::json!({
+                "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
+                "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+                "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
+                "cache_control": {"type": "ephemeral"}
+            })]),
+            stream: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -221,6 +268,18 @@ struct UsageRow {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "optional_cache_count")]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "optional_cache_count")]
+    cache_creation_input_tokens: Option<u64>,
+}
+
+// Optional provider extensions must not make an otherwise valid reply fail.
+// A malformed count is unknown; never coerce strings or negatives into a hit.
+fn optional_cache_count<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Ok(Value::deserialize(deserializer)?.as_u64())
 }
 
 /// The provider's own token count for the request that produced one turn.
@@ -230,6 +289,10 @@ struct UsageRow {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Provider-reported cache reads; `None` is unknown, `Some(0)` is no hit.
+    pub cache_read_input_tokens: Option<u64>,
+    /// Provider-reported cache writes, separate from both reads and input tokens.
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 /// One assistant turn: the message the runtime and rollout act on, plus the
@@ -250,6 +313,8 @@ fn to_usage(row: Option<UsageRow>) -> Option<Usage> {
     Some(Usage {
         input_tokens: row.input_tokens?,
         output_tokens: row.output_tokens?,
+        cache_read_input_tokens: row.cache_read_input_tokens,
+        cache_creation_input_tokens: row.cache_creation_input_tokens,
     })
 }
 
@@ -493,18 +558,7 @@ fn build_request_body(
     conversation: &Conversation,
     native_cell: bool,
 ) -> Vec<u8> {
-    let body = RequestBody {
-        model,
-        max_tokens,
-        system: &conversation.system,
-        messages: conversation.messages.iter().map(to_wire_message).collect(),
-        tools: native_cell.then(|| vec![serde_json::json!({
-            "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
-            "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
-            "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
-        })]),
-        stream: None,
-    };
+    let body = RequestBody::new(model, max_tokens, conversation, native_cell);
     serde_json::to_vec(&body).expect("Conversation has no non-serialisable field")
 }
 
@@ -797,10 +851,16 @@ impl StreamAccumulator {
         let held = self.usage.take().unwrap_or(UsageRow {
             input_tokens: None,
             output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         });
         self.usage = Some(UsageRow {
-            input_tokens: row.input_tokens.filter(|n| *n > 0).or(held.input_tokens),
-            output_tokens: row.output_tokens.filter(|n| *n > 0).or(held.output_tokens),
+            input_tokens: row.input_tokens.or(held.input_tokens),
+            output_tokens: row.output_tokens.or(held.output_tokens),
+            cache_read_input_tokens: row.cache_read_input_tokens.or(held.cache_read_input_tokens),
+            cache_creation_input_tokens: row
+                .cache_creation_input_tokens
+                .or(held.cache_creation_input_tokens),
         });
     }
 
@@ -879,18 +939,8 @@ pub fn send_turn_streaming_configured(
     use std::io::{BufRead, BufReader};
 
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = RequestBody {
-        model,
-        max_tokens: MAX_TOKENS,
-        system: &conversation.system,
-        messages: conversation.messages.iter().map(to_wire_message).collect(),
-        tools: Some(vec![serde_json::json!({
-            "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
-            "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
-            "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false}
-        })]),
-        stream: Some(true),
-    };
+    let mut body = RequestBody::new(model, MAX_TOKENS, conversation, true);
+    body.stream = Some(true);
     let body = configure_effort(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
@@ -965,7 +1015,7 @@ mod tests {
             serde_json::from_slice(&request_body(&conversation)).unwrap();
         assert_eq!(value["model"], MODEL);
         assert_eq!(value["max_tokens"], MAX_TOKENS);
-        assert_eq!(value["system"], conversation.system);
+        assert_eq!(value["system"][0]["text"], conversation.system);
         assert_eq!(value["messages"][0]["role"], "user");
         assert_eq!(value["messages"][1]["role"], "assistant");
     }
@@ -1195,9 +1245,90 @@ mod tests {
             turn.usage,
             Some(Usage {
                 input_tokens: 10,
-                output_tokens: 5
+                output_tokens: 5,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
             })
         );
+    }
+
+    #[test]
+    fn cache_usage_preserves_absent_zero_and_independent_provider_counts() {
+        for (fields, read, written) in [
+            (serde_json::json!({}), None, None),
+            (
+                serde_json::json!({"cache_read_input_tokens": "300", "cache_creation_input_tokens": -1}),
+                None,
+                None,
+            ),
+            (
+                serde_json::json!({"cache_read_input_tokens": 3.5, "cache_creation_input_tokens": false}),
+                None,
+                None,
+            ),
+            (
+                serde_json::json!({"cache_read_input_tokens": null}),
+                None,
+                None,
+            ),
+            (
+                serde_json::json!({"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}),
+                Some(0),
+                Some(0),
+            ),
+            (
+                serde_json::json!({"cache_read_input_tokens": 300}),
+                Some(300),
+                None,
+            ),
+            (
+                serde_json::json!({"cache_creation_input_tokens": 400}),
+                None,
+                Some(400),
+            ),
+        ] {
+            let mut usage = serde_json::json!({"input_tokens": 0, "output_tokens": 0});
+            usage
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let whole = parse_response(
+                &serde_json::json!({
+                    "role": "assistant", "content": [], "usage": usage
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .usage
+            .unwrap();
+            assert_eq!(whole.cache_read_input_tokens, read);
+            assert_eq!(whole.cache_creation_input_tokens, written);
+            let mut stream = StreamAccumulator::new();
+            stream
+                .event(
+                    &serde_json::json!({
+                        "type": "message_start", "message": {"role": "assistant", "usage": usage}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            stream
+                .event(r#"{"type":"message_delta","usage":{"output_tokens":0}}"#)
+                .unwrap();
+            stream.event(r#"{"type":"message_stop"}"#).unwrap();
+            assert_eq!(stream.finish().unwrap().usage, Some(whole));
+        }
+    }
+
+    #[test]
+    fn streamed_cache_usage_uses_latest_supplied_count_without_summing_or_inventing_hits() {
+        let mut stream = StreamAccumulator::new();
+        stream.event(r#"{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":12,"output_tokens":0,"cache_read_input_tokens":100,"cache_creation_input_tokens":200}}}"#).unwrap();
+        stream.event(r#"{"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":300}}"#).unwrap();
+        stream.event(r#"{"type":"message_stop"}"#).unwrap();
+        let usage = stream.finish().unwrap().usage.unwrap();
+        assert_eq!(usage.cache_read_input_tokens, Some(0));
+        assert_eq!(usage.cache_creation_input_tokens, Some(300));
     }
 
     #[test]

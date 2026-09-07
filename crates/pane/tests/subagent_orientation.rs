@@ -141,7 +141,7 @@ fn child_receives_root_orientation_and_nested_policy_before_nested_write() {
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
-    let first_system = bodies[0]["system"].as_str().unwrap();
+    let first_system = bodies[0]["system"][0]["text"].as_str().unwrap();
     assert!(
         first_system.contains("ROOT_AGENTS_GUIDANCE"),
         "{first_system}"

@@ -893,6 +893,8 @@ fn telemetry_distinguishes_proposals_measurements_and_actual_execution() {
             Some(&pane::wire::Usage {
                 input_tokens: 100,
                 output_tokens: 20,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
             }),
         )],
         cells: vec![CellView {

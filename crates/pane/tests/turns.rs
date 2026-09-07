@@ -250,7 +250,7 @@ fn start_status_provider(status_line: &'static str, body: &'static [u8]) -> Stri
 /// Reads a minimal HTTP/1.1 request (headers, then its declared
 /// `Content-Length` body) and discards it, then writes back `status_line`
 /// and `body` as the whole response.
-fn respond(mut stream: TcpStream, status_line: &str, body: &[u8]) {
+fn respond(mut stream: TcpStream, status_line: &str, body: &[u8]) -> Vec<u8> {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut content_length = 0usize;
     loop {
@@ -276,6 +276,7 @@ fn respond(mut stream: TcpStream, status_line: &str, body: &[u8]) {
     response.extend_from_slice(body);
     stream.write_all(&response).unwrap();
     stream.flush().unwrap();
+    request_body
 }
 
 /// Binds an ephemeral local port and drops the listener immediately, so a
@@ -574,4 +575,147 @@ fn streams_from_a_real_gateway() {
     // would fail on a correct gateway and teach nothing about pane.
     assert!(chunks > 0, "no delta arrived before the reply completed");
     assert!(!turn.message.content.is_empty(), "the turn carried no text");
+}
+
+#[test]
+fn request_cache_breakpoints_have_the_exact_messages_shape() {
+    let conversation = sample_conversation();
+    let actual: serde_json::Value =
+        serde_json::from_slice(&wire::request_body(&conversation)).unwrap();
+    assert_eq!(
+        actual,
+        serde_json::json!({
+            "model": wire::MODEL,
+            "max_tokens": wire::MAX_TOKENS,
+            "system": [{
+                "type": "text",
+                "text": "You act by writing TypeScript.",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "How many files name IntegrationId?"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "```pane\nreturn 1;\n```"}]}
+            ],
+            "tools": [{
+                "name": "execute_cell",
+                "description": pane::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+                "input_schema": {
+                    "type": "object", "properties": {"code": {"type": "string"}},
+                    "required": ["code"], "additionalProperties": false
+                },
+                "cache_control": {"type": "ephemeral"}
+            }]
+        })
+    );
+}
+
+#[test]
+fn cache_prefix_bytes_stay_stable_as_tasks_and_live_cell_state_change() {
+    let mut conversation = Conversation {
+        system: "Stable project instructions \u{2014} keep Unicode and whitespace.\n\n".into(),
+        messages: vec![Message::text(Role::User, "first task")],
+    };
+    let mut prefix = None;
+    let mut previous_messages = None;
+    for cell in 0..4 {
+        let task = if cell < 3 {
+            "first task"
+        } else {
+            "second task"
+        };
+        if cell == 3 {
+            conversation.messages.push(Message::text(Role::User, task));
+        }
+        let request = pane::prompt::with_task_context(&conversation, wire::MODEL, task);
+        let body: serde_json::Value =
+            serde_json::from_slice(&wire::request_body(&request)).unwrap();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!([body["tools"], body["system"]])).unwrap();
+        if let Some(first) = &prefix {
+            assert_eq!(&bytes, first, "cell {cell} invalidated the stable prefix");
+        } else {
+            prefix = Some(bytes);
+        }
+        assert_eq!(body["system"][0]["text"], request.system);
+        let messages = serde_json::to_string(&body["messages"]).unwrap();
+        assert!(!messages.contains("cache_control"));
+        assert_ne!(previous_messages.as_ref(), Some(&messages));
+        previous_messages = Some(messages);
+        let mut assistant = Message::text(Role::Assistant, "");
+        assistant.content = vec![Block::ToolUse {
+            id: format!("cell-{cell}"),
+            name: "execute_cell".into(),
+            input: serde_json::json!({"code": "const hits = [];"}),
+        }];
+        conversation.messages.push(assistant);
+        conversation.messages.push(Message::runtime_tool_result(
+            format!("cell-{cell}"),
+            format!(
+                "[cell {cell} yielded]\n\n## Handles\nhits n={cell}\n\n## Budget\ncells {cell}/40"
+            ),
+            false,
+            format!("[cell {cell} yielded]"),
+        ));
+    }
+}
+
+#[test]
+fn streaming_and_whole_responses_send_the_same_cache_structure_and_expose_usage() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let whole = br#"{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":0,"output_tokens":2,"cache_read_input_tokens":2048,"cache_creation_input_tokens":64}}"#;
+    let streaming = br#"data: {"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":2048,"cache_creation_input_tokens":64}}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+data: {"type":"message_delta","usage":{"output_tokens":2}}
+
+data: {"type":"message_stop"}
+
+"#;
+    let mut requests = Vec::new();
+    let mut turns = Vec::new();
+    for (is_streaming, reply) in [(false, whole.as_slice()), (true, streaming.as_slice())] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            respond(stream, "200 OK", reply)
+        });
+        // SAFETY: ENV_LOCK serializes this test binary's environment changes.
+        unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &base) };
+        let turn = if is_streaming {
+            wire::send_turn_streaming(&sample_conversation(), wire::MODEL, &mut |_| {})
+        } else {
+            wire::send_turn(&sample_conversation())
+        };
+        unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+        turns.push(turn.unwrap());
+        requests
+            .push(serde_json::from_slice::<serde_json::Value>(&server.join().unwrap()).unwrap());
+    }
+    assert_eq!(
+        requests[1].as_object_mut().unwrap().remove("stream"),
+        Some(true.into())
+    );
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(turns[0].message, turns[1].message);
+    assert_eq!(turns[0].usage, turns[1].usage);
+    let usage = turns[0].usage.unwrap();
+    assert_eq!((usage.input_tokens, usage.output_tokens), (0, 2));
+    assert_eq!(usage.cache_read_input_tokens, Some(2048));
+    assert_eq!(usage.cache_creation_input_tokens, Some(64));
+}
+
+#[test]
+fn an_empty_system_has_no_invalid_empty_cache_block() {
+    let body: serde_json::Value = serde_json::from_slice(&wire::request_body(&Conversation {
+        system: String::new(),
+        messages: vec![Message::text(Role::User, "hello")],
+    }))
+    .unwrap();
+    assert_eq!(body["system"], serde_json::json!([]));
+    assert_eq!(
+        body["tools"][0]["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
 }

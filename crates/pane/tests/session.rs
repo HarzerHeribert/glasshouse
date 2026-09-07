@@ -605,7 +605,7 @@ fn the_binary_loads_the_projects_own_instructions() {
 
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
-    let system = request["system"].as_str().unwrap();
+    let system = request["system"][0]["text"].as_str().unwrap();
     assert!(
         system.contains("PANE-SESSION-TEST-MARKER-loads-its-own-claude-md"),
         "system prompt did not carry CLAUDE.md's content: {system}"
@@ -1317,7 +1317,10 @@ fn the_system_block_is_render_systems_own_bytes() {
         pane::wire::MODEL,
         "hi",
     );
-    assert_eq!(request["system"].as_str().unwrap(), expected.system);
+    assert_eq!(
+        request["system"][0]["text"].as_str().unwrap(),
+        expected.system
+    );
 }
 
 /// §6's cell cap, and the one sentence that replaces the preamble when a
@@ -1914,7 +1917,7 @@ const SUPERVISOR_SYSTEM_MARKER: &str = "You watch a coding agent's trajectory";
 
 fn is_supervisor_request(body: &str) -> bool {
     let request: serde_json::Value = serde_json::from_str(body).unwrap();
-    request["system"]
+    request["system"][0]["text"]
         .as_str()
         .unwrap_or("")
         .contains(SUPERVISOR_SYSTEM_MARKER)
@@ -3142,7 +3145,7 @@ fn yolo_grants_every_command_line_and_the_system_block_says_so() {
 
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
-    let system = request["system"].as_str().unwrap();
+    let system = request["system"][0]["text"].as_str().unwrap();
     assert!(
         system.contains("every command line is admitted"),
         "system block must state the yolo grant; got:\n{system}"
@@ -3176,7 +3179,7 @@ fn without_a_grant_the_system_block_says_no_command_may_run() {
 
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
-    let system = request["system"].as_str().unwrap();
+    let system = request["system"][0]["text"].as_str().unwrap();
     assert!(
         system.contains("no command may be run at all"),
         "got:\n{system}"
@@ -3520,7 +3523,7 @@ fn new_user_requests_get_truthful_model_and_runtime_boundaries() {
     for body in bodies.iter() {
         let request: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(request["model"], "deepseek-v4-flash");
-        let system = request["system"].as_str().unwrap();
+        let system = request["system"][0]["text"].as_str().unwrap();
         assert!(system.contains("You are Pane"));
         assert!(system.contains("Configured request model: \"deepseek-v4-flash\""));
         assert_eq!(body.matches("Pane task boundary").count(), 1);
@@ -3952,8 +3955,8 @@ fn task_orientation_and_instructions_refresh_without_widening_live_permissions()
     let bodies = bodies.lock().unwrap();
     let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
-    let first = first["system"].as_str().unwrap();
-    let second = second["system"].as_str().unwrap();
+    let first = first["system"][0]["text"].as_str().unwrap();
+    let second = second["system"][0]["text"].as_str().unwrap();
     assert!(first.contains("GUIDANCE_VERSION_ONE"));
     assert!(second.contains("GUIDANCE_VERSION_TWO"));
     assert!(!second.contains("GUIDANCE_VERSION_ONE"));
@@ -3994,7 +3997,7 @@ fn resumed_tasks_use_current_instructions_instead_of_the_saved_system_prompt() {
     );
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
-    let system = request["system"].as_str().unwrap();
+    let system = request["system"][0]["text"].as_str().unwrap();
     assert!(system.contains("RESUME_NEW_GUIDANCE"));
     assert!(!system.contains("RESUME_OLD_GUIDANCE"));
 }
@@ -4043,7 +4046,7 @@ fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
     let step = std::sync::atomic::AtomicUsize::new(0);
     let (url, bodies) = start_answering_provider(2, move |body| {
         let request: serde_json::Value = serde_json::from_str(body).unwrap();
-        let system = request["system"].as_str().unwrap();
+        let system = request["system"][0]["text"].as_str().unwrap();
         assert!(
             !checked_target.exists(),
             "write happened before guidance delivery"

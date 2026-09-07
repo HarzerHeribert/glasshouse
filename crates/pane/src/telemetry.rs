@@ -12,6 +12,7 @@ pub struct RequestMeasurement {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
     pub served: ServedBy,
 }
 
@@ -37,7 +38,10 @@ impl RequestMeasurement {
             elapsed_ms,
             input_tokens,
             output_tokens,
-            cached_input_tokens: served.cached_input_tokens,
+            cached_input_tokens: served
+                .cached_input_tokens
+                .or_else(|| usage.and_then(|row| row.cache_read_input_tokens)),
+            cache_creation_input_tokens: usage.and_then(|row| row.cache_creation_input_tokens),
             served,
         }
     }
@@ -58,6 +62,8 @@ mod tests {
         let usage = Usage {
             input_tokens: 300,
             output_tokens: 40,
+            cache_read_input_tokens: Some(200),
+            cache_creation_input_tokens: Some(50),
         };
         let measured = RequestMeasurement::from_response(
             2,
@@ -69,6 +75,7 @@ mod tests {
         assert_eq!(measured.input_tokens, Some(30));
         assert_eq!(measured.output_tokens, Some(40));
         assert_eq!(measured.cached_input_tokens, Some(20));
+        assert_eq!(measured.cache_creation_input_tokens, Some(50));
         assert_eq!(measured.served, served);
     }
 
@@ -81,12 +88,36 @@ mod tests {
         let usage = Usage {
             input_tokens: 12,
             output_tokens: 4,
+            cache_read_input_tokens: Some(100),
+            cache_creation_input_tokens: Some(25),
         };
         let measured =
             RequestMeasurement::from_response(1, "model".into(), 9, served, Some(&usage));
         assert_eq!(measured.input_tokens, Some(12));
         assert_eq!(measured.output_tokens, Some(4));
-        assert_eq!(measured.cached_input_tokens, None);
+        assert_eq!(measured.cached_input_tokens, Some(100));
+        assert_eq!(measured.cache_creation_input_tokens, Some(25));
+    }
+
+    #[test]
+    fn explicit_cache_zero_is_preserved_and_missing_cache_fields_stay_unknown() {
+        for (read, written) in [(None, None), (Some(0), Some(0))] {
+            let usage = Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: written,
+            };
+            let measured = RequestMeasurement::from_response(
+                1,
+                "model".into(),
+                0,
+                ServedBy::default(),
+                Some(&usage),
+            );
+            assert_eq!(measured.cached_input_tokens, read);
+            assert_eq!(measured.cache_creation_input_tokens, written);
+        }
     }
 
     #[test]
@@ -96,5 +127,6 @@ mod tests {
         assert_eq!(measured.input_tokens, None);
         assert_eq!(measured.output_tokens, None);
         assert_eq!(measured.cached_input_tokens, None);
+        assert_eq!(measured.cache_creation_input_tokens, None);
     }
 }

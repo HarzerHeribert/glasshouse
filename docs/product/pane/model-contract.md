@@ -304,11 +304,33 @@ request's model field, and it does not change a byte of the system block; and
 a firewall reduction on the relayed path must preserve Pane's correlated cell
 result semantics; the same request body is used through the gateway and direct.
 
+### Explicit cache boundaries and usage
+
+The outbound `system` is a one-element array of text blocks. Its `text` is
+exactly the rendered system string, with `cache_control: {"type":"ephemeral"}`
+on that block (an empty system uses an empty array). The native `execute_cell`
+tool definition has the same breakpoint,
+so a changed system can still reuse the tool prefix. Streaming uses the same
+serializer and boundaries. Neither path marks conversation messages: task
+boundaries, handles, cell output and budget snapshots stay after the cached
+system prefix. Changed instructions intentionally change that prefix.
+
+These are requests for caching, not evidence of a hit. Pane exposes provider
+`cache_read_input_tokens` and `cache_creation_input_tokens` separately from
+`input_tokens` and `output_tokens`; missing or malformed cache fields stay
+unknown and explicit zero stays zero. Streaming merges supplied fields across the start
+and final usage events without summing cumulative counts. Request telemetry
+prefers correlated gateway cache-read counts and otherwise uses the response;
+cache writes come from the response. No count or dollar saving is inferred from
+the presence of a breakpoint. Provider support, cache lifetime and minimum
+prefix length still determine whether caching occurs, as specified by the
+[Anthropic prompt caching protocol](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+
 ## 9. What this contract does not decide
 
 - **Slash-command rendering.** `/handles`, `/budget` and the rest are TUI
   commands; whether any of them injects text is 61C's.
-- **Sampling parameters, thinking budgets and cache breakpoints.** These are
+- **Sampling parameters and thinking budgets.** These are
   request fields, not prompt bytes, and the gateway may rewrite them
   (`gateway/translate/canonical.rs`). See `phase-minus-one.md` §5 for the one
   place that is not yet safe.
