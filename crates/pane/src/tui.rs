@@ -770,7 +770,7 @@ pub fn render_screen(
     let connection = match state.connected {
         Some(true) => "Glasshouse connected",
         Some(false) => "Glasshouse offline",
-        None if served_by.is_known() => "Glasshouse metered",
+        None if served_by.is_known() => "Glasshouse routed",
         None => NOT_CONNECTED,
     };
     let width = usize::from(regions.status.width);

@@ -175,6 +175,32 @@ fn the_status_line_names_the_model_the_project_the_sandbox_and_the_connection() 
     }
 }
 #[test]
+fn gateway_provenance_does_not_invent_a_billing_status() {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let served = ServedBy {
+        provider: Some("subscription-broker".into()),
+        ..ServedBy::default()
+    };
+    let mut state = state();
+    state.connected = None;
+    terminal
+        .draw(|frame| {
+            render_screen(
+                frame,
+                &conversation(),
+                &served,
+                &HandleTable::new(),
+                &Notebook::default(),
+                &state,
+            )
+        })
+        .unwrap();
+    let rendered = text(terminal.backend().buffer());
+    assert!(rendered.contains("Glasshouse routed"));
+    assert!(!rendered.contains("metered"));
+}
+
+#[test]
 fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcript() {
     let mut state = state();
     state.input = "first line\nsecond line".into();

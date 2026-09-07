@@ -557,7 +557,13 @@ fn run(
                 }
             }
             Event::Paste(text) => {
-                editor.insert(&text);
+                if !state
+                    .panel
+                    .as_mut()
+                    .is_some_and(|panel| panel.search_insert(&text))
+                {
+                    editor.insert(&text);
+                }
                 dirty = true;
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -635,20 +641,35 @@ fn run(
                     }
                 }
                 if let Some(panel) = state.panel.as_mut() {
+                    if panel.search.is_some() {
+                        match key.code {
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                panel.search_clear();
+                                continue;
+                            }
+                            KeyCode::Char(c)
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
+                                panel.search_insert(&c.to_string());
+                                continue;
+                            }
+                            KeyCode::Backspace => {
+                                panel.search_backspace();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     match key.code {
                         KeyCode::Esc => {
                             state.panel = None;
                         }
-                        KeyCode::Up => panel.selected = panel.selected.saturating_sub(1),
-                        KeyCode::Down => {
-                            panel.selected =
-                                (panel.selected + 1).min(panel.rows.len().saturating_sub(1))
-                        }
-                        KeyCode::PageUp => panel.selected = panel.selected.saturating_sub(10),
-                        KeyCode::PageDown => {
-                            panel.selected =
-                                (panel.selected + 10).min(panel.rows.len().saturating_sub(1))
-                        }
+                        KeyCode::Up => panel.move_selection(false, 1),
+                        KeyCode::Down => panel.move_selection(true, 1),
+                        KeyCode::PageUp => panel.move_selection(false, 10),
+                        KeyCode::PageDown => panel.move_selection(true, 10),
                         KeyCode::Enter => {
                             if let Some(command) = panel
                                 .rows
@@ -834,6 +855,7 @@ fn run(
                                             command: Some(format!("/theme {}", theme.name())),
                                         })
                                         .collect(),
+                                    ..tui::Panel::default()
                                 });
                             }
                         }

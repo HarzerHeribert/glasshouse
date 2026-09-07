@@ -352,7 +352,7 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '{\"version\":1,\"accounts\":[{\"account\":\"z-account\",\"provider\":\"fixture\",\"models\":[\"z-model\"],\"scope\":\"provider-declared\"},{\"account\":\"a-account\",\"provider\":\"fixture\",\"models\":[\"b-model\",\"a-model\"],\"scope\":\"provider-declared\"}]}'\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/model\r");
-    app.contains("Models by entitlement");
+    app.contains("Models by provider");
     app.contains("a-model");
     let content = app.screen.screen().contents();
     assert!(content.find("a-account").unwrap() < content.find("z-account").unwrap());
@@ -362,6 +362,62 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     app.send(b"answer this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(request["model"], "a-model");
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() {
+    use std::os::unix::fs::PermissionsExt;
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    let models: Vec<_> = (0..304)
+        .rev()
+        .map(|i| format!("vendor/model-{i:03}"))
+        .collect();
+    let catalogue = serde_json::json!({"version": 1, "accounts": [
+        {"account":"personal", "provider":"openrouter", "scope":"provider-declared", "models":models},
+        {"account":"work", "provider":"openrouter", "scope":"provider-declared", "models":["vendor/model-303"]}
+    ]});
+    std::fs::write(app.root.join("catalogue.json"), catalogue.to_string()).unwrap();
+    let executable = app.root.join("no-glasshouse");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\ncat '{}'\n",
+            app.root.join("catalogue.json").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.send(b"/model\r");
+    app.contains("305/305");
+    app.send(b"OPENROUTER work 303");
+    app.contains("1/305");
+    app.contains("openrouter · work");
+    app.contains("vendor/model-303");
+    assert!(!app.screen.screen().contents().contains("personal"));
+    app.send(b"x");
+    app.contains("No models match");
+    app.send(b"\r");
+    assert!(requests.try_recv().is_err());
+    app.send(b"\x7f");
+    app.contains("1/305");
+    app.send(b"\x15");
+    app.contains("305/305");
+    app.send(b"\x1b[200~personal 302\x1b[201~");
+    app.contains("vendor/model-302");
+    app.contains("1/305");
+    app.resize(40);
+    app.contains("vendor/model-302");
+    app.send(b"\r");
+    app.contains("model changed to vendor/model-302");
+    app.send(b"answer this\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request["model"], "vendor/model-302");
     app.contains("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);

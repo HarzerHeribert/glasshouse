@@ -41,19 +41,27 @@ pub(super) fn models(session: &Session<'_>) {
             None,
         )
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
-    let mut panel = Panel::text(
-        "Models by entitlement",
-        "Provider declarations; selecting a model does not pin routing to an account.",
-    );
+    show(session, model_panel(catalogue, &session.model.borrow()));
+}
+
+fn model_panel(catalogue: Option<Catalogue>, current: &str) -> Panel {
+    let mut panel = Panel::text(format!("Models by provider · Current: {current}"), "");
     match catalogue {
         Some(mut catalogue) if catalogue.version == 1 => {
-            catalogue.accounts.sort_by(|a, b| a.account.cmp(&b.account));
+            catalogue.accounts.sort_by(|a, b| {
+                a.provider
+                    .as_deref()
+                    .unwrap_or("native harness")
+                    .cmp(b.provider.as_deref().unwrap_or("native harness"))
+                    .then_with(|| a.account.cmp(&b.account))
+                    .then_with(|| a.scope.cmp(&b.scope))
+            });
             for mut account in catalogue.accounts {
                 panel.rows.push(PanelRow {
                     text: format!(
                         "{} · {} · {}",
-                        account.account,
                         account.provider.as_deref().unwrap_or("native harness"),
+                        account.account,
                         account.scope
                     ),
                     command: None,
@@ -83,16 +91,10 @@ pub(super) fn models(session: &Session<'_>) {
             command: None,
         }),
     }
-    panel.rows.push(PanelRow {
-        text: format!("Current: {}", session.model.borrow()),
-        command: None,
-    });
-    panel.selected = panel
-        .rows
-        .iter()
-        .position(|r| r.command.is_some())
-        .unwrap_or(0);
-    show(session, panel);
+    if panel.rows.iter().any(|r| r.command.is_some()) {
+        panel = panel.searchable();
+    }
+    panel
 }
 
 pub(super) fn command(
@@ -141,6 +143,7 @@ pub(super) fn command(
                         title: format!("Effort · current {}", session.effort.get().name()),
                         rows,
                         selected: 0,
+                        ..Panel::default()
                     },
                 );
             }
@@ -442,6 +445,48 @@ fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_catalogue_groups_by_provider_then_account_and_preserves_model_ids() {
+        let catalogue = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "accounts": [
+                {"account":"a-account", "provider":"z-provider", "scope":"declared", "models":["shared/id"]},
+                {"account":"z-account", "provider":"a-provider", "scope":"declared", "models":["shared/id", "B/model", "shared/id", "bad id", ""]},
+                {"account":"b-account", "provider":"a-provider", "scope":"declared", "models":["shared/id"]}
+            ]
+        })).unwrap();
+        let panel = model_panel(Some(catalogue), "current");
+        let headings: Vec<_> = panel
+            .rows
+            .iter()
+            .filter(|row| row.command.is_none())
+            .map(|row| row.text.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                "a-provider · b-account · declared",
+                "a-provider · z-account · declared",
+                "z-provider · a-account · declared"
+            ]
+        );
+        let commands: Vec<_> = panel
+            .rows
+            .iter()
+            .filter_map(|row| row.command.as_deref())
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "/model shared/id",
+                "/model B/model",
+                "/model shared/id",
+                "/model shared/id"
+            ]
+        );
+        assert_eq!(panel.selected, 1);
+    }
+
     #[test]
     fn permission_edits_preserve_other_settings_and_reject_invalid_grants() {
         let root = std::env::temp_dir().join(format!("pane-permissions-{}", std::process::id()));
