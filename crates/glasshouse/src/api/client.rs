@@ -241,6 +241,23 @@ pub fn read_output(
     Ok(())
 }
 
+/// The path this client would connect to for this project — capability map
+/// line 2479, `glasshouse api socket-path`.
+///
+/// Deliberately infallible and deliberately not a connection. A program that
+/// speaks this door's protocol itself — pane, resolving the door once and
+/// connecting at every poll — needs to know *where* before it can decide
+/// anything about *whether*, and a refused connect is "no door this turn",
+/// not "no door for this project": a door started after the asking program
+/// is still found at the same path. Answering only when something is
+/// listening would have made the two indistinguishable.
+///
+/// It is [`socket_path_for`], not a second derivation of it, so the answer is
+/// by construction the path this module's own [`call_inner`] would use.
+pub fn socket_path(runtime: &Runtime) -> PathBuf {
+    socket_path_for(runtime)
+}
+
 /// Where this project's door listens when nothing overrides it.
 ///
 /// A copy of `unix::socket_path_for` — see this module's doc comment for why

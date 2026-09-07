@@ -191,6 +191,26 @@ pub fn unmute(_runtime: &glasshouse::Runtime, _session: &str) -> anyhow::Result<
     Err(no_unix_socket())
 }
 
+/// Where this project's door binds — capability map line 2479,
+/// `glasshouse api socket-path`.
+///
+/// One wrapper over [`client::socket_path`] rather than a re-export, so that
+/// `main.rs` has one arm on every platform: resolving a path cannot fail
+/// where there are Unix domain sockets, and where there are none the answer
+/// is [`no_unix_socket`]'s single sentence — the same absence `serve` and
+/// every client verb report, said the same way.
+#[cfg(unix)]
+pub fn socket_path(runtime: &glasshouse::Runtime) -> anyhow::Result<std::path::PathBuf> {
+    Ok(client::socket_path(runtime))
+}
+
+/// See [`no_unix_socket`]. There is no path to print here because there is no
+/// door to bind.
+#[cfg(not(unix))]
+pub fn socket_path(_runtime: &glasshouse::Runtime) -> anyhow::Result<std::path::PathBuf> {
+    Err(no_unix_socket())
+}
+
 /// The Windows half of Phase 42's door, proved on the platform that has it.
 ///
 /// `main.rs`'s `ApiCommand::Mute`/`Unmute` arms call `api::mute`/`api::unmute`

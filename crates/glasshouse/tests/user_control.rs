@@ -28,6 +28,8 @@
 //! | 1714, 1715 | [`to_and_fresh_override_a_ranking_that_would_have_chosen_otherwise`] |
 //! | 1716 | [`checkpoint_first_leaves_a_checkpoint_for_the_session_being_left`], [`checkpoint_first_says_when_it_had_nothing_to_check_point`], [`checkpoint_first_on_a_resume_leaves_a_checkpoint_for_the_session_being_left`], [`checkpoint_first_on_a_resume_of_the_session_in_hand_says_it_had_nothing_to_do`] |
 //! | 1717 | [`a_muted_session_refuses_machine_messages_but_not_interrupts`], [`a_mute_expires_on_its_own`] |
+//! | 1717, 2479 | [`a_muted_pane_session_refuses_a_machine_message_before_its_inbox_is_touched`] |
+//! | 2479 | [`socket_path_prints_the_path_the_client_would_use_and_exits_zero_with_no_door_listening`] |
 //! | 1718 | [`a_person_takes_over_an_orchestrated_worker_and_the_orchestrator_is_locked_out`] |
 //! | 1719 | [`a_persons_keystroke_outranks_a_machine_message_to_the_same_session`] |
 //! | 1720 | [`every_automated_move_is_announced_before_it_happens`] |
@@ -40,6 +42,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+use glasshouse::cli::Cli;
+use glasshouse::session::{NewSession, ProjectSessions};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -849,6 +854,35 @@ impl Door {
         std::fs::read_to_string(self.root.join(format!("argv-{session}.log"))).ok()
     }
 
+    /// Record a session under `harness` in this project's own store and hand
+    /// back its identifier — capability map line 2479.
+    ///
+    /// Through `ProjectSessions` rather than `Request::SpawnSession` because
+    /// this fixture installs one harness executable and pane is not it: what
+    /// is under test is where a message goes given the recipient's recorded
+    /// harness, not whether a harness starts. **Call it before the server
+    /// starts**: the runtime it opens owns a database connection, and it is
+    /// dropped here so nothing holds the file when the door opens it.
+    fn seed_session(&self, harness: &str) -> String {
+        let cli = Cli {
+            scope: Some(self.root.clone()),
+            allow_unsafe_scope: false,
+            data_dir: Some(self.base.join("data")),
+            config_dir: Some(self.base.join("config")),
+            log_level: None,
+            log_file: None,
+            log_stderr: false,
+            command: None,
+        };
+        let runtime = glasshouse::bootstrap(&cli, &self.root).expect("bootstrap the fixture");
+        let sessions = ProjectSessions::open(&runtime).expect("open the session store");
+        let record = sessions
+            .store()
+            .create(NewSession::embedded(harness))
+            .expect("record the session");
+        record.id.as_str().to_owned()
+    }
+
     /// Run the shipped binary as a person would, against this project.
     fn client(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_glasshouse"))
@@ -957,6 +991,21 @@ impl Serving {
             "session": session,
             "text": text,
         }))
+    }
+
+    /// One session's stored messages from the start — capability map line
+    /// 2479. Asserts the read itself succeeded, so a caller below is looking
+    /// at an inbox that was really answered rather than at a missing field.
+    fn inbox(&self, session: &str) -> Vec<serde_json::Value> {
+        let response = self.call(serde_json::json!({
+            "op": "inbox",
+            "session": session,
+        }));
+        assert_eq!(response["status"], "ok", "{response}");
+        response["result"]["messages"]
+            .as_array()
+            .expect("a messages array")
+            .clone()
     }
 }
 
@@ -1401,5 +1450,155 @@ fn a_person_takes_over_an_orchestrated_worker_and_the_orchestrator_is_locked_out
         "and the reason must now be the keyboard rather than the mute — two controls, two \
          sentences, and a person handing a worker back can tell which one is still in force: {}",
         error_message(&still_held)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 1717 meets line 2479 — a mute is about the recipient, not the pipe
+// ---------------------------------------------------------------------------
+
+/// **Line 1717 and line 2479 together.** A mute stops an orchestrator's
+/// message reaching a session, and it stops it *before* the message is stored
+/// — a session whose harness reads a batch instead of a terminal is muted the
+/// same way one with a pseudo-terminal is.
+///
+/// The order is what this test exists for. Storing first and refusing second
+/// would still answer `error`, and a person reading only the refusal could
+/// not tell that the line they muted a worker to keep out of it was sitting
+/// in that worker's inbox waiting for its next turn. So the assertion is the
+/// **empty inbox**, not the refusal, and the refusal is checked for the two
+/// things line 1717 already requires: that it names the remaining time and
+/// that it does not quote the text it refused.
+///
+/// The unmute at the end is the positive control: without it, an inbox that
+/// was empty because the harness branch never ran at all would pass.
+#[test]
+fn a_muted_pane_session_refuses_a_machine_message_before_its_inbox_is_touched() {
+    let door = Door::new();
+    let session = door.seed_session("pane");
+    let server = Serving::start(&door);
+
+    let muted = server.call(serde_json::json!({
+        "op": "mute_session",
+        "session": session,
+        "seconds": 600,
+    }));
+    assert_eq!(muted["status"], "ok", "{muted}");
+
+    let refused = server.machine_send(&session, "orchestrator-line-one");
+    assert_eq!(
+        refused["status"], "error",
+        "a muted session must refuse an orchestrator's message whether or not \
+         it has a terminal: {refused}"
+    );
+    let message = error_message(&refused);
+    assert!(
+        message.contains("muted"),
+        "the refusal must say the session is muted: {message}"
+    );
+    assert!(
+        message.contains('s') && message.contains("another"),
+        "and it must name the remaining time: {message}"
+    );
+    assert!(
+        !message.contains("orchestrator-line-one"),
+        "the refusal must not carry the text it refused: {message}"
+    );
+
+    assert!(
+        server.inbox(&session).is_empty(),
+        "a mute must be answered before the inbox is written to, or the line \
+         a person muted a worker to keep out of it is waiting in that worker's \
+         next turn"
+    );
+
+    // The control: lift the mute and the same message is stored, so the empty
+    // inbox above was the mute and not a branch that never ran.
+    let lifted = server.call(serde_json::json!({
+        "op": "unmute_session",
+        "session": session,
+    }));
+    assert_eq!(lifted["status"], "ok", "{lifted}");
+    let delivered = server.machine_send(&session, "orchestrator-line-two");
+    assert_eq!(delivered["status"], "ok", "{delivered}");
+    assert_eq!(delivered["result"]["via"], "inbox", "{delivered}");
+
+    let inbox = server.inbox(&session);
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert_eq!(inbox[0]["text"], "orchestrator-line-two", "{inbox:?}");
+    assert!(
+        !inbox
+            .iter()
+            .any(|message| message["text"] == "orchestrator-line-one"),
+        "the refused line must never appear later: {inbox:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 2479 — `glasshouse api socket-path`
+// ---------------------------------------------------------------------------
+
+/// **Line 2479.** `glasshouse api socket-path` answers *where the door binds*
+/// — a question about this project — and answers it with nothing listening.
+///
+/// Both halves matter to the program that asked for this verb. A harness
+/// resolves the path once and connects at every poll, so an answer that
+/// required a running door would make "no door for this project" and "no door
+/// this second" the same result; and the path has to be the one the server
+/// actually binds, or the caller polls somewhere nothing will ever be.
+///
+/// So this asserts the exit code and the exact line **before** any door
+/// exists, then starts a real `glasshouse api serve` and compares the path
+/// the server announces against the line already printed. Neither assertion
+/// re-derives the path — that would be this test agreeing with a copy of the
+/// rule rather than with the door.
+#[test]
+fn socket_path_prints_the_path_the_client_would_use_and_exits_zero_with_no_door_listening() {
+    let door = Door::new();
+
+    let printed = door.client(&["api", "socket-path"]);
+    assert!(
+        printed.status.success(),
+        "socket-path must exit zero with nothing listening: {:?} / {}",
+        printed.status,
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let stdout = String::from_utf8(printed.stdout).expect("utf-8 stdout");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one line on standard output, so a caller can read it \
+         without parsing: {stdout:?}"
+    );
+    assert!(
+        stdout.ends_with('\n'),
+        "and it is a line, terminated: {stdout:?}"
+    );
+    let path = PathBuf::from(lines[0]);
+    assert!(
+        path.is_absolute(),
+        "the answer must be usable from anywhere: {path:?}"
+    );
+    assert!(
+        !path.exists(),
+        "nothing may be bound by asking where the door binds: {path:?}"
+    );
+
+    // The same question, answered by a door that really bound.
+    let server = Serving::start(&door);
+    assert_eq!(
+        server.socket, path,
+        "the printed path must be the one `glasshouse api serve` binds"
+    );
+
+    // And it is still the same answer while a door is listening: the verb
+    // reports where, not whether.
+    let again = door.client(&["api", "socket-path"]);
+    assert!(again.status.success(), "{:?}", again.status);
+    assert_eq!(
+        String::from_utf8(again.stdout).expect("utf-8 stdout"),
+        stdout,
+        "the answer must not depend on what is running"
     );
 }

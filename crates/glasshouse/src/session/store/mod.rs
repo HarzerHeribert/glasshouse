@@ -35,6 +35,7 @@ pub use claims::{FileClaim, STALE_CLAIM_AFTER};
 pub use context::{
     AdvisoryCacheState, CacheState, CheckpointRecency, SessionContext, TaskContinuity,
 };
+pub use messages::SessionMessage;
 pub use progress::{TASK_PROGRESS_EXPIRES_AFTER, TaskProgressDeclaration};
 pub use record::{
     LabelError, NewSession, ResponseMechanism, ResumableSession, SessionDisposition, SessionId,
@@ -1753,6 +1754,7 @@ fn require_owning_harness(harness: &str) -> Result<(), SessionStoreError> {
 
 mod claims;
 mod context;
+mod messages;
 mod progress;
 mod record;
 #[cfg(test)]

@@ -405,6 +405,21 @@ fn columns_of(conn: &Connection, table: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every table this database holds, in a stable order.
+fn table_names(conn: &Connection) -> Vec<String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// Everything `sqlite_master` holds, in a stable order — the whole
 /// schema as one comparable value.
 fn whole_schema(conn: &Connection) -> Vec<(String, String, Option<String>)> {
@@ -455,6 +470,7 @@ fn migration_18_adds_failure_class_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN failure_class;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 18;
@@ -603,6 +619,7 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN task_class;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 23;
@@ -643,7 +660,7 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
         "the launch must have applied migration 23"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 28,
+        SUPPORTED_SCHEMA_VERSION, 29,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -797,6 +814,7 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN session_id;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 24;
@@ -839,7 +857,7 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
         "the launch must have applied migration 24"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 28,
+        SUPPORTED_SCHEMA_VERSION, 29,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1005,6 +1023,7 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 25;
@@ -1057,7 +1076,7 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
         "the launch must have applied migration 25"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 28,
+        SUPPORTED_SCHEMA_VERSION, 29,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1228,6 +1247,7 @@ fn migration_19_adds_the_assumption_tables_and_undoes_cleanly() {
             DROP TABLE task_assumptions;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 19;
@@ -1417,6 +1437,7 @@ fn migration_20_adds_presentation_ref_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN presentation_ref;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 20;
@@ -1547,6 +1568,7 @@ fn the_memory_commit_migration_adds_its_two_columns_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 21;
@@ -1732,6 +1754,7 @@ fn the_entitlement_migration_adds_its_column_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN entitlement;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
+            DROP TABLE IF EXISTS session_messages;
             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 22;
@@ -1773,7 +1796,7 @@ fn the_entitlement_migration_adds_its_column_and_undoes_cleanly() {
         "the launch must have applied the entitlement migration"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 28,
+        SUPPORTED_SCHEMA_VERSION, 29,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1896,6 +1919,7 @@ fn a_version_sixteen_database_migrates_forward_keeping_its_memories() {
                  DROP TABLE memory_files;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 17;",
@@ -2052,6 +2076,7 @@ fn a_version_nine_database_migrates_forward_keeping_its_memories() {
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
 
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
 
@@ -2135,6 +2160,7 @@ fn a_version_twelve_database_migrates_forward_keeping_a_supersession_it_could_no
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 13;"
@@ -2234,6 +2260,7 @@ fn a_version_thirteen_database_migrates_forward_keeping_the_order_it_could_recor
             "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 14;"
@@ -2416,6 +2443,7 @@ fn a_version_ten_database_migrates_forward_keeping_its_memories() {
                  DROP TABLE routing_observations;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 11;"
@@ -3441,4 +3469,161 @@ fn a_missing_database_file_still_creates_a_fresh_project() {
     assert_eq!(migrated.database_path(), db);
     assert!(db.exists());
     assert_eq!(schema_version(&db), version_before);
+}
+
+/// Migration proof for 29 — capability map line 2479: a version-28 database
+/// that already holds a session and a lifecycle event opens, migrates to 29
+/// adding exactly `session_messages` with its index and its two project-scope
+/// triggers, keeps every pre-migration row, takes a message through the real
+/// writer, refuses a row for a session of another project by trigger, and the
+/// undo takes the whole schema back to exactly what it was.
+///
+/// The foreign-project half is what makes the triggers load-bearing rather
+/// than decorative: `session_messages` deliberately has no
+/// `REFERENCES sessions(id)` (migration 5's posture), so the trigger is the
+/// *only* thing standing between this table and another project's row.
+///
+/// One connection at a time throughout (practice §65).
+#[test]
+fn migration_29_adds_session_messages_and_refuses_a_foreign_projects_session() {
+    use crate::session::{NewSession, SessionStore};
+
+    const UNDO_29: &str = "
+            DROP TABLE IF EXISTS session_messages;
+            DELETE FROM schema_migrations WHERE version >= 29;
+        ";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let db_path = fixture.runtime.database_path();
+    let project_id = stored_project_id(&db_path);
+
+    // A session and an event, written the way a version-28 build wrote them,
+    // so "every existing row intact" is a claim about real rows.
+    let session = {
+        let conn = Connection::open(&db_path).unwrap();
+        let store = SessionStore::new(&conn).unwrap();
+        let record = store.create(NewSession::embedded("pane")).unwrap();
+        conn.execute(
+            "INSERT INTO lifecycle_events (project_id, session_id, at, kind)
+                 VALUES (?1, ?2, 1, 'session_started')",
+            rusqlite::params![&project_id, record.id.as_str()],
+        )
+        .unwrap();
+        record.id
+    };
+
+    let (schema_at_28, tables_at_28) = {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(UNDO_29).unwrap();
+        (whole_schema(&conn), table_names(&conn))
+    };
+    assert_eq!(schema_version(&db_path), 28, "the rollback must land on 28");
+    assert!(
+        !tables_at_28.iter().any(|table| table == "session_messages"),
+        "{tables_at_28:?}"
+    );
+
+    // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+    let migrated = fixture.rebootstrap().unwrap();
+    assert_eq!(
+        schema_version(&migrated.database_path()),
+        SUPPORTED_SCHEMA_VERSION,
+        "the launch must have applied migration 29"
+    );
+    assert_eq!(
+        SUPPORTED_SCHEMA_VERSION, 29,
+        "a fresh database reports the version the newest migration ships"
+    );
+
+    let schema_at_29 = {
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Every pre-migration row survived.
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sessions, 1, "the pre-migration session must survive");
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM lifecycle_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 1, "the pre-migration event must survive");
+
+        // Exactly one new table, with exactly the columns the migration names.
+        let mut added: Vec<String> = table_names(&conn)
+            .into_iter()
+            .filter(|table| !tables_at_28.contains(table))
+            .collect();
+        added.sort();
+        assert_eq!(added, vec!["session_messages".to_owned()], "{added:?}");
+        assert_eq!(
+            columns_of(&conn, "session_messages"),
+            vec!["seq", "project_id", "session", "sender", "body", "at"],
+        );
+
+        // The real writer, and the cursor over what it wrote.
+        let store = SessionStore::new(&conn).unwrap();
+        let seq = store
+            .append_session_message(&session, Some("orchestrator-1"), "a line")
+            .unwrap();
+        assert!(seq > 0, "a stored message must carry a cursor position");
+        let stored = store.session_messages(&session, 0, 10).unwrap();
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        assert_eq!(stored[0].sender.as_deref(), Some("orchestrator-1"));
+        assert_eq!(stored[0].body, "a line");
+        assert_eq!(store.session_messages_head(&session).unwrap(), seq);
+
+        // A sender that stated nothing is `NULL`, not an empty string:
+        // "nobody said" and "somebody said nothing" are different facts.
+        store
+            .append_session_message(&session, None, "anonymous")
+            .unwrap();
+        let anonymous = store.session_messages(&session, seq, 10).unwrap();
+        assert_eq!(anonymous.len(), 1, "{anonymous:?}");
+        assert!(anonymous[0].sender.is_none(), "{anonymous:?}");
+
+        // The trigger, which is the only project scope this table has.
+        let foreign = conn.execute(
+            "INSERT INTO session_messages (project_id, session, sender, body, at)
+                 VALUES ('some-other-project', ?1, NULL, 'not ours', 1)",
+            [session.as_str()],
+        );
+        let refusal = foreign.expect_err("a foreign project's message must be refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("session message belongs to a different project"),
+            "the trigger must be what refused it: {refusal}"
+        );
+
+        // And an update that tries to move a row into another project.
+        let moved = conn.execute(
+            "UPDATE session_messages SET project_id = 'some-other-project'",
+            [],
+        );
+        let refusal = moved.expect_err("a row must not be moved to another project");
+        assert!(
+            refusal
+                .to_string()
+                .contains("session message belongs to a different project"),
+            "{refusal}"
+        );
+
+        whole_schema(&conn)
+    };
+
+    // The undo takes the whole schema back to exactly what it was — every
+    // table, index and trigger, the two project-scope triggers included.
+    assert_ne!(
+        schema_at_29, schema_at_28,
+        "the migration must add something"
+    );
+    let undone = {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(UNDO_29).unwrap();
+        whole_schema(&conn)
+    };
+    assert_eq!(undone, schema_at_28, "migration 29 must undo cleanly");
 }

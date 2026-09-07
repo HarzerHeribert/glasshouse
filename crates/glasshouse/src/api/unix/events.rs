@@ -17,7 +17,12 @@ use crate::api::protocol::Response;
 /// output" requirement. A caller that has fallen behind by more than this
 /// many events gets a `head` past what it can see in this response and
 /// polls again rather than pulling the whole table in one line of JSON.
-const MAX_EVENTS_LIMIT: usize = 1000;
+///
+/// `pub(super)` since line 2479: `Request::Inbox` walks the same shape of
+/// cursor over a different table and is capped by this same number, stated
+/// once here rather than copied into a second handler that could drift from
+/// it.
+pub(super) const MAX_EVENTS_LIMIT: usize = 1000;
 
 /// This project's lifecycle events, harness-independent — capability map
 /// line 701.

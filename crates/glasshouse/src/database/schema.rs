@@ -13,7 +13,7 @@
 ///
 /// History: design-decisions.md, "Trims: the remaining module docs, second
 /// packet", `SUPPORTED_SCHEMA_VERSION`.
-pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 28;
+pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 29;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///

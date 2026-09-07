@@ -504,6 +504,15 @@ const TOOLS: &[Tool] = &[
             Ok(Request::SendMessage {
                 session,
                 text,
+                // Line 2479: `from` is the sender's own session id, and this
+                // door does not have one. `ServerContext` is opened for a
+                // `Runtime` and knows the project, never which session's
+                // harness is holding this stdio pipe — so there is nothing
+                // truthful to put here, and stating a guess would put an
+                // unverifiable attribution into a recipient's inbox. `None`
+                // is the honest answer until the MCP door is told who it
+                // serves.
+                from: None,
                 // Ruling 4: an MCP caller is a program. Stated here rather
                 // than left to the wire default so that a future change to
                 // that default cannot change what this door records.

@@ -362,6 +362,7 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              DROP TABLE IF EXISTS task_assumptions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS session_messages;
              DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 4;",
@@ -394,7 +395,7 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 28,
+        version, 29,
         "the launch must have applied migrations 4 through 22"
     );
 

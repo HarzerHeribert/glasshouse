@@ -1,7 +1,7 @@
 //! Migrations 14 onwards, split out of `database.rs`'s `MIGRATIONS`
 //! array by Phase 59's decomposition. Bodies through 26 are verbatim.
 
-pub(super) const MIGRATIONS_V14_ON: [&str; 15] = [
+pub(super) const MIGRATIONS_V14_ON: [&str; 16] = [
     // 14: the order checkpoints were actually written in, because
     // `created_at` cannot carry it.
     //
@@ -673,6 +673,83 @@ pub(super) const MIGRATIONS_V14_ON: [&str; 15] = [
     )
     BEGIN
         SELECT RAISE(ABORT, 'task progress belongs to a different project');
+    END;
+    ",
+    // 29: `session_messages` — one session's inbox, capability map line
+    // 2479.
+    //
+    // # Why a table rather than the lifecycle log or the door's memory
+    //
+    // Two doors speak the same requests — the socket door and the MCP door
+    // inside a harness session — so a message sent through one has to be
+    // readable through the other, and the project database is the only thing
+    // both hold. Widening `lifecycle_events` is refused on the recorded
+    // ruling (`design-decisions.md`, *Why not simply widen
+    // `lifecycle_events`, in three parts*): that table's `kind` `CHECK` costs
+    // a full rebuild per new value, and a message body has no business in a
+    // ledger every `Request::Events` reader can see. The lifecycle stream
+    // keeps carrying the delivery as `text_delivered` with a byte count and
+    // nothing else.
+    //
+    // `body` is the one free-text column here, and it is the message a caller
+    // sent — the same text that would otherwise have been typed into this
+    // session's terminal, where Glasshouse never stored it at all. It is
+    // never composed by Glasshouse, never resolved from a `config::SecretRef`,
+    // and read back by exactly one verb (`Request::Inbox`) behind the same
+    // peer-uid check that already guards `read_output`, which returns a live
+    // worker's whole scrollback. A caller that sends a credential to a
+    // session has handed it to that session either way; what is new is that
+    // it now rests in the project database, and that is stated rather than
+    // implied.
+    //
+    // No `REFERENCES sessions(id)`, for migration 5's stated reason:
+    // `PRAGMA foreign_keys` is off by default, and a message for a session
+    // this database has forgotten is a fact worth keeping. Project scope is
+    // the two triggers below, migration 11's shape, and `project_id` is the
+    // column they compare — the same column every other session-owned table
+    // here carries.
+    //
+    // Rows are never deleted by this migration's writer. Retention is a
+    // successor, and until one lands an inbox grows with what was sent to it.
+    "
+    CREATE TABLE session_messages (
+        -- The cursor `Request::Inbox` walks. One counter for the project, so
+        -- a page is ordered by it within a session and never across two.
+        seq        INTEGER PRIMARY KEY,
+        project_id TEXT    NOT NULL,
+        -- The recipient, as `sessions.id` spells it. Never a process id.
+        session    TEXT    NOT NULL,
+        -- Who the sender said it was: attribution, never authentication.
+        -- NULL when the sender stated nothing, which is what every caller
+        -- before `Request::SendMessage` grew a `from` field meant.
+        sender     TEXT,
+        -- The line that was sent. See this migration's own note.
+        body       TEXT    NOT NULL,
+        -- Seconds since the Unix epoch.
+        at         INTEGER NOT NULL
+    );
+
+    CREATE INDEX session_messages_by_session
+        ON session_messages (session, seq);
+
+    CREATE TRIGGER session_messages_reject_foreign_project_insert
+    BEFORE INSERT ON session_messages
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'session message belongs to a different project');
+    END;
+
+    CREATE TRIGGER session_messages_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON session_messages
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'session message belongs to a different project');
     END;
     ",
 ];

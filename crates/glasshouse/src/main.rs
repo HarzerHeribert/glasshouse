@@ -930,6 +930,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             ApiCommand::Unmute { session } => {
                 api::unmute(&runtime, session)?;
             }
+            // Line 2479. The one verb here that touches no socket: it
+            // answers where the door binds, which is a question about this
+            // project and not about what is running.
+            ApiCommand::SocketPath => {
+                println!("{}", api::socket_path(&runtime)?.display());
+            }
         },
         // The MCP door — the same handlers `api serve` answers with, over
         // stdio, bound to the project `runtime` was resolved for exactly as

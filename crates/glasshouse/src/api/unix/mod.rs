@@ -19,6 +19,7 @@
 mod assumptions;
 mod checkpoints;
 mod events;
+mod inbox;
 mod memory;
 mod routing;
 mod sessions;
@@ -589,6 +590,7 @@ fn dispatch(
         Request::SendMessage {
             session,
             text,
+            from,
             origin,
         } => {
             let id = SessionId::new(session);
@@ -619,6 +621,17 @@ fn dispatch(
                 if let Some(remaining) = mute_remaining(muted, &id) {
                     return Response::err(mute_refusal(&id, remaining));
                 }
+            }
+            // Line 2479, and it comes **after** the mute and **before**
+            // `select_memory`: a muted session's inbox is never written to,
+            // and a briefing is typed into a terminal, which an inbox is not.
+            // `None` means this recipient is not one whose messages are
+            // stored, and everything below is the path it has always taken —
+            // see `inbox::deliver` for why the refusals stay there
+            // rather than moving here.
+            if let Some(stored) = inbox::deliver(&store, live, &id, &text, from.as_deref(), origin)
+            {
+                return stored;
             }
             // Selected before the runtime lock is taken: opening the
             // project's memory goes through `database::open`, which can wait
@@ -703,6 +716,14 @@ fn dispatch(
             limit,
             assumptions_after,
         } => project_events(runtime, after, limit, assumptions_after, recorder),
+        // Line 2479's read half. Beside `Events` because it is the same
+        // cursor shape and the same ceiling, and separate from it because
+        // `Events` is project-wide and has no session filter.
+        Request::Inbox {
+            session,
+            after,
+            limit,
+        } => inbox::inbox(&store, live, session, after, limit),
         // Phase 21K — the five assumption verbs. Every session named on one
         // goes through `SessionApi` first, for `ListSessions`' reason: the
         // ledger is scoped by trigger at the database, and the door checks

@@ -36,10 +36,10 @@ pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
 pub use store::{
     AdvisoryCacheState, CacheState, CheckpointRecency, FileClaim, LabelError, NewSession,
     ProjectSessions, ResponseMechanism, ResumableSession, STALE_CLAIM_AFTER, SessionContext,
-    SessionDisposition, SessionId, SessionLifecycle, SessionName, SessionPairingClass,
-    SessionPresentation, SessionProtocol, SessionPurpose, SessionRecord, SessionRole, SessionStore,
-    SessionStoreError, SupervisionRecord, TASK_PROGRESS_EXPIRES_AFTER, TaskContinuity,
-    TaskProgressDeclaration,
+    SessionDisposition, SessionId, SessionLifecycle, SessionMessage, SessionName,
+    SessionPairingClass, SessionPresentation, SessionProtocol, SessionPurpose, SessionRecord,
+    SessionRole, SessionStore, SessionStoreError, SupervisionRecord, TASK_PROGRESS_EXPIRES_AFTER,
+    TaskContinuity, TaskProgressDeclaration,
 };
 pub use supervision::{
     ProcessIdentity, ProcessState, SupervisedSession, Supervision, SupervisionRefusal,

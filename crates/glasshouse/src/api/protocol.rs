@@ -209,6 +209,23 @@ pub enum Request {
     SendMessage {
         session: String,
         text: String,
+        /// `from` is attribution, not authentication; the peer-uid check is
+        /// the whole authorization, exactly as for `origin`.
+        ///
+        /// The sender's own session id, as the sender states it. Nothing
+        /// here resolves it, compares it against the connected peer, or
+        /// refuses a value: a caller that names another session as the
+        /// sender is recorded as having said so, and a reader that treats
+        /// this as proof of identity has believed something Glasshouse never
+        /// checked. It reaches a pane recipient's inbox as `from` and is
+        /// dropped on every other path, which types the text into a terminal
+        /// that has nowhere to put it.
+        ///
+        /// Absent means the sender stated nothing, which is what every
+        /// caller meant before this field existed — `glasshouse api send`
+        /// and the MCP door both still send nothing.
+        #[serde(default)]
+        from: Option<String>,
         #[serde(default)]
         origin: RequestOrigin,
     },
@@ -347,6 +364,32 @@ pub enum Request {
         limit: usize,
         #[serde(default)]
         assumptions_after: i64,
+    },
+    /// One session's inbound messages, in `seq` order, after the cursor;
+    /// `head` is returned even when the page is empty; the page is capped
+    /// exactly as [`Request::Events`] is.
+    ///
+    /// The other half of capability map line 2479: [`Request::SendMessage`]
+    /// appends to the inbox of a session whose harness reads its input as a
+    /// batch rather than off a terminal, and this hands it out. `after` is
+    /// the cursor a prior response's `head` gave — `0` for the start of this
+    /// session's inbox — and only messages strictly newer than it come back.
+    /// Handing a message out does not consume it: the cursor is the reader's,
+    /// so two readers of one inbox see the same messages rather than racing
+    /// to take them, and *at most once* is a property of the reader's cursor
+    /// rather than of the store.
+    ///
+    /// A separate verb rather than a third cursor on [`Request::Events`],
+    /// because that one is project-wide and has no session filter — volume
+    /// and shape, not confidentiality: the peer-uid check already trusts
+    /// every process of this user with `read_output`, which returns a live
+    /// worker's whole scrollback.
+    Inbox {
+        session: String,
+        #[serde(default)]
+        after: i64,
+        #[serde(default = "default_events_limit")]
+        limit: usize,
     },
     /// Register interest in one worker session's completion events, to be
     /// delivered into an orchestrator session — capability map line 733.

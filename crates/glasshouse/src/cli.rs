@@ -1373,6 +1373,20 @@ pub enum ApiCommand {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// Print the path this project's control door binds, whether or not one
+    /// is listening — capability map line 2479.
+    ///
+    /// One line on standard output and nothing else, so a program that
+    /// speaks the door's protocol itself can resolve the socket once and
+    /// connect at every poll. It opens no socket and starts nothing: a door
+    /// started after this ran is found at the same path, and a refused
+    /// connect means "nothing is listening right now", never "this project
+    /// has no door".
+    ///
+    /// Exits non-zero only when no project resolves from the working
+    /// directory, or on a platform with no Unix domain socket — the same
+    /// refusal `glasshouse api serve` gives there.
+    SocketPath,
 }
 
 #[cfg(test)]

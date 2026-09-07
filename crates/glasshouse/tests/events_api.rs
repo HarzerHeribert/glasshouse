@@ -13,6 +13,17 @@
 //! is proving the *read* side of the door, the same way `capacity_api.rs`'s
 //! own `write_project_config` seeds state directly rather than through the
 //! settings UI that writes it in production.
+//!
+//! # Capability map line 2479 — the inbox, beside the events it publishes
+//!
+//! The three tests at the end of this file are the door's other cursor:
+//! `Request::SendMessage` to a session whose harness reads its input as a
+//! batch stores the message instead of typing it, and `Request::Inbox` hands
+//! it out. They live here rather than in a file of their own because the
+//! thing line 2479 must not do is put a message body into the lifecycle
+//! stream, and that is an assertion about `Request::Events`' answer — the
+//! two verbs have to be driven through one door to say anything about each
+//! other.
 
 #![cfg(unix)]
 
@@ -24,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use glasshouse::cli::Cli;
 use glasshouse::events::{EventBus, EventLog, LifecycleEvent, Observation, TurnOutcome};
-use glasshouse::session::SessionId;
+use glasshouse::session::{NewSession, ProjectSessions, SessionId};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -78,6 +89,35 @@ fn seed_events(
             .expect("append a fixture event");
     }
     log.head().expect("read the log's head")
+}
+
+/// Record one session under `harness` in the fixture's own project and hand
+/// back its identifier.
+///
+/// Through `ProjectSessions`, the store the door itself opens, rather than
+/// through `Request::SpawnSession`: a pane session has no executable
+/// installed in this fixture, and spawning one would be proving that a
+/// harness starts rather than that a message reaches its inbox. The runtime
+/// — and the database connection it owns — is dropped before returning, so
+/// nothing holds the file open when the server starts.
+fn seed_session(fixture: &Fixture, root: &Path, harness: &str) -> String {
+    let cli = Cli {
+        scope: Some(root.to_path_buf()),
+        allow_unsafe_scope: false,
+        data_dir: Some(fixture.base.join("data")),
+        config_dir: Some(fixture.base.join("config")),
+        log_level: None,
+        log_file: None,
+        log_stderr: false,
+        command: None,
+    };
+    let runtime = glasshouse::bootstrap(&cli, root).expect("bootstrap the fixture runtime");
+    let sessions = ProjectSessions::open(&runtime).expect("open the session store");
+    let record = sessions
+        .store()
+        .create(NewSession::embedded(harness))
+        .expect("record the session");
+    record.id.as_str().to_owned()
 }
 
 struct Server {
@@ -318,5 +358,255 @@ fn no_raw_harness_event_name_appears_in_any_response() {
     assert!(
         rendered.contains("claude-code"),
         "the harness name should still appear as an attribute: {rendered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capability map line 2479 — the inbox
+// ---------------------------------------------------------------------------
+
+/// **Line 2479, the whole of this half in one test.** A message to a session
+/// whose harness reads its input as a batch is *stored* rather than typed,
+/// carries the sender the caller named, and shows up in the lifecycle stream
+/// as a byte count with the text nowhere in the answer.
+///
+/// The negative is the load-bearing half and it is asserted over the whole
+/// rendered `Request::Events` response, not over the fields this test happens
+/// to know about: a future payload field that started carrying the body would
+/// fail here even though every positive assertion still passed. That is the
+/// shape `no_raw_harness_event_name_appears_in_any_response` above already
+/// uses, for the same reason.
+#[test]
+fn a_message_to_a_pane_session_lands_in_its_inbox_with_the_sender_and_never_in_the_lifecycle_stream()
+ {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("inbox-alpha");
+    let session = seed_session(&fixture, &root, "pane");
+    let server = Server::start(&fixture, &root);
+
+    const TEXT: &str = "INBOX-BODY-must-not-reach-the-lifecycle-stream";
+
+    let sent = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": session,
+        "text": TEXT,
+        "from": "orchestrator-1",
+    }));
+    assert_eq!(sent["status"], "ok", "unexpected response: {sent}");
+    assert_eq!(
+        sent["result"]["via"], "inbox",
+        "the door must say the message was stored rather than typed: {sent}"
+    );
+    assert!(
+        sent["result"]["seq"].as_i64().is_some_and(|seq| seq > 0),
+        "a stored message must answer with its cursor position: {sent}"
+    );
+
+    let inbox = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": session,
+        "after": 0,
+    }));
+    assert_eq!(inbox["status"], "ok", "unexpected response: {inbox}");
+    let messages = inbox["result"]["messages"]
+        .as_array()
+        .expect("a messages array");
+    assert_eq!(messages.len(), 1, "{inbox}");
+    assert_eq!(messages[0]["from"], "orchestrator-1", "{inbox}");
+    assert_eq!(messages[0]["text"], TEXT, "{inbox}");
+    assert!(messages[0]["at"].is_i64(), "{inbox}");
+    assert_eq!(
+        inbox["result"]["head"], messages[0]["seq"],
+        "the cursor must be the last message's own position: {inbox}"
+    );
+
+    let events = server.call(serde_json::json!({ "op": "events" }));
+    assert_eq!(events["status"], "ok", "unexpected response: {events}");
+    let recorded = events["result"]["events"]
+        .as_array()
+        .expect("an events array");
+    let delivered: Vec<_> = recorded
+        .iter()
+        .filter(|event| event["kind"] == "text_delivered")
+        .collect();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "storing a message must record exactly the delivery a typed one \
+         records: {events}"
+    );
+    assert_eq!(delivered[0]["session"], session.as_str(), "{events}");
+    assert_eq!(
+        delivered[0]["bytes"],
+        TEXT.len(),
+        "the lifecycle stream carries the byte count: {events}"
+    );
+
+    let rendered = serde_json::to_string(&events).expect("render the response");
+    assert!(
+        !rendered.contains(TEXT),
+        "no field of the lifecycle stream may carry the message body: {rendered}"
+    );
+    // A positive control, so the negative above is not passing on an empty
+    // or broken response.
+    assert!(
+        rendered.contains("text_delivered"),
+        "the delivery itself should still be visible: {rendered}"
+    );
+}
+
+/// The other side of the branch, and the one this package must not have
+/// changed: a session under any other harness takes today's path, refusal
+/// and all, and nothing is stored for it.
+///
+/// A session recorded but held by no runtime is exactly what
+/// `SessionApi::send_text` answers `NotLive` for, and with no
+/// `presentation_ref` there is no pane to fall back to — so the refusal here
+/// is the one this door has always given, arriving by the same route.
+#[test]
+fn a_message_to_a_non_pane_session_is_refused_as_not_live_exactly_as_before_and_its_inbox_stays_empty()
+ {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("inbox-beta");
+    let session = seed_session(&fixture, &root, "claude-code");
+    let server = Server::start(&fixture, &root);
+
+    let sent = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": session,
+        "text": "a line for a terminal",
+        "from": "orchestrator-1",
+    }));
+    assert_eq!(
+        sent["status"], "error",
+        "a session no runtime holds must still be refused: {sent}"
+    );
+    let message = sent["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("is not live in this Glasshouse"),
+        "and refused as not live, in the door's own words — the same sentence \
+         `SessionApi::send_text` has always given: {message}"
+    );
+
+    let inbox = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": session,
+    }));
+    assert_eq!(inbox["status"], "ok", "unexpected response: {inbox}");
+    let messages = inbox["result"]["messages"]
+        .as_array()
+        .expect("a messages array");
+    assert!(
+        messages.is_empty(),
+        "nothing may be stored for a harness that is written to by typing: {inbox}"
+    );
+    assert_eq!(
+        inbox["result"]["head"], 0,
+        "an empty inbox still answers with a cursor: {inbox}"
+    );
+}
+
+/// The cursor: `after` excludes what was seen, `limit` is honoured, and
+/// `head` comes back on a page that is short and on a page that is empty.
+///
+/// The third call is the one that matters most — a reader that has caught up
+/// must still be told where it is, or it has no cursor to hand back and
+/// starts from the beginning of the inbox next turn.
+#[test]
+fn an_inbox_cursor_hands_each_message_out_once_and_honours_the_page_limit() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("inbox-gamma");
+    let session = seed_session(&fixture, &root, "pane");
+    let server = Server::start(&fixture, &root);
+
+    for text in ["one", "two", "three"] {
+        let sent = server.call(serde_json::json!({
+            "op": "send_message",
+            "session": session,
+            "text": text,
+        }));
+        assert_eq!(sent["status"], "ok", "unexpected response: {sent}");
+    }
+
+    let first = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": session,
+        "limit": 2,
+    }));
+    assert_eq!(first["status"], "ok", "unexpected response: {first}");
+    let page = first["result"]["messages"]
+        .as_array()
+        .expect("a messages array");
+    assert_eq!(page.len(), 2, "`limit` must bound the page: {first}");
+    assert_eq!(page[0]["text"], "one", "{first}");
+    assert_eq!(page[1]["text"], "two", "{first}");
+    // A sender that stated nothing comes back as `null`, never as an empty
+    // string: "nobody said" and "somebody said nothing" are different facts.
+    assert!(page[0]["from"].is_null(), "{first}");
+    let head = first["result"]["head"].as_i64().expect("a head");
+    assert!(
+        head > page[1]["seq"].as_i64().expect("a seq"),
+        "head must report the whole inbox, not just what `limit` returned: {first}"
+    );
+
+    let second = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": session,
+        "after": page[1]["seq"],
+    }));
+    assert_eq!(second["status"], "ok", "unexpected response: {second}");
+    let rest = second["result"]["messages"]
+        .as_array()
+        .expect("a messages array");
+    assert_eq!(rest.len(), 1, "{second}");
+    assert_eq!(rest[0]["text"], "three", "{second}");
+    assert_eq!(second["result"]["head"], head, "{second}");
+
+    let caught_up = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": session,
+        "after": head,
+    }));
+    assert_eq!(
+        caught_up["status"], "ok",
+        "unexpected response: {caught_up}"
+    );
+    assert!(
+        caught_up["result"]["messages"]
+            .as_array()
+            .expect("a messages array")
+            .is_empty(),
+        "a reader that has caught up must be handed nothing again: {caught_up}"
+    );
+    assert_eq!(
+        caught_up["result"]["head"], head,
+        "and must still be told where it is: {caught_up}"
+    );
+}
+
+/// A session this project does not have is refused by the same project-scope
+/// error every other verb on this door gives it — never answered with an
+/// empty inbox, which would be indistinguishable from a session that exists
+/// and has had nothing sent to it (§54's family).
+#[test]
+fn an_inbox_for_a_session_this_project_does_not_have_is_refused_not_answered_empty() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("inbox-delta");
+    let server = Server::start(&fixture, &root);
+
+    let response = server.call(serde_json::json!({
+        "op": "inbox",
+        "session": "not-a-session-of-this-project",
+    }));
+    assert_eq!(
+        response["status"], "error",
+        "an unknown session must be refused: {response}"
+    );
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not-a-session-of-this-project"),
+        "and the refusal must name what was asked for: {response}"
     );
 }

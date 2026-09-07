@@ -1292,6 +1292,31 @@ fn the_project_database_schema_has_nowhere_to_put_a_credential() {
             "routing_observations.first_tool_call_ms",
             "routing_observations.completed_ms",
             "schema_migrations.version",
+            // Migration 29. A project identifier, the recipient's own
+            // Glasshouse session identifier, a timestamp, and two strings
+            // that came from the caller: `sender`, which is whatever the
+            // sender said it was (attribution, never authentication — see
+            // `Request::SendMessage`'s `from`), and `body`, the line that
+            // was sent.
+            //
+            // `body` is the one column in this database that holds text a
+            // caller handed Glasshouse to pass on. It is not a place a
+            // credential could be *put* by Glasshouse — nothing here is
+            // composed, resolved from a `config::SecretRef`, or read from a
+            // provider — but a caller that sends one to a session has stored
+            // it, which is the honest statement and the reason this comment
+            // does not claim otherwise. The same caller sending the same
+            // line to any other harness has handed it to that harness's
+            // terminal instead; what migration 29 changes is that it now
+            // rests here, readable by `Request::Inbox` behind the same
+            // peer-uid check that already hands out a live worker's whole
+            // scrollback.
+            "session_messages.seq",
+            "session_messages.project_id",
+            "session_messages.session",
+            "session_messages.sender",
+            "session_messages.body",
+            "session_messages.at",
             "sessions.id",
             "sessions.project_id",
             "sessions.harness",
@@ -1444,6 +1469,9 @@ fn no_launch_profile_definition_is_stored_in_the_project_database() {
             "project_metadata",
             "routing_observations",
             "schema_migrations",
+            // Migration 29: one session's inbound messages, not a profile
+            // definition.
+            "session_messages",
             "sessions",
             "task_assumptions",
             // Migration 28: whose current task somebody declared nearly
@@ -1558,6 +1586,7 @@ fn upgrading_a_version_2_database_preserves_every_existing_session() {
              DROP TABLE IF EXISTS task_assumptions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS session_messages;
              DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 3;",
@@ -1571,7 +1600,7 @@ fn upgrading_a_version_2_database_preserves_every_existing_session() {
         })
         .unwrap();
     assert_eq!(
-        version, 28,
+        version, 29,
         "the launch must have applied migrations 3 through 22"
     );
 
@@ -1753,6 +1782,7 @@ fn a_version_one_database_migrates_forward_keeping_its_binding() {
              DROP TABLE IF EXISTS task_assumptions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS session_messages;
              DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 2;",
@@ -1767,7 +1797,7 @@ fn a_version_one_database_migrates_forward_keeping_its_binding() {
         })
         .unwrap();
     assert_eq!(
-        version, 28,
+        version, 29,
         "the launch must have applied migrations 2 through 22"
     );
 
@@ -2778,6 +2808,7 @@ mod phase_10 {
              DROP TABLE IF EXISTS memory_files;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS session_messages;
              DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 8;"
@@ -2791,7 +2822,7 @@ mod phase_10 {
             })
             .unwrap();
         assert_eq!(
-            version, 28,
+            version, 29,
             "the launch must have applied migrations 8 through 22"
         );
 
@@ -2911,6 +2942,7 @@ mod phase_40 {
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
+                 DROP TABLE IF EXISTS session_messages;
                  DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 12;"
@@ -2924,7 +2956,7 @@ mod phase_40 {
             })
             .unwrap();
         assert_eq!(
-            version, 28,
+            version, 29,
             "the reopen must have applied migrations 12 through 22"
         );
 
