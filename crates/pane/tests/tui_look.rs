@@ -1,8 +1,8 @@
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::runtime::handles::HandleTable;
 use pane::tui::{
-    Activity, CellError, CellView, Notebook, ScreenState, SidebarVisibility, SupervisorStatus,
-    render_screen, screen_regions, slash_matches,
+    Activity, CellError, CellView, ContextTokens, Counted, Notebook, ScreenState,
+    SidebarVisibility, SupervisorStatus, render_screen, screen_regions, slash_matches,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 
@@ -296,6 +296,11 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         cached_input_tokens: Some(100),
     };
     let notebook = Notebook {
+        context: Some(ContextTokens {
+            used: 44_584,
+            cap: Some(1_048_576),
+            counted: Counted::Gateway,
+        }),
         tokens: Some(pane::tui::TaskTokens {
             used: 579,
             cap: 400_000,
@@ -323,11 +328,77 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         "route: direct",
         "cached input: 100",
         "tokens: 123 in / 456 out",
-        "budget: 579/400000 tok",
+        "spent: 579/400000 tok",
+        "ctx",
+        "44.6k/1.0M 4%",
         "counted: reported",
         "supervisor: check the request",
     ] {
         assert!(rendered.contains(field), "{field}: {rendered}");
+    }
+}
+
+#[test]
+fn statusline_separates_request_context_from_cumulative_spend() {
+    let notebook = Notebook {
+        context: Some(ContextTokens {
+            used: 44_584,
+            cap: Some(1_048_576),
+            counted: Counted::Gateway,
+        }),
+        tokens: Some(pane::tui::TaskTokens {
+            used: 369_178,
+            cap: 400_000,
+            counted: Counted::Gateway,
+        }),
+        ..Notebook::default()
+    };
+    let shown = text(&draw(200, 30, &state(), &conversation(), &notebook));
+    assert!(shown.contains("ctx"), "{shown}");
+    assert!(shown.contains("44.6k/1.0M 4%"), "{shown}");
+    assert!(shown.contains("spent 369178/400000"), "{shown}");
+
+    let unknown = Notebook {
+        context: Some(ContextTokens {
+            used: 44_584,
+            cap: None,
+            counted: Counted::Gateway,
+        }),
+        ..notebook
+    };
+    let shown = text(&draw(200, 30, &state(), &conversation(), &unknown));
+    assert!(shown.contains("ctx 44.6k / window ?"), "{shown}");
+    assert!(!shown.contains("44.6k/400.0k"), "{shown}");
+}
+
+#[test]
+fn context_fill_animates_while_busy_without_changing_its_measurement() {
+    let notebook = Notebook {
+        context: Some(ContextTokens {
+            used: 600_000,
+            cap: Some(1_000_000),
+            counted: Counted::Estimated,
+        }),
+        ..Notebook::default()
+    };
+    let mut first_state = state();
+    first_state.activity = Activity::Thinking;
+    let first = draw(200, 30, &first_state, &conversation(), &notebook);
+    first_state.animation_frame = 1;
+    let moved = draw(200, 30, &first_state, &conversation(), &notebook);
+    let status = screen_regions(first.area, &first_state).status;
+    assert!(
+        (status.y..status.bottom())
+            .any(|y| { (status.x..status.right()).any(|x| first[(x, y)] != moved[(x, y)]) }),
+        "the measured fill should carry a moving glint"
+    );
+    let first_text = text(&first);
+    let moved_text = text(&moved);
+    for measurement in ["600.0k/1.0M 60%", "spent"] {
+        assert_eq!(
+            first_text.contains(measurement),
+            moved_text.contains(measurement)
+        );
     }
 }
 

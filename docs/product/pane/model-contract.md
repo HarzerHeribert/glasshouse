@@ -333,6 +333,23 @@ the presence of a breakpoint. Provider support, cache lifetime and minimum
 prefix length still determine whether caching occurs, as specified by the
 [Anthropic prompt caching protocol](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
 
+Pane presents request context and task spend as two separate measurements.
+Request context is the most recent request's `input_tokens` plus cache-read
+and cache-creation input; it excludes output and replaces the previous
+request's value. Task spend remains the cumulative sum of every reported
+token class across every request in the task. The statusline and telemetry
+rail use `context`/`ctx` for the first and `spent` for the second so the task
+cap can never be mistaken for a model context window.
+
+A context-window percentage is shown only when the launch supplied
+`--context-window-tokens` for its initial model. Pane does not infer a window
+from the task cap, output cap, model name, or another provider's catalogue.
+After `/model` selects a different identifier, the denominator is unknown.
+While a request is active, the existing presentation clock may move a glint
+inside the measured fill; the occupied fraction does not change and reduced
+motion freezes it. These values are local presentation state and are not
+added to model messages or rollout rows.
+
 ## 9. What this contract does not decide
 
 - **Slash-command rendering.** `/handles`, `/budget` and the rest are TUI

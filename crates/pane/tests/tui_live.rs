@@ -463,11 +463,12 @@ fn telemetry_and_motion_are_local_controls_with_real_response_usage() {
     for width in [60, 80, 120, 200] {
         app.resize(width);
         app.wait("redraw after resize", |screen| {
-            // The mode moves to the new right edge only after a real redraw.
+            // The current-context reading is the statusline's highest-priority
+            // right-edge signal and must survive even the narrow layout.
             (25..30).any(|row| {
                 screen
-                    .contents_between(row, width - 14, row, width)
-                    .contains("effort auto")
+                    .contents_between(row, 0, row, width)
+                    .contains("ctx 123")
             })
         });
         app.contains("REQUEST 01");

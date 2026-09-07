@@ -456,7 +456,7 @@ pub enum Counted {
 
 impl Counted {
     /// Short provenance label shared by telemetry and compact status.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Counted::Gateway => "reported",
             Counted::Estimated => "estimated",
@@ -470,6 +470,16 @@ impl Counted {
 pub struct TaskTokens {
     pub used: u64,
     pub cap: u64,
+    pub counted: Counted,
+}
+
+/// Occupancy of the most recent (or currently assembling) provider request.
+/// This is intentionally separate from [`TaskTokens`], which accumulates the
+/// cost of every request made for the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextTokens {
+    pub used: u64,
+    pub cap: Option<u64>,
     pub counted: Counted,
 }
 
@@ -496,6 +506,7 @@ pub struct Notebook {
     pub requests: Vec<crate::telemetry::RequestMeasurement>,
     pub cells: Vec<CellView>,
     pub tokens: Option<TaskTokens>,
+    pub context: Option<ContextTokens>,
     pub supervisor: Option<SupervisorStatus>,
 }
 
@@ -783,16 +794,24 @@ pub fn render_screen(
         abbreviate(sandbox, 16),
         abbreviate(network, 8)
     );
-    let budget = notebook.tokens.filter(|_| width >= 100).map(|tokens| {
+    let spent = notebook.tokens.filter(|_| width >= 78).map(|tokens| {
         format!(
-            "budget: {}/{} tok · counted: {}",
+            "spent {}/{} · {}",
             tokens.used,
             tokens.cap,
             tokens.counted.as_str()
         )
     });
+    let context = notebook.context.map(|tokens| {
+        context_summary(
+            tokens,
+            if width >= 160 { 12 } else { 7 },
+            state.animation_frame,
+            matches!(state.activity, Activity::Thinking | Activity::Streaming),
+        )
+    });
     let status = if state.status_line == StatusLine::Compact {
-        vec![footer_row(identity, mode, width, ACCENT)]
+        vec![footer_row(identity, context.unwrap_or(mode), width, ACCENT)]
     } else if width < 140 {
         vec![
             footer_row(
@@ -807,15 +826,15 @@ pub fn render_screen(
             ),
             footer_row(
                 posture,
-                budget
+                context
                     .clone()
                     .unwrap_or_else(|| if width < 100 { mode } else { String::new() }),
                 width,
-                MUTED,
+                ACCENT,
             ),
             footer_row(
                 format!(" {connection}"),
-                "PgUp/PgDn chat · /cells inspect".into(),
+                spent.unwrap_or_else(|| "PgUp/PgDn chat · /cells inspect".into()),
                 width,
                 MUTED,
             ),
@@ -825,9 +844,14 @@ pub fn render_screen(
             footer_row(identity, mode, width, ACCENT),
             footer_row(
                 format!("{posture} · {connection}"),
-                budget.unwrap_or_else(|| "PgUp/PgDn chat · /cells inspect".into()),
+                match (context, spent) {
+                    (Some(context), Some(spent)) => format!("{context} · {spent}"),
+                    (Some(context), None) => context,
+                    (None, Some(spent)) => spent,
+                    (None, None) => "PgUp/PgDn chat · /cells inspect".into(),
+                },
                 width,
-                MUTED,
+                ACCENT,
             ),
         ]
     };
@@ -847,6 +871,63 @@ pub fn render_screen(
             cell.set_bg(state.theme.accent());
         }
     }
+}
+
+fn compact_tokens(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+/// A truthful, fixed-width occupancy trace. Motion changes only the marker at
+/// the measured boundary; it never changes how many cells appear filled.
+fn context_summary(tokens: ContextTokens, width: usize, tick: usize, moving: bool) -> String {
+    let Some(cap) = tokens.cap else {
+        return format!(
+            "ctx {} / window ? · {}",
+            compact_tokens(tokens.used),
+            tokens.counted.as_str()
+        );
+    };
+    let (bar, percent) = context_bar(tokens, width, tick, moving);
+    format!(
+        "ctx {bar} {}/{} {percent}%",
+        compact_tokens(tokens.used),
+        compact_tokens(cap)
+    )
+}
+
+fn context_bar(tokens: ContextTokens, width: usize, tick: usize, moving: bool) -> (String, u64) {
+    let cap = tokens.cap.unwrap_or(0);
+    let eighths = if cap == 0 {
+        0
+    } else {
+        ((tokens.used.min(cap) as u128 * (width * 8) as u128) / cap as u128) as usize
+    };
+    let full = eighths / 8;
+    let partial = eighths % 8;
+    let parts = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let mut bar = String::with_capacity(width);
+    for index in 0..width {
+        if index < full {
+            let glint = moving && full > 1 && index == tick % full;
+            bar.push(if glint { '◆' } else { '━' });
+        } else if index == full && partial > 0 {
+            bar.push(parts[partial]);
+        } else {
+            bar.push('─');
+        }
+    }
+    let percent = if cap == 0 {
+        0
+    } else {
+        ((tokens.used.min(cap) as u128 * 100) / cap as u128) as u64
+    };
+    (bar, percent)
 }
 
 /// Keep controls at the edge; omit optional hints when metadata fills the row.

@@ -172,14 +172,33 @@ pub(super) fn command(
             let c = &transcript.conversation;
             let estimated = estimate_request_tokens(c, &session.model.borrow());
             let bytes: usize = c.messages.iter().map(|m| message_text(m).len()).sum();
+            let measured = transcript
+                .notebook
+                .context
+                .map(|context| match context.cap {
+                    Some(cap) => format!(
+                        "Current request context: {}/{} tokens ({}%) · {}",
+                        context.used,
+                        cap,
+                        context.used.min(cap).saturating_mul(100) / cap.max(1),
+                        context.counted.as_str()
+                    ),
+                    None => format!(
+                        "Current request context: {} tokens · window unknown · {}",
+                        context.used,
+                        context.counted.as_str()
+                    ),
+                })
+                .unwrap_or_else(|| "Current request context: no request yet".into());
             show(
                 session,
                 Panel::text(
                     "Context",
                     format!(
-                        "{} messages · {} cells\nSystem: {} bytes\nMessages: {} bytes\nNext request: ~{} tokens (estimate)\nTask budget: {} tokens\nContext is retained in the rollout; no model call was made.",
+                        "{} messages · {} cells\n{}\nSystem: {} bytes\nMessages: {} bytes\nNext request: ~{} tokens (estimate)\nTask spend limit: {} tokens\nContext is retained in the rollout; no model call was made.",
                         c.messages.len(),
                         transcript.notebook.cells.len(),
+                        measured,
                         c.system.len(),
                         bytes,
                         estimated,
@@ -486,6 +505,7 @@ mod tests {
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
             ui: None,
             model: RefCell::new("test".into()),
+            context_window: None,
             mode: Cell::new(tui::Mode::Execute),
             effort: Cell::new(wire::Effort::Auto),
             project: &project,

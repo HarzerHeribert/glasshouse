@@ -45,6 +45,30 @@ impl RequestMeasurement {
             served,
         }
     }
+
+    /// Tokens occupying the request context at the provider boundary.
+    ///
+    /// Cache reads and writes still occupy the model's context window even
+    /// when the provider bills them differently. Pane therefore adds the
+    /// three input classes and deliberately excludes output: this is the
+    /// context of the request that produced the response, not cumulative
+    /// task spend.
+    pub fn context_tokens(&self) -> Option<u64> {
+        let mut known = false;
+        let mut total = 0u64;
+        for value in [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.cache_creation_input_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            known = true;
+            total = total.saturating_add(value);
+        }
+        known.then_some(total)
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +152,22 @@ mod tests {
         assert_eq!(measured.output_tokens, None);
         assert_eq!(measured.cached_input_tokens, None);
         assert_eq!(measured.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn context_is_one_request_and_includes_every_input_class_only() {
+        let measured = RequestMeasurement::from_response(
+            1,
+            "model".into(),
+            9,
+            ServedBy::default(),
+            Some(&Usage {
+                input_tokens: 12,
+                output_tokens: 99,
+                cache_read_input_tokens: Some(100),
+                cache_creation_input_tokens: Some(25),
+            }),
+        );
+        assert_eq!(measured.context_tokens(), Some(137));
     }
 }

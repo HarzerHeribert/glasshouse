@@ -1576,11 +1576,11 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("budget: 240/400000 tok"),
+        stdout.contains("spent 240/400000 · reported"),
         "two reported turns total 240 in the sidebar:\n{stdout}"
     );
     assert!(
-        stdout.contains("counted: reported"),
+        stdout.contains("spent 240/400000 · reported"),
         "the sidebar must say the figure was reported, not estimated:\n{stdout}"
     );
 }
@@ -1621,7 +1621,7 @@ fn a_turn_the_gateway_never_metered_is_labelled_rather_than_averaged() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("counted: part estimated"),
+        stdout.contains("part estimated"),
         "a total built from both sources must say so:\n{stdout}"
     );
 }
@@ -2007,11 +2007,11 @@ fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("budget: 60/400000 tok"),
+        stdout.contains("spent 60/400000 · reported"),
         "two reported turns total 60 in the sidebar:\n{stdout}"
     );
     assert!(
-        stdout.contains("counted: reported"),
+        stdout.contains("spent 60/400000 · reported"),
         "the sidebar must say the figure was reported, not estimated, when a \
          direct provider's own usage is all there is:\n{stdout}"
     );
@@ -2058,7 +2058,7 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("budget: 240/400000 tok"),
+        stdout.contains("spent 240/400000 · reported"),
         "two gateway-reported turns total 240, not the responses' 60:\n{stdout}"
     );
 }

@@ -37,7 +37,9 @@ use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
-use crate::tui::{self, CellError, CellView, Counted, Notebook, SupervisorStatus, TaskTokens};
+use crate::tui::{
+    self, CellError, CellView, ContextTokens, Counted, Notebook, SupervisorStatus, TaskTokens,
+};
 use crate::wire;
 
 /// How many prose turns in a row end the task (the primary's addendum of
@@ -52,11 +54,27 @@ macro_rules! session_println {
 }
 
 fn record_request(notebook: &mut Notebook, measurement: RequestMeasurement) {
+    if let Some(used) = measurement.context_tokens() {
+        let cap = notebook.context.and_then(|context| context.cap);
+        notebook.context = Some(ContextTokens {
+            used,
+            cap,
+            counted: Counted::Gateway,
+        });
+    }
     if notebook.requests.len() >= REQUEST_MEASUREMENT_CAP {
         let remove = notebook.requests.len() + 1 - REQUEST_MEASUREMENT_CAP;
         notebook.requests.drain(..remove);
     }
     notebook.requests.push(measurement);
+}
+
+fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
+    notebook.context = Some(ContextTokens {
+        used: estimate,
+        cap,
+        counted: Counted::Estimated,
+    });
 }
 mod controls;
 
@@ -396,6 +414,12 @@ pub struct SessionArgs {
     /// Initial request model; can also be changed with /model.
     #[arg(long)]
     pub model: Option<String>,
+
+    /// Input context capacity for the initial model. Pane does not guess
+    /// provider-specific limits; switching models makes the capacity unknown
+    /// until a future catalogue supplies per-model metadata.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub context_window_tokens: Option<u64>,
 
     /// Where turns are appended and, on a later run, resumed from. Defaults
     /// to `<root>/.pane/rollout.jsonl` so two runs against the same project
@@ -747,6 +771,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
         interrupt: &interrupt,
         ui: interactive.as_ref(),
         model: RefCell::new(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
+        context_window: args.context_window_tokens.map(|cap| {
+            (
+                args.model.clone().unwrap_or_else(|| wire::MODEL.into()),
+                cap,
+            )
+        }),
         mode: Cell::new(tui::Mode::Execute),
         effort: Cell::new(wire::Effort::Auto),
         rollbacks: RefCell::new(Vec::new()),
@@ -784,6 +814,9 @@ struct Session<'a> {
         std::rc::Rc<RefCell<std::collections::HashMap<String, crate::events::inbox::Message>>>,
     ui: Option<&'a ui::LiveUi>,
     model: RefCell<String>,
+    /// Capacity explicitly associated with the startup model. A `/model`
+    /// switch cannot silently reuse it for a different model.
+    context_window: Option<(String, u64)>,
     mode: Cell<tui::Mode>,
     effort: Cell<wire::Effort>,
     project: &'a ProjectConfig,
@@ -801,6 +834,13 @@ struct Session<'a> {
     rollbacks: RefCell<Vec<RollbackCheckpoint>>,
     /// Stack length previewed by the last bare `/rollback`.
     rollback_pending: Cell<Option<usize>>,
+}
+
+fn context_cap(session: &Session<'_>, model: &str) -> Option<u64> {
+    session
+        .context_window
+        .as_ref()
+        .and_then(|(configured_model, cap)| (configured_model == model).then_some(*cap))
 }
 
 struct RollbackCheckpoint {
@@ -1135,13 +1175,18 @@ fn run_task_inner(
     if session.mode.get() == tui::Mode::Plan {
         let mut request = transcript.conversation.clone();
         request.system.push_str("\nPlanning mode: respond naturally with a plan. No code or tool call will execute in this mode.");
-        if let Some(ui) = session.ui {
-            ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
-        }
         let since = SystemTime::now();
         let requested_model = session.model.borrow().clone();
         let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
         let estimated = estimate_task_request_tokens(&request, &session.model.borrow(), task);
+        estimate_context(
+            &mut transcript.notebook,
+            estimated,
+            context_cap(session, &requested_model),
+        );
+        if let Some(ui) = session.ui {
+            ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
+        }
         let (turn, elapsed_ms) = timed_send_task_turn(&request, session, task)
             .map_err(|e| format!("request failed: {e}"))?;
         let served = glasshouse::served_by(session.glasshouse, since);
@@ -1208,14 +1253,19 @@ fn run_task_inner(
     loop {
         let since = SystemTime::now();
         let requested_model = session.model.borrow().clone();
+        let estimate =
+            estimate_task_request_tokens(&transcript.conversation, &requested_model, task);
+        estimate_context(
+            &mut transcript.notebook,
+            estimate,
+            context_cap(session, &requested_model),
+        );
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
         let (turn, elapsed_ms) =
             send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
         let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
-        let estimate =
-            estimate_task_request_tokens(&transcript.conversation, &session.model.borrow(), task);
         let served = glasshouse::served_by(session.glasshouse, since);
         record_request(
             &mut transcript.notebook,
@@ -2428,6 +2478,44 @@ mod tests {
             999,
         );
         assert_eq!(absent.used, 7);
+    }
+
+    #[test]
+    fn request_context_replaces_the_previous_request_and_preserves_its_window() {
+        let mut notebook = Notebook {
+            context: Some(ContextTokens {
+                used: 9,
+                cap: Some(1_048_576),
+                counted: Counted::Estimated,
+            }),
+            ..Notebook::default()
+        };
+        for (input, cached) in [(100, 20), (250, 50)] {
+            record_request(
+                &mut notebook,
+                RequestMeasurement::from_response(
+                    1,
+                    "gemini-3.8-flash-high".into(),
+                    10,
+                    ServedBy::default(),
+                    Some(&wire::Usage {
+                        input_tokens: input,
+                        output_tokens: 999,
+                        cache_read_input_tokens: Some(cached),
+                        cache_creation_input_tokens: None,
+                    }),
+                ),
+            );
+        }
+        assert_eq!(notebook.requests.len(), 2);
+        assert_eq!(
+            notebook.context,
+            Some(ContextTokens {
+                used: 300,
+                cap: Some(1_048_576),
+                counted: Counted::Gateway,
+            })
+        );
     }
 
     #[test]

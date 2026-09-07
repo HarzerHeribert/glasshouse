@@ -1,5 +1,5 @@
 //! Local instruments. Measurements and decorative motion have separate inputs.
-use super::{ACCENT, MUTED, Notebook, ScreenState};
+use super::{ACCENT, ContextTokens, MUTED, Notebook, ScreenState};
 use crate::contract::{Conversation, Role, ServedBy};
 use ratatui::{
     Frame,
@@ -72,9 +72,9 @@ fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
         })
         .collect()
 }
-fn budget(notebook: &Notebook, width: usize) -> Vec<Line<'static>> {
+fn task_spend(notebook: &Notebook, width: usize) -> Vec<Line<'static>> {
     let Some(tokens) = notebook.tokens else {
-        return vec![muted("Task budget · no usage yet")];
+        return vec![muted("No task spend yet")];
     };
     let filled = if tokens.cap == 0 {
         0
@@ -96,9 +96,48 @@ fn budget(notebook: &Notebook, width: usize) -> Vec<Line<'static>> {
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
-        muted(format!("budget: {}/{} tok", tokens.used, tokens.cap)),
+        muted(format!("spent: {}/{} tok", tokens.used, tokens.cap)),
         muted(format!("counted: {}", tokens.counted.as_str())),
     ]
+}
+
+fn context_window(
+    tokens: Option<ContextTokens>,
+    width: usize,
+    state: &ScreenState,
+) -> Vec<Line<'static>> {
+    let Some(tokens) = tokens else {
+        return vec![muted("No request context yet")];
+    };
+    let provenance = tokens.counted.as_str();
+    match tokens.cap {
+        Some(cap) => {
+            let (bar, percent) = super::context_bar(
+                tokens,
+                width,
+                state.animation_frame,
+                matches!(
+                    state.activity,
+                    super::Activity::Thinking | super::Activity::Streaming
+                ),
+            );
+            vec![
+                Line::styled(format!("{bar} {percent}%"), Style::default().fg(ACCENT)),
+                muted(format!(
+                    "{} / {} · {provenance}",
+                    super::compact_tokens(tokens.used),
+                    super::compact_tokens(cap)
+                )),
+            ]
+        }
+        None => vec![
+            Line::styled(
+                format!("context {}", super::compact_tokens(tokens.used)),
+                Style::default().fg(ACCENT),
+            ),
+            muted(format!("window unknown · {provenance}")),
+        ],
+    }
 }
 
 pub(super) fn rail(
@@ -179,9 +218,18 @@ pub(super) fn rail(
     } else {
         lines.push(muted("No request telemetry yet."));
     }
+    if notebook.context.is_some() {
+        lines.push(Line::default());
+        lines.push(label("02 / CONTEXT WINDOW"));
+        lines.extend(context_window(notebook.context, width.min(24), state));
+    }
     lines.push(Line::default());
-    lines.push(label("02 / TASK BUDGET"));
-    lines.extend(budget(notebook, width.min(30)));
+    lines.push(label(if notebook.context.is_some() {
+        "03 / TASK SPEND"
+    } else {
+        "02 / TASK SPEND"
+    }));
+    lines.extend(task_spend(notebook, width.min(30)));
     let metrics = [
         format!("inbox {}", notebook.inbox_depth),
         format!("batches {}", notebook.batches_delivered),
@@ -210,7 +258,11 @@ pub(super) fn rail(
         && let Some(cell) = notebook.cells.iter().rfind(|cell| cell.execution.is_some())
     {
         lines.push(Line::default());
-        lines.push(label("03 / LAST ACTION"));
+        lines.push(label(if notebook.context.is_some() {
+            "04 / LAST ACTION"
+        } else {
+            "03 / LAST ACTION"
+        }));
         if let Some(execution) = &cell.execution {
             lines.extend(
                 execution
@@ -418,11 +470,18 @@ pub(super) fn expanded(
     ));
     instruments.push(muted("Text delivery sizes · bytes"));
     instruments.push(Line::default());
-    instruments.push(label("02 / TASK BUDGET"));
-    instruments.extend(budget(notebook, usize::from(left.width).min(34)));
+    instruments.push(label("02 / CONTEXT WINDOW"));
+    instruments.extend(context_window(
+        notebook.context,
+        usize::from(left.width).min(24),
+        state,
+    ));
+    instruments.push(Line::default());
+    instruments.push(label("03 / TASK SPEND"));
+    instruments.extend(task_spend(notebook, usize::from(left.width).min(34)));
     if wide {
         instruments.push(Line::default());
-        instruments.push(label("03 / REQUEST HISTORY"));
+        instruments.push(label("04 / REQUEST HISTORY"));
         let start = index.saturating_sub(5);
         for (i, request) in notebook.requests.iter().enumerate().skip(start).take(10) {
             instruments.push(Line::styled(

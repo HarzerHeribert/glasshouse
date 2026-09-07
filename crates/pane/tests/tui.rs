@@ -828,7 +828,7 @@ fn a_nudge_shows_under_the_budget_line() {
     );
     let text = buffer_text(&buffer);
 
-    let budget_at = text.find("budget:").expect("the budget line renders");
+    let budget_at = text.find("spent:").expect("the spend line renders");
     let supervisor_at = text
         .find("supervisor: looping")
         .expect("the nudge's own reason renders under the budget line");
