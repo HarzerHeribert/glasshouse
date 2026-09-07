@@ -352,6 +352,9 @@ pub enum WireError {
     /// `error` event of its own. Distinct from [`WireError::Json`] because
     /// the bytes parsed and the *stream* was wrong.
     Stream(String),
+    /// The provider exhausted its generation budget. Partial prose remains
+    /// inspectable as diagnostic data, never as a completed assistant turn.
+    IncompleteResponse { partial_text: String },
 }
 
 impl WireError {
@@ -400,6 +403,18 @@ impl fmt::Display for WireError {
             WireError::Json(err) => write!(f, "could not parse response: {err}"),
             WireError::UnexpectedRole(role) => write!(f, "unexpected response role {role:?}"),
             WireError::Stream(what) => write!(f, "the stream ended without a reply: {what}"),
+            WireError::IncompleteResponse { partial_text } => {
+                write!(
+                    f,
+                    "provider stopped at max_tokens; response incomplete and no code from this response was executed"
+                )?;
+                if !partial_text.is_empty() {
+                    // Preserve the entire partial text while escaping terminal
+                    // controls. It is a diagnostic, not executable input.
+                    write!(f, "; partial assistant text: {partial_text:?}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -412,6 +427,7 @@ impl std::error::Error for WireError {
             WireError::Json(err) => Some(err),
             WireError::UnexpectedRole(_) => None,
             WireError::Stream(_) => None,
+            WireError::IncompleteResponse { .. } => None,
         }
     }
 }
@@ -580,15 +596,18 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
     if parsed.role != "assistant" {
         return Err(WireError::UnexpectedRole(parsed.role));
     }
-    if parsed.stop_reason.as_deref() == Some("max_tokens")
-        && parsed
-            .content
-            .iter()
-            .any(|block| matches!(block, WireBlock::ToolUse { .. }))
-    {
-        return Err(WireError::Stream(
-            "provider stopped at max_tokens while constructing a tool call".into(),
-        ));
+    if parsed.stop_reason.as_deref() == Some("max_tokens") {
+        return Err(WireError::IncompleteResponse {
+            partial_text: parsed
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    WireBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
     }
     let mut content = Vec::new();
     for block in parsed.content {
@@ -888,15 +907,18 @@ impl StreamAccumulator {
                 "no message_stop arrived; the connection ended mid-reply".to_string(),
             ));
         }
-        if self.stopped_at_max_tokens
-            && self
-                .blocks
-                .values()
-                .any(|block| matches!(block, PendingBlock::ToolUse { .. }))
-        {
-            return Err(WireError::Stream(
-                "provider stopped at max_tokens while constructing a tool call".into(),
-            ));
+        if self.stopped_at_max_tokens {
+            return Err(WireError::IncompleteResponse {
+                partial_text: self
+                    .blocks
+                    .values()
+                    .filter_map(|block| match block {
+                        PendingBlock::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
         }
         let mut content = Vec::new();
         for (index, block) in self.blocks {
@@ -1221,10 +1243,80 @@ mod tests {
         let mut capped = ready();
         capped.event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":10}}"#).unwrap();
         capped.event(r#"{"type":"message_stop"}"#).unwrap();
-        assert!(capped.finish().is_err());
+        assert!(matches!(
+            capped.finish(),
+            Err(WireError::IncompleteResponse { partial_text }) if partial_text.is_empty()
+        ));
 
         let whole = r#"{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"tool_use","id":"x","name":"execute_cell","input":{"code":"return 1"}}]}"#;
-        assert!(parse_response(whole).is_err());
+        assert!(matches!(
+            parse_response(whole),
+            Err(WireError::IncompleteResponse { partial_text }) if partial_text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn max_token_prose_is_incomplete_and_inspectable_in_both_transports() {
+        // More than BODY_HEAD_LIMIT, including Unicode and terminal controls:
+        // the diagnostic keeps every character, escaping controls for display.
+        let partial = format!("{}\nnext: café\u{1b}[2J", "working… ".repeat(80));
+        let whole = serde_json::json!({
+            "role": "assistant",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": partial}],
+        });
+        let json_error = parse_response(&whole.to_string()).unwrap_err();
+        let mut streamed = StreamAccumulator::new();
+        streamed.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#).unwrap();
+        streamed
+            .event(
+                &serde_json::json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": partial},
+                })
+                .to_string(),
+            )
+            .unwrap();
+        streamed
+            .event(r#"{"type":"content_block_stop","index":0}"#)
+            .unwrap();
+        streamed
+            .event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#)
+            .unwrap();
+        streamed.event(r#"{"type":"message_stop"}"#).unwrap();
+        let stream_error = streamed.finish().unwrap_err();
+
+        for error in [&json_error, &stream_error] {
+            assert!(
+                matches!(error, WireError::IncompleteResponse { partial_text } if partial_text == &partial)
+            );
+            assert!(!error.is_context_overflow());
+            let shown = error.to_string();
+            assert!(shown.contains("response incomplete"), "{shown}");
+            assert!(shown.contains(&format!("{partial:?}")), "{shown}");
+            assert!(!shown.contains('\u{1b}'));
+        }
+        assert_eq!(json_error.to_string(), stream_error.to_string());
+    }
+
+    #[test]
+    fn max_token_mixed_text_and_tool_input_never_returns_an_executable_turn() {
+        let whole = r#"{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"text","text":"Partial explanation"},{"type":"tool_use","id":"x","name":"execute_cell","input":{"code":"return 1"}}]}"#;
+        assert!(
+            matches!(parse_response(whole), Err(WireError::IncompleteResponse { partial_text }) if partial_text == "Partial explanation")
+        );
+
+        let mut streamed = StreamAccumulator::new();
+        streamed.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Partial explanation"}}"#).unwrap();
+        streamed.event(r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
+        streamed.event(r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"code\":"}}"#).unwrap();
+        streamed
+            .event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#)
+            .unwrap();
+        streamed.event(r#"{"type":"message_stop"}"#).unwrap();
+        assert!(
+            matches!(streamed.finish(), Err(WireError::IncompleteResponse { partial_text }) if partial_text == "Partial explanation")
+        );
     }
 
     #[test]

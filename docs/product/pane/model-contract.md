@@ -156,6 +156,12 @@ Provenance is not shown in the table. A stale handle carries the one word
 
 The primary action channel is the provider-native `execute_cell` tool. Its input schema is exactly `{code: string}`. The assistant's generation ends at the call; Pane executes only the complete, decoded input and returns a correlated `tool_result` before the model can interpret it. Malformed or truncated JSON never executes. Unknown or multiple calls remain explicit typed calls so the session can reject each without silently dropping it.
 
+A provider response stopped at `max_tokens` is incomplete, including a
+prose-only response. JSON and streaming transports fail the request explicitly
+without automatic continuation or executing code from that response. Partial
+prose is retained in the error diagnostic, with terminal controls escaped;
+it is not recorded as a completed assistant turn or accepted as the final answer.
+
 Legacy fenced `pane` blocks remain an input compatibility and repair path, not the advertised action channel:
 
     ```pane

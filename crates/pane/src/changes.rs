@@ -220,7 +220,8 @@ impl Snapshot {
         }
     }
 
-    /// Renders observed changes. `None` means no change was observed within the capture limits.
+    /// Renders observed changes and incomplete coverage. `None` means the
+    /// snapshots were complete within the capture scope and observed no change.
     pub fn diff(&self, after: &Self) -> Option<String> {
         let mut out = String::new();
         for (path, current) in &after.files {
@@ -245,7 +246,10 @@ impl Snapshot {
                 notes.push(note.clone());
             }
         }
-        if !out.is_empty() && !notes.is_empty() {
+        if !notes.is_empty() {
+            if out.is_empty() {
+                out.push_str("No observed changes; capture incomplete.\n");
+            }
             out.push_str("\n[change capture incomplete: ");
             out.push_str(&notes.join("; "));
             out.push_str("]\n");
@@ -608,7 +612,57 @@ mod tests {
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
         let before = Snapshot::capture_with_limits(&profile, 1, 10, 10);
-        assert!(before.diff(&Snapshot::capture(&profile)).is_none());
+        let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
+        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(!rendered.contains("+++"), "{rendered}");
+        assert!(!rendered.contains("added file"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_length_oversized_mutation_discloses_missing_coverage() {
+        let (root, profile) = fixture("oversized-mutation");
+        let path = root.join("large.bin");
+        let mut bytes = vec![b'a'; MAX_FILE_BYTES as usize + 1];
+        fs::write(&path, &bytes).unwrap();
+        let before = Snapshot::capture(&profile);
+        bytes[0] = b'b';
+        fs::write(&path, bytes).unwrap();
+        let after = Snapshot::capture(&profile);
+
+        let rendered = before.diff(&after).unwrap();
+        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(rendered.contains("byte limit"), "{rendered}");
+        assert!(!rendered.contains("changed file"), "{rendered}");
+        assert!(!rendered.contains("+++"), "{rendered}");
+        assert!(before.rollback_plan(&after).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_entirely_omitted_file_discloses_missing_coverage() {
+        let (root, profile) = fixture("omitted-mutation");
+        fs::write(root.join("a.txt"), "held").unwrap();
+        fs::write(root.join("b.txt"), "before").unwrap();
+        let before = Snapshot::capture_with_limits(&profile, 1, 100, 100);
+        fs::write(root.join("b.txt"), "after").unwrap();
+        let after = Snapshot::capture_with_limits(&profile, 1, 100, 100);
+
+        let rendered = before.diff(&after).unwrap();
+        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(!rendered.contains("+++"), "{rendered}");
+        assert!(!rendered.contains("---"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn complete_unchanged_snapshots_remain_quiet() {
+        let (root, profile) = fixture("unchanged");
+        fs::write(root.join("held.txt"), "unchanged\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        let after = Snapshot::capture(&profile);
+        assert!(before.complete && after.complete);
+        assert!(before.diff(&after).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
