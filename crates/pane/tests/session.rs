@@ -957,6 +957,46 @@ fn the_command_list_is_offered_by_the_binary() {
     );
 }
 
+#[test]
+fn a_project_command_runs_through_the_normal_task_prompt() {
+    let root = scratch_dir("project-command-run");
+    fs::create_dir_all(root.join(".claude").join("commands")).unwrap();
+    fs::write(
+        root.join(".claude").join("commands").join("deploy.md"),
+        "Inspect the release manifest before deploying.",
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "project-command-run",
+        "/deploy staging",
+        &base_url,
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let task = last_user_text(&requests[0]);
+    assert!(task.contains("Project command /deploy:"), "{task}");
+    assert!(
+        task.contains("Inspect the release manifest before deploying."),
+        "{task}"
+    );
+    assert!(
+        task.contains("Arguments supplied by the user:\nstaging"),
+        "{task}"
+    );
+}
+
 /// 2450's uncovered branch: `commands::resolve`'s `ProjectSkill` arm, which
 /// no test in the crate exercised even though it is the branch the binary
 /// itself uses for a bare `/<skill-name>`.
@@ -984,8 +1024,96 @@ fn a_project_skill_resolves_by_name() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("project skill"),
+        stdout.contains("informational project skill")
+            && stdout.contains("does not execute this entry"),
         "resolving a bare project skill by name never reached the binary's ProjectSkill branch:\n{stdout}"
+    );
+}
+
+#[test]
+fn supervisor_and_permissions_report_effective_session_state() {
+    let root = scratch_dir("control-state");
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(cargo *)"]}}"#,
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let supervisor = run_session(
+        &root,
+        &rollout,
+        "control-supervisor",
+        "/supervisor",
+        &refused_base_url(),
+        Some(&absent),
+    );
+    assert!(supervisor.status.success());
+    let stdout = String::from_utf8_lossy(&supervisor.stdout);
+    assert!(stdout.contains("Supervisor"), "{stdout}");
+    assert!(stdout.contains("State: off"), "{stdout}");
+    assert!(stdout.contains("Cadence: every 4 cells"), "{stdout}");
+
+    let permissions = run_session(
+        &root,
+        &root.join("permissions-rollout.jsonl"),
+        "control-permissions",
+        "/permissions",
+        &refused_base_url(),
+        Some(&absent),
+    );
+    assert!(permissions.status.success());
+    let stdout = String::from_utf8_lossy(&permissions.stdout);
+    assert!(
+        stdout.contains("Effective current session (immutable)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Persisted next-session settings"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Bash(cargo *)"), "{stdout}");
+}
+
+#[test]
+fn rollback_previews_the_exact_checkpoint_and_headless_confirmation_refuses() {
+    let root = scratch_dir("rollback-control");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, _bodies) = start_fake_provider(vec![
+        native_cell_reply(
+            "make-file",
+            "await write({path: 'created-by-cell.txt', content: 'cell'});",
+        ),
+        native_cell_reply("finish", "return 'done';"),
+    ]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "rollback-control",
+        &["make a file", "/rollback", "/rollback confirm"],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("remove created-by-cell.txt"), "{stdout}");
+    assert!(
+        stdout.contains("refused outside an interactive TUI"),
+        "{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("created-by-cell.txt")).unwrap(),
+        "cell"
     );
 }
 

@@ -729,6 +729,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         model: RefCell::new(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
         mode: Cell::new(tui::Mode::Execute),
         effort: Cell::new(wire::Effort::Auto),
+        rollbacks: RefCell::new(Vec::new()),
+        rollback_pending: Cell::new(None),
     };
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
     // §5 again, and this one is the promise `session::run` itself makes: an
@@ -771,6 +773,15 @@ struct Session<'a> {
     glasshouse: &'a Glasshouse,
     id: &'a SessionId,
     memory: &'a LocalMemory,
+    /// Exact before/after snapshots for cells that changed project files.
+    rollbacks: RefCell<Vec<RollbackCheckpoint>>,
+    /// Stack length previewed by the last bare `/rollback`.
+    rollback_pending: Cell<Option<usize>>,
+}
+
+struct RollbackCheckpoint {
+    before: crate::changes::Snapshot,
+    after: crate::changes::Snapshot,
 }
 
 /// Handles scripted, live-composer, and piped input through the same task
@@ -845,6 +856,15 @@ fn process_input(
     }
     if let Some(rest) = input.strip_prefix('/') {
         let (name, argument) = split_command(rest);
+        if !is_session_control(name)
+            && let Some(resolved) = commands::resolve(session.project, name)
+            && resolved.source == CommandSource::ProjectCommand
+            && resolved.status == CommandStatus::Available
+            && let Some(body) = session.project.commands.get(name)
+        {
+            let task = project_command_task(name, body, argument);
+            return run_task(&task, session, transcript, rollout);
+        }
         answer_command(rest, name, argument, session, transcript);
         render(
             transcript,
@@ -855,6 +875,36 @@ fn process_input(
         return Ok(());
     }
     run_task(input, session, transcript, rollout)
+}
+
+fn is_session_control(name: &str) -> bool {
+    matches!(
+        name,
+        "" | "help"
+            | "tool"
+            | "model"
+            | "effort"
+            | "mode"
+            | "handles"
+            | "budget"
+            | "context"
+            | "status"
+            | "config"
+            | "permissions"
+            | "entitlements"
+            | "supervisor"
+            | "rollback"
+            | "memory"
+    )
+}
+
+fn project_command_task(name: &str, body: &str, argument: Option<&str>) -> String {
+    let mut task = format!("Project command /{name}:\n\n{body}");
+    if let Some(argument) = argument.filter(|value| !value.is_empty()) {
+        task.push_str("\n\nArguments supplied by the user:\n");
+        task.push_str(argument);
+    }
+    task
 }
 
 /// The task's token total and the cells it has spent, and where each turn's
@@ -974,6 +1024,7 @@ struct Step {
     /// (`supervisor.md` §2) -- `None` for prose and for two blocks, neither
     /// of which ran a cell at all, so neither counts toward the cadence.
     record: Option<CellRecord>,
+    rollback: Option<(crate::changes::Snapshot, crate::changes::Snapshot)>,
     view: CellView,
 }
 
@@ -1191,6 +1242,13 @@ fn run_task(
             session.interrupt,
             session.profile,
         )?;
+        if let Some((before, after)) = step.rollback.take() {
+            session
+                .rollbacks
+                .borrow_mut()
+                .push(RollbackCheckpoint { before, after });
+            session.rollback_pending.set(None);
+        }
         let instruction_boundary = runtime.pending_instructions();
         if let Some(pending) = &instruction_boundary {
             transcript.conversation.system.push_str("\n\n");
@@ -1449,6 +1507,7 @@ fn act_on(
             response: None,
             prose: true,
             record: None,
+            rollback: None,
             view: CellView {
                 error: Some(CellError {
                     class: "ProtocolError".into(),
@@ -1476,6 +1535,7 @@ fn act_on(
                 response: None,
                 prose: true,
                 record: None,
+                rollback: None,
                 view: CellView {
                     error: Some(CellError {
                         class: "ProtocolError".into(),
@@ -1514,6 +1574,7 @@ fn act_on(
                             response: None,
                             prose: true,
                             record: None,
+                            rollback: None,
                             view: CellView {
                                 error: Some(CellError {
                                     class: "CellEditError".into(),
@@ -1540,6 +1601,7 @@ fn act_on(
                     response: None,
                     prose: false,
                     record: None,
+                    rollback: None,
                     view: CellView::default(),
                 });
             }
@@ -1551,6 +1613,7 @@ fn act_on(
                     response: None,
                     prose: true,
                     record: None,
+                    rollback: None,
                     view: CellView {
                         error: Some(CellError {
                             class: "ProtocolError".into(),
@@ -1571,6 +1634,7 @@ fn act_on(
                     response: None,
                     prose: true,
                     record: None,
+                    rollback: None,
                     view: CellView {
                         table: Some(table),
                         ..CellView::default()
@@ -1585,6 +1649,7 @@ fn act_on(
                     response: None,
                     prose: true,
                     record: None,
+                    rollback: None,
                     view: CellView {
                         table: Some(runtime.render_handles()),
                         ..CellView::default()
@@ -1596,7 +1661,9 @@ fn act_on(
 
     let before = crate::changes::Snapshot::capture(profile);
     let outcome = runtime.run_cell(&source);
-    let changes = before.diff(&crate::changes::Snapshot::capture(profile));
+    let after = crate::changes::Snapshot::capture(profile);
+    let changes = before.diff(&after);
+    let rollback = changes.is_some().then_some((before, after));
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
     let record = turn.record.clone();
@@ -1747,6 +1814,7 @@ fn act_on(
         response,
         prose: false,
         record: Some(record),
+        rollback,
         view,
     })
 }
@@ -1956,8 +2024,15 @@ fn answer_command(
                     );
                 }
             }
-            CommandStatus::NotBuilt { subphase } => {
-                session_println!("/{name} is not built yet -- that is sub-phase {subphase}");
+            CommandStatus::Informational => {
+                let description = match resolved.source {
+                    CommandSource::ProjectSkill => "project skill",
+                    CommandSource::ProjectCommand => "project command",
+                    CommandSource::BuiltIn(_) => "command",
+                };
+                session_println!(
+                    "/{name}: informational {description}; Pane does not execute this entry"
+                );
             }
         },
         None => session_println!("/{name}: unknown command"),

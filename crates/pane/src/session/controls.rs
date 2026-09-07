@@ -227,11 +227,40 @@ pub(super) fn command(
                 ),
             );
         }
-        "permissions" => match permissions(&session.project.root, argument) {
-            Ok(text) => show(
+        "supervisor" => {
+            let latest = match transcript.notebook.supervisor.as_ref() {
+                Some(SupervisorStatus::Nudged(reason)) => format!("nudged: {reason}"),
+                Some(SupervisorStatus::LookedNoNudge) => "looked; no nudge".into(),
+                Some(SupervisorStatus::Off) | None => "no look in this session".into(),
+            };
+            show(
                 session,
-                Panel::text("Permissions · changes apply next session", text),
-            ),
+                Panel::text(
+                    "Supervisor",
+                    format!(
+                        "State: {}\nModel: {}\nCadence: every {} cells\nLatest: {}\nConfigure [supervisor] in .glasshouse/pane.toml for the next session.",
+                        if session.config.supervisor.enabled
+                            && session.config.supervisor.model.is_some()
+                        {
+                            "active"
+                        } else {
+                            "off"
+                        },
+                        session
+                            .config
+                            .supervisor
+                            .model
+                            .as_deref()
+                            .unwrap_or("not configured"),
+                        session.config.supervisor.every,
+                        latest
+                    ),
+                ),
+            );
+        }
+        "rollback" => rollback(session, argument),
+        "permissions" => match permissions(session, argument) {
+            Ok(text) => show(session, Panel::text("Permissions", text)),
             Err(error) => session_println!("ERROR: {error}"),
         },
         "entitlements" => {
@@ -242,7 +271,91 @@ pub(super) fn command(
     true
 }
 
-fn permissions(root: &std::path::Path, argument: Option<&str>) -> Result<String, String> {
+fn rollback(session: &Session<'_>, argument: Option<&str>) {
+    let count = session.rollbacks.borrow().len();
+    let Some(last) = session
+        .rollbacks
+        .borrow()
+        .last()
+        .map(|checkpoint| checkpoint.before.rollback_plan(&checkpoint.after))
+    else {
+        session_println!("/rollback: no file-changing cell is available in this session");
+        return;
+    };
+    let plan = match last {
+        Ok(plan) => plan,
+        Err(error) => {
+            session_println!("/rollback unavailable: {error}");
+            return;
+        }
+    };
+
+    match argument.filter(|value| !value.is_empty()) {
+        None => {
+            session.rollback_pending.set(Some(count));
+            let mut panel = Panel::text(
+                "Rollback preview · confirmation required",
+                format!(
+                    "The latest file-changing cell affected:\n{}",
+                    plan.preview()
+                ),
+            );
+            panel.rows.push(PanelRow {
+                text: "Confirm rollback".into(),
+                command: Some("/rollback confirm".into()),
+            });
+            panel.rows.push(PanelRow {
+                text: "Cancel".into(),
+                command: Some("/rollback cancel".into()),
+            });
+            panel.selected = panel.rows.len().saturating_sub(2);
+            show(session, panel);
+        }
+        Some("cancel") => {
+            session.rollback_pending.set(None);
+            session_println!("Rollback cancelled; no files were changed.");
+        }
+        Some("confirm") => {
+            if let Err(message) =
+                rollback_confirmation(session.ui.is_some(), session.rollback_pending.get(), count)
+            {
+                session_println!("{message}");
+                return;
+            }
+            match plan.apply(session.profile) {
+                Ok(()) => {
+                    session.rollbacks.borrow_mut().pop();
+                    session.rollback_pending.set(None);
+                    session_println!("Rollback complete:\n{}", plan.preview());
+                }
+                Err(error) => {
+                    session.rollback_pending.set(None);
+                    session_println!("Rollback refused: {error}");
+                }
+            }
+        }
+        Some(_) => session_println!("Use /rollback, /rollback confirm, or /rollback cancel"),
+    }
+}
+
+fn rollback_confirmation(
+    interactive: bool,
+    previewed: Option<usize>,
+    current: usize,
+) -> Result<(), &'static str> {
+    if !interactive {
+        return Err(
+            "/rollback confirm is refused outside an interactive TUI; no files were changed",
+        );
+    }
+    if previewed != Some(current) {
+        return Err("/rollback confirm requires a current preview; run /rollback first");
+    }
+    Ok(())
+}
+
+fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, String> {
+    let root = &session.project.root;
     let path = root.join(".claude/settings.json");
     let mut settings: serde_json::Value = match fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).map_err(|e| format!("settings.json: {e}"))?,
@@ -297,7 +410,20 @@ fn permissions(root: &std::path::Path, argument: Option<&str>) -> Result<String,
         .cloned()
         .unwrap_or_else(|| serde_json::json!({"allow":[]}));
     Ok(format!(
-        "{}\n{}\n\n/permissions allow <rule>\n/permissions remove <rule>\nThe running sandbox is unchanged; start a new session to apply edits.",
+        "Effective current session (immutable):\n{} path rules · {} command patterns · {} MCP patterns · network {}\n{}\n\nPersisted next-session settings:\n{}\n{}\n\n/permissions allow <rule>\n/permissions remove <rule>\nPersisted edits never change the running sandbox.",
+        session.profile.rule_count(),
+        session.profile.command_pattern_count(),
+        session.profile.mcp_tool_count(),
+        if session.profile.grants_network() {
+            "on"
+        } else {
+            "off"
+        },
+        if session.profile.diagnostics().is_empty() {
+            "No permission diagnostics.".to_string()
+        } else {
+            format!("Diagnostics: {}", session.profile.diagnostics().join("; "))
+        },
         if changed {
             "Saved .claude/settings.json"
         } else {
@@ -320,7 +446,34 @@ mod tests {
             r#"{"other":{"keep":true},"permissions":{"allow":[],"deny":["Bash(rm *)"]}}"#,
         )
         .unwrap();
-        permissions(&root, Some("allow Read(**)")).unwrap();
+        let project = ProjectConfig {
+            root: root.clone(),
+            ..ProjectConfig::default()
+        };
+        let config = PaneConfig::default();
+        let profile = Profile::compile(&root, fs::read_to_string(&path).ok().as_deref());
+        let glasshouse = Glasshouse::Command {
+            glasshouse: root.join("absent"),
+        };
+        let id = SessionId::new("permission-test");
+        let memory = LocalMemory::new(&root);
+        let interrupt = Interrupter::new(id.clone());
+        let session = Session {
+            ui: None,
+            model: RefCell::new("test".into()),
+            mode: Cell::new(tui::Mode::Execute),
+            effort: Cell::new(wire::Effort::Auto),
+            project: &project,
+            config: &config,
+            interrupt: &interrupt,
+            profile: &profile,
+            glasshouse: &glasshouse,
+            id: &id,
+            memory: &memory,
+            rollbacks: RefCell::new(Vec::new()),
+            rollback_pending: Cell::new(None),
+        };
+        permissions(&session, Some("allow Read(**)")).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
         assert_eq!(parsed["other"]["keep"], true);
@@ -328,12 +481,20 @@ mod tests {
             parsed["permissions"]["deny"],
             serde_json::json!(["Bash(rm *)"])
         );
-        assert!(permissions(&root, Some("allow NotAGrant(foo)")).is_err());
+        assert!(permissions(&session, Some("allow NotAGrant(foo)")).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), saved);
-        permissions(&root, Some("remove Read(**)")).unwrap();
+        permissions(&session, Some("remove Read(**)")).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(parsed["permissions"]["allow"], serde_json::json!([]));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_confirmation_is_interactive_and_bound_to_the_previewed_checkpoint() {
+        assert!(rollback_confirmation(false, Some(1), 1).is_err());
+        assert!(rollback_confirmation(true, None, 1).is_err());
+        assert!(rollback_confirmation(true, Some(1), 2).is_err());
+        assert_eq!(rollback_confirmation(true, Some(2), 2), Ok(()));
     }
 }

@@ -161,19 +161,16 @@ fn every_project_command_and_skill_is_offered_by_name() {
 }
 
 #[test]
-fn a_command_whose_subsystem_is_not_built_says_so_and_names_the_phase() {
-    let fixture = Fixture::new("not-built");
+fn built_in_controls_with_existing_subsystems_are_available() {
+    let fixture = Fixture::new("available-controls");
     let config = project::load(&fixture.root);
 
     let handles = commands::resolve(&config, "handles").unwrap();
     assert_eq!(handles.source, CommandSource::BuiltIn(BuiltIn::Handles));
-    assert_eq!(handles.status, CommandStatus::NotBuilt { subphase: "61E" });
+    assert_eq!(handles.status, CommandStatus::Available);
 
     let supervisor = commands::resolve(&config, "supervisor").unwrap();
-    assert_eq!(
-        supervisor.status,
-        CommandStatus::NotBuilt { subphase: "61F" }
-    );
+    assert_eq!(supervisor.status, CommandStatus::Available);
 
     let model = commands::resolve(&config, "model").unwrap();
     assert_eq!(model.status, CommandStatus::Available);
@@ -228,9 +225,24 @@ fn a_project_command_beats_a_same_named_skill() {
 
     let resolved = commands::resolve(&config, "reviewer").unwrap();
     assert_eq!(resolved.source, CommandSource::ProjectCommand);
+    assert_eq!(resolved.status, CommandStatus::Available);
 
     let all = commands::all(&config);
     assert_eq!(all.iter().filter(|c| c.name == "reviewer").count(), 1);
+}
+
+#[test]
+fn a_discovered_skill_is_explicitly_informational() {
+    let fixture = Fixture::new("informational-skill");
+    write(
+        &fixture.root,
+        ".claude/skills/reviewer/SKILL.md",
+        "review\n",
+    );
+    let config = project::load(&fixture.root);
+    let resolved = commands::resolve(&config, "reviewer").unwrap();
+    assert_eq!(resolved.source, CommandSource::ProjectSkill);
+    assert_eq!(resolved.status, CommandStatus::Informational);
 }
 
 #[cfg(unix)]

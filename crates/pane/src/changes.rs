@@ -29,7 +29,7 @@ const EXCLUDED: &[&str] = &[
     "__pycache__",
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FileState {
     len: u64,
     digest: Option<[u8; 32]>,
@@ -42,6 +42,23 @@ pub struct Snapshot {
     files: BTreeMap<PathBuf, FileState>,
     complete: bool,
     notes: Vec<String>,
+}
+
+/// A checked reversal of one observed cell change.
+///
+/// The plan contains only paths whose state changed between the cell's
+/// before/after snapshots. Applying it captures the project again and refuses
+/// the whole reversal if any of those paths has changed since the cell ended.
+#[derive(Clone, Debug)]
+pub struct RollbackPlan {
+    expected: BTreeMap<PathBuf, Option<FileState>>,
+    operations: Vec<RollbackOperation>,
+}
+
+#[derive(Clone, Debug)]
+enum RollbackOperation {
+    Write { path: PathBuf, bytes: Vec<u8> },
+    Remove { path: PathBuf },
 }
 
 impl Snapshot {
@@ -245,6 +262,157 @@ impl Snapshot {
             out.push_str("\n[change output truncated]\n");
         }
         Some(out)
+    }
+
+    /// Builds an exact rollback for the transition from `self` to `after`.
+    ///
+    /// Incomplete snapshots cannot prove which paths belong to the cell, and
+    /// an unavailable baseline body cannot be restored, so both conditions
+    /// refuse the plan instead of guessing.
+    pub fn rollback_plan(&self, after: &Self) -> Result<RollbackPlan, String> {
+        if !self.complete || !after.complete {
+            let mut notes = self.notes.clone();
+            for note in &after.notes {
+                if !notes.contains(note) {
+                    notes.push(note.clone());
+                }
+            }
+            return Err(format!(
+                "change capture was incomplete{}",
+                if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", notes.join("; "))
+                }
+            ));
+        }
+
+        let mut paths: Vec<PathBuf> = self
+            .files
+            .keys()
+            .chain(after.files.keys())
+            .cloned()
+            .collect();
+        paths.sort();
+        paths.dedup();
+
+        let mut expected = BTreeMap::new();
+        let mut operations = Vec::new();
+        for path in paths {
+            let before = self.files.get(&path);
+            let observed = after.files.get(&path);
+            if before == observed {
+                continue;
+            }
+            expected.insert(path.clone(), observed.cloned());
+            match before {
+                Some(state) => {
+                    let bytes = state
+                        .bytes
+                        .clone()
+                        .ok_or_else(|| format!("content was not captured for {}", label(&path)))?;
+                    operations.push(RollbackOperation::Write { path, bytes });
+                }
+                None => operations.push(RollbackOperation::Remove { path }),
+            }
+        }
+        if operations.is_empty() {
+            return Err("the checkpoint contains no observed file changes".into());
+        }
+        Ok(RollbackPlan {
+            expected,
+            operations,
+        })
+    }
+}
+
+impl RollbackPlan {
+    /// Exact affected paths, suitable for a confirmation panel.
+    pub fn preview(&self) -> String {
+        self.operations
+            .iter()
+            .map(|operation| match operation {
+                RollbackOperation::Write { path, .. } => {
+                    format!("restore {}", label(path))
+                }
+                RollbackOperation::Remove { path } => format!("remove {}", label(path)),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Applies the plan after proving every affected path still has the
+    /// state observed when the cell ended.
+    pub fn apply(&self, profile: &Profile) -> Result<(), String> {
+        let current = Snapshot::capture(profile);
+        if !current.complete {
+            return Err("the current project snapshot is incomplete; nothing was changed".into());
+        }
+        for (path, expected) in &self.expected {
+            if current.files.get(path) != expected.as_ref() {
+                return Err(format!(
+                    "{} changed after the checkpoint; nothing was changed",
+                    label(path)
+                ));
+            }
+            let written = profile.root().join(path);
+            if expected.is_none() && fs::symlink_metadata(&written).is_ok() {
+                return Err(format!(
+                    "{} appeared after the checkpoint; nothing was changed",
+                    label(path)
+                ));
+            }
+            let mut prefix = profile.root().to_path_buf();
+            for component in path.components() {
+                prefix.push(component);
+                if fs::symlink_metadata(&prefix)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    return Err(format!(
+                        "{} now crosses a symlink; nothing was changed",
+                        label(path)
+                    ));
+                }
+            }
+        }
+
+        // Resolve every destination through the profile before changing the
+        // first byte. A denied path therefore cannot leave a partial rollback.
+        let targets =
+            self.operations
+                .iter()
+                .map(|operation| {
+                    let path = match operation {
+                        RollbackOperation::Write { path, .. }
+                        | RollbackOperation::Remove { path } => path,
+                    };
+                    profile
+                        .check("rollback", Access::Write, &profile.root().join(path))
+                        .map_err(|denied| denied.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+        for (operation, target) in self.operations.iter().zip(targets) {
+            match operation {
+                RollbackOperation::Write { path, bytes } => {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            format!("could not create {}: {error}", parent.display())
+                        })?;
+                    }
+                    fs::write(&target, bytes)
+                        .map_err(|error| format!("could not restore {}: {error}", label(path)))?;
+                }
+                RollbackOperation::Remove { path } => match fs::remove_file(&target) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("could not remove {}: {error}", label(path)));
+                    }
+                },
+            }
+        }
+        Ok(())
     }
 }
 
@@ -466,6 +634,108 @@ mod tests {
         fs::write(root.join("line.txt"), "same\n").unwrap();
         let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
         assert!(rendered.contains("end-of-file newline"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_restores_a_modified_file() {
+        let (root, profile) = fixture("rollback-modified");
+        fs::write(root.join("changed.txt"), "before\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        fs::write(root.join("changed.txt"), "after\n").unwrap();
+        let after = Snapshot::capture(&profile);
+
+        let plan = before.rollback_plan(&after).unwrap();
+        assert_eq!(plan.preview(), "restore changed.txt");
+        plan.apply(&profile).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("changed.txt")).unwrap(),
+            "before\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_removes_a_file_created_by_the_cell() {
+        let (root, profile) = fixture("rollback-created");
+        let before = Snapshot::capture(&profile);
+        fs::write(root.join("created.txt"), "cell\n").unwrap();
+        let after = Snapshot::capture(&profile);
+
+        let plan = before.rollback_plan(&after).unwrap();
+        assert_eq!(plan.preview(), "remove created.txt");
+        plan.apply(&profile).unwrap();
+
+        assert!(!root.join("created.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_recreates_a_file_deleted_by_the_cell() {
+        let (root, profile) = fixture("rollback-deleted");
+        fs::write(root.join("deleted.txt"), "original\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        fs::remove_file(root.join("deleted.txt")).unwrap();
+        let after = Snapshot::capture(&profile);
+
+        before
+            .rollback_plan(&after)
+            .unwrap()
+            .apply(&profile)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("deleted.txt")).unwrap(),
+            "original\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_preserves_unrelated_files_and_refuses_later_edits() {
+        let (root, profile) = fixture("rollback-unrelated");
+        fs::write(root.join("changed.txt"), "before\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        fs::write(root.join("changed.txt"), "after\n").unwrap();
+        let after = Snapshot::capture(&profile);
+        let plan = before.rollback_plan(&after).unwrap();
+
+        fs::write(root.join("unrelated.txt"), "user\n").unwrap();
+        plan.apply(&profile).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("unrelated.txt")).unwrap(),
+            "user\n"
+        );
+
+        fs::write(root.join("changed.txt"), "newer user edit\n").unwrap();
+        let error = plan.apply(&profile).unwrap_err();
+        assert!(error.contains("changed after the checkpoint"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("changed.txt")).unwrap(),
+            "newer user edit\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_a_symlink_that_replaced_a_deleted_path() {
+        let (root, profile) = fixture("rollback-symlink");
+        fs::write(root.join("deleted.txt"), "original\n").unwrap();
+        fs::write(root.join("unrelated.txt"), "user\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        fs::remove_file(root.join("deleted.txt")).unwrap();
+        let after = Snapshot::capture(&profile);
+        let plan = before.rollback_plan(&after).unwrap();
+        std::os::unix::fs::symlink("unrelated.txt", root.join("deleted.txt")).unwrap();
+
+        let error = plan.apply(&profile).unwrap_err();
+        assert!(error.contains("appeared after the checkpoint"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("unrelated.txt")).unwrap(),
+            "user\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

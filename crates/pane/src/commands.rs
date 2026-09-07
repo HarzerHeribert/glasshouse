@@ -44,17 +44,6 @@ impl BuiltIn {
             BuiltIn::Memory => "memory",
         }
     }
-
-    /// The sub-phase that has not landed yet, for a built-in that names a
-    /// subsystem this round does not build. `None` means the built-in's
-    /// subsystem already exists.
-    pub fn pending_subphase(self) -> Option<&'static str> {
-        match self {
-            BuiltIn::Handles => Some("61E"),
-            BuiltIn::Supervisor => Some("61F"),
-            _ => None,
-        }
-    }
 }
 
 /// Where a resolved command's answer came from.
@@ -65,17 +54,13 @@ pub enum CommandSource {
     ProjectSkill,
 }
 
-/// Whether invoking a resolved command would do anything yet.
-///
-/// This is a state on the resolved command rather than an error, because a
-/// built-in naming a subsystem that has not landed (`/handles` is 61E,
-/// `/supervisor` is 61F) is not a failure to resolve -- map line 2450 says
-/// to offer it -- it is a command that exists and honestly reports it is not
-/// wired to anything yet.
+/// Whether a resolved entry executes or is discovery metadata only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandStatus {
     Available,
-    NotBuilt { subphase: &'static str },
+    /// Discoverable project metadata that Pane can describe but does not
+    /// execute. This prevents discovery from looking like acceptance.
+    Informational,
 }
 
 /// A slash command by name, and what would happen if it were invoked.
@@ -125,7 +110,7 @@ pub fn all(project: &ProjectConfig) -> Vec<ResolvedCommand> {
         out.push(ResolvedCommand {
             name: name.clone(),
             source: CommandSource::ProjectSkill,
-            status: CommandStatus::Available,
+            status: CommandStatus::Informational,
         });
     }
 
@@ -149,20 +134,16 @@ pub fn resolve(project: &ProjectConfig, name: &str) -> Option<ResolvedCommand> {
         return Some(ResolvedCommand {
             name: name.to_string(),
             source: CommandSource::ProjectSkill,
-            status: CommandStatus::Available,
+            status: CommandStatus::Informational,
         });
     }
     None
 }
 
 fn resolved_builtin(builtin: BuiltIn) -> ResolvedCommand {
-    let status = match builtin.pending_subphase() {
-        Some(subphase) => CommandStatus::NotBuilt { subphase },
-        None => CommandStatus::Available,
-    };
     ResolvedCommand {
         name: builtin.name().to_string(),
         source: CommandSource::BuiltIn(builtin),
-        status,
+        status: CommandStatus::Available,
     }
 }
