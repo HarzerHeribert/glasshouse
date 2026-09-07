@@ -61,6 +61,7 @@ blocks the next batch.
 | 2C routing model | Opus **team lead**, subcontractors | ~55 min | — | +2450/-51, 4 files | 4 (phase COMPLETE) | 17 designed, 17 killed, 0 survived | 4 | PASS, CI green |
 | Rustdoc links | Sonnet | ~25 min | — | +22/-22, 12 files | **0** (made a gate real) | 1 gate mutation, killed | 0 | PASS |
 | 9B child env | **Codex `gpt-5.6-sol` xhigh** | ~17 min | subscription, 4% of weekly | +169/-95, 2 files | 1 (phase COMPLETE) | 3 by worker + 1 by orchestrator, all killed | 4 | PASS |
+| Pane uncapped spend + literal scripts | **2× Codex `gpt-5.6-sol` high** | ~8 min parallel | subscription | +394/-192, 22 files before records | 0 (benchmark-driven correction) | focused 157 + 25/87/18; full Pane suite and Clippy re-run by primary | 1 (stale subagent-budget comments) | PASS; post-fix live benchmark next |
 | 9D connectivity + model cache | Opus **team lead**, 3 leaf subs (`agy-gh`) | ~2 h 50 min | — | +5343/-176, 12 files | 3 (phase COMPLETE) | 13 by lead + 3 by orchestrator, all killed | 5 | PASS — **but one of six evidence promotions was withdrawn on review** |
 
 ### The batch that says review is not a formality

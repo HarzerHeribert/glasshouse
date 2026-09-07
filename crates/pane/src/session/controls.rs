@@ -160,10 +160,10 @@ pub(super) fn command(
             show(
                 session,
                 Panel::text(
-                    "Task budget",
+                    "Task spend",
                     format!(
-                        "Last task: {used} tokens\nLimit: {} tokens · {} cells\nConfigure limits in .glasshouse/pane.toml for the next session.",
-                        session.config.limits.task_tokens, session.config.limits.cells
+                        "Last task: {used} cumulative tokens\nToken spend is telemetry and has no cap.\nCell limit: {}\nConfigure runtime limits in .glasshouse/pane.toml for the next session.",
+                        session.config.limits.cells
                     ),
                 ),
             );
@@ -195,14 +195,13 @@ pub(super) fn command(
                 Panel::text(
                     "Context",
                     format!(
-                        "{} messages · {} cells\n{}\nSystem: {} bytes\nMessages: {} bytes\nNext request: ~{} tokens (estimate)\nTask spend limit: {} tokens\nContext is retained in the rollout; no model call was made.",
+                        "{} messages · {} cells\n{}\nSystem: {} bytes\nMessages: {} bytes\nNext request: ~{} tokens (estimate)\nTask spend: cumulative telemetry, no cap\nContext is retained in the rollout; no model call was made.",
                         c.messages.len(),
                         transcript.notebook.cells.len(),
                         measured,
                         c.system.len(),
                         bytes,
-                        estimated,
-                        session.config.limits.task_tokens
+                        estimated
                     ),
                 ),
             );
@@ -213,14 +212,13 @@ pub(super) fn command(
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask budget: {} tokens · {} cells\nCell limit: {} seconds · response {} bytes\nSupervisor: {}\nLimits: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nLimits: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),
                         session.profile.rule_count(),
                         session.profile.command_pattern_count(),
                         session.profile.grants_network(),
-                        session.config.limits.task_tokens,
                         session.config.limits.cells,
                         session.config.limits.cell_wall_clock_s,
                         session.config.limits.response_bytes,

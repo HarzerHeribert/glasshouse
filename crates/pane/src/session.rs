@@ -45,7 +45,7 @@ use crate::wire;
 /// How many prose turns in a row end the task (the primary's addendum of
 /// 2026-09-06): on this one, the answer carries the exhausted preamble and
 /// the loop ends after one more turn whatever the model does. A program or
-/// two blocks resets the count; the token budget stays the outer stop.
+/// two blocks resets the count; the cell limit remains the outer stop.
 const PROSE_TURN_CAP: u32 = 3;
 const REQUEST_MEASUREMENT_CAP: usize = 64;
 
@@ -972,28 +972,24 @@ fn project_command_task(name: &str, body: &str, argument: Option<&str>) -> Strin
     task
 }
 
-/// The task's token total and the cells it has spent, and where each turn's
-/// figure came from -- `model-contract.md` §6's budget line.
-struct TaskBudget {
+/// The task's cumulative token spend and executed-cell count, and where each
+/// turn's figure came from. Spend is telemetry only; only the configured cell
+/// count remains a control limit.
+struct TaskSpend {
     used: u64,
     cells_used: u64,
     reported: bool,
     estimated: bool,
-    /// `pane.toml`'s `[limits]` -- `task_tokens` and `cells`, 61F's own
-    /// replacement for what were the constants `TASK_TOKEN_CAP` and
-    /// `CELL_CAP`. Defaults match those constants exactly.
-    task_cap: u64,
     cells_cap: u64,
 }
 
-impl TaskBudget {
-    fn new(task_cap: u64, cells_cap: u64) -> Self {
+impl TaskSpend {
+    fn new(cells_cap: u64) -> Self {
         Self {
             used: 0,
             cells_used: 0,
             reported: false,
             estimated: false,
-            task_cap,
             cells_cap,
         }
     }
@@ -1056,7 +1052,9 @@ impl TaskBudget {
         Budget {
             turn_cap: u64::from(wire::MAX_TOKENS),
             task_used: self.used,
-            task_cap: self.task_cap,
+            // Kept in the wire-facing value for API compatibility. The
+            // renderer deliberately ignores it: task spend has no cap.
+            task_cap: 0,
             cells_used: self.cells_used,
             cells_cap: self.cells_cap,
         }
@@ -1065,16 +1063,14 @@ impl TaskBudget {
     fn tokens(&self) -> Option<TaskTokens> {
         Some(TaskTokens {
             used: self.used,
-            cap: self.task_cap,
             counted: self.counted()?,
         })
     }
 
-    /// Whether this task may still ask for another turn after the one being
-    /// answered -- §6's cap on cells and its task budget, either of which
-    /// buys exactly one more turn under [`prompt::exhausted_preamble`].
-    fn spent(&self) -> bool {
-        self.used >= self.task_cap || self.cells_used >= self.cells_cap
+    /// The cell limit buys exactly one final-answer turn. Token spend is not
+    /// consulted here or anywhere else in the task loop.
+    fn cell_limit_reached(&self) -> bool {
+        self.cells_used >= self.cells_cap
     }
 }
 
@@ -1104,7 +1100,7 @@ struct Step {
 /// Runs one task to its end: every turn's program goes to this task's own
 /// isolate and every outcome comes back as the next user message, with no
 /// person in the loop, until a terminal return, the cell cap or the task
-/// budget ends it. The model is directed to return final answers as strings.
+/// cell limit ends it. The model is directed to return final answers as strings.
 ///
 /// **One [`Runtime`] per task, built from the session's one compiled
 /// [`Profile`].** `sandbox-grants.md` §1.5 is that the profile is computed
@@ -1207,10 +1203,7 @@ fn run_task_inner(
         }
         write_turn(session.interrupt, rollout, Role::Assistant, &text)
             .map_err(|e| e.to_string())?;
-        let mut budget = TaskBudget::new(
-            session.config.limits.task_tokens,
-            session.config.limits.cells,
-        );
+        let mut budget = TaskSpend::new(session.config.limits.cells);
         budget.add(&served, turn.usage.as_ref(), estimated);
         transcript.notebook.tokens = budget.tokens();
         transcript.conversation.messages.push(turn.message);
@@ -1230,10 +1223,7 @@ fn run_task_inner(
     )
     .with_response_byte_cap(session.config.limits.response_bytes)
     .with_instruction_context();
-    let mut budget = TaskBudget::new(
-        session.config.limits.task_tokens,
-        session.config.limits.cells,
-    );
+    let mut budget = TaskSpend::new(session.config.limits.cells);
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
@@ -1319,10 +1309,10 @@ fn run_task_inner(
         runtime.set_token(cell_token);
         // What a subagent inherits and is measured against — Phase 64. Set
         // per turn rather than once, because both change during a task.
-        runtime.set_task_context(
-            budget.task_cap.saturating_sub(budget.used),
-            &session.model.borrow(),
-        );
+        // Zero means "unbounded/unknown" to the subagent binding. The parent
+        // accounts for nested work, but cumulative token spend never refuses
+        // an agent call or ends the task.
+        runtime.set_task_context(0, &session.model.borrow());
 
         // `events-contract.md` §4: the window that was open while this turn
         // was being answered closes here and its batch is bound into the
@@ -1474,8 +1464,8 @@ fn run_task_inner(
         let completed = step.answer.is_none();
         let stop = completed || final_turn || poisoned;
         incomplete = poisoned || (stop && !completed);
-        let exhausted = if budget.spent() {
-            Some(ExhaustedReason::TaskBudget)
+        let exhausted = if budget.cell_limit_reached() {
+            Some(ExhaustedReason::CellLimit)
         } else if prose_turns >= PROSE_TURN_CAP {
             Some(ExhaustedReason::ThreeTurnsWithoutAProgram)
         } else {
@@ -1660,7 +1650,7 @@ fn next_batch_with(
 fn act_on(
     assistant: &Message,
     runtime: &mut Runtime,
-    budget: &mut TaskBudget,
+    budget: &mut TaskSpend,
     rollout: &mut Rollout,
     interrupt: &Interrupter,
     profile: &Profile,
@@ -2442,18 +2432,18 @@ mod tests {
     }
 
     #[test]
-    fn task_budget_counts_cache_reads_and_creation_without_inventing_them() {
+    fn task_spend_counts_cache_reads_and_creation_without_inventing_them() {
         let usage = wire::Usage {
             input_tokens: 10,
             output_tokens: 5,
             cache_read_input_tokens: Some(70),
             cache_creation_input_tokens: Some(20),
         };
-        let mut direct = TaskBudget::new(1_000, 10);
+        let mut direct = TaskSpend::new(10);
         direct.add(&ServedBy::default(), Some(&usage), 999);
         assert_eq!(direct.used, 105);
 
-        let mut gateway = TaskBudget::new(1_000, 10);
+        let mut gateway = TaskSpend::new(10);
         gateway.add(
             &ServedBy {
                 input_tokens: Some(3),
@@ -2466,7 +2456,7 @@ mod tests {
         );
         assert_eq!(gateway.used, 107);
 
-        let mut absent = TaskBudget::new(1_000, 10);
+        let mut absent = TaskSpend::new(10);
         absent.add(
             &ServedBy::default(),
             Some(&wire::Usage {

@@ -981,9 +981,9 @@ impl Runtime {
         self.syntax_failure.as_ref()
     }
 
-    /// What the task around this runtime is spending and on which model, so a
-    /// subagent can inherit the model and be refused when the budget cannot
-    /// pay for it. Called once per turn; `remaining` of `0` means unknown.
+    /// The task's model and a legacy remaining-token hint. Pane sessions pass
+    /// `0`, meaning unbounded/unknown, because task token spend is telemetry
+    /// and never refuses a subagent. Called once per turn.
     pub fn set_task_context(&mut self, remaining: u64, model: &str) {
         self.state.budget_remaining.set(remaining);
         *self.state.model.borrow_mut() = model.to_string();

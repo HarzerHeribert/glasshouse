@@ -16,9 +16,8 @@ owns in a managed project — not a new file at the project root. Absent means
 defaults. Two tables and nothing else:
 
     [limits]
-    cell_wall_clock_s = 30      # runtime-contract §7's four constants, moved here
+    cell_wall_clock_s = 30      # runtime-contract §7's runtime limits, moved here
     response_bytes    = 16384
-    task_tokens       = 400000
     cells             = 40
 
     [supervisor]
@@ -29,6 +28,10 @@ defaults. Two tables and nothing else:
 A value outside a fixed range is refused at start with one sentence. Nothing in
 this file can name a tool, a path or a grant — those are the sandbox's
 (`sandbox-grants.md`) and stay there.
+
+Token usage is cumulative telemetry, not a limit. Older files that still name
+`task_tokens` are accepted for compatibility, but the value is ignored and
+cannot stop a task.
 
 ## 2. The compressed trajectory is the rollout's own cell lines
 
@@ -52,7 +55,7 @@ supervisor spent.
 The exhausted preamble's slot, the same mechanism: `supervisor: <reason>`.
 Recorded in the rollout as a `turn` line with the user role and that prefix
 (`RolloutKind` stays frozen; `--resume` needs nothing new). The sidebar shows
-it under the budget line. A nudge never ends a task, never changes a grant,
+it under the task-spend line. A nudge never ends a task, never changes a grant,
 never runs code.
 
 ## 5. The planted loop is the acceptance test

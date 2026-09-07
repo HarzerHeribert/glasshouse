@@ -43,7 +43,15 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-09-02, late night (Europe/Berlin)
+Last updated: 2026-09-07 (Europe/Berlin)
+
+## Checkpoint — 2026-09-07, Pane benchmark correction in progress
+
+- A matched Claude Sonnet 4.6 subscription trial used the same frozen 1,005-byte prompt, fixture, oracle, entitlement and Glasshouse gateway. Claude Code passed 6/6 oracle cases in 13 requests and 306.4 s. Pane failed 4/6 after 29 requests and 651.3 s; its task stopped at 1,096,011 displayed cumulative tokens while the latest request occupied only about 54.1k of the 1M context window.
+- The visible failure trace separated two defects: Pane spent repeated turns escaping multiline shell inside JavaScript, then missed macOS `/tmp` → `/private/tmp` canonicalization in its implementation. The benchmark lives under `.agent-runtime/benchmarks/2026-09-07-subscription-context/`; trial 01 is diagnostic evidence, not a Pane win.
+- The user's ruling removes cumulative token spend as task control. Pane still measures and displays spend, but it has no denominator and cannot alter a prompt, refuse a subagent or stop a task. The independent cell count and per-cell wall-clock limits remain.
+- Pane now offers literal line arrays for whole-file writes and exact edits: `write({path, lines})` and `edit({oldLines, replacementLines})`. This preserves shell text such as `${BASH_SOURCE[0]}` and `$WORKTREE` without a JavaScript template literal. Existing byte-exact string forms remain.
+- Full `cargo test -p pane --no-fail-fast`, all-target Clippy with warnings denied, formatting, the Windows GNU test compile and `scripts/blast-radius.sh --targeted` are green. Next action: rebuild Pane and Glasshouse, run a visible post-fix Pane trial under active observation, collect the oracle and request accounting, then expand to repeated trials before making a comparative product claim.
 
 ## Checkpoint — 2026-09-06 (10:40), waves 146–148: 1348 / 1413 (95.3%) — the inbox ruled and its Glasshouse half dispatched, 2475/2481 closed, fix-4 merged, the 2463 preview seam found by its verifier, the sixth build rule
 

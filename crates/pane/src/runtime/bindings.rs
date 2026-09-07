@@ -485,7 +485,13 @@ fn tool_callback(
         return;
     };
 
-    let mut call_args = read_arguments(scope, args.get(0));
+    let Ok(mut call_args) = read_arguments(scope, args.get(0)) else {
+        throw_tool_error(
+            scope,
+            "tool arguments must be strings, except declared line arguments which must be arrays of strings",
+        );
+        return;
+    };
     let state = state(scope);
     let tool = if requested_tool.name() == "read" {
         call_args
@@ -644,17 +650,17 @@ fn tool_callback(
 /// declare: [`invoke::run`] refuses an undeclared argument, and dropping it
 /// here would make a call that named the wrong argument look like it had
 /// honoured it.
-fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Args {
+fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Args, ()> {
     let mut args = Args::new();
     if !value.is_object() {
-        return args;
+        return Ok(args);
     }
     let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
-        return args;
+        return Ok(args);
     };
     let Some(names) = object.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
     else {
-        return args;
+        return Ok(args);
     };
     for index in 0..names.length() {
         let Some(key) = names.get_index(scope, index) else {
@@ -666,12 +672,23 @@ fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Args
         if given.is_undefined() || given.is_null() {
             continue;
         }
-        args = args.with(
-            key.to_rust_string_lossy(scope),
-            given.to_rust_string_lossy(scope),
-        );
+        let key = key.to_rust_string_lossy(scope);
+        if given.is_array() {
+            let array = v8::Local::<v8::Array>::try_from(given).map_err(|_| ())?;
+            let mut lines = Vec::with_capacity(array.length() as usize);
+            for index in 0..array.length() {
+                let line = array.get_index(scope, index).ok_or(())?;
+                if !line.is_string() {
+                    return Err(());
+                }
+                lines.push(line.to_rust_string_lossy(scope));
+            }
+            args = args.with_lines(key, lines);
+        } else {
+            args = args.with(key, given.to_rust_string_lossy(scope));
+        }
     }
-    args
+    Ok(args)
 }
 
 /// Builds the tool's declared result type, records the call, and tags the
@@ -1822,11 +1839,10 @@ fn stream(
 /// rule and matters for the same reason: a program that catches the exception
 /// is holding nothing, and there is no started subagent to stop.
 ///
-/// The first refusal is depth — a subagent may not start a subagent, and the
-/// runtime knows which it is. The second is budget: a subagent charges the
-/// parent's task budget, so one the parent cannot pay for is refused rather
-/// than started and killed halfway, which would spend the tokens and produce
-/// nothing.
+/// The refusal is depth — a subagent may not start a subagent, and the runtime
+/// knows which it is. `budget_remaining` is a compatibility hint for direct
+/// runtime callers; Pane sessions set it to zero (unbounded/unknown), so token
+/// spend never refuses an agent call.
 fn agent_run_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -1854,10 +1870,8 @@ fn agent_run_callback(
         return;
     }
 
-    // A turn's worth of budget is the floor, not the whole cost: what a
-    // subagent actually spends is charged as its `agent.done` arrives. This
-    // refuses the case the parent plainly cannot afford rather than
-    // predicting one it might.
+    // Nonzero remains supported for direct runtime callers. Normal Pane
+    // sessions pass zero, so cumulative task spend cannot reach this guard.
     let remaining = state.budget_remaining.get();
     if remaining > 0 && remaining < MINIMUM_AGENT_BUDGET {
         throw_denied(

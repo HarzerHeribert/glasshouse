@@ -25,6 +25,7 @@ use pane::sandbox::profile::Access;
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::{self, Args, ToolContext};
 use pane::tools::registry::{self, Purity, Tool};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1261,6 +1262,111 @@ fn write_puts_arbitrary_bytes_on_disk_exactly() {
         "write reported a child it never created"
     );
     assert!(result.stdout.contains("wrote"), "{}", result.stdout);
+}
+
+/// Line arrays are the script-friendly spelling: JavaScript never parses the
+/// file as a template literal, and Pane owns newline normalization.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn write_lines_preserve_literal_script_variables_and_add_a_final_newline() {
+    let fixture = Fixture::new("write-lines");
+    let profile = Profile::compile(&fixture.root, Some(&write_settings(&fixture.root)));
+    let target = fixture.root.join("run.sh");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("write-lines");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*target.to_string_lossy())
+            .with_lines(
+                "lines",
+                [
+                    "#!/usr/bin/env bash",
+                    "source=\"${BASH_SOURCE[0]}\"",
+                    "printf '%s\\n' \"$WORKTREE\"",
+                ],
+            ),
+    )
+    .expect("literal script lines should be admitted");
+
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "#!/usr/bin/env bash\nsource=\"${BASH_SOURCE[0]}\"\nprintf '%s\\n' \"$WORKTREE\"\n"
+    );
+
+    let empty = fixture.root.join("empty.txt");
+    invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*empty.to_string_lossy())
+            .with_lines("lines", std::iter::empty::<&str>()),
+    )
+    .expect("an empty line array should write an empty file");
+    assert_eq!(std::fs::read(&empty).unwrap(), b"");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn write_requires_exactly_one_content_form_and_mutates_nothing_on_ambiguity() {
+    let fixture = Fixture::new("write-exclusive");
+    let profile = Profile::compile(&fixture.root, Some(&write_settings(&fixture.root)));
+    let target = fixture.root.join("ambiguous.txt");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("write-exclusive");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    for args in [
+        Args::new().with("path", &*target.to_string_lossy()),
+        Args::new()
+            .with("path", &*target.to_string_lossy())
+            .with("content", "string form")
+            .with_lines("lines", ["line form"]),
+    ] {
+        let error = invoke::run(&ctx, "write", &args).expect_err("ambiguous write must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("exactly one of content or lines"),
+            "{error}"
+        );
+        assert!(!target.exists(), "a refused write mutated the filesystem");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn edit_accepts_literal_line_arrays_for_both_sides() {
+    let fixture = Fixture::new("edit-lines");
+    let profile = Profile::compile(&fixture.root, Some(&write_settings(&fixture.root)));
+    let target = fixture.root.join("run.sh");
+    let original = "before\nsource=\"${BASH_SOURCE[0]}\"\nafter\n";
+    std::fs::write(&target, original).unwrap();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("edit-lines");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    invoke::run(
+        &ctx,
+        "edit",
+        &Args::new()
+            .with("path", &*target.to_string_lossy())
+            .with("expected_sha256", format!("{:x}", Sha256::digest(original)))
+            .with_lines("oldLines", ["source=\"${BASH_SOURCE[0]}\""])
+            .with_lines(
+                "replacementLines",
+                ["root=\"${BASH_SOURCE[0]}\"", "echo \"$WORKTREE\""],
+            ),
+    )
+    .expect("line-array edit should be admitted");
+
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "before\nroot=\"${BASH_SOURCE[0]}\"\necho \"$WORKTREE\"\nafter\n"
+    );
 }
 
 /// `WritePath` asks `Profile::check` the *write* question, and this is where

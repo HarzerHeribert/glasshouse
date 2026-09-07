@@ -2204,6 +2204,35 @@ fn a_read_of_a_missing_file_throws_and_never_becomes_a_result() {
     assert_eq!(returned(&ok), &Value::Number(2.0), "{ok:?}");
 }
 
+/// The live failure this API closes: `${...}` in a template literal is a
+/// JavaScript expression, but in a line-array string it reaches disk as shell
+/// syntax. `$WORKTREE` is likewise data, not an expansion by Pane.
+#[test]
+fn a_cell_writes_literal_multiline_scripts_without_template_interpolation() {
+    let fixture = Fixture::new("literal-script-lines");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("literal-script-lines-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        r##"await write({
+  path: "run.sh",
+  lines: [
+    "#!/usr/bin/env bash",
+    'source="${BASH_SOURCE[0]}"',
+    'printf "%s\\n" "$WORKTREE"'
+  ]
+});
+return "written";
+"##,
+    );
+    assert_eq!(returned_string(&outcome), "written", "{outcome:?}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("run.sh")).unwrap(),
+        "#!/usr/bin/env bash\nsource=\"${BASH_SOURCE[0]}\"\nprintf \"%s\\n\" \"$WORKTREE\"\n"
+    );
+}
+
 /// The one exception, and its boundary: for `grep` and `glob`, exit 1 is "no
 /// matches" and stays an empty array; exit 2 and above is a real failure and
 /// throws like `read`.

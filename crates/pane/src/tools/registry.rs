@@ -85,6 +85,10 @@ pub enum ArgKind {
     /// parsed, never expanded, and never spliced into a command line, so
     /// there is nothing in it for a shell to interpret.
     Pattern,
+    /// Literal file lines. They are joined with `\n` and a final newline by
+    /// the invoker, without JavaScript template interpolation or shell
+    /// expansion. Only in-process file tools admit this structured value.
+    Lines,
     /// A whole command line. Goes through `Profile::admits_command` and
     /// through nothing else — it grants no file access whatsoever (§2).
     CommandLine,
@@ -368,7 +372,8 @@ const WRITE: Tool = Tool::declare_in_process(
     "write",
     &[
         Arg::required("path", ArgKind::WritePath),
-        Arg::required("content", ArgKind::Pattern),
+        Arg::optional("content", ArgKind::Pattern),
+        Arg::optional("lines", ArgKind::Lines),
     ],
     Purity::Effectful,
 );
@@ -391,8 +396,10 @@ const EDIT: Tool = Tool::declare_in_process(
     &[
         Arg::required("path", ArgKind::WritePath),
         Arg::optional("expected_sha256", ArgKind::Pattern),
-        Arg::required("old", ArgKind::Pattern),
-        Arg::required("replacement", ArgKind::Pattern),
+        Arg::optional("old", ArgKind::Pattern),
+        Arg::optional("oldLines", ArgKind::Lines),
+        Arg::optional("replacement", ArgKind::Pattern),
+        Arg::optional("replacementLines", ArgKind::Lines),
     ],
     Purity::Effectful,
 );

@@ -1,6 +1,6 @@
 //! `docs/product/pane/supervisor.md` §1: `.glasshouse/pane.toml`, loaded once
-//! at session start. Absent means every default the runtime and the task
-//! budget already used; anything present is validated with one sentence per
+//! at session start. Absent means every default the runtime already used;
+//! anything present is validated with one sentence per
 //! refusal.
 
 use std::fs;
@@ -39,11 +39,19 @@ fn absent_pane_toml_means_the_defaults() {
     assert_eq!(config, PaneConfig::default());
     assert_eq!(config.limits.cell_wall_clock_s, 30);
     assert_eq!(config.limits.response_bytes, 16384);
-    assert_eq!(config.limits.task_tokens, 400_000);
     assert_eq!(config.limits.cells, 40);
     assert_eq!(config.supervisor.every, 4);
     assert_eq!(config.supervisor.model, None);
     assert!(config.supervisor.enabled);
+}
+
+#[test]
+fn legacy_task_tokens_is_accepted_but_does_not_configure_a_cap() {
+    let root = scratch_dir("legacy-task-tokens");
+    write_pane_toml(&root, "[limits]\ntask_tokens = 1000\n");
+
+    let config = PaneConfig::load(&root).unwrap();
+    assert_eq!(config.limits, PaneConfig::default().limits);
 }
 
 #[test]

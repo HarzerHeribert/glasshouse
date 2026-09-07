@@ -123,6 +123,14 @@ when exactly one complete version of that path is visible; the caller supplies
 and no-op requests throw without writing or retrying. `write` remains the
 whole-file and new-file operation.
 
+For literal multiline content, `write` also accepts `lines: string[]` instead
+of `content`, and `edit` accepts `oldLines` and `replacementLines` instead of
+their string forms. Pane joins a nonempty line array with `\n` and adds one
+final newline; an empty array is an empty file. Exactly one form must be given
+for each value. This keeps syntax such as `${BASH_SOURCE[0]}` and `$WORKTREE`
+literal without requiring a JavaScript template literal; the string forms
+remain available when byte-exact newline control matters.
+
 The result of `read` has an `excerpt({start?, lines?})` method over its already
 loaded `lines` array. It adds no filesystem access. `start` is one-based;
 `lines` defaults to 400 and caps at 1,000. `console.log(file.excerpt(...).text)`
@@ -143,7 +151,7 @@ ones with an explicit notice.
 
 ## 4. The handle table
 
-Rendered fresh every turn, after the tools and before the budget. Empty on
+Rendered fresh every turn, after the tools and before usage. Empty on
 turn 1 and written as `## Handles\n(none)`. Otherwise one entry per live
 handle, in declaration order, in the shape `runtime-contract.md` §3 fixes.
 The whole table is capped at 2,048 tokens; over it, the oldest entries are
@@ -207,7 +215,7 @@ cell, task end, or runtime reset invalidates the old target. Runtime-thrown
 `SyntaxError`, even with no tool calls, does not authorize a repair/replay.
 
 Pane applies a valid edit locally and runs the corrected source as a **new
-cell**, through the same compiler, sandbox, cancellation, and budget path.
+cell**, through the same compiler, sandbox, cancellation, and accounting path.
 The original record is immutable; the new record stores the complete amended
 source. A new parse error offers the new cell ID. No corrected source copy is
 added to the next model result. Invalid edits count toward bounded malformed
@@ -215,7 +223,7 @@ reply handling. A message containing both `pane` and `pane-edit`, or multiple
 `pane-edit` blocks, runs neither. The same repair path is available to
 subagents. A repair is protocol data, not a reentrant JavaScript function.
 
-## 6. The result block, and the budget line
+## 6. The result block, usage and limits
 
 The runtime's reply is one user message with up to four sections, always in
 this order and each omitted when empty:
@@ -228,20 +236,20 @@ this order and each omitted when empty:
     ## stdout
     …last 8,192 estimated tokens of the program's console output…
 
-    ## Budget
-    turn cap 8,000 · task 3,412/400,000 · cells 1/40
+    ## Usage
+    turn output cap 8,000 · task spent 3,412 · cells 1/40
 
 A throw replaces the first line with `[cell 3 threw in 88 ms]` and adds an
 `## Error` section carrying the class, the message, the source line and column
 inside the model's program, and the top three in-program frames.
 
-The three budget figures are: the output-token cap for the turn about to
-start (default 8,000); total provider-reported tokens for the task (default
-400,000, read from the gateway's own usage row rather than estimated); and
-cells used against their cap (default 40). At 90%
-of the task budget the line gains `— finish or return`; when it is exhausted
-the next turn's preamble is replaced by one sentence saying the only permitted
-action is a top-level returned string.
+The usage figures are: the output-token cap for the turn about to start
+(default 8,000); cumulative provider-reported tokens spent by the task, read
+from the gateway's own usage row rather than estimated when available; and
+cells used against their cap (default 40). Task token spend is telemetry. It
+has no cap, never changes the prompt and never stops a task. Reaching the cell
+limit still gives the model one final turn whose only permitted action is a
+top-level returned string.
 
 ## 7. The worked turn, as bytes
 
@@ -274,8 +282,8 @@ names, same previews. Figures measured on this repository at `4d97c8f`.
       L1       "//! The contract every supported harness is reached through."
       L2       "//!"                                                          preview 66 tok
 
-    ## Budget
-    turn cap 8,000 · task 3,412/400,000 · cells 1/40
+    ## Usage
+    turn output cap 8,000 · task spent 3,412 · cells 1/40
 
 **Turn 2, assistant:**
 
@@ -319,7 +327,7 @@ on that block (an empty system uses an empty array). The native `execute_cell`
 tool definition has the same breakpoint,
 so a changed system can still reuse the tool prefix. Streaming uses the same
 serializer and boundaries. Neither path marks conversation messages: task
-boundaries, handles, cell output and budget snapshots stay after the cached
+boundaries, handles, cell output and usage snapshots stay after the cached
 system prefix. Changed instructions intentionally change that prefix.
 
 These are requests for caching, not evidence of a hit. Pane exposes provider
@@ -378,7 +386,7 @@ test:       `crates/pane/tests/prompt_bytes.rs::the_worked_turn_renders_byte_for
 ### Request history and live state
 
 New runtime feedback has two renderer-produced forms: its full observation
-and its historical form without handle, plan and budget snapshots. Requests
+and its historical form without handle, plan and usage snapshots. Requests
 keep the newest live snapshot for the current task and use the historical form
 for older feedback. Errors, stdout, yield reasons, syntax repair hints and
 supervisor guidance remain. A new task does not present the previous task's

@@ -243,6 +243,30 @@ fn every_registered_tool_has_exactly_one_declaration_and_no_other_does() {
 }
 
 #[test]
+fn the_prompt_teaches_the_literal_multiline_content_form() {
+    let system = prompt::render_system(
+        "",
+        &registry::ALL.iter().collect::<Vec<_>>(),
+        &prompt::SessionFacts {
+            root: "/tmp/x".to_string(),
+            writable: Vec::new(),
+            command_patterns: 0,
+            all_commands: false,
+            network: false,
+        },
+    );
+
+    assert!(
+        system.contains("content?: string; lines?: string[]"),
+        "{system}"
+    );
+    assert!(system.contains("oldLines?: string[]"), "{system}");
+    assert!(system.contains("replacementLines?: string[]"), "{system}");
+    assert!(system.contains("${BASH_SOURCE[0]}"), "{system}");
+    assert!(system.contains("$WORKTREE"), "{system}");
+}
+
+#[test]
 fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     let empty = CellResult {
         cell: 1,
@@ -265,7 +289,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     assert!(rendered.contains("## Handles\n(none)"));
     assert!(!rendered.contains("## Error"));
     assert!(!rendered.contains("## stdout"));
-    assert!(rendered.contains("## Budget"));
+    assert!(rendered.contains("## Usage"));
 
     let with_stdout = CellResult {
         cell: 2,
@@ -316,16 +340,16 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     assert!(rendered.contains("line 2, column 4"));
     assert!(rendered.contains("at cell 3, line 2"));
 
-    // Section order: Handles, Error, stdout, Budget.
+    // Section order: Handles, Error, stdout, Usage.
     let handles_at = rendered.find("## Handles").unwrap();
     let error_at = rendered.find("## Error").unwrap();
-    let budget_at = rendered.find("## Budget").unwrap();
+    let budget_at = rendered.find("## Usage").unwrap();
     assert!(handles_at < error_at);
     assert!(error_at < budget_at);
 }
 
 #[test]
-fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sentence() {
+fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     let below = CellResult {
         cell: 1,
         elapsed_ms: 1,
@@ -362,13 +386,13 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
         },
         plan: Vec::new(),
     };
-    assert!(
-        prompt::render_result(&at_ninety)
-            .contains("turn cap 8,000 · task 360,000/400,000 · cells 1/40 — finish or return")
-    );
+    let rendered = prompt::render_result(&at_ninety);
+    assert!(rendered.contains("turn output cap 8,000 · task spent 360,000 · cells 1/40"));
+    assert!(!rendered.contains("400,000"));
+    assert!(!rendered.contains("finish or return"));
 
     for reason in [
-        ExhaustedReason::TaskBudget,
+        ExhaustedReason::CellLimit,
         ExhaustedReason::ThreeTurnsWithoutAProgram,
     ] {
         let sentence = prompt::exhausted_preamble(reason);
@@ -614,7 +638,7 @@ fn compaction_removes_only_what_the_newest_result_restates() {
     let compacted = prompt::compact_result(&old);
     assert!(compacted.len() < old.len(), "nothing was removed");
 
-    for section in ["## Handles", "## Plan", "## Budget"] {
+    for section in ["## Handles", "## Plan", "## Usage"] {
         assert!(
             !compacted.contains(section),
             "`{section}` survived compaction: {compacted}"

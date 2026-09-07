@@ -106,12 +106,12 @@ pub fn project_runtime_history(conversation: &mut Conversation, active_from: usi
     }
 }
 
-/// Why the preamble is being replaced: §6's spent task budget, or three
+/// Why the preamble is being replaced: the configured cell limit, or three
 /// prose turns in a row (the primary's addendum of 2026-09-06 — a model that
 /// never programs must not spend hundreds of requests to find out).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExhaustedReason {
-    TaskBudget,
+    CellLimit,
     ThreeTurnsWithoutAProgram,
 }
 
@@ -120,8 +120,8 @@ pub enum ExhaustedReason {
 /// top-level returned string.
 pub fn exhausted_preamble(reason: ExhaustedReason) -> &'static str {
     match reason {
-        ExhaustedReason::TaskBudget => {
-            "The task budget is exhausted; the only action this turn may take is returning a \
+        ExhaustedReason::CellLimit => {
+            "The cell limit is reached; the only action this turn may take is returning a \
              final answer string at top level."
         }
         ExhaustedReason::ThreeTurnsWithoutAProgram => {
@@ -238,7 +238,11 @@ fn render_params(args: &[Arg]) -> String {
         .iter()
         .map(|arg| {
             let optional_mark = if arg.is_required() { "" } else { "?" };
-            format!("{}{optional_mark}: string", arg.name())
+            let value_type = match arg.kind() {
+                crate::tools::registry::ArgKind::Lines => "string[]",
+                _ => "string",
+            };
+            format!("{}{optional_mark}: {value_type}", arg.name())
         })
         .collect();
     format!("{{{}}}", fields.join("; "))
@@ -295,7 +299,9 @@ impl ErrorSection {
     }
 }
 
-/// The three figures §6's budget line reports.
+/// The usage figures §6 reports. `task_cap` is retained for compatibility
+/// with callers constructing this value, but task spend is never capped and
+/// the renderer does not expose the field.
 pub struct Budget {
     pub turn_cap: u64,
     pub task_used: u64,
@@ -305,7 +311,7 @@ pub struct Budget {
 }
 
 /// §6's user message: the yield/throw line, then `## Handles`, `## Error`,
-/// `## stdout` and `## Budget`, in that order, each omitted when there is
+/// `## stdout` and `## Usage`, in that order, each omitted when there is
 /// nothing to say — except `## Handles`, which is never omitted and writes
 /// `(none)` for an empty table.
 pub fn render_result(result: &CellResult) -> String {
@@ -371,31 +377,24 @@ fn render_result_with_state(result: &CellResult, include_state: bool) -> String 
     }
 
     if include_state {
-        out.push_str("\n\n## Budget\n");
-        out.push_str(&render_budget_line(&result.budget));
+        out.push_str("\n\n## Usage\n");
+        out.push_str(&render_usage_line(&result.budget));
     }
 
     out
 }
 
-fn render_budget_line(budget: &Budget) -> String {
-    let mut line = format!(
-        "turn cap {} · task {}/{} · cells {}/{}",
+fn render_usage_line(budget: &Budget) -> String {
+    format!(
+        "turn output cap {} · task spent {} · cells {}/{}",
         thousands(budget.turn_cap),
         thousands(budget.task_used),
-        thousands(budget.task_cap),
         thousands(budget.cells_used),
         thousands(budget.cells_cap),
-    );
-    if budget.task_cap > 0
-        && budget.task_used.saturating_mul(100) >= budget.task_cap.saturating_mul(90)
-    {
-        line.push_str(" — finish or return");
-    }
-    line
+    )
 }
 
-/// `n` with a comma every three digits from the right — the budget line's
+/// `n` with a comma every three digits from the right — the usage line's
 /// own formatting, `model-contract.md` §6's `8,000` / `3,412` / `400,000`.
 fn thousands(n: u64) -> String {
     let digits = n.to_string();
@@ -441,11 +440,11 @@ impl Compaction {
 ///
 /// The invariant: **a section listed here is rendered complete every turn, so
 /// an older copy tells the model nothing the latest message does not.**
-/// `## Handles` is the whole live table, `## Plan` the whole plan, `## Budget`
+/// `## Handles` is the whole live table, `## Plan` the whole plan, `## Usage`
 /// the current figures — each is a snapshot of now, not a record of then.
 /// `## Error` and `## stdout` are the opposite: they belong to the cell that
 /// produced them and appear nowhere else, so they are never dropped.
-const SUPERSEDED_SECTIONS: [&str; 3] = ["## Handles", "## Plan", "## Budget"];
+const SUPERSEDED_SECTIONS: [&str; 4] = ["## Handles", "## Plan", "## Usage", "## Budget"];
 
 /// Removes the superseded sections from one rendered cell result.
 ///

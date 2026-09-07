@@ -2546,8 +2546,8 @@ delegation is between peer sessions visible in the session list. The two are
 different mechanisms with different visibility contracts and neither replaces the
 other. Sized and ordered after Phase 63; not a release blocker.
 
-☐ Let a cell start a subagent with its own task and its own turn budget, and receive its result as a handle rather than as text.
+☐ Let a cell start a subagent with its own task and finite turn count, and receive its result as a handle rather than as text.
 ☐ Run a subagent under the parent session's own compiled profile, so it can reach nothing the parent could not.
-☐ Charge a subagent's turns to the parent task's budget, and refuse to start one that the remaining budget cannot pay for.
+☐ Add a subagent's reported tokens to the parent task's cumulative spend telemetry without imposing a token cap or refusing useful work because of spend.
 ☐ Show a running subagent in the session's own display and let the person stop it, so no work runs that nothing on screen accounts for.
 ☐ Do not give a subagent its own inbox, its own row in Glasshouse's session list, or the ability to start a subagent of its own.

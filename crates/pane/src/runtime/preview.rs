@@ -344,7 +344,7 @@ pub(crate) fn tokens_for_bytes(bytes: u64) -> usize {
 
 /// `n` with a comma every three digits from the right —
 /// `model-contract.md` §7's `30,565` / `63,979` / `1,508`. `prompt::thousands`
-/// does the same formatting for the budget line, but `prompt/**` belongs to
+/// does the same formatting for the usage line, but `prompt/**` belongs to
 /// another package for this task and this crate has no third module both
 /// already depend on, so this is a deliberate duplicate of that one
 /// four-line function rather than a new shared one.

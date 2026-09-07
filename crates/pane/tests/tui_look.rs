@@ -303,7 +303,6 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         }),
         tokens: Some(pane::tui::TaskTokens {
             used: 579,
-            cap: 400_000,
             counted: pane::tui::Counted::Gateway,
         }),
         supervisor: Some(SupervisorStatus::Nudged("check the request".into())),
@@ -328,7 +327,8 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         "route: direct",
         "cached input: 100",
         "tokens: 123 in / 456 out",
-        "spent: 579/400000 tok",
+        "Σ 579 tokens",
+        "cumulative task spend · no cap",
         "ctx",
         "44.6k/1.0M 4%",
         "counted: reported",
@@ -348,7 +348,6 @@ fn statusline_separates_request_context_from_cumulative_spend() {
         }),
         tokens: Some(pane::tui::TaskTokens {
             used: 369_178,
-            cap: 400_000,
             counted: Counted::Gateway,
         }),
         ..Notebook::default()
@@ -356,7 +355,7 @@ fn statusline_separates_request_context_from_cumulative_spend() {
     let shown = text(&draw(200, 30, &state(), &conversation(), &notebook));
     assert!(shown.contains("ctx"), "{shown}");
     assert!(shown.contains("44.6k/1.0M 4%"), "{shown}");
-    assert!(shown.contains("spent 369178/400000"), "{shown}");
+    assert!(shown.contains("spent 369.2k · reported"), "{shown}");
 
     let unknown = Notebook {
         context: Some(ContextTokens {

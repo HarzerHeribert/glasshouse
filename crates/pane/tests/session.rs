@@ -1458,8 +1458,8 @@ fn the_system_block_is_render_systems_own_bytes() {
     );
 }
 
-/// §6's cell cap, and the one sentence that replaces the preamble when a
-/// budget is spent.
+/// §6's cell limit, and the one sentence that replaces the preamble when the
+/// limit is reached.
 ///
 /// **The loop ends after that turn whatever the model does**, so the cap is
 /// asserted by the provider running out of scripted turns: a loop that kept
@@ -1475,7 +1475,7 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
 
-    // 40 is `CELL_CAP`; the forty-first turn is the one the spent budget buys.
+    // 40 is `CELL_CAP`; the forty-first turn is the final-answer turn.
     let turns = 41;
     let replies = (0..turns)
         .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
@@ -1503,12 +1503,12 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
         "the task must stop one turn after the cap, not run on"
     );
     assert!(
-        !last_user_text(&bodies[turns - 2]).starts_with("The task budget is exhausted"),
+        !last_user_text(&bodies[turns - 2]).starts_with("The cell limit is reached"),
         "the turn before the cap carries the ordinary result block"
     );
     assert!(
-        last_user_text(&bodies[turns - 1]).starts_with("The task budget is exhausted"),
-        "the turn a spent budget buys opens with the one sentence that replaces \
+        last_user_text(&bodies[turns - 1]).starts_with("The cell limit is reached"),
+        "the final-answer turn opens with the one sentence that replaces \
          the preamble: {}",
         last_user_text(&bodies[turns - 1])
     );
@@ -1539,8 +1539,8 @@ fn write_routing_cost(dir: &Path, name: &str, once_only: bool) -> PathBuf {
 /// one -- "read from the gateway's own usage row rather than estimated".
 ///
 /// 120 is `100 + 20`, the row's own two figures. The estimate for this
-/// conversation is several hundred tokens, so a budget line reading `task
-/// 120/400,000` cannot have been produced by the fallback.
+/// conversation is several hundred tokens, so a usage line reading `task
+/// spent 120` cannot have been produced by the fallback.
 #[cfg(unix)]
 #[test]
 fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
@@ -1570,17 +1570,17 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn cap 8,192 · task 120/400,000 · cells 1/40"),
-        "the budget line must carry the gateway's own figures: {result_block}"
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/40"),
+        "the usage line must carry the gateway's own figures: {result_block}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("spent 240/400000 · reported"),
+        stdout.contains("spent 240 · reported"),
         "two reported turns total 240 in the sidebar:\n{stdout}"
     );
     assert!(
-        stdout.contains("spent 240/400000 · reported"),
+        stdout.contains("spent 240 · reported"),
         "the sidebar must say the figure was reported, not estimated:\n{stdout}"
     );
 }
@@ -1926,11 +1926,11 @@ fn repeated_malformed_executable_replies_are_bounded() {
     }
 }
 
-/// Addendum 1: the budget line's turn cap is the `max_tokens` the request
+/// Addendum 1: the usage line's turn output cap is the `max_tokens` the request
 /// actually carries -- one constant, read from the wire -- so the model is
 /// told the figure that binds it.
 #[test]
-fn the_budget_line_names_the_max_tokens_actually_sent() {
+fn the_usage_line_names_the_max_tokens_actually_sent() {
     let root = scratch_dir("turn-cap-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
@@ -1958,8 +1958,8 @@ fn the_budget_line_names_the_max_tokens_actually_sent() {
     assert_eq!(sent, 8_192);
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn cap 8,192 ·"),
-        "the budget line names the figure actually sent: {result_block}"
+        result_block.contains("turn output cap 8,192 ·"),
+        "the usage line names the figure actually sent: {result_block}"
     );
 }
 
@@ -1970,8 +1970,8 @@ fn the_budget_line_names_the_max_tokens_actually_sent() {
 ///
 /// 30 is `20 + 10`, one reply's own two figures; 60 is both replies'. The
 /// estimate for this conversation is a different figure entirely (several
-/// hundred tokens, as the gateway test's own comment notes), so a budget
-/// line reading `task 30/400,000` cannot have come from the fallback.
+/// hundred tokens, as the gateway test's own comment notes), so a usage
+/// line reading `task spent 30` cannot have come from the fallback.
 #[cfg(unix)]
 #[test]
 fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
@@ -2001,19 +2001,63 @@ fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn cap 8,192 · task 30/400,000 · cells 1/40"),
-        "the budget line must carry the response's own usage: {result_block}"
+        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1/40"),
+        "the usage line must carry the response's own usage: {result_block}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("spent 60/400000 · reported"),
+        stdout.contains("spent 60 · reported"),
         "two reported turns total 60 in the sidebar:\n{stdout}"
     );
     assert!(
-        stdout.contains("spent 60/400000 · reported"),
+        stdout.contains("spent 60 · reported"),
         "the sidebar must say the figure was reported, not estimated, when a \
          direct provider's own usage is all there is:\n{stdout}"
+    );
+}
+
+/// Cumulative spend is an observation, not control flow. Crossing the former
+/// 400k default on the first response must neither inject a final-answer
+/// preamble nor stop the task after the following cell.
+#[cfg(unix)]
+#[test]
+fn reported_token_spend_never_caps_the_task() {
+    let root = scratch_dir("uncapped-token-spend-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply_with_usage("```pane\nconst first = 1;\n```", 450_000, 10),
+        assistant_reply_with_usage("```pane\nconst second = first + 1;\n```", 20, 10),
+        ending_reply_with_usage(20, 10),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-uncapped-token-spend",
+        "keep working until you can return",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3, "the task must continue past 400k spent");
+    assert!(
+        !last_user_text(&bodies[1]).contains("only action this turn"),
+        "spend must not alter the next request: {}",
+        last_user_text(&bodies[1])
+    );
+    assert!(
+        last_user_text(&bodies[2]).contains("task spent 450,040"),
+        "later turns still receive truthful cumulative spend: {}",
+        last_user_text(&bodies[2])
     );
 }
 
@@ -2052,13 +2096,13 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn cap 8,192 · task 120/400,000 · cells 1/40"),
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/40"),
         "the gateway's row (120) must win over the response's usage (30): {result_block}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("spent 240/400000 · reported"),
+        stdout.contains("spent 240 · reported"),
         "two gateway-reported turns total 240, not the responses' 60:\n{stdout}"
     );
 }
@@ -2397,7 +2441,7 @@ fn the_look_names_the_supervisors_model_and_the_turns_name_the_tasks() {
 }
 
 /// REQUIRED BEHAVIOR 4: the four limits actually bind the runtime and the
-/// budget -- `cells` here, loaded from `pane.toml` rather than the built-in
+/// cell limit, loaded from `pane.toml` rather than the built-in
 /// default of 40.
 #[test]
 fn a_loaded_cell_limit_ends_the_task() {
@@ -2411,7 +2455,7 @@ fn a_loaded_cell_limit_ends_the_task() {
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
 
-    // Three scripted turns: the third is the one turn a spent budget buys.
+    // Three scripted turns: the third is the final-answer turn.
     let turns = 3;
     let replies = (0..turns)
         .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
@@ -2439,7 +2483,7 @@ fn a_loaded_cell_limit_ends_the_task() {
         "the task must stop one turn after the loaded cap, not run on"
     );
     assert!(
-        last_user_text(&bodies[turns - 1]).starts_with("The task budget is exhausted"),
+        last_user_text(&bodies[turns - 1]).starts_with("The cell limit is reached"),
         "a `cells = 2` pane.toml must end the task after two cells: {}",
         last_user_text(&bodies[turns - 1])
     );
@@ -4059,7 +4103,7 @@ fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
         .unwrap();
     assert!(old.contains("preserved failure"));
     assert!(old.contains("observation\n\n## Handles\nliteral stdout heading"));
-    assert!(!old.contains("## Budget"));
+    assert!(!old.contains("## Usage"));
     assert_eq!(
         old.matches("## Handles").count(),
         1,
@@ -4068,7 +4112,7 @@ fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
     assert!(last_user_text(&requests[2]).contains("fresh"));
     let evidence = fs::read_to_string(rollout).unwrap();
     assert!(
-        evidence.contains("## Budget"),
+        evidence.contains("## Usage"),
         "full original feedback stays in the rollout"
     );
 }

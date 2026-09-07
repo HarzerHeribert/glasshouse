@@ -36,7 +36,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "write",
         return_type: "string",
-        summary: "Replace one whole file inside the project with `content`, creating parents. Use for new files or deliberate whole rewrites; prefer `edit` for an existing region so stale source cannot be overwritten.",
+        summary: "Replace one whole file, creating parents. Pass exactly one of `content` or `lines`; `lines` adds a final newline and safely carries literal script text, e.g. `await write({path: \"run.sh\", lines: [\"#!/bin/bash\", 'src=\"${BASH_SOURCE[0]}\"', 'echo \"$WORKTREE\"']})`. Prefer `edit` for an existing region.",
     },
     Entry {
         name: "bash",
@@ -51,7 +51,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "edit",
         return_type: "{path: string; before_sha256: string; after_sha256: string; changed_lines: {start: number; before: number; after: number}}",
-        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
+        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`, or use `oldLines` and `replacementLines` for newline-terminated literal blocks. Pass exactly one form for each side. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
     },
 ];
 

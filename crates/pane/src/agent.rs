@@ -29,9 +29,9 @@ use crate::wire::{self, Effort};
 
 /// The most turns a subagent may take whatever it was asked for.
 ///
-/// A cap here and not only at the call: `agent.run({turns})` is written by the
-/// model, and a subagent that could ask for a thousand turns would be a way to
-/// spend the parent's whole budget in one call it does not watch.
+/// `agent.run({turns})` is written by the model, so a local turn cap keeps one
+/// background worker finite even though the parent task's token spend is
+/// uncapped.
 pub const MAX_TURNS: u64 = 24;
 
 /// The turns a subagent takes when the cell named none.
@@ -45,7 +45,7 @@ pub struct AgentResult {
     /// Why it stopped, in one word: `returned`, `turns`, `cancelled`,
     /// `failed`.
     pub status: String,
-    /// Turns actually taken, which is what the parent's budget is charged.
+    /// Turns actually taken, reported with the parent's cumulative spend.
     pub turns: u64,
     /// Provider-reported tokens, summed over the turns that reported any.
     pub tokens: u64,
@@ -300,7 +300,7 @@ fn message_text(message: &Message) -> String {
 }
 
 /// The subagent's own result message, which is the parent's renderer with no
-/// budget line: a subagent is bounded by its turn count, and a token figure it
+/// usage line: a subagent is bounded by its turn count, and a token figure it
 /// cannot act on is prompt it pays for.
 fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
     let turn = outcome.turn();

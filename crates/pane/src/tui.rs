@@ -332,7 +332,7 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     BuiltIn::Handles => "inspect runtime handles",
                     BuiltIn::Supervisor => "inspect supervisor settings",
                     BuiltIn::Rollback => "roll back to a checkpoint",
-                    BuiltIn::Budget => "inspect the task budget",
+                    BuiltIn::Budget => "inspect cumulative task spend",
                     BuiltIn::Memory => "read or save project memory",
                 },
             )
@@ -465,11 +465,10 @@ impl Counted {
     }
 }
 
-/// The task budget's two figures and their provenance.
+/// Cumulative task spend and its provenance. It deliberately has no cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskTokens {
     pub used: u64,
-    pub cap: u64,
     pub counted: Counted,
 }
 
@@ -796,9 +795,8 @@ pub fn render_screen(
     );
     let spent = notebook.tokens.filter(|_| width >= 78).map(|tokens| {
         format!(
-            "spent {}/{} · {}",
-            tokens.used,
-            tokens.cap,
+            "spent {} · {}",
+            compact_tokens(tokens.used),
             tokens.counted.as_str()
         )
     });
@@ -2009,7 +2007,7 @@ fn known_sidebar_lines(served_by: &ServedBy) -> Vec<Line<'static>> {
 }
 
 /// §4 and §5's three fixed lines, and nothing else -- the sidebar shows this
-/// one line under the budget line, whatever `served_by` says.
+/// one line under the task-spend line, whatever `served_by` says.
 fn supervisor_line(status: &SupervisorStatus) -> String {
     match status {
         SupervisorStatus::Nudged(reason) => format!("supervisor: {reason}"),

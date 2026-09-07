@@ -101,14 +101,20 @@ impl CancellationToken {
     }
 }
 
+/// One argument as authored by the cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Argument {
+    Text(String),
+    Lines(Vec<String>),
+}
+
 /// The arguments of one call, by declared name.
 ///
-/// A `BTreeMap<String, String>`: every value is one argv element or one
-/// command line, and nothing here parses, splits or expands it. Structured
-/// argument types are `runtime-contract.md` §7's "argument types" question
-/// and they arrive with the runtime that has something structured to pass.
+/// Most values are one argv element or one command line. `Lines` is the one
+/// structured form: it lets a cell carry literal multiline file content
+/// without putting that content in a JavaScript template literal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Args(BTreeMap<String, String>);
+pub struct Args(BTreeMap<String, Argument>);
 
 impl Args {
     pub fn new() -> Self {
@@ -118,12 +124,29 @@ impl Args {
     /// Builder form, so a call site reads like the contract's own
     /// `read({ path: … })`.
     pub fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.0.insert(name.into(), value.into());
+        self.0.insert(name.into(), Argument::Text(value.into()));
+        self
+    }
+
+    /// Builder form for a literal line array. The tool declaration decides
+    /// whether the named argument admits this structured value.
+    pub fn with_lines<I, S>(mut self, name: impl Into<String>, lines: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.0.insert(
+            name.into(),
+            Argument::Lines(lines.into_iter().map(Into::into).collect()),
+        );
         self
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(String::as_str)
+        match self.0.get(name) {
+            Some(Argument::Text(value)) => Some(value),
+            Some(Argument::Lines(_)) | None => None,
+        }
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -135,7 +158,15 @@ impl Args {
         Value::Object(
             self.0
                 .iter()
-                .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+                .map(|(name, value)| {
+                    let value = match value {
+                        Argument::Text(value) => Value::String(value.clone()),
+                        Argument::Lines(lines) => {
+                            Value::Array(lines.iter().cloned().map(Value::String).collect())
+                        }
+                    };
+                    (name.clone(), value)
+                })
                 .collect(),
         )
     }
@@ -574,6 +605,9 @@ enum Checked {
     /// that may reach the child.
     Path(PathBuf),
     Pattern(String),
+    /// Literal lines normalized to text. A non-empty array is newline
+    /// terminated; callers that need byte-exact control keep using a string.
+    Lines(String),
     CommandLine(String),
 }
 
@@ -583,7 +617,9 @@ impl Checked {
     fn spelling(&self) -> String {
         match self {
             Checked::Path(path) => path.to_string_lossy().into_owned(),
-            Checked::Pattern(text) | Checked::CommandLine(text) => text.clone(),
+            Checked::Pattern(text) | Checked::Lines(text) | Checked::CommandLine(text) => {
+                text.clone()
+            }
         }
     }
 }
@@ -715,11 +751,14 @@ fn perform_in_process(
             })
         }
         "write" => {
-            let (Some(path), Some(content)) =
-                (resolved_path(checked, "path"), text(checked, "content"))
-            else {
-                return Err(refuse("write needs a checked path and content".to_string()));
+            let Some(path) = resolved_path(checked, "path") else {
+                return Err(refuse("write needs a checked path".to_string()));
             };
+            let content = exclusive_text(checked, "content", "lines").map_err(|message| {
+                refuse(format!(
+                    "write needs exactly one of content or lines; {message}"
+                ))
+            })?;
             // The parent is created, because a model that has to `mkdir -p`
             // through `bash` before every `write` gains nothing from having
             // `write`. It is inside the checked path by construction, so it
@@ -759,16 +798,26 @@ fn perform_in_process(
             }
         }
         "edit" => {
-            let (Some(path), Some(expected_sha256), Some(expected), Some(replacement)) = (
+            let (Some(path), Some(expected_sha256)) = (
                 resolved_path(checked, "path"),
                 text(checked, "expected_sha256"),
-                text(checked, "old"),
-                text(checked, "replacement"),
             ) else {
                 return Err(refuse(
-                    "edit needs checked path, a visible or explicit expected_sha256, old, and replacement arguments".to_string(),
+                    "edit needs a checked path and a visible or explicit expected_sha256"
+                        .to_string(),
                 ));
             };
+            let expected = exclusive_text(checked, "old", "oldLines").map_err(|message| {
+                refuse(format!(
+                    "edit needs exactly one of old or oldLines; {message}"
+                ))
+            })?;
+            let replacement =
+                exclusive_text(checked, "replacement", "replacementLines").map_err(|message| {
+                    refuse(format!(
+                        "edit needs exactly one of replacement or replacementLines; {message}"
+                    ))
+                })?;
             let result = crate::tools::exact_edit::apply(
                 profile,
                 path,
@@ -1075,16 +1124,16 @@ fn check_arguments(
 
     let mut checked = Vec::new();
     for arg in tool.args() {
-        let given = args.get(arg.name());
+        let given = args.0.get(arg.name());
         match (arg.kind(), given) {
-            (ArgKind::Path, Some(value)) => {
+            (ArgKind::Path, Some(Argument::Text(value))) => {
                 let resolved = profile.check(tool.name(), Access::Read, Path::new(value))?;
                 admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             // The same check, asked with the other access. A path the profile
             // grants for reading and not for writing is refused here, which
             // is the whole difference between the two kinds.
-            (ArgKind::WritePath, Some(value)) => {
+            (ArgKind::WritePath, Some(Argument::Text(value))) => {
                 let resolved = profile.check(tool.name(), Access::Write, Path::new(value))?;
                 admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
@@ -1098,7 +1147,7 @@ fn check_arguments(
                 admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             (_, None) if !arg.is_required() => {}
-            (ArgKind::Pattern, Some(value)) => {
+            (ArgKind::Pattern, Some(Argument::Text(value))) => {
                 admit(
                     &mut checked,
                     trace,
@@ -1106,7 +1155,14 @@ fn check_arguments(
                     Checked::Pattern(value.to_string()),
                 );
             }
-            (ArgKind::CommandLine, Some(value)) => {
+            (ArgKind::Lines, Some(Argument::Lines(lines))) => {
+                let mut value = lines.join("\n");
+                if !lines.is_empty() {
+                    value.push('\n');
+                }
+                admit(&mut checked, trace, arg.name(), Checked::Lines(value));
+            }
+            (ArgKind::CommandLine, Some(Argument::Text(value))) => {
                 profile.admits_command(value)?;
                 admit(
                     &mut checked,
@@ -1114,6 +1170,17 @@ fn check_arguments(
                     arg.name(),
                     Checked::CommandLine(value.to_string()),
                 );
+            }
+            (_, Some(_)) => {
+                return Err(PermissionDenied {
+                    tool: tool.name().to_string(),
+                    path: arg.name().to_string(),
+                    rule: format!(
+                        "`{}` argument `{}` has the wrong type",
+                        tool.name(),
+                        arg.name()
+                    ),
+                });
             }
             (_, None) => {
                 return Err(PermissionDenied {
@@ -1140,11 +1207,28 @@ fn resolved_path<'a>(checked: &'a [(&'static str, Checked)], name: &str) -> Opti
 
 fn text<'a>(checked: &'a [(&'static str, Checked)], name: &str) -> Option<&'a str> {
     checked.iter().find_map(|(declared, value)| match value {
-        Checked::Pattern(text) | Checked::CommandLine(text) if *declared == name => {
+        Checked::Pattern(text) | Checked::Lines(text) | Checked::CommandLine(text)
+            if *declared == name =>
+        {
             Some(text.as_str())
         }
         _ => None,
     })
+}
+
+/// Selects one of a tool's compatible text spellings. Both missing and both
+/// present are errors: silently preferring one would make a model believe the
+/// other content was written.
+fn exclusive_text<'a>(
+    checked: &'a [(&'static str, Checked)],
+    text_name: &str,
+    lines_name: &str,
+) -> Result<&'a str, &'static str> {
+    match (text(checked, text_name), text(checked, lines_name)) {
+        (Some(value), None) | (None, Some(value)) => Ok(value),
+        (None, None) => Err("neither was provided"),
+        (Some(_), Some(_)) => Err("both were provided"),
+    }
 }
 
 /// The child's argv, built only from checked values.

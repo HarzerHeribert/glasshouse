@@ -801,14 +801,13 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
 
 // --- docs/product/pane/supervisor.md §4: the sidebar's own line ----------
 
-/// §4: the sidebar shows the supervisor's line under the budget line, and a
+/// §4: the sidebar shows the supervisor's line under the spend line, and a
 /// nudge's own reason is what it says.
 #[test]
-fn a_nudge_shows_under_the_budget_line() {
+fn a_nudge_shows_under_the_spend_line() {
     let notebook = Notebook {
         tokens: Some(TaskTokens {
             used: 100,
-            cap: 400_000,
             counted: Counted::Estimated,
         }),
         // Short enough to fit the sidebar's own width on one row -- this test
@@ -828,13 +827,13 @@ fn a_nudge_shows_under_the_budget_line() {
     );
     let text = buffer_text(&buffer);
 
-    let budget_at = text.find("spent:").expect("the spend line renders");
+    let spend_at = text.find("Σ 100 tokens").expect("the spend line renders");
     let supervisor_at = text
         .find("supervisor: looping")
-        .expect("the nudge's own reason renders under the budget line");
+        .expect("the nudge's own reason renders under the spend line");
     assert!(
-        budget_at < supervisor_at,
-        "the supervisor line must sit under the budget line:\n{text}"
+        spend_at < supervisor_at,
+        "the supervisor line must sit under the spend line:\n{text}"
     );
 }
 

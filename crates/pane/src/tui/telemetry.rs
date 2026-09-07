@@ -72,31 +72,16 @@ fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
         })
         .collect()
 }
-fn task_spend(notebook: &Notebook, width: usize) -> Vec<Line<'static>> {
+fn task_spend(notebook: &Notebook, _width: usize) -> Vec<Line<'static>> {
     let Some(tokens) = notebook.tokens else {
         return vec![muted("No task spend yet")];
     };
-    let filled = if tokens.cap == 0 {
-        0
-    } else {
-        ((tokens.used as u128 * width as u128) / tokens.cap as u128).min(width as u128) as usize
-    };
     vec![
-        Line::from(vec![
-            Span::styled(
-                "━".repeat(filled),
-                Style::default().fg(if filled * 5 >= width * 4 {
-                    Color::LightYellow
-                } else {
-                    ACCENT
-                }),
-            ),
-            Span::styled(
-                "─".repeat(width - filled),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        muted(format!("spent: {}/{} tok", tokens.used, tokens.cap)),
+        Line::styled(
+            format!("Σ {} tokens", super::compact_tokens(tokens.used)),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        muted("cumulative task spend · no cap"),
         muted(format!("counted: {}", tokens.counted.as_str())),
     ]
 }

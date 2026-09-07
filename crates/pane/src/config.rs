@@ -1,21 +1,19 @@
 //! `<project root>/.glasshouse/pane.toml`, read once at session start --
 //! `docs/product/pane/supervisor.md` §1. A missing file means every default
-//! the runtime and the task budget already used before this package existed
-//! (`runtime-contract.md` §7's four constants), so an absent file changes no
+//! the runtime limits already used before this package existed
+//! (`runtime-contract.md` §7), so an absent file changes no
 //! existing test.
 
 use std::path::Path;
 
 use crate::tools::registry;
 
-/// `[limits]` -- the four constants `runtime-contract.md` §7 and `session.rs`'s
-/// task budget used before this package, now loadable. Defaults are exactly
-/// those constants' values.
+/// `[limits]` -- the runtime constants `runtime-contract.md` §7 and the cell
+/// limit, now loadable. Token spend is telemetry rather than a limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub cell_wall_clock_s: u64,
     pub response_bytes: usize,
-    pub task_tokens: u64,
     pub cells: u64,
 }
 
@@ -24,7 +22,6 @@ impl Default for Limits {
         Self {
             cell_wall_clock_s: 30,
             response_bytes: 16 * 1024,
-            task_tokens: 400_000,
             cells: 40,
         }
     }
@@ -74,11 +71,6 @@ const RESPONSE_BYTES: Range = Range {
     key: "response_bytes",
     min: 1024,
     max: 1_048_576,
-};
-const TASK_TOKENS: Range = Range {
-    key: "task_tokens",
-    min: 1000,
-    max: 10_000_000,
 };
 const CELLS: Range = Range {
     key: "cells",
@@ -166,6 +158,9 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         if ![
             "cell_wall_clock_s",
             "response_bytes",
+            // Accepted as a no-op so an existing project does not stop
+            // starting when token caps are removed. New sessions account for
+            // spend but never use this value to control execution.
             "task_tokens",
             "cells",
         ]
@@ -183,10 +178,11 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         Some(v) => usize::try_from(RESPONSE_BYTES.check(v)?).expect("range is non-negative"),
         None => defaults.response_bytes,
     };
-    let task_tokens = match int_field(table, "task_tokens")? {
-        Some(v) => u64::try_from(TASK_TOKENS.check(v)?).expect("range is non-negative"),
-        None => defaults.task_tokens,
-    };
+    if let Some(value) = table.get("task_tokens")
+        && !value.is_integer()
+    {
+        return Err("pane.toml: `task_tokens` must be an integer".into());
+    }
     let cells = match int_field(table, "cells")? {
         Some(v) => u64::try_from(CELLS.check(v)?).expect("range is non-negative"),
         None => defaults.cells,
@@ -195,7 +191,6 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
     Ok(Limits {
         cell_wall_clock_s,
         response_bytes,
-        task_tokens,
         cells,
     })
 }
