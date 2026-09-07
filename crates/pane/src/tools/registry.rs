@@ -434,6 +434,36 @@ pub fn names() -> Vec<&'static str> {
     ALL.iter().map(|tool| tool.name).collect()
 }
 
+/// MCP names are encoded component by component; punctuation and underscores
+/// cannot collide with namespace separators or each other.
+pub fn mcp_name(server: &str, tool: &str) -> String {
+    fn encode(value: &str) -> String {
+        let mut out = String::new();
+        for byte in value.bytes() {
+            if byte.is_ascii_alphanumeric() {
+                out.push(char::from(byte));
+            } else {
+                out.push_str(&format!("_{byte:02x}"));
+            }
+        }
+        out
+    }
+    format!("mcp__{}__{}", encode(server), encode(tool))
+}
+
+/// Apply the deliberate network-tool absence to raw MCP tool names too.
+pub fn mcp_tool_is_absent(name: &str) -> bool {
+    let normalized: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    NEVER_REGISTERED
+        .iter()
+        .any(|absent| normalized.eq_ignore_ascii_case(absent))
+        || name.split("__").any(|part| {
+            NEVER_REGISTERED
+                .iter()
+                .any(|absent| part.eq_ignore_ascii_case(absent))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,34 +563,4 @@ mod tests {
         assert!(lookup("webfetch").is_none());
         assert!(lookup("Read").is_none());
     }
-}
-
-/// MCP names are encoded component by component; punctuation and underscores
-/// cannot collide with namespace separators or each other.
-pub fn mcp_name(server: &str, tool: &str) -> String {
-    fn encode(value: &str) -> String {
-        let mut out = String::new();
-        for byte in value.bytes() {
-            if byte.is_ascii_alphanumeric() {
-                out.push(char::from(byte));
-            } else {
-                out.push_str(&format!("_{byte:02x}"));
-            }
-        }
-        out
-    }
-    format!("mcp__{}__{}", encode(server), encode(tool))
-}
-
-/// Apply the deliberate network-tool absence to raw MCP tool names too.
-pub fn mcp_tool_is_absent(name: &str) -> bool {
-    let normalized: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    NEVER_REGISTERED
-        .iter()
-        .any(|absent| normalized.eq_ignore_ascii_case(absent))
-        || name.split("__").any(|part| {
-            NEVER_REGISTERED
-                .iter()
-                .any(|absent| part.eq_ignore_ascii_case(absent))
-        })
 }
