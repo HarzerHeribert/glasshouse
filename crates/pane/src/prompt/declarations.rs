@@ -90,6 +90,10 @@ pub struct Binding {
 /// Every host global that is not a registered tool.
 pub const RUNTIME: &[Binding] = &[
     Binding {
+        global: "send",
+        declaration: "declare function send(session: string, message: string): void;\n// Send once to this project's sessions through Glasshouse, using your session id.\n// Recipient: 1–256 bytes; message: 1–65536 UTF-8 bytes. No standalone transport.\n// A definite refusal delivered nothing. DeliveryUnknown means the reply was lost\n// and delivery may have committed: never retry. Inbound message event.payload()\n// returns {sender: string | null, body: string}; bodies are never previewed.",
+    },
+    Binding {
         global: "on",
         declaration: "type Handler = {name: string};\ndeclare function on(pattern: {kind?: string; source?: string}, program: string): Handler;\n// Register TypeScript source for matching future batches before model inference.\n// Example: const noise = on({kind: \"hook.*\"}, \"batch.ack(batch.where({kind: \\\"hook.*\\\"}).map(e => e.id));\");\n// The saved program shares this task's persistent scope, sandbox and cell timeout.\n// Acknowledged events are removed before you see the batch. A throw or refusal\n// disables the handler without retry. Nested on() throws HandlerNesting.\n// At most 64 handlers per task, with at most 65536 source bytes each. No resume.",
     },

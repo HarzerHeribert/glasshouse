@@ -159,21 +159,29 @@ the model's batch: routine noise is drained by a program the model wrote once.
     send(session, message)   → void on success, throws on failure
 
 Every session has an inbox: the message lands as a `message` event in the recipient's **next
-batch**, carrying the sender's id. The guarantee is *once, or an error to the sender* — at most
-once, never retried, and a `send` that throws delivered nothing.
+batch**, carrying the sender's id. Delivery is attempted at most once, never retried. A definite door refusal means
+nothing was delivered. If the connection loses its reply after request bytes were written,
+`send` throws `DeliveryUnknown`: delivery may have committed, so retrying could duplicate it.
+The current protocol has no receipt query that can remove this ambiguity.
 
 **Inside Glasshouse this rides what Phase 12 and Phase 13 ship, and adds no transport.** Outbound is
 `Request::SendMessage` (`crates/glasshouse/src/api/protocol.rs:220`), dispatched at
 `crates/glasshouse/src/api/unix/mod.rs:642`; its `origin` defaults to `RequestOrigin::Machine`,
 which is what a `send` from a program is, and the sender's session id rides the envelope, not
-`origin`. Inbound is the lifecycle bus — `EventBus::publish` and `EventBus::subscribe`
-(`crates/glasshouse/src/events/bus.rs:261`, `:314`) in process, and `Request::Events`
-(`crates/glasshouse/src/api/protocol.rs:398`) across the socket, whose `after`/`head` cursor and
-1,000-event ceiling (`crates/glasshouse/src/api/unix/events.rs:20`) are pane's inbox cursor.
+`origin`. Inbound uses `Request::Inbox {session, after, limit}` on the project control socket,
+whose path comes from `glasshouse api socket-path` run from the project root.
+Rows carry `seq`, `from`, `text` and producer `at` (epoch seconds). Pane advances from the
+last returned `seq`, never the full response `head`, and drains bounded pages into the
+ordinary event window. An event's `at` remains Pane's acceptance time (§1); a message
+payload exposes `sender` (null when unstated) and `body`. Previews say only "message received".
+The cursor and pending window survive ordinary tasks and control-door reconnects for the
+life of the Pane process. This does not promise cursor persistence across restarting Pane.
+Outbound strings are bounded to a 256-byte recipient and a 65,536-byte UTF-8 body.
+This wire has no sender interrupt flag; messages enter at batch priority.
 
 A pane session addressed by `send` receives a `message` event; a **non-pane** Glasshouse session
 receives a line of text, because that is what `Request::SendMessage` has always done — `send` is a
-strict superset of an existing verb, not a second messaging system. **Standalone**, `session` names
+strict superset of an existing verb, not a second messaging system. **Standalone**, the intended (not yet shipped) transport names
 a socket: `pane.sock` in the project's own state directory, beside Glasshouse's `control.sock`
 (`crates/glasshouse/src/api/unix/mod.rs:68`), under the same 90-byte path bound (`:78`) so a long
 project id cannot bind with `ENAMETOOLONG` after the session looks started.

@@ -488,6 +488,8 @@ pub enum SupervisorStatus {
 /// total, and the supervisor's latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Notebook {
+    pub inbox_depth: usize,
+    pub batches_delivered: u64,
     pub handlers: Vec<crate::runtime::handlers::HandlerInfo>,
     pub requests: Vec<crate::telemetry::RequestMeasurement>,
     pub cells: Vec<CellView>,

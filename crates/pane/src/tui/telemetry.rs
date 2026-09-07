@@ -182,10 +182,27 @@ pub(super) fn rail(
     lines.push(Line::default());
     lines.push(label("02 / TASK BUDGET"));
     lines.extend(budget(notebook, width.min(30)));
-    lines.push(muted(format!(
-        "handlers {}",
-        notebook.handlers.iter().filter(|h| h.active).count()
-    )));
+    let metrics = [
+        format!("inbox {}", notebook.inbox_depth),
+        format!("batches {}", notebook.batches_delivered),
+        format!(
+            "handlers {}",
+            notebook.handlers.iter().filter(|h| h.active).count()
+        ),
+    ];
+    let mut metric_line = String::new();
+    for metric in metrics {
+        if !metric_line.is_empty()
+            && metric_line.chars().count() + 3 + metric.chars().count() > width
+        {
+            lines.push(muted(std::mem::take(&mut metric_line)));
+        }
+        if !metric_line.is_empty() {
+            metric_line.push_str(" · ");
+        }
+        metric_line.push_str(&metric);
+    }
+    lines.push(muted(metric_line));
     if let Some(status) = &notebook.supervisor {
         lines.push(muted(super::supervisor_line(status)));
     }

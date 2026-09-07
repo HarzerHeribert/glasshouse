@@ -465,6 +465,9 @@ mod tests {
         let memory = LocalMemory::new(&root);
         let interrupt = Interrupter::new(id.clone());
         let session = Session {
+            inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, &root)),
+            window: RefCell::new(crate::events::window::Window::new(Default::default())),
+            messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
             ui: None,
             model: RefCell::new("test".into()),
             mode: Cell::new(tui::Mode::Execute),

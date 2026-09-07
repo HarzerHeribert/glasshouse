@@ -831,3 +831,32 @@ fn a_nudge_shows_under_the_budget_line() {
         "the supervisor line must sit under the budget line:\n{text}"
     );
 }
+
+#[test]
+fn sidebar_shows_real_inbox_and_batch_counts_without_changing_narrow_layout() {
+    let notebook = Notebook {
+        inbox_depth: 7,
+        batches_delivered: 12,
+        ..Notebook::default()
+    };
+    let conversation = conversation(vec![]);
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        40,
+    );
+    let text = buffer_text(&buffer);
+    assert!(text.contains("inbox 7 · batches 12"), "{text}");
+    assert!(text.contains("handlers 0"), "{text}");
+    let narrow = rendered_sized(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        40,
+        12,
+    );
+    assert!(!buffer_text(&narrow).contains("inbox 7"));
+}

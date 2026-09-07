@@ -120,6 +120,18 @@ impl Window {
         self.events.is_empty() && self.rolled_in.is_empty()
     }
 
+    pub fn depth(&self) -> usize {
+        self.events.len() + self.rolled_in.len()
+    }
+
+    pub fn payload_ids(&self) -> std::collections::HashSet<String> {
+        self.events
+            .iter()
+            .chain(self.rolled_in.iter().map(|(event, _)| event))
+            .map(|event| event.payload.as_str().to_string())
+            .collect()
+    }
+
     pub fn arrivals(&self) -> &[Arrival] {
         &self.arrivals
     }
@@ -205,6 +217,12 @@ impl Window {
     /// the window is already closed by an interrupt or the deadline has not
     /// arrived: a window with no interrupt and no due deadline stays open.
     pub fn close_if_due(&mut self, now: Stamp) -> Option<Batch> {
+        if self.first_at.is_none() && !self.rolled_in.is_empty() {
+            self.first_at = Some(now);
+            self.deadline = Some(Stamp::from_millis(
+                now.as_millis() + self.config.deadline_ms,
+            ));
+        }
         if !self.is_closed()
             && let Some(deadline) = self.deadline
             && now >= deadline
@@ -273,8 +291,10 @@ impl Window {
         );
         batch.set_newly_dropped(std::mem::take(&mut self.pending_dropped_count));
 
-        self.first_at = None;
-        self.deadline = None;
+        self.first_at = self.events.first().map(|event| event.at);
+        self.deadline = self
+            .first_at
+            .map(|at| Stamp::from_millis(at.as_millis() + self.config.deadline_ms));
         self.closed_on = None;
 
         Some(batch)

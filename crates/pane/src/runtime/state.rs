@@ -132,6 +132,7 @@ pub(crate) struct CellState {
 
 /// What every host callback can reach.
 pub(crate) struct RuntimeState {
+    pub(crate) messages: RefCell<Rc<RefCell<HashMap<String, crate::events::inbox::Message>>>>,
     pub(crate) handlers: Rc<crate::runtime::handlers::Handlers>,
     pub(crate) profile: Profile,
     /// Host-only suspension seam; absent in ordinary sessions and subagents.
@@ -191,6 +192,7 @@ pub(crate) struct RuntimeState {
 impl RuntimeState {
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
         Self {
+            messages: RefCell::new(Rc::new(RefCell::new(HashMap::new()))),
             handlers: crate::runtime::handlers::Handlers::new(),
             profile: profile.clone(),
             approval_gate: RefCell::new(None),

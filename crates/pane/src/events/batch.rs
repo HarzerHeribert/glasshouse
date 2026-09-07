@@ -202,6 +202,15 @@ impl Batch {
     /// cannot starve what the model waits for, so the oldest half-cap
     /// survive and anything past that is dropped alongside the age-4 events
     /// rather than held for a window that can never make room for it.
+    /// What the next batch can carry after the age and half-cap rules.
+    pub fn rolling_depth(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| !self.acked.contains(&entry.event.id) && entry.age + 1 < self.drop_age)
+            .count()
+            .min(self.cap / 2)
+    }
+
     pub fn roll(self) -> Rolled {
         let Batch {
             entries,

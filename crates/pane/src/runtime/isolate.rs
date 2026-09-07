@@ -910,6 +910,26 @@ impl Runtime {
     pub fn take_handler_notices(&mut self) -> Vec<String> {
         self.state.handlers.notices.take()
     }
+    pub fn set_message_payloads(
+        &mut self,
+        messages: Rc<
+            std::cell::RefCell<std::collections::HashMap<String, crate::events::inbox::Message>>,
+        >,
+    ) {
+        *self.state.messages.borrow_mut() = messages;
+    }
+
+    pub fn take_batch(&mut self) -> Option<Batch> {
+        self.state.table.borrow_mut().free("batch");
+        self.batch_store().take()
+    }
+
+    pub fn batch_rolling_depth(&mut self) -> usize {
+        self.batch_store()
+            .with(|batch| batch.rolling_depth())
+            .unwrap_or(0)
+    }
+
     pub fn batch_remaining(&mut self) -> usize {
         self.batch_store()
             .with(|batch| batch.rest().len())

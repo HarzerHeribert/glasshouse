@@ -6,6 +6,7 @@
 //! vocabulary and the dedup rule those sections bind.
 
 pub mod batch;
+pub mod inbox;
 pub mod window;
 
 use std::cell::RefCell;
@@ -44,6 +45,10 @@ impl BatchStore {
 
     /// Frees the live batch — the task ending, which is one of
     /// `runtime-contract.md` §2's three lifetime events.
+    pub fn take(&self) -> Option<batch::Batch> {
+        self.live.borrow_mut().take()
+    }
+
     pub fn clear(&self) {
         self.live.borrow_mut().take();
     }

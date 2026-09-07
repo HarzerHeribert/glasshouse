@@ -224,6 +224,9 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, global, name, function.into());
     }
 
+    if let Some(function) = v8::Function::builder(send_callback).build(scope) {
+        set_fixed_key(scope, global, "send", function.into());
+    }
     if let Some(function) = v8::Function::builder(on_callback).build(scope) {
         set_fixed_key(scope, global, "on", function.into());
     }
@@ -1658,13 +1661,99 @@ fn batch_ack_callback(
 /// An event's payload, materialised now: the status verbatim, and `stdout`
 /// and `stderr` as methods, so §5's "a job that printed 40 MB costs a status
 /// line" is true of the object and not only of the preview.
+fn send_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _: v8::ReturnValue,
+) {
+    let state = state(scope);
+    if state.token.borrow().is_cancelled() {
+        throw_cancelled(scope, "send");
+        return;
+    }
+    // No coercion: user accessors must not execute ahead of validation.
+    let (Ok(recipient), Ok(message)) = (
+        v8::Local::<v8::String>::try_from(args.get(0)),
+        v8::Local::<v8::String>::try_from(args.get(1)),
+    ) else {
+        throw_tool_error(scope, "send requires two strings");
+        return;
+    };
+    if recipient.length() > 256 || message.length() > crate::events::inbox::MESSAGE_BYTES {
+        throw_tool_error(scope, "send input exceeds its byte bound");
+        return;
+    }
+    let recipient = recipient.to_rust_string_lossy(scope);
+    let message = message.to_rust_string_lossy(scope);
+    if let Err(error) = crate::events::inbox::send_unless_cancelled(
+        &state.glasshouse,
+        state.profile.root(),
+        &state.session,
+        &recipient,
+        &message,
+        || {
+            state.token.borrow().is_cancelled()
+                || state
+                    .watchdog_fired
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        },
+    ) {
+        let Some(text) = v8::String::new(scope, error) else {
+            return;
+        };
+        let exception = v8::Exception::error(scope, text);
+        if let Ok(object) = v8::Local::<v8::Object>::try_from(exception) {
+            let name = js_string(
+                scope,
+                error.split_once(':').map_or("ToolError", |(name, _)| name),
+            );
+            set_key(scope, object, "name", name);
+        }
+        scope.throw_exception(exception);
+    }
+}
+
 fn payload_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut retval: v8::ReturnValue,
 ) {
     let id = args.data().to_rust_string_lossy(scope);
-    let session = state(scope).session.clone();
+    let state = state(scope);
+    if id.starts_with("message/") {
+        let message = state.messages.borrow().borrow().get(&id).cloned();
+        let Some(message) = message else {
+            throw_tool_error(scope, "PayloadDropped: message payload is no longer live");
+            return;
+        };
+        let object = v8::Object::new(scope);
+        let sender = message
+            .from
+            .as_deref()
+            .map(|text| js_string(scope, text))
+            .unwrap_or_else(|| v8::null(scope).into());
+        set_fixed_key(scope, object, "sender", sender);
+        let body = js_string(scope, &message.text);
+        set_fixed_key(scope, object, "body", body);
+        // Retaining the payload handle never previews its contents. A program
+        // can deliberately read body, but the ordinary handle table cannot.
+        let call = state.record_call(RecordedCall {
+            preview: Value::string("message payload"),
+            meta: HandleMeta {
+                type_label: Some("Message".into()),
+                size_estimate: message.text.len() as u64,
+                provenance: None,
+            },
+        });
+        let tag = call_tag(scope);
+        let marker = v8::Number::new(scope, call as f64);
+        object.set_private(scope, tag, marker.into());
+        retval.set(object.into());
+        return;
+    }
+    let session = state.session.clone();
     let Some(result) = bg::payload(&session, &id) else {
         let null = v8::null(scope);
         retval.set(null.into());

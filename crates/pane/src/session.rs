@@ -718,6 +718,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
         };
 
     let session = Session {
+        inbox: RefCell::new(crate::events::inbox::Inbox::discover(
+            &glasshouse,
+            profile.root(),
+        )),
+        window: RefCell::new(Window::new(WindowConfig::default())),
+        messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
         project: &project,
         config: &config,
         profile: &profile,
@@ -758,6 +764,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
 /// `Profile` `run` compiled is the only one any input can be answered
 /// against; there is no owned field here that a later call could replace.
 struct Session<'a> {
+    inbox: RefCell<crate::events::inbox::Inbox>,
+    window: RefCell<Window>,
+    messages:
+        std::rc::Rc<RefCell<std::collections::HashMap<String, crate::events::inbox::Message>>>,
     ui: Option<&'a ui::LiveUi>,
     model: RefCell<String>,
     mode: Cell<tui::Mode>,
@@ -1169,7 +1179,9 @@ fn run_task_inner(
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
     // cancelled with it below.
-    let mut window = Window::new(WindowConfig::default());
+    let mut window = session.window.borrow_mut();
+    runtime.set_message_payloads(session.messages.clone());
+    transcript.notebook.batches_delivered = 0;
     let mut final_turn = false;
     let mut incomplete;
     let mut prose_turns = 0u32;
@@ -1263,18 +1275,33 @@ fn run_task_inner(
                 );
             }
         }
-        if let Some(batch) = next_batch(&mut window, session.id, EVENT_WAIT) {
-            if let Some(previous) = runtime.deliver_batch(batch) {
-                window.carry_forward(previous.roll());
-            }
+        if let Some(previous) = runtime.take_batch() {
+            window.carry_forward(previous.roll());
+        }
+        let live_payloads = window.payload_ids();
+        session
+            .messages
+            .borrow_mut()
+            .retain(|id, _| live_payloads.contains(id));
+        if let Some(batch) = next_batch_with(&mut window, session.id, EVENT_WAIT, |window| {
+            session.inbox.borrow_mut().drain_into(
+                session.id,
+                window,
+                &mut session.messages.borrow_mut(),
+            );
+        }) {
+            runtime.deliver_batch(batch);
             for (name, outcome) in runtime.run_handlers() {
                 let _line = session.interrupt.writing();
                 rollout
                     .record_handler(&name, &outcome.turn().record)
                     .map_err(|e| format!("could not record the handler run: {e}"))?;
             }
+            if runtime.batch_remaining() > 0 {
+                transcript.notebook.batches_delivered += 1;
+            }
         }
-
+        transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
         if let Some(ui) = session.ui {
             ui.publish(transcript, &served, tui::Activity::Executing);
@@ -1288,6 +1315,7 @@ fn run_task_inner(
             session.profile,
         )?;
         transcript.notebook.handlers = runtime.handlers();
+        transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let notices = runtime.take_handler_notices().join("\n");
         if !notices.is_empty() {
             if let Some(answer) = &mut step.answer {
@@ -1466,6 +1494,15 @@ fn run_task_inner(
         }
     }
 
+    if let Some(previous) = runtime.take_batch() {
+        window.carry_forward(previous.roll());
+    }
+    let live_payloads = window.payload_ids();
+    session
+        .messages
+        .borrow_mut()
+        .retain(|id, _| live_payloads.contains(id));
+    transcript.notebook.inbox_depth = window.depth();
     runtime.end_task();
     transcript.notebook.handlers.clear();
     // §5: a background job outlives no task. Every live job is cancelled
@@ -1505,8 +1542,19 @@ fn run_task_inner(
 /// `budget` is a ceiling on the second state, so a clock that jumps backwards
 /// or a window whose deadline is misconfigured costs a bounded wait rather
 /// than a session that never sends another turn.
+#[cfg(test)]
 fn next_batch(window: &mut Window, session: &SessionId, budget: Duration) -> Option<Batch> {
+    next_batch_with(window, session, budget, |_| {})
+}
+
+fn next_batch_with(
+    window: &mut Window,
+    session: &SessionId,
+    budget: Duration,
+    mut poll: impl FnMut(&mut Window),
+) -> Option<Batch> {
     let started = Instant::now();
+    poll(window);
     loop {
         for event in bg::drain(session) {
             window.accept(event, crate::events::now());
