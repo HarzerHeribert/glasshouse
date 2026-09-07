@@ -31,6 +31,8 @@
 //! at compile time; there is no argument, no path and no branch through
 //! which assistant text selects or becomes a program.
 
+mod process;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
@@ -595,6 +597,12 @@ fn checked_call(
     gate: Option<&crate::approval::Gate>,
     stopped: &dyn Fn() -> bool,
 ) -> Result<ToolResult, ToolError> {
+    let stop = || token.is_cancelled() || stopped();
+    if stop() {
+        return Err(ToolError::Cancelled {
+            tool: tool.name().into(),
+        });
+    }
     let checked = check_arguments(ctx.profile, tool, args, trace)?;
     if let Some(gate) = gate {
         if ctx.profile.root().to_str().is_none()
@@ -637,7 +645,7 @@ fn checked_call(
     // a `Command`, an `exec_grant` or a sandbox applier, because the only
     // call site of all three is the other arm.
     if tool.argv() == Argv::InProcess {
-        return perform_in_process(ctx.profile, token, tool, &checked);
+        return perform_in_process(ctx.profile, &stop, tool, &checked);
     }
     let mut argv = build_argv(tool, &checked)?;
     let broad_search = resolved_path(&checked, "path").is_some_and(|path| {
@@ -650,7 +658,7 @@ fn checked_call(
         // basename-wide exclusion, so it is removed from output below.
         argv.insert(1, "--exclude-dir=.git".into());
     }
-    let mut result = spawn_confined(ctx.profile, token, tool, &argv)?;
+    let mut result = spawn_confined(ctx.profile, &stop, tool, &argv)?;
     if tool.name() == "grep" && broad_search {
         result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
     }
@@ -669,10 +677,15 @@ fn checked_call(
 /// in-process declaration cannot silently acquire another tool's behavior.
 fn perform_in_process(
     profile: &Profile,
-    token: &CancellationToken,
+    stopped: &dyn Fn() -> bool,
     tool: &Tool,
     checked: &[(&'static str, Checked)],
 ) -> Result<ToolResult, ToolError> {
+    if stopped() {
+        return Err(ToolError::Cancelled {
+            tool: tool.name().into(),
+        });
+    }
     let refuse = |rule: String| {
         ToolError::Denied(PermissionDenied {
             tool: tool.name().to_string(),
@@ -687,7 +700,7 @@ fn perform_in_process(
             else {
                 return Err(refuse("glob needs a checked path and pattern".to_string()));
             };
-            let stdout = glob_paths(profile, token, tool.name(), root, pattern)?;
+            let stdout = glob_paths(profile, stopped, tool.name(), root, pattern)?;
             Ok(ToolResult {
                 modified: None,
                 tool: tool.name().to_string(),
@@ -718,6 +731,11 @@ fn perform_in_process(
                     tool: tool.name().to_string(),
                     program: PathBuf::from("(in-process)"),
                     error: error.to_string(),
+                });
+            }
+            if stopped() {
+                return Err(ToolError::Cancelled {
+                    tool: tool.name().into(),
                 });
             }
             match std::fs::write(path, content) {
@@ -830,7 +848,7 @@ fn perform_in_process(
 /// keeps names beneath it from becoming an enumeration side channel.
 fn glob_paths(
     profile: &Profile,
-    token: &CancellationToken,
+    stopped: &dyn Fn() -> bool,
     tool: &str,
     root: &Path,
     pattern: &str,
@@ -854,7 +872,7 @@ fn glob_paths(
     let mut matches = Vec::new();
     let mut visited = 0usize;
     while let Some(directory) = pending.pop() {
-        if token.is_cancelled() {
+        if stopped() {
             return Err(ToolError::Cancelled {
                 tool: tool.to_string(),
             });
@@ -865,7 +883,7 @@ fn glob_paths(
             error: error.to_string(),
         })?;
         for entry in entries {
-            if token.is_cancelled() {
+            if stopped() {
                 return Err(ToolError::Cancelled {
                     tool: tool.to_string(),
                 });
@@ -1249,7 +1267,7 @@ fn runnable(path: &Path) -> bool {
 /// - neither: exactly the `ToolResult` this function returned before.
 fn spawn_confined(
     profile: &Profile,
-    token: &CancellationToken,
+    stopped: &dyn Fn() -> bool,
     tool: &Tool,
     argv: &[std::ffi::OsString],
 ) -> Result<ToolResult, ToolError> {
@@ -1304,7 +1322,7 @@ fn spawn_confined(
 
     let confinement = confine(profile, &grant.binary, tool.name(), &mut command)?;
 
-    if token.is_cancelled() {
+    if stopped() {
         return Err(cancelled());
     }
 
@@ -1321,7 +1339,7 @@ fn spawn_confined(
     // than a tick later is not about the latency: it is that this is the
     // window a caller is *most* likely to cancel in, because a caller that
     // cancels at all usually cancels early.
-    if token.is_cancelled() {
+    if stopped() {
         kill_and_reap(&mut child);
         return Err(cancelled());
     }
@@ -1330,12 +1348,12 @@ fn spawn_confined(
     let stderr = drain(child.stderr.take());
 
     let status = loop {
-        match child.try_wait() {
+        if stopped() {
+            kill_and_reap(&mut child);
+            return Err(cancelled());
+        }
+        match process::try_complete(&mut child) {
             Ok(Some(status)) => break status,
-            Ok(None) if token.is_cancelled() => {
-                kill_and_reap(&mut child);
-                return Err(cancelled());
-            }
             Ok(None) => std::thread::sleep(CANCEL_POLL),
             // The wait itself failing leaves a running child nothing here
             // can observe again, so it is killed on the way out. Reporting
@@ -1348,6 +1366,15 @@ fn spawn_confined(
         }
     };
 
+    // Descendants in the owned group have now been stopped. Keep the final
+    // pipe drain cancellable too; a process that deliberately escaped the
+    // group must not hold this host callback indefinitely through its pipe.
+    while !stdout.is_finished() || !stderr.is_finished() {
+        if stopped() {
+            return Err(cancelled());
+        }
+        std::thread::sleep(CANCEL_POLL);
+    }
     Ok(ToolResult {
         modified: None,
         tool: tool.name().to_string(),
@@ -1528,6 +1555,45 @@ fn truncate(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_stop_predicate_cancels_glob_during_traversal() {
+        let root = std::env::temp_dir().join(format!("pane-stop-glob-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..20 {
+            std::fs::write(root.join(format!("file-{i}")), "x").unwrap();
+        }
+        let settings =
+            serde_json::json!({"permissions":{"allow":[format!("Read({}/**)", root.display())]}})
+                .to_string();
+        let profile = Profile::compile(&root, Some(&settings));
+        let ctx = ToolContext {
+            profile: &profile,
+            glasshouse: &Glasshouse::None,
+            session: &SessionId::new("stop-glob"),
+        };
+        let polls = std::cell::Cell::new(0);
+        let result = run_traced_with_gate(
+            &ctx,
+            &CancellationToken::new(),
+            "glob",
+            &Args::new()
+                .with("path", root.to_string_lossy())
+                .with("pattern", "**"),
+            None,
+            &|| {
+                polls.set(polls.get() + 1);
+                polls.get() >= 6
+            },
+        );
+        assert!(matches!(result.outcome, Err(ToolError::Cancelled { .. })));
+        assert_eq!(
+            polls.get(),
+            6,
+            "glob never asked the host stop predicate while walking"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_unknown_tool_name_is_a_refusal_and_not_a_panic() {

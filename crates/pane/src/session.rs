@@ -108,6 +108,7 @@ const REAP_GRACE: Duration = Duration::from_millis(250);
 /// second of a pair, whether a rollout line is half written -- is decided by
 /// [`watch`] on an ordinary thread, where locks and allocation are legal.
 static INTERRUPT: AtomicBool = AtomicBool::new(false);
+static TERMINATE: AtomicBool = AtomicBool::new(false);
 
 /// Installs the process's SIGINT handler. Unix: `signal(2)`, whose BSD
 /// semantics on both platforms pane ships for leave the handler installed
@@ -129,7 +130,13 @@ fn install_interrupt_handler() {
         INTERRUPT.store(true, Ordering::SeqCst);
     }
 
-    unsafe { signal(SIGINT, on_interrupt as *const () as usize) };
+    extern "C" fn on_terminate(_sig: i32) {
+        TERMINATE.store(true, Ordering::SeqCst);
+    }
+    unsafe {
+        signal(SIGINT, on_interrupt as *const () as usize);
+        signal(15, on_terminate as *const () as usize);
+    };
 }
 
 /// The Windows half: the console's Ctrl-C routine sets the identical flag.
@@ -281,14 +288,18 @@ impl Interrupter {
     /// [`REAP_GRACE`] is bounded because a Ctrl-C that hangs is not a Ctrl-C:
     /// after it, the exit proceeds whatever the child is doing.
     fn end_the_session(&self) -> ! {
+        self.end_after_signal(INTERRUPTED_EXIT, "interrupted twice; ending the session")
+    }
+
+    fn end_after_signal(&self, exit: i32, message: &str) -> ! {
         self.ending.store(true, Ordering::SeqCst);
         self.raise();
         let _line = self.writing();
         bg::shutdown_within(&self.session, REAP_GRACE);
         std::thread::sleep(REAP_GRACE);
         ui::restore_terminal();
-        eprintln!("pane: interrupted twice; ending the session");
-        std::process::exit(INTERRUPTED_EXIT);
+        eprintln!("pane: {message}");
+        std::process::exit(exit);
     }
 }
 
@@ -301,6 +312,9 @@ fn watch(state: &Interrupter) -> ! {
     let mut first: Option<Instant> = None;
     loop {
         std::thread::sleep(INTERRUPT_POLL);
+        if TERMINATE.swap(false, Ordering::SeqCst) {
+            state.end_after_signal(143, "termination requested; ending the session");
+        }
         if !INTERRUPT.swap(false, Ordering::SeqCst) {
             continue;
         }
@@ -1183,6 +1197,7 @@ fn run_task_inner(
     runtime.set_message_payloads(session.messages.clone());
     transcript.notebook.batches_delivered = 0;
     let mut final_turn = false;
+    let mut terminal_failure = None;
     let mut incomplete;
     let mut prose_turns = 0u32;
     let supervisor = Supervisor::new();
@@ -1362,7 +1377,23 @@ fn run_task_inner(
         // one. §2: prose and two-blocks turns never reach `cells_since_look`
         // at all (they push no record above), so they never count.
         let mut nudge_reason: Option<String> = None;
-        if step.answer.is_some() {
+        let poisoned = runtime.poisoned();
+        if poisoned {
+            let cause = step
+                .view
+                .error
+                .as_ref()
+                .map(|error| format!("{}: {}", error.class, error.message))
+                .unwrap_or_else(|| {
+                    "the cell or its handle inspection exceeded the runtime's hard stop deadline"
+                        .into()
+                });
+            terminal_failure = Some(format!(
+                "The task is incomplete: the runtime is poisoned and cannot execute further work. {cause}"
+            ));
+            step.response = None;
+        }
+        if !poisoned && step.answer.is_some() {
             if !supervisor_active {
                 transcript.notebook.supervisor = Some(SupervisorStatus::Off);
             } else if cells_since_look.len() as u32 >= session.config.supervisor.every {
@@ -1391,8 +1422,8 @@ fn run_task_inner(
         // ends the task -- §6's "the only permitted action is a top-level
         // `return`" needs that turn to actually happen.
         let completed = step.answer.is_none();
-        let stop = completed || final_turn;
-        incomplete = stop && !completed;
+        let stop = completed || final_turn || poisoned;
+        incomplete = poisoned || (stop && !completed);
         let exhausted = if budget.spent() {
             Some(ExhaustedReason::TaskBudget)
         } else if prose_turns >= PROSE_TURN_CAP {
@@ -1511,10 +1542,10 @@ fn run_task_inner(
     // the isolate that could have read its result is gone.
     bg::shutdown(session.id);
     if incomplete {
-        Err(
+        Err(terminal_failure.unwrap_or_else(|| {
             "The task stopped without confirmed completion; requested work may be unfinished."
-                .into(),
-        )
+                .into()
+        }))
     } else {
         Ok(())
     }

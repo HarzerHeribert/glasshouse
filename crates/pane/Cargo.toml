@@ -49,9 +49,8 @@ oxc = { version = "=0.148.0", default-features = false, features = ["ast_visit",
 [lints]
 workspace = true
 
-# Platform appliers only. macOS needs nothing: `sandbox_init` lives in
-# libSystem, which every Rust binary already links.
-[target.'cfg(target_os = "linux")'.dependencies]
+# Native waitid types keep process-group cleanup ABI-correct on both Unix hosts.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # Landlock is three syscalls and `prctl`; there is no wrapper crate here on
 # purpose, because the ruleset derivation is a value this crate tests on every
 # host and the twenty lines that install it are reviewable as they stand.
