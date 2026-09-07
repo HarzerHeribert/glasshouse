@@ -96,6 +96,9 @@ pub fn apply(
     }
     let before_bytes =
         fs::read(&readable).map_err(|error| format!("could not read file: {error}"))?;
+    if before_bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("edit target exceeds {MAX_FILE_BYTES} bytes").into());
+    }
     let before = std::str::from_utf8(&before_bytes).map_err(|_| "edit target is not UTF-8")?;
     let before_hash = sha256(&before_bytes);
     if !before_hash.eq_ignore_ascii_case(expected_sha256) {
