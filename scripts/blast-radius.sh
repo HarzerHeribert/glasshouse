@@ -463,6 +463,7 @@ KNOWN_SERIAL_TESTS=(
   session_supervision     # spawns the built glasshouse binary (CARGO_BIN_EXE) and polls its exit
   checkpoint_portability  # spawns via HarnessLaunch/platform::exec
   entitlement_shell_scrub # spawns via HarnessLaunch/platform::exec
+  inbox                   # Runtime/Glasshouse spawn control-door discovery indirectly; its deadline is load-sensitive
 )
 
 # --lib SPLITS between the lanes. Only the known flaky/process-bound families
