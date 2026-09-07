@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::handles::Provenance;
 use crate::runtime::preview::{self, ErrorValue, PREVIEW_TOKEN_CAP, Value};
@@ -218,7 +218,28 @@ pub struct CallRecord {
     /// was given, never the program's spelling. A refused call carries only
     /// what was admitted before the refusing argument.
     pub args: BTreeMap<String, String>,
+    /// Exact source material made visible by an inspection call before a
+    /// semantic edit. Absent for ordinary calls and older rollout rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<SourceEvidence>,
     pub ended: Ended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEvidence {
+    pub path: String,
+    pub sha256: String,
+    pub complete: bool,
+    pub ranges: Vec<SourceRange>,
+    pub omissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRange {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    pub role: String,
 }
 
 /// How one call ended: `"ok"`, `{"threw": "<class>"}` or
@@ -274,11 +295,13 @@ mod tests {
                 CallRecord {
                     tool: "grep".into(),
                     args: BTreeMap::from([("path".to_string(), "/tmp/root".to_string())]),
+                    evidence: None,
                     ended: Ended::Ok,
                 },
                 CallRecord {
                     tool: "bash".into(),
                     args: BTreeMap::new(),
+                    evidence: None,
                     ended: Ended::Denied {
                         rule: "no allow".into(),
                     },
@@ -286,6 +309,7 @@ mod tests {
                 CallRecord {
                     tool: "read".into(),
                     args: BTreeMap::new(),
+                    evidence: None,
                     ended: Ended::Threw {
                         class: "Cancelled".into(),
                     },

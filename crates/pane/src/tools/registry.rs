@@ -98,6 +98,9 @@ pub struct Arg {
     /// `false` only where [`Argv`] has a stated substitute for the missing
     /// value; there is no argument that is optional and then absent.
     required: bool,
+    /// A missing path is replaced by the project root. Kept separate from
+    /// `required`: optional scalar arguments are simply omitted.
+    root_default: bool,
 }
 
 impl Arg {
@@ -106,6 +109,7 @@ impl Arg {
             name,
             kind,
             required: true,
+            root_default: false,
         }
     }
 
@@ -117,6 +121,18 @@ impl Arg {
             name,
             kind: ArgKind::Path,
             required: false,
+            root_default: true,
+        }
+    }
+
+    /// An argument whose absence has no substitute and is passed through as
+    /// absent. This is intentionally distinct from [`Arg::rooted`].
+    pub const fn optional(name: &'static str, kind: ArgKind) -> Self {
+        Self {
+            name,
+            kind,
+            required: false,
+            root_default: false,
         }
     }
 
@@ -130,6 +146,10 @@ impl Arg {
 
     pub fn is_required(&self) -> bool {
         self.required
+    }
+
+    pub fn uses_root_default(&self) -> bool {
+        self.root_default
     }
 }
 
@@ -338,10 +358,9 @@ const BASH: Tool = Tool::declare(
 /// So this one is work pane does itself, checked by `Profile::check` for
 /// `Access::Write` exactly as `read`'s path is checked for `Access::Read`.
 ///
-/// **There is deliberately no `edit`.** The model already holds the file as
-/// an object and writes TypeScript over it, so a replacement is
-/// `text.replace(a, b)` in the cell followed by one `write` — the harness's
-/// own thesis rather than a second tool with its own matching rules.
+/// Existing-file changes normally use [`EDIT`], which binds the mutation to
+/// the hash of source the model inspected. `write` remains necessary for new
+/// files and deliberate whole-file replacement.
 ///
 /// Effectful, obviously: it is the only tool here whose whole purpose is to
 /// change the world.
@@ -354,12 +373,36 @@ const WRITE: Tool = Tool::declare_in_process(
     Purity::Effectful,
 );
 
+/// `context({ path, symbol? })` — a bounded, versioned editing surface around
+/// one file or symbol, with ranked callers and tests.
+const CONTEXT: Tool = Tool::declare_in_process(
+    "context",
+    &[
+        Arg::required("path", ArgKind::Path),
+        Arg::optional("symbol", ArgKind::Pattern),
+    ],
+    Purity::Pure,
+);
+
+/// `edit({ path, expected_sha256?, old, replacement })` — one exact replacement tied
+/// to source the model actually inspected.
+const EDIT: Tool = Tool::declare_in_process(
+    "edit",
+    &[
+        Arg::required("path", ArgKind::WritePath),
+        Arg::optional("expected_sha256", ArgKind::Pattern),
+        Arg::required("old", ArgKind::Pattern),
+        Arg::required("replacement", ArgKind::Pattern),
+    ],
+    Purity::Effectful,
+);
+
 /// Every registered tool.
 ///
 /// Small on purpose: each entry is a program that gets exec'd inside a
 /// sandbox, so the set is the attack surface and it grows by a package, not
 /// by a convenience.
-pub const ALL: [Tool; 5] = [READ, GLOB, GREP, BASH, WRITE];
+pub const ALL: [Tool; 7] = [READ, GLOB, GREP, BASH, WRITE, CONTEXT, EDIT];
 
 /// Tools that are **absent**, by name, and why.
 ///
@@ -409,29 +452,29 @@ mod tests {
     /// The effectful set is enumerated rather than counted: a resumed handle
     /// re-materialises by re-running a recorded *pure* call, so a tool that
     /// joins this list without the question being asked would be silently
-    /// re-run on resume. Two, and each earned it — `bash` runs a command
-    /// line, `write` replaces a file.
+    /// re-run on resume. Each is named: `bash` runs a command line, `write`
+    /// replaces a file, and `edit` atomically changes an existing file.
     #[test]
-    fn exactly_two_tools_are_effectful_and_they_are_named() {
+    fn effectful_tools_are_named() {
         let effectful: Vec<_> = ALL
             .iter()
             .filter(|tool| tool.purity() == Purity::Effectful)
             .map(Tool::name)
             .collect();
-        assert_eq!(effectful, vec!["bash", "write"]);
+        assert_eq!(effectful, vec!["bash", "write", "edit"]);
     }
 
     /// The companion claim, and the one that matters for the sandbox: a tool
     /// either names a binary to exec or is performed in this process, and
-    /// `glob` and `write` are the second.
+    /// four filesystem-object tools are the second.
     #[test]
-    fn glob_and_write_are_the_only_tools_that_spawn_nothing() {
+    fn in_process_tools_are_named() {
         let in_process: Vec<_> = ALL
             .iter()
             .filter(|tool| tool.executable().is_none())
             .map(Tool::name)
             .collect();
-        assert_eq!(in_process, vec!["glob", "write"]);
+        assert_eq!(in_process, vec!["glob", "write", "context", "edit"]);
         for tool in ALL.iter().filter(|tool| tool.executable().is_none()) {
             assert_eq!(
                 tool.argv(),
@@ -465,17 +508,23 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_argument_is_a_path_the_root_stands_in_for() {
+    fn optional_arguments_state_whether_the_root_stands_in() {
         for tool in ALL {
             for arg in tool.args() {
-                assert!(
-                    arg.is_required() || arg.kind() == ArgKind::Path,
-                    "{}({}) is optional with nothing to stand in for it",
-                    tool.name(),
-                    arg.name()
-                );
+                if arg.uses_root_default() {
+                    assert_eq!(arg.kind(), ArgKind::Path);
+                    assert!(!arg.is_required());
+                }
             }
         }
+        let symbol = lookup("context")
+            .unwrap()
+            .args()
+            .iter()
+            .find(|arg| arg.name() == "symbol")
+            .unwrap();
+        assert!(!symbol.is_required());
+        assert!(!symbol.uses_root_default());
     }
 
     #[test]

@@ -231,6 +231,165 @@ fn assistant_reply(text: &str) -> String {
     .to_string()
 }
 
+fn native_cell_reply(id: &str, code: &str) -> String {
+    serde_json::json!({
+        "role": "assistant",
+        "content": [{"type":"tool_use","id":id,"name":"execute_cell","input":{"code":code}}],
+    })
+    .to_string()
+}
+
+#[test]
+fn native_cell_result_is_correlated_before_the_next_request() {
+    let root = scratch_dir("native-handoff");
+    let rollout = root.join("rollout.jsonl");
+    let (base, bodies) = start_fake_provider(vec![
+        native_cell_reply("call-read", "const x = 6 * 7; console.log(x);"),
+        native_cell_reply("call-return", "return `done ${x}`;"),
+    ]);
+    let output = run_session(&root, &rollout, "native-handoff", "compute", &base, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let result = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call-read")
+        .expect("the exact correlated result must reach request two");
+    assert!(result["content"].as_str().unwrap().contains("42"));
+    let saved = rollout_lines(&rollout);
+    assert!(
+        saved
+            .iter()
+            .any(|line| line["blocks"][0]["type"] == "tool_use"
+                && line["blocks"][0]["id"] == "call-read")
+    );
+    assert!(
+        saved
+            .iter()
+            .any(|line| line["blocks"][0]["type"] == "tool_result"
+                && line["blocks"][0]["tool_use_id"] == "call-read")
+    );
+    let call = saved
+        .iter()
+        .position(|line| line["blocks"][0]["id"] == "call-return")
+        .unwrap();
+    let result = saved
+        .iter()
+        .position(|line| line["blocks"][0]["tool_use_id"] == "call-return")
+        .unwrap();
+    let terminal = saved
+        .iter()
+        .rposition(|line| line["role"] == "assistant" && line["text"] == "done 42")
+        .unwrap();
+    assert!(call < result && result < terminal);
+    assert!(
+        saved[result]["blocks"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("## Return\ndone 42")
+    );
+    assert_eq!(cell_lines(&rollout).len(), 2);
+}
+
+#[test]
+fn multiple_native_calls_are_all_rejected_without_execution() {
+    let root = scratch_dir("native-multiple");
+    let rollout = root.join("rollout.jsonl");
+    let first = serde_json::json!({"role":"assistant","content":[
+        {"type":"tool_use","id":"a","name":"execute_cell","input":{"code":"globalThis.bad = 1"}},
+        {"type":"tool_use","id":"b","name":"other","input":{"code":"globalThis.worse = 1"}}
+    ]})
+    .to_string();
+    let (base, bodies) =
+        start_fake_provider(vec![first, native_cell_reply("finish", "return 'safe';")]);
+    let output = run_session(&root, &rollout, "native-multiple", "do it", &base, None);
+    assert!(output.status.success());
+    assert_eq!(
+        cell_lines(&rollout).len(),
+        1,
+        "only the final return may execute"
+    );
+    let second: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+    let results: Vec<_> = second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter(|block| block["type"] == "tool_result")
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["tool_use_id"], "a");
+    assert_eq!(results[1]["tool_use_id"], "b");
+    assert!(results.iter().all(|result| result["is_error"] == true));
+}
+
+#[test]
+fn one_long_native_call_can_run_multiple_runtime_tools() {
+    let root = scratch_dir("native-long-tools");
+    let rollout = root.join("rollout.jsonl");
+    let padding = "// retained source\n".repeat(1200);
+    let code = format!(
+        "{padding}await write({{path:'made.txt',content:'native'}}); const f = await read({{path:'made.txt'}}); console.log(f.text);"
+    );
+    let (base, bodies) = start_fake_provider(vec![
+        native_cell_reply("long-tools", &code),
+        native_cell_reply("finish", "return 'done';"),
+    ]);
+    let output = run_session(&root, &rollout, "native-long-tools", "do it", &base, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(root.join("made.txt")).unwrap(), "native");
+    let cells = cell_lines(&rollout);
+    assert_eq!(cells[0]["source"].as_str().unwrap(), code);
+    assert_eq!(cells[0]["calls"].as_array().unwrap().len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+    assert!(second.to_string().contains("native"));
+}
+
+#[test]
+fn malformed_native_input_and_runtime_throw_are_correlated_errors() {
+    let root = scratch_dir("native-errors");
+    let rollout = root.join("rollout.jsonl");
+    let malformed = serde_json::json!({"role":"assistant","content":[
+        {"type":"tool_use","id":"bad-input","name":"execute_cell","input":{"code":7}}
+    ]})
+    .to_string();
+    let (base, bodies) = start_fake_provider(vec![
+        malformed,
+        native_cell_reply("throws", "throw new Error('boom')"),
+        native_cell_reply("finish", "return 'done';"),
+    ]);
+    let output = run_session(&root, &rollout, "native-errors", "do it", &base, None);
+    assert!(output.status.success());
+    let bodies = bodies.lock().unwrap();
+    for (index, id) in [(1, "bad-input"), (2, "throws")] {
+        let body: serde_json::Value = serde_json::from_str(&bodies[index]).unwrap();
+        let result = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == id)
+            .unwrap();
+        assert_eq!(result["is_error"], true);
+    }
+    assert_eq!(
+        cell_lines(&rollout).len(),
+        2,
+        "invalid input must not run a cell"
+    );
+}
+
 /// The same reply, plus a Messages `usage` object -- the shape a direct
 /// provider always sends and the gateway tests never need, so this stays a
 /// separate builder rather than a change to [`assistant_reply`] that every
@@ -327,8 +486,10 @@ fn rollout_lines(path: &Path) -> Vec<serde_json::Value> {
 fn the_binary_runs_a_turn_and_writes_a_rollout() {
     let root = scratch_dir("turn-root");
     let rollout = root.join("rollout.jsonl");
-    let (base_url, bodies) =
-        start_fake_provider(vec![assistant_reply("hi from the model"), ending_reply()]);
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("hi from the model\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
 
     let output = run_session(&root, &rollout, "sess-turn", "hello there", &base_url, None);
 
@@ -349,7 +510,7 @@ fn the_binary_runs_a_turn_and_writes_a_rollout() {
     assert!(
         lines.iter().any(|l| l["kind"] == "turn"
             && l["role"] == "assistant"
-            && l["text"] == "hi from the model"),
+            && l["text"] == "hi from the model\n<!-- pane:done -->"),
         "no assistant turn in {lines:?}"
     );
 
@@ -362,8 +523,10 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
     let root = scratch_dir("resume-root");
     let rollout = root.join("rollout.jsonl");
 
-    let (first_url, _first_bodies) =
-        start_fake_provider(vec![assistant_reply("first reply"), ending_reply()]);
+    let (first_url, _first_bodies) = start_fake_provider(vec![
+        assistant_reply("first reply\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
     let first = run_session(
         &root,
         &rollout,
@@ -378,8 +541,10 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let (second_url, second_bodies) =
-        start_fake_provider(vec![assistant_reply("second reply"), ending_reply()]);
+    let (second_url, second_bodies) = start_fake_provider(vec![
+        assistant_reply("second reply\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
     let second = run_session(
         &root,
         &rollout,
@@ -408,7 +573,7 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
         "second run's request must carry the first run's user turn: {texts:?}"
     );
     assert!(
-        texts.contains(&"first reply"),
+        texts.contains(&"first reply\n<!-- pane:done -->"),
         "second run's request must carry the first run's assistant turn: {texts:?}"
     );
     assert!(
@@ -426,7 +591,10 @@ fn the_binary_loads_the_projects_own_instructions() {
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
-    let (base_url, bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("ack\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
 
     let output = run_session(&root, &rollout, "sess-instructions", "hi", &base_url, None);
     assert!(
@@ -451,7 +619,10 @@ fn the_binary_emits_session_start_to_the_hook_command() {
     let rollout = root.join("rollout.jsonl");
     let record = root.join("argv.txt");
     let glasshouse = write_argv_recorder(&root, &record);
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
+    let (base_url, _bodies) = start_fake_provider(vec![
+        assistant_reply("ack\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
 
     let output = run_session(
         &root,
@@ -678,7 +849,7 @@ fn a_piped_session_prints_the_models_reply() {
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
     let (base_url, _bodies) = start_fake_provider(vec![
-        assistant_reply("PANE-PRINTED-REPLY-MARKER"),
+        assistant_reply("PANE-PRINTED-REPLY-MARKER\n<!-- pane:done -->"),
         ending_reply(),
     ]);
 
@@ -717,7 +888,10 @@ fn a_piped_session_prints_the_sidebar_content() {
     let root = scratch_dir("print-sidebar-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
+    let (base_url, _bodies) = start_fake_provider(vec![
+        assistant_reply("ack\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
 
     let output = run_session(
         &root,
@@ -949,7 +1123,9 @@ fn a_prose_answer_with_example_code_ends_without_running_a_cell() {
     let absent = root.join("no-such-glasshouse");
 
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("Here is how I would do it:\n\n```ts\nconst x = 1;\n```\n\nShall I?"),
+        assistant_reply(
+            "Here is how I would do it:\n\n```ts\nconst x = 1;\n```\n\nShall I?\n<!-- pane:done -->",
+        ),
         ending_reply(),
     ]);
 
@@ -978,64 +1154,39 @@ fn a_prose_answer_with_example_code_ends_without_running_a_cell() {
     assert!(saved.contains("Shall I?"));
 }
 
-/// §5: two `pane` blocks in one message are a protocol error and **neither
-/// runs** -- running the first is the silently-wrong reading, because the
-/// second is usually the one the model meant.
-///
-/// The third cell asks the isolate itself: `typeof a` is `"undefined"` only if
-/// the first block never ran. A loop that ran the first block would bind `a`
-/// on the persistent scope and this would return `"number"`.
+/// Blocks are one program, with one feedback exchange and cross-block bindings.
 #[test]
-fn two_pane_blocks_run_neither() {
+fn ordered_pane_blocks_run_in_one_cell() {
     let root = scratch_dir("two-blocks-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nconst a = 1;\n```\n\n```pane\nconst b = 2;\n```"),
-        assistant_reply("```pane\nreturn typeof a;\n```"),
+        assistant_reply("```pane\nconst a = 1;\n```\n\n```pane\nconst b = a + 2;\n```"),
+        assistant_reply("```pane\nreturn b;\n```"),
     ]);
-
     let output = run_session(
         &root,
         &rollout,
-        "sess-two-blocks",
+        "ordered",
         "do the thing",
         &base_url,
         Some(&absent),
     );
     assert!(
         output.status.success(),
-        "stderr: {}",
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-
     let cells = cell_lines(&rollout);
-    assert_eq!(
-        cells.len(),
-        1,
-        "neither block ran: only the third message's cell is recorded: {cells:?}"
-    );
-
-    let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(
-        last_user_text(&bodies[1]),
-        "two pane blocks in one turn; send one",
-        "the answer is the contract's own sentence and carries no handle table"
-    );
-
-    // The returned string is the terminal response, verbatim (§9.2): the
-    // screen carries `undefined` as the assistant's reply, unquoted.
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(cells.len(), 2);
     assert!(
-        stdout.contains(" undefined"),
-        "the first block's binding must not exist in the isolate:\n{stdout}"
+        cells[0]["source"]
+            .as_str()
+            .unwrap()
+            .contains("const b = a + 2;")
     );
-    assert!(
-        !stdout.contains(" number"),
-        "the first block ran and bound `a`:\n{stdout}"
-    );
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    assert!(String::from_utf8_lossy(&output.stdout).contains(" 3"));
 }
 
 /// §5: a throw is a result. It fills the turn slot a yield would have used,
@@ -1101,8 +1252,11 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
         .iter()
         .position(|line| line["kind"] == "cell" && line["outcome"] == "threw")
         .unwrap();
-    assert_eq!(lines[threw_at + 1]["kind"], "turn", "{lines:?}");
-    assert_eq!(lines[threw_at + 1]["role"], "user", "{lines:?}");
+    let feedback = lines[threw_at + 1..]
+        .iter()
+        .find(|line| line["kind"] == "turn")
+        .expect("a throw must be followed by runtime feedback");
+    assert_eq!(feedback["role"], "user", "{lines:?}");
 }
 
 /// REQUIRED BEHAVIOR 6, and `model-contract.md` §1: the system block the
@@ -1141,11 +1295,18 @@ fn the_system_block_is_render_systems_own_bytes() {
     // would be the very drift this test exists to catch.
     let profile = pane::sandbox::profile::Profile::compile(&root, None);
     let expected = pane::prompt::render_system(
-        "PROJECT-INSTRUCTION-ONE",
+        &pane::project::instructions::root(&profile),
         &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
         &pane::session::session_facts(&profile),
     );
 
+    // Read the task-start snapshot from its audit row: time is sampled by
+    // the subprocess, not regenerated by this test after the task finishes.
+    let saved = pane::rollout::resume(&rollout).unwrap().system;
+    let (prefix, orientation) = saved.split_once("\n\n## Environment orientation").unwrap();
+    assert_eq!(prefix, expected);
+    assert!(orientation.contains("task-start UTC:"));
+    let expected = saved;
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let expected = pane::prompt::with_task_context(
@@ -1192,7 +1353,7 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
         Some(&absent),
     );
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1366,16 +1527,19 @@ fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
     );
 
     let lines = rollout_lines(&rollout);
-    let n = lines.len();
-    assert_eq!(lines[n - 2]["kind"], "cell", "{lines:?}");
-    assert_eq!(lines[n - 2]["outcome"], "returned", "{lines:?}");
-    assert_eq!(lines[n - 1]["kind"], "turn", "{lines:?}");
-    assert_eq!(lines[n - 1]["role"], "assistant", "{lines:?}");
-    assert_eq!(
-        lines[n - 1]["text"],
-        answer,
-        "the response is kept verbatim"
-    );
+    let returned = lines
+        .iter()
+        .rev()
+        .find(|line| line["kind"] == "cell")
+        .unwrap();
+    assert_eq!(returned["outcome"], "returned", "{lines:?}");
+    let terminal = lines
+        .iter()
+        .rev()
+        .find(|line| line["kind"] == "turn")
+        .unwrap();
+    assert_eq!(terminal["role"], "assistant", "{lines:?}");
+    assert_eq!(terminal["text"], answer, "the response is kept verbatim");
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(
@@ -1427,10 +1591,12 @@ fn a_throw_never_becomes_a_terminal_response() {
         .iter()
         .position(|line| line["kind"] == "cell" && line["outcome"] == "threw")
         .unwrap_or_else(|| panic!("the throw's cell line is missing: {lines:?}"));
-    assert_eq!(lines[threw_at + 1]["kind"], "turn", "{lines:?}");
+    let feedback = lines[threw_at + 1..]
+        .iter()
+        .find(|line| line["kind"] == "turn")
+        .expect("a throw must be followed by runtime feedback");
     assert_eq!(
-        lines[threw_at + 1]["role"],
-        "user",
+        feedback["role"], "user",
         "the line after a throw is the runtime's answer, never an assistant turn: {lines:?}"
     );
     assert!(
@@ -1546,7 +1712,7 @@ fn repeated_malformed_executable_replies_are_bounded() {
         Some(&absent),
     );
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2103,7 +2269,7 @@ fn a_loaded_cell_limit_ends_the_task() {
         Some(&absent),
     );
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2982,7 +3148,7 @@ fn yolo_grants_every_command_line_and_the_system_block_says_so() {
         "system block must state the yolo grant; got:\n{system}"
     );
     assert!(
-        system.contains("To change part of a file, `read` it, edit the"),
+        system.contains("To change existing source, call `context` with"),
         "the model must be told how a file is changed; got:\n{system}"
     );
 }
@@ -3139,7 +3305,7 @@ fn untaken_tool_branches_are_not_reported_as_executed_calls() {
 /// that outgrew the window ended the task -- the one failure every long task
 /// is guaranteed to reach.
 #[test]
-fn an_overflow_compacts_the_conversation_and_the_task_continues() {
+fn an_overflow_checkpoints_the_already_projected_request_once() {
     let root = scratch_dir("overflow-compact-root");
     let rollout = root.join("rollout.jsonl");
     let turn = std::sync::atomic::AtomicUsize::new(0);
@@ -3150,7 +3316,7 @@ fn an_overflow_compacts_the_conversation_and_the_task_continues() {
         match n {
             0 | 1 => (200, assistant_reply("```pane\nconst a = 1;\n```")),
             2 => (400, too_long_body()),
-            _ => (200, ending_reply()),
+            _ => (200, assistant_reply("```pane\nreturn a;\n```")),
         }
     });
 
@@ -3170,10 +3336,68 @@ fn an_overflow_compacts_the_conversation_and_the_task_continues() {
         bodies[2].len()
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("nothing was lost"),
+        String::from_utf8_lossy(&output.stdout)
+            .contains("provider context was replaced by a checkpoint"),
         "the compaction was not reported: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+    let resumed = pane::rollout::resume(&rollout).unwrap();
+    assert_eq!(
+        resumed.messages.len(),
+        7,
+        "resume must preserve visible pre-checkpoint turns"
+    );
+    assert!(
+        !resumed.messages.iter().any(|message| {
+            message.content[0]
+                .text()
+                .contains("every handle below is live")
+        }),
+        "provider checkpoint metadata is not visible chat"
+    );
+    assert!(
+        fs::read_to_string(&rollout).unwrap().contains("[cell 1"),
+        "original evidence must remain in the append-only file"
+    );
+    assert_eq!(
+        resumed.messages.last().unwrap().content[0].text(),
+        "1",
+        "the live binding survives without replay"
+    );
+}
+
+#[test]
+fn task_after_overflow_keeps_small_provider_context_without_stale_handles() {
+    let root = scratch_dir("overflow-new-task");
+    let rollout = root.join("rollout.jsonl");
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    let (base, bodies) = start_status_answering_provider(5, move |_| {
+        let n = turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match n {
+            0 | 1 => (200, assistant_reply("```pane\nconst oldHandle = 1;\n```")),
+            2 => (400, too_long_body()),
+            _ => (200, ending_reply()),
+        }
+    });
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "overflow-new-task",
+        &["old oversized task", "fresh task"],
+        &base,
+        None,
+        false,
+    );
+    assert!(output.status.success());
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[4]).unwrap();
+    let encoded = request["messages"].to_string();
+    assert!(encoded.contains("fresh task"));
+    assert!(
+        !encoded.contains("oldHandle"),
+        "a fresh runtime must not inherit prior task handles"
+    );
+    assert!(encoded.contains("no prior handles are live"));
 }
 
 /// Rung two: with nothing redundant to drop -- the very first request of a
@@ -3338,7 +3562,9 @@ fn an_identity_answer_after_a_completed_task_does_not_trigger_more_execution() {
     let absent = root.join("no-glasshouse");
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply("```pane\nconst result = 42; return 'Task complete.';\n```"),
-        assistant_reply("I am Pane, a coding assistant. The requested model is deepseek-v4-flash."),
+        assistant_reply(
+            "I am Pane, a coding assistant. The requested model is deepseek-v4-flash.\n<!-- pane:done -->",
+        ),
         assistant_reply("```pane\nthrow new Error('unwanted extra execution');\n```"),
     ]);
     let output = run_session_stdin(
@@ -3387,7 +3613,7 @@ fn shell_changes_survive_a_cell_error_but_never_enter_model_context() {
         assistant_reply(
             "```pane\nawait bash({command: 'echo replacement > example.txt'});\nthrow new Error('after write');\n```",
         ),
-        assistant_reply("The script failed after writing."),
+        assistant_reply("The script failed after writing.\n<!-- pane:done -->"),
     ]);
     let output = run_session(
         &root,
@@ -3410,10 +3636,20 @@ fn shell_changes_survive_a_cell_error_but_never_enter_model_context() {
         assert!(!body.contains("LOCAL_DIFF_OLD_SENTINEL"));
         assert!(!body.contains("CHANGES OBSERVED"));
     }
+    let persisted = rollout_lines(&rollout);
     assert!(
-        !fs::read_to_string(rollout)
-            .unwrap()
-            .contains("LOCAL_DIFF_OLD_SENTINEL")
+        persisted.iter().any(|line| line["kind"] == "view"
+            && line["view"]["changes"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("LOCAL_DIFF_OLD_SENTINEL"))),
+        "the display-only local diff must survive resume"
+    );
+    assert!(
+        !persisted
+            .iter()
+            .filter(|line| line["kind"] == "turn" || line["kind"] == "cell")
+            .any(|line| line.to_string().contains("LOCAL_DIFF_OLD_SENTINEL")),
+        "model/protocol rows must not contain the local diff"
     );
 }
 
@@ -3516,7 +3752,7 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
         &base,
         Some(&root.join("absent")),
     );
-    assert!(output.status.success());
+    assert!(!output.status.success());
     assert_eq!(cell_lines(&rollout).len(), 1);
     let bodies = bodies.lock().unwrap();
     assert_eq!(
@@ -3526,4 +3762,341 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
     );
     assert!(!last_user_text(&bodies[1]).contains("pane-edit"));
     assert!(last_user_text(&bodies[2]).contains("No syntax-failed cell"));
+}
+
+#[test]
+fn prose_without_a_native_call_is_final_and_never_executes_its_example() {
+    let root = scratch_dir("completion-regression");
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#,
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nawait write({path:'implementation.txt', content:'fixed'});\n```"),
+        assistant_reply(
+            "Let me create the regression tests now.\n```bash\ntouch MUST_NOT_EXECUTE\n```",
+        ),
+        assistant_reply(
+            "```pane\nawait write({path:'regression.txt', content:'retained regression fixture'});\nreturn 'Implementation and regression fixture written.';\n```",
+        ),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "completion-regression",
+        "Implement the fix and add regression tests.",
+        &base,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("implementation.txt")).unwrap(),
+        "fixed"
+    );
+    assert!(!root.join("regression.txt").exists());
+    assert!(!root.join("MUST_NOT_EXECUTE").exists());
+    assert_eq!(
+        cell_lines(&rollout).len(),
+        1,
+        "the Bash example is prose, never a cell"
+    );
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Let me create"));
+}
+
+#[test]
+fn unmarked_prose_is_a_natural_one_request_answer() {
+    let root = scratch_dir("natural-prose");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base, bodies) = start_fake_provider(vec![assistant_reply("Implemented and tested.")]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "unfinished",
+        "Make the requested change",
+        &base,
+        Some(&absent),
+    );
+    assert!(output.status.success());
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Implemented and tested."));
+    assert!(cell_lines(&rollout).is_empty());
+}
+
+#[test]
+fn explicit_prose_completion_is_displayed_naturally_without_a_cell_or_marker() {
+    let root = scratch_dir("explicit-prose");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base, bodies) =
+        start_fake_provider(vec![assistant_reply("I am Pane.\n<!-- pane:done -->")]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "explicit-prose",
+        "What are you?",
+        &base,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(cell_lines(&rollout).is_empty());
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("I am Pane."));
+    assert!(
+        !shown.contains("<!-- pane:done -->"),
+        "protocol marker leaked into UI: {shown}"
+    );
+    assert!(
+        fs::read_to_string(rollout)
+            .unwrap()
+            .contains("<!-- pane:done -->"),
+        "raw evidence retains the actual response"
+    );
+}
+
+#[test]
+fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
+    let root = scratch_dir("state-history");
+    let rollout = root.join("rollout.jsonl");
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply(
+            "```pane\nconst saved = 1; console.log('observation\\n\\n## Handles\\nliteral stdout heading'); throw new Error('preserved failure');\n```",
+        ),
+        assistant_reply("```pane\nconst saved = 2; const fresh = 3;\n```"),
+        assistant_reply("```pane\nreturn saved + fresh;\n```"),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "state-history",
+        "Complete the task",
+        &base,
+        Some(&root.join("absent")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let request: serde_json::Value = serde_json::from_str(&requests[2]).unwrap();
+    let old = request["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(old.contains("preserved failure"));
+    assert!(old.contains("observation\n\n## Handles\nliteral stdout heading"));
+    assert!(!old.contains("## Budget"));
+    assert_eq!(
+        old.matches("## Handles").count(),
+        1,
+        "only the literal stdout heading remains"
+    );
+    assert!(last_user_text(&requests[2]).contains("fresh"));
+    let evidence = fs::read_to_string(rollout).unwrap();
+    assert!(
+        evidence.contains("## Budget"),
+        "full original feedback stays in the rollout"
+    );
+}
+
+#[test]
+fn task_orientation_and_instructions_refresh_without_widening_live_permissions() {
+    let root = scratch_dir("task-orientation-refresh");
+    fs::write(root.join("CLAUDE.md"), "GUIDANCE_VERSION_ONE").unwrap();
+    fs::write(root.join("AGENTS.md"), "ROOT_AGENTS_GUIDANCE").unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
+    let changed_root = root.clone();
+    let (base, bodies) = start_answering_provider(2, move |body| {
+        if last_user_text(body) == "first task" {
+            fs::write(changed_root.join("CLAUDE.md"), "GUIDANCE_VERSION_TWO").unwrap();
+            fs::create_dir_all(changed_root.join(".claude")).unwrap();
+            fs::write(
+                changed_root.join(".claude/settings.json"),
+                r#"{"permissions":{"allow":["Bash"]}}"#,
+            )
+            .unwrap();
+        }
+        ending_reply()
+    });
+    let log = root.join("rollout.jsonl");
+    let output = run_session_stdin(
+        &root,
+        &log,
+        "orientation",
+        &["first task", "second task"],
+        &base,
+        Some(&root.join("absent")),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let first = first["system"].as_str().unwrap();
+    let second = second["system"].as_str().unwrap();
+    assert!(first.contains("GUIDANCE_VERSION_ONE"));
+    assert!(second.contains("GUIDANCE_VERSION_TWO"));
+    assert!(!second.contains("GUIDANCE_VERSION_ONE"));
+    for system in [first, second] {
+        assert!(system.contains("ROOT_AGENTS_GUIDANCE"));
+        assert!(system.contains("CLAUDE.md") && system.contains("AGENTS.md"));
+        assert!(system.contains("## Environment orientation"));
+        assert!(system.contains(std::env::consts::OS));
+        assert!(system.contains("Cargo.toml"));
+        assert!(
+            system.contains("no command may be run at all"),
+            "guidance reload widened frozen permissions: {system}"
+        );
+    }
+    let resumed = pane::rollout::resume(&log).unwrap();
+    assert!(resumed.system.contains("GUIDANCE_VERSION_TWO"));
+    assert!(!resumed.system.contains("GUIDANCE_VERSION_ONE"));
+}
+
+#[test]
+fn resumed_tasks_use_current_instructions_instead_of_the_saved_system_prompt() {
+    let root = scratch_dir("resumed-guidance");
+    fs::write(root.join("AGENTS.md"), "RESUME_OLD_GUIDANCE").unwrap();
+    let log = root.join("rollout.jsonl");
+    let absent = root.join("absent");
+    let (url, _) = start_fake_provider(vec![ending_reply()]);
+    assert!(
+        run_session(&root, &log, "first", "first", &url, Some(&absent))
+            .status
+            .success()
+    );
+    fs::write(root.join("AGENTS.md"), "RESUME_NEW_GUIDANCE").unwrap();
+    let (url, bodies) = start_fake_provider(vec![ending_reply()]);
+    assert!(
+        run_session(&root, &log, "second", "second", &url, Some(&absent))
+            .status
+            .success()
+    );
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let system = request["system"].as_str().unwrap();
+    assert!(system.contains("RESUME_NEW_GUIDANCE"));
+    assert!(!system.contains("RESUME_OLD_GUIDANCE"));
+}
+
+#[test]
+fn environment_snapshot_does_not_change_between_inferences_in_one_task() {
+    let root = scratch_dir("stable-task-context");
+    let (url, bodies) = start_fake_provider(vec![
+        native_cell_reply("first", "const x = 1;"),
+        native_cell_reply("second", "return x;"),
+    ]);
+    let output = run_session(
+        &root,
+        &root.join("rollout.jsonl"),
+        "stable-context",
+        "work",
+        &url,
+        Some(&root.join("absent")),
+    );
+    assert!(output.status.success());
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(first["system"], second["system"]);
+}
+
+#[test]
+fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
+    let root = scratch_dir("nested-provider-boundary");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("AGENTS.md"), "ROOT_GUIDANCE").unwrap();
+    fs::write(
+        root.join("nested/AGENTS.md"),
+        "NESTED_GUIDANCE: write the word verified.",
+    )
+    .unwrap();
+    let target = root.join("nested/result.txt");
+    let checked_target = target.clone();
+    let step = std::sync::atomic::AtomicUsize::new(0);
+    let (url, bodies) = start_answering_provider(2, move |body| {
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        let system = request["system"].as_str().unwrap();
+        assert!(
+            !checked_target.exists(),
+            "write happened before guidance delivery"
+        );
+        match step.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                assert!(system.contains("ROOT_GUIDANCE"));
+                assert!(!system.contains("NESTED_GUIDANCE:"));
+                native_cell_reply(
+                    "blocked",
+                    "await write({path: 'nested/result.txt', content: 'too early'}); return 'wrong';",
+                )
+            }
+            _ => {
+                assert!(system.contains("NESTED_GUIDANCE: write the word verified."));
+                let result = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|m| m["content"].as_array().into_iter().flatten())
+                    .find(|b| b["type"] == "tool_result" && b["tool_use_id"] == "blocked")
+                    .unwrap();
+                assert!(result["content"].as_str().unwrap().contains("did not run"));
+                native_cell_reply(
+                    "allowed",
+                    "await write({path: 'nested/result.txt', content: 'verified'}); return 'done';",
+                )
+            }
+        }
+    });
+    let log = root.join("rollout.jsonl");
+    let output = run_session(
+        &root,
+        &log,
+        "nested-instructions",
+        "write result",
+        &url,
+        Some(&root.join("absent")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    assert_eq!(fs::read_to_string(target).unwrap(), "verified");
+    let resumed = pane::rollout::resume(&log).unwrap();
+    assert!(resumed.system.contains("NESTED_GUIDANCE:"));
+    let rows = rollout_lines(&log);
+    let calls: usize = rows
+        .iter()
+        .filter(|r| r["kind"] == "cell")
+        .map(|r| r["calls"].as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(calls, 1, "only the post-guidance write should be recorded");
 }

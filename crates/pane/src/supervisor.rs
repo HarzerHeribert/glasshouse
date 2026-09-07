@@ -156,6 +156,7 @@ mod tests {
             calls: vec![CallRecord {
                 tool: "grep".into(),
                 args: BTreeMap::from([("pattern".to_string(), "x".to_string())]),
+                evidence: None,
                 ended: Ended::Ok,
             }],
         };

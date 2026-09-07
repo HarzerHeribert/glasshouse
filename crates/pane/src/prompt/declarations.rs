@@ -7,6 +7,9 @@
 
 use crate::tools::registry::Purity;
 
+pub const EXECUTE_CELL_NAME: &str = "execute_cell";
+pub const EXECUTE_CELL_DESCRIPTION: &str = "Make exactly one native call in this assistant turn to run one Pane TypeScript cell. Put every runtime operation inside its single program; functions such as read and bash are not separate native calls. While constructing the input, none of this cell has run. Code may branch on results returned by awaited tools inside the cell; after submitting it, stop and wait for the correlated tool result before interpreting outcomes. Prose and comments are not runtime evidence.";
+
 /// One tool's return type and its own descriptive sentence.
 pub struct Entry {
     pub name: &'static str,
@@ -17,13 +20,13 @@ pub struct Entry {
 pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "read",
-        return_type: "{path: string; text: string; lines: string[]; bytes: number; lineCount: number; mtime: string}",
-        summary: "Read one file inside the project.",
+        return_type: "{path: string; text: string; lines: string[]; bytes: number; lineCount: number; mtime: string; sha256: string; excerpt(options?: {start?: number; lines?: number}): {text: string; start: number; end: number | null; lineCount: number; next: number | null; truncatedLines: number}}",
+        summary: "Read one documentation, configuration, or modest source file inside the project. If a large source has one uniquely unfinished definition, Pane promotes the read to its bounded `context`; otherwise use `context` first when you will edit source. Never print a whole `File.text` or broad `File.lines`.",
     },
     Entry {
         name: "glob",
         return_type: "string[]",
-        summary: "List paths inside the project matching a glob pattern.",
+        summary: "List paths inside the project matching a glob pattern. Results may include directories: do not pass a bare directory match to `read`; select a file path.",
     },
     Entry {
         name: "grep",
@@ -33,14 +36,22 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "write",
         return_type: "string",
-        summary: "Replace one file inside the project with `content`, creating parents. \
-                  To change part of a file: `read` it, edit the text in this cell, `write` it \
-                  back -- there is no separate edit tool because you already hold the file.",
+        summary: "Replace one whole file inside the project with `content`, creating parents. Use for new files or deliberate whole rewrites; prefer `edit` for an existing region so stale source cannot be overwritten.",
     },
     Entry {
         name: "bash",
         return_type: "{stdout: string; stderr: string; exit_code: number | null}",
-        summary: "Run a command line under the sandbox grant.",
+        summary: "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful.",
+    },
+    Entry {
+        name: "context",
+        return_type: "{path: string; sha256: string; symbol: string | null; text: string; complete: boolean; ranges: {path: string; start: number; end: number; role: string}[]; omissions: string[]}",
+        summary: "Load the editing surface for one file or symbol. For a large source file, supply the target `symbol`. Its complete target, short display version, and ranked support are automatically printed once; the handle retains full `sha256` for rare disambiguation. Do not print `text` or inspect the same file with `read`.",
+    },
+    Entry {
+        name: "edit",
+        return_type: "{path: string; before_sha256: string; after_sha256: string; changed_lines: {start: number; before: number; after: number}}",
+        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
     },
 ];
 
@@ -117,8 +128,8 @@ pub const RUNTIME: &[Binding] = &[
                       // status line. `bg.watch` re-runs `command` every `every` ms (default\n\
                       // 1000) and emits one `bg.done` per match until `until` matches or you\n\
                       // cancel. Both refuse a command outside the sandbox grant with\n\
-                      // PermissionDenied, before any handle exists. Do not poll a job; do not\n\
-                      // sleep waiting for one.",
+                      // PermissionDenied, before any handle exists. Use background work only\n\
+                      // when separable from the next decision; do not poll or sleep for it.",
     },
     Binding {
         global: "batch",
@@ -148,9 +159,8 @@ pub const RUNTIME: &[Binding] = &[
                       // batch.n is zero until events arrive. Match source: job.source, not job.id.\n\
                       // `batch.where({kind: \"agent.done\"})`. It runs under this session's own\n\
                       // grant, spends this task's budget, and cannot start a subagent of its\n\
-                      // own. Worth it when a question is separable and its working would\n\
-                      // otherwise fill your own context; not worth it for anything you could\n\
-                      // answer in the next cell. `bg.cancel` stops one.",
+                      // own. Use it only when the question is separable and its working would\n\
+                      // otherwise fill your context. `bg.cancel` stops one.",
     },
     Binding {
         global: "todo",
@@ -170,8 +180,8 @@ pub const RUNTIME: &[Binding] = &[
         declaration: "declare const console: {log(...args: unknown[]): void; info: typeof console.log; \
                       warn: typeof console.log; error: typeof console.log; debug: typeof console.log; \
                       trace: typeof console.log};\n\
-                      // Printed with the cell's result, bounded per argument. It is for you to\n\
-                      // read next turn, not a way to answer the person.",
+                      // Printed with the cell's correlated result, bounded per argument. Prefer a\n\
+                      // compact structured summary over broad object or file output.",
     },
 ];
 

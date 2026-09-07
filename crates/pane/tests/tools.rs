@@ -171,7 +171,10 @@ fn no_registered_tool_needs_the_network() {
             "a tool runs `{program}`, which reaches a network"
         );
     }
-    assert_eq!(names, vec!["read", "glob", "grep", "bash", "write"]);
+    assert_eq!(
+        names,
+        vec!["read", "glob", "grep", "bash", "write", "context", "edit"]
+    );
 
     // The profile half of the same clause: no `permissions` pattern can
     // produce a network grant, and the two named MCP network tools are not

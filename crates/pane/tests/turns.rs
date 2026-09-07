@@ -490,9 +490,15 @@ data: {\"type\":\"message_stop\"}\n\
         std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
     }
     let mut deltas: Vec<String> = Vec::new();
-    let result = wire::send_turn_streaming(&sample_conversation(), wire::MODEL, &mut |text| {
-        deltas.push(text.to_string())
-    });
+    let result =
+        wire::send_turn_streaming(
+            &sample_conversation(),
+            wire::MODEL,
+            &mut |text| match text {
+                wire::StreamDelta::Text(text) => deltas.push(text),
+                other => panic!("unexpected native delta in text fixture: {other:?}"),
+            },
+        );
     unsafe {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
@@ -550,6 +556,10 @@ fn streams_from_a_real_gateway() {
     };
     let mut chunks = 0usize;
     let turn = wire::send_turn_streaming(&conversation, wire::MODEL, &mut |text| {
+        let text = match text {
+            wire::StreamDelta::Text(text) | wire::StreamDelta::ToolInput(text) => text,
+            wire::StreamDelta::ToolReady(_) => return,
+        };
         chunks += 1;
         print!("{text}");
         use std::io::Write as _;

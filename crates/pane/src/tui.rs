@@ -1,6 +1,8 @@
 //! Fullscreen presentation. The caller owns terminal lifecycle, input and ticks.
 
 mod controls;
+mod inspection;
+pub use inspection::Inspection;
 mod markdown;
 mod ribbon;
 mod telemetry;
@@ -14,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::contract::{Conversation, Message, Role, ServedBy};
+use crate::contract::{Block as ContentBlock, Conversation, Message, Role, ServedBy};
 use crate::prompt::{Extracted, extract_program};
 use crate::runtime::handles::{HandleTable, render_table};
 use crate::runtime::preview::PREVIEW_TOKEN_CAP;
@@ -45,10 +47,14 @@ pub struct ScreenState {
     /// Partial provider text for the active response; never persisted as a completed turn.
     /// The streaming caller replaces this accumulated text and clears it on completion.
     pub streaming_text: Option<String>,
+    /// Raw native tool-input fragments, presentation-only; never executed or shown as results.
+    pub streaming_tool_input: Option<String>,
     pub animation_frame: usize,
     pub completion_tick: Option<usize>,
     /// Rows back from the transcript's end; zero follows the current turn.
     pub scrollback: usize,
+    /// A selected notebook cell, inspected locally without model traffic.
+    pub inspection: Option<Inspection>,
     /// User preference, retained across resizes. The caller toggles this field.
     pub sidebar: SidebarVisibility,
     pub theme: Theme,
@@ -342,6 +348,12 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "live activity, requests and execution · Ctrl-T",
                 ),
                 ("/motion".to_string(), "on or off · reduce animation"),
+                (
+                    "/cells".to_string(),
+                    "inspect code and real results by cell",
+                ),
+                ("/cell".to_string(), "inspect a numbered cell · /cell 12"),
+                ("/chat".to_string(), "return to the conversation"),
                 ("/effort".to_string(), "configure response reasoning effort"),
                 (
                     "/context".to_string(),
@@ -373,7 +385,8 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
 /// its table or its value, so this module turns no live object into text --
 /// which is the invariant `tests/tui.rs::the_tui_renders_no_handle_itself`
 /// scans this file for.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CellView {
     /// Corrected source for an executed pane-edit; display only, never another model message.
     pub executed_source: Option<String>,
@@ -388,6 +401,8 @@ pub struct CellView {
     pub stdout: Option<String>,
     /// Recorded tool outcomes, not calls inferred from generated source.
     pub execution: Option<String>,
+    /// Host call count from the runtime record; never inferred from display lines.
+    pub call_count: Option<usize>,
     /// A throw, `runtime-contract.md` §5.
     pub error: Option<CellError>,
     /// A top-level `return`'s terminal response, already rendered by the
@@ -407,7 +422,8 @@ pub struct CellView {
 /// `runtime-contract.md` §5's first two items, and nothing from inside the
 /// runtime. The position is optional because the runtime could not always
 /// attribute a throw to a line of the model's program.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CellError {
     pub class: String,
     pub message: String,
@@ -610,6 +626,15 @@ pub fn render_screen(
         frame.render_widget(Clear, area);
         telemetry::expanded(frame, area, conversation, served_by, notebook, state);
     }
+    if let Some(inspection) = &state.inspection {
+        inspection::render(
+            frame,
+            regions.transcript,
+            conversation,
+            notebook,
+            inspection,
+        );
+    }
     if let Some(panel) = &state.panel {
         frame.render_widget(Clear, regions.transcript);
         frame.render_widget(
@@ -753,7 +778,7 @@ pub fn render_screen(
             ),
             footer_row(
                 format!(" {connection}"),
-                "Shift-Tab mode · / commands".into(),
+                "PgUp/PgDn chat · /cells inspect".into(),
                 width,
                 MUTED,
             ),
@@ -763,7 +788,7 @@ pub fn render_screen(
             footer_row(identity, mode, width, ACCENT),
             footer_row(
                 format!("{posture} · {connection}"),
-                budget.unwrap_or_else(|| "Shift-Tab mode   / commands".into()),
+                budget.unwrap_or_else(|| "PgUp/PgDn chat · /cells inspect".into()),
                 width,
                 MUTED,
             ),
@@ -952,35 +977,47 @@ pub fn cell_ordinal(conversation: &Conversation, notebook: &Notebook) -> usize {
                     .cell(cells)
                     .is_some_and(|view| view.returned.is_some());
             }
+            Role::User if is_tool_feedback(message) => {}
             Role::User => after_return = false,
         }
     }
     cells
 }
 
-fn render_conversation(
-    frame: &mut Frame,
-    area: Rect,
+pub fn conversation_rows(
     conversation: &Conversation,
     handles: &HandleTable,
     notebook: &Notebook,
     state: &ScreenState,
-) {
+    width: u16,
+) -> usize {
+    conversation_lines(conversation, handles, notebook, state, width).len()
+}
+
+fn conversation_lines(
+    conversation: &Conversation,
+    handles: &HandleTable,
+    notebook: &Notebook,
+    state: &ScreenState,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut content = notebook_lines(
         conversation,
         handles,
         notebook,
         state.compact,
         state.pretty,
-        usize::from(area.width.saturating_sub(1)),
+        usize::from(width.saturating_sub(2)),
     );
-    if let Some(partial) = state.streaming_text.as_deref() {
+    if let Some(raw_partial) = state.streaming_text.as_deref() {
+        let visible = streaming_message_text(raw_partial);
+        let partial = visible.as_str();
         turn_header(
             &mut content,
             format!(
                 "PANE / RECEIVING  {} · {} bytes",
                 Activity::Streaming.indicator(state.animation_frame),
-                partial.len()
+                raw_partial.len()
             ),
             ACCENT,
         );
@@ -1004,14 +1041,56 @@ fn render_conversation(
         } else {
             content.extend(markdown::render(
                 partial,
-                usize::from(area.width.saturating_sub(1)),
+                usize::from(width.saturating_sub(2)),
             ));
+        }
+    }
+    if let Some(input) = &state.streaming_tool_input {
+        turn_header(
+            &mut content,
+            format!(
+                "CELL {} · preparing · nothing has run",
+                cell_ordinal(conversation, notebook) + 1
+            ),
+            Color::LightCyan,
+        );
+        content.push(Line::styled(
+            format!(
+                "Receiving program · {} bytes · waiting for execution handoff",
+                input.len()
+            ),
+            Style::default().fg(MUTED),
+        ));
+        if !state.compact
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(input)
+            && let Some(code) = value.get("code").and_then(|value| value.as_str())
+        {
+            content.extend(markdown::code(code));
         }
     }
     let mut active = false;
     for line in &mut content {
+        let mut cell_header = false;
         if let Some(first) = line.spans.first_mut() {
             if first.content.starts_with("╭─ ") {
+                cell_header = first.content.contains("Cell ")
+                    || first.content.contains("CELL ")
+                    || first.content.contains("Action failed")
+                    || first.content.contains("PANE / CODE");
+                if state.activity == Activity::Executing
+                    && first.content.contains("◇ Cell preparing · nothing has run")
+                {
+                    first.content = first
+                        .content
+                        .replace(
+                            "◇ Cell preparing · nothing has run",
+                            &format!(
+                                "{} Cell running",
+                                Activity::Executing.indicator(state.animation_frame)
+                            ),
+                        )
+                        .into();
+                }
                 first.content = first.content.trim_start_matches("╭─ ").to_string().into();
                 active = true;
             } else if first.content == "╰─" {
@@ -1020,14 +1099,30 @@ fn render_conversation(
             }
         }
         if active {
-            line.style = line.style.bg(state.theme.backlight());
+            line.style = line.style.bg(if cell_header {
+                state.theme.dock()
+            } else {
+                state.theme.backlight()
+            });
         }
     }
-    let lines = wrap_lines(content, area.width.saturating_sub(1));
+    wrap_lines(content, width.saturating_sub(2))
+}
+
+fn render_conversation(
+    frame: &mut Frame,
+    area: Rect,
+    conversation: &Conversation,
+    handles: &HandleTable,
+    notebook: &Notebook,
+    state: &ScreenState,
+) {
+    let lines = conversation_lines(conversation, handles, notebook, state, area.width);
     let start = lines
         .len()
         .saturating_sub(usize::from(area.height))
         .saturating_sub(state.scrollback);
+    let total_rows = lines.len();
     let lines: Vec<Line> = lines
         .into_iter()
         .skip(start)
@@ -1042,6 +1137,40 @@ fn render_conversation(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+    render_scrollbar(frame, area, total_rows, start);
+}
+
+fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, start: usize) {
+    let height = usize::from(area.height);
+    if total <= height || height == 0 || area.width == 0 {
+        return;
+    }
+    let thumb = (height * height / total).max(1);
+    let top = start.min(total - height) * (height - thumb) / (total - height);
+    for row in 0..height {
+        let active = row >= top && row < top + thumb;
+        frame.render_widget(
+            Paragraph::new(if active { "┃" } else { "│" }).style(Style::default().fg(if active {
+                ACCENT
+            } else {
+                Color::DarkGray
+            })),
+            Rect::new(area.right() - 1, area.y + row as u16, 1, 1),
+        );
+    }
+}
+
+/// Preserve the viewed rows as new content arrives; zero remains live-follow.
+pub fn anchor_scrollback(scroll: usize, previous: usize, current: usize, height: usize) -> usize {
+    if scroll == 0 {
+        return 0;
+    }
+    let adjusted = if current >= previous {
+        scroll.saturating_add(current - previous)
+    } else {
+        scroll.saturating_sub(previous - current)
+    };
+    adjusted.min(current.saturating_sub(height))
 }
 
 fn turn_header(lines: &mut Vec<Line<'static>>, label: String, color: Color) {
@@ -1106,7 +1235,7 @@ fn notebook_lines(
                 after_return = view.is_some_and(|view| view.returned.is_some());
 
                 let original = message_text(message);
-                if matches!(extract_program(&original), Extracted::Prose)
+                if matches!(message_program(message), Extracted::Prose)
                     && view.is_none_or(|v| {
                         v.table.is_none()
                             && v.execution.is_none()
@@ -1127,10 +1256,9 @@ fn notebook_lines(
                 }
                 if compact {
                     let original = message_text(message);
-                    match extract_program(&original) {
+                    match message_program(message) {
                         Extracted::Program(source) | Extracted::Edit(source) => {
-                            let repairing =
-                                matches!(extract_program(&original), Extracted::Edit(_));
+                            let repairing = matches!(message_program(message), Extracted::Edit(_));
                             let source = view
                                 .and_then(|v| v.executed_source.as_ref())
                                 .unwrap_or(&source);
@@ -1155,9 +1283,9 @@ fn notebook_lines(
                                 } else if failed {
                                     "× Action failed"
                                 } else if evaluated {
-                                    "◆ Tool results"
+                                    "✓ Cell executed"
                                 } else {
-                                    "◇ Preparing actions"
+                                    "◇ Cell preparing · nothing has run"
                                 };
                                 turn_header(
                                     &mut lines,
@@ -1191,7 +1319,7 @@ fn notebook_lines(
                                         }
                                     } else {
                                         push_text_region(&mut lines, actual);
-                                        let count = actual.lines().count();
+                                        let count = view.and_then(|v| v.call_count).unwrap_or(0);
                                         if count > 1 {
                                             lines.push(Line::styled(
                                                 format!(
@@ -1203,10 +1331,18 @@ fn notebook_lines(
                                     }
                                 }
                                 lines.push(Line::styled(
-                                    "Ctrl-O · code and results",
+                                    format!("Ctrl-O · code and results · /cell {cell} inspect"),
                                     Style::default().fg(MUTED),
                                 ));
                             }
+                        }
+                        Extracted::Invalid(error) => {
+                            turn_header(
+                                &mut lines,
+                                "Response format rejected".into(),
+                                Color::Yellow,
+                            );
+                            push_text_region(&mut lines, &format!("{error} Nothing ran."));
                         }
                         Extracted::TwoBlocks => {
                             turn_header(
@@ -1216,7 +1352,7 @@ fn notebook_lines(
                             );
                             push_text_region(
                                 &mut lines,
-                                "Multiple code blocks · nothing ran. Ctrl-O shows the response.",
+                                "Ambiguous repair blocks · nothing ran. Ctrl-O shows the response.",
                             );
                         }
                         Extracted::Prose
@@ -1229,7 +1365,7 @@ fn notebook_lines(
                             );
                             push_text_region(
                                 &mut lines,
-                                "Expected one Pane code block · nothing ran. Ctrl-O shows the response.",
+                                "Expected complete Pane code · nothing ran. Ctrl-O shows the response.",
                             );
                         }
                         Extracted::Prose => {
@@ -1272,15 +1408,15 @@ fn notebook_lines(
                     continue;
                 }
                 let role = if matches!(
-                    extract_program(&message_text(message)),
+                    message_program(message),
                     Extracted::Program(_) | Extracted::Edit(_)
                 ) {
                     "PANE / CODE"
                 } else if matches!(
-                    extract_program(&message_text(message)),
-                    Extracted::TwoBlocks
+                    message_program(message),
+                    Extracted::TwoBlocks | Extracted::Invalid(_)
                 ) {
-                    "PANE / NOT EXECUTED: multiple code blocks"
+                    "PANE / NOT EXECUTED: invalid protocol"
                 } else if message_text(message).contains("<php-pane>") {
                     "PANE / NOT EXECUTED"
                 } else {
@@ -1312,7 +1448,7 @@ fn notebook_lines(
                     .and_then(|v| v.executed_source.clone())
                     .unwrap_or_else(|| input_region(message));
                 let display = if pretty && view.is_none_or(|v| v.error.is_none()) {
-                    match extract_program(&message_text(message)) {
+                    match message_program(message) {
                         Extracted::Program(_) | Extracted::Edit(_) => pretty_code(&source),
                         _ => source,
                     }
@@ -1401,6 +1537,9 @@ fn notebook_lines(
                     lines.extend(markdown::render(after.trim(), width));
                 }
             }
+            Role::User if is_tool_feedback(message) => {
+                answered = false;
+            }
             Role::User => {
                 after_return = false;
                 if answered {
@@ -1428,6 +1567,13 @@ fn notebook_lines(
 /// the model for any narration or changing its program/source positions.
 fn natural_message(message: &Message) -> (String, String) {
     let text = message_text(message);
+    if message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+    {
+        return (text, String::new());
+    }
     if !matches!(
         extract_program(&text),
         Extracted::Program(_) | Extracted::Edit(_)
@@ -1435,6 +1581,9 @@ fn natural_message(message: &Message) -> (String, String) {
         return (String::new(), String::new());
     }
     let lines: Vec<_> = text.lines().collect();
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut saw_program = false;
     let mut i = 0;
     while i < lines.len() {
         if let Some(info) = lines[i].strip_prefix("```") {
@@ -1443,17 +1592,22 @@ fn natural_message(message: &Message) -> (String, String) {
                 end += 1;
             }
             if matches!(info.trim(), "pane" | "pane-edit") {
-                return (
-                    lines[..i].join("\n"),
-                    lines[(end + 1).min(lines.len())..].join("\n"),
-                );
+                saw_program = true;
+            } else {
+                let target = if saw_program { &mut after } else { &mut before };
+                target.extend_from_slice(&lines[i..(end + 1).min(lines.len())]);
             }
             i = end + 1;
         } else {
+            if saw_program {
+                after.push(lines[i]);
+            } else {
+                before.push(lines[i]);
+            }
             i += 1;
         }
     }
-    (String::new(), String::new())
+    (before.join("\n"), after.join("\n"))
 }
 
 /// Syntactic candidates only: an untaken branch is never execution evidence.
@@ -1570,11 +1724,43 @@ fn pretty_json(text: &str) -> String {
     }
 }
 
+fn message_program(message: &Message) -> Extracted {
+    let calls: Vec<_> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { name, input, .. } => Some((name, input)),
+            _ => None,
+        })
+        .collect();
+    if calls.is_empty() {
+        return extract_program(&message_text(message));
+    }
+    if calls.len() != 1 {
+        return Extracted::Invalid("Multiple native cell calls; no cell ran.".into());
+    }
+    let (name, input) = calls[0];
+    if name != "execute_cell" {
+        return Extracted::Invalid(format!("Unknown native tool {name}"));
+    }
+    match input.get("code").and_then(|value| value.as_str()) {
+        Some(code) => Extracted::Program(code.to_string()),
+        None => Extracted::Invalid("Cell call has no valid source.".into()),
+    }
+}
+
+fn is_tool_feedback(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
 fn input_region(message: &Message) -> String {
     let text = message_text(message);
-    match extract_program(&text) {
+    match message_program(message) {
         Extracted::Program(source) | Extracted::Edit(source) => source,
-        Extracted::Prose | Extracted::TwoBlocks => text,
+        Extracted::Prose | Extracted::TwoBlocks | Extracted::Invalid(_) => text,
     }
 }
 
@@ -1629,13 +1815,40 @@ fn push_folded_region(lines: &mut Vec<Line<'static>>, text: &str, limit: usize, 
     ));
 }
 
+/// Hide framing even when its last line arrives over several stream chunks.
+fn streaming_message_text(text: &str) -> String {
+    if let Some((prefix, last)) = text.rsplit_once('\n')
+        && !last.is_empty()
+        && crate::prompt::COMPLETE_MARKER.starts_with(last)
+    {
+        let framed = format!("{prefix}\n{}", crate::prompt::COMPLETE_MARKER);
+        if let Some(visible) = crate::prompt::completion_text(&framed) {
+            return visible;
+        }
+    }
+    if let Some(completed) = crate::prompt::completion_text(text) {
+        return completed;
+    }
+    text.to_string()
+}
+
 fn message_text(message: &Message) -> String {
-    message
+    let text = message
         .content
         .iter()
-        .map(|block| block.text())
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) | ContentBlock::ToolResult { content: text, .. } => {
+                Some(text.as_str())
+            }
+            ContentBlock::ToolUse { .. } => None,
+        })
         .collect::<Vec<_>>()
-        .join("")
+        .join("");
+    if message.role == Role::Assistant {
+        crate::prompt::completion_text(&text).unwrap_or(text)
+    } else {
+        text
+    }
 }
 
 /// Only the fields Glasshouse actually reported become a line. A field it

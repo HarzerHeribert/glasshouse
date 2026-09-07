@@ -60,7 +60,7 @@ pub const RESERVED_PREFIX: &str = "__pane_";
 /// a scan that only knows declarations and globals.
 const IMPLICIT_FUNCTION_BINDINGS: [&str; 1] = ["arguments"];
 
-/// The names the isolate puts on the persistent scope: the four tools, the
+/// The names the isolate puts on the persistent scope: the registered tools, the
 /// three handle functions and `yieldNow`. A top-level binding may not take
 /// one, because the capture that makes a handle persist would overwrite it
 /// for the whole task.

@@ -177,7 +177,7 @@ fn conversation_rows(buffer: &Buffer, marker: &str, count: usize) -> Vec<String>
                         .strip_prefix(' ')
                         .unwrap_or(line)
                         .trim_start_matches('\u{2502}');
-                    let end = inner.find('\u{2502}').unwrap_or(inner.len());
+                    let end = inner.find(['\u{2502}', '\u{2503}']).unwrap_or(inner.len());
                     inner[..end].trim_end().to_string()
                 })
                 .unwrap_or_default()
@@ -514,6 +514,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some("n  number  1195".to_string()),
             error: None,
             returned: Some("\"total\": number".to_string()),
@@ -574,6 +575,7 @@ fn a_throw_renders_as_the_cells_error_region() {
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some(String::new()),
             error: Some(CellError {
                 class: "ReferenceError".to_string(),
@@ -635,6 +637,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: None,
@@ -682,6 +685,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some(String::new()),
             error: None,
             returned: Some("1".to_string()),
@@ -733,6 +737,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: None,
@@ -748,6 +753,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
             changes: None,
             stdout: None,
             execution: None,
+            call_count: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: Some("the answer".to_string()),

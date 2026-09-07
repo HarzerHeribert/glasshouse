@@ -91,13 +91,17 @@ firewall never report two different sizes for the same bytes:
   dropped from the *rendering* oldest-first — never freed — and one line says
   `…N older handles not shown; call handles() for the full list`.
 
-A program's own `console.log` output is not conversation and is not a
-preview: the last 512 tokens of it are appended to the turn under a
-`[stdout]` heading, and the rest is dropped with a count. That number is
-pane's own; Codex's comparable cap is 10,000 output tokens per exec call
-(`DEFAULT_MAX_OUTPUT_TOKENS_PER_EXEC_CALL`), which is a reasonable ceiling for
-a harness whose results still travel as text and far too large for one whose
-whole claim is that they do not.
+A program's `console.log` output has a shared per-cell budget of 8,192
+estimated tokens (32,768 characters). Each top-level string is bounded to
+24,576 Unicode scalar values. Truncation retains a true tail and states what
+was omitted. Source inspection has a separate bounded `File.excerpt` cursor,
+so larger source files remain inspectable without re-reading the file.
+
+The console budget must accommodate useful source inspection, not merely
+minimize one response. The earlier 512-token tail fragmented ordinary source
+reads into many inference requests and let outputs from batched calls displace
+one another. Full tool objects still remain in the runtime; inspecting relevant
+source text is part of the work and needs enough space to be useful.
 
 ## 4. The rollout records programs and previews, never objects
 

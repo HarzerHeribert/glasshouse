@@ -127,6 +127,10 @@ struct NeverRule {
 #[derive(Debug, Clone)]
 pub struct Profile {
     root: PathBuf,
+    /// Present when the supplied project root had no unambiguous absolute
+    /// identity. Every admission method checks this before implicit root or
+    /// configured grants.
+    invalid_root: Option<String>,
     /// `root` in [`spelling`], compiled once. Every containment question this
     /// module asks about the project root is asked against this and never
     /// against `root` itself, for the reason [`NeverRule::prefix`] gives.
@@ -181,9 +185,32 @@ impl Profile {
     /// writable, so a parse failure, an unknown pattern kind and an unknown
     /// `permissions` key each add a diagnostic and no rule.
     pub fn compile(root: impl AsRef<Path>, settings: Option<&str>) -> Self {
-        let root = resolve(root.as_ref(), None, None);
+        let supplied_root = root.as_ref();
+        // Anchor a relative CLI/project root before lexical resolution. In
+        // particular, resolving `.` component-by-component produces an empty
+        // PathBuf, which later makes both `read_dir("")` and
+        // `Command::current_dir("")` fail with ENOENT even though Pane's own
+        // cwd is healthy. Existing roots are canonicalised so the grant and
+        // the path actually opened use one symlink spelling. A missing root
+        // stays anchored at its intended absolute location and therefore
+        // still fails there; it never falls back to another directory.
+        let (anchored, anchor_error) =
+            match anchor_project_root(supplied_root, std::env::current_dir()) {
+                Ok(root) => (root, None),
+                Err(error) => {
+                    // No relative root has a stable identity when cwd cannot
+                    // be read. Use an absolute sentinel only as a display and
+                    // confinement input, then return before compiling any
+                    // grants below.
+                    let sentinel = invalid_root_sentinel();
+                    (sentinel, Some(error))
+                }
+            };
+        let root =
+            std::fs::canonicalize(&anchored).unwrap_or_else(|_| resolve(&anchored, None, None));
         let home = home_dir().map(|home| resolve(&home, None, None));
         let mut profile = Self {
+            invalid_root: None,
             never: never_rules(&root, home.as_deref()),
             root_spelling: spelling(&root),
             root,
@@ -196,6 +223,14 @@ impl Profile {
             mcp_deny: BTreeSet::new(),
             diagnostics: Vec::new(),
         };
+        if let Some(error) = anchor_error {
+            let reason = format!(
+                "could not establish an absolute project root: {error}; no permissions were compiled"
+            );
+            profile.invalid_root = Some(reason.clone());
+            profile.diagnostics.push(reason);
+            return profile;
+        }
         let Some(text) = settings else {
             return profile;
         };
@@ -512,6 +547,9 @@ impl Profile {
     /// `deny: ["mcp__git__*"]` deny nothing at all while every path pattern
     /// beside it globbed — a grant nobody asked for and no diagnostic.
     pub fn admits_mcp_tool(&self, name: &str) -> bool {
+        if self.invalid_root.is_some() {
+            return false;
+        }
         if name.eq_ignore_ascii_case("webfetch") || name.eq_ignore_ascii_case("websearch") {
             return false;
         }
@@ -540,6 +578,9 @@ impl Profile {
                 rule,
             })
         };
+        if let Some(reason) = &self.invalid_root {
+            return denied(reason.clone());
+        }
         if let Some(name) = escaping_command(command_line) {
             return denied(format!(
                 "`{name}` re-enters the sandbox launcher or attaches a debugger and is never grantable by any pattern (sandbox-grants.md §4.6)"
@@ -640,6 +681,9 @@ impl Profile {
                 rule,
             })
         };
+        if let Some(reason) = &self.invalid_root {
+            return denied(reason.clone());
+        }
         for never in &self.never {
             if never.write_only && access != Access::Write {
                 continue;
@@ -1208,6 +1252,51 @@ fn windows_rooted(path: &Path) -> bool {
     text.starts_with("//") || is_drive_prefixed(&text)
 }
 
+/// A Windows path with an actual root. `C:project` is drive-relative, so it
+/// is rejected as ambiguous; `C:/project` and
+/// UNC/verbatim paths already identify a location without process cwd.
+fn windows_absolute(path: &Path) -> bool {
+    let text = display(path).replace('\\', "/");
+    text.starts_with("//")
+        || (text.as_bytes().get(1) == Some(&b':')
+            && text.as_bytes().get(2) == Some(&b'/')
+            && text.as_bytes()[0].is_ascii_alphabetic())
+}
+
+fn anchor_project_root(
+    supplied: &Path,
+    current_dir: std::io::Result<PathBuf>,
+) -> std::io::Result<PathBuf> {
+    if windows_drive_relative(supplied) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a drive-relative Windows project root is ambiguous",
+        ));
+    }
+    if supplied.is_absolute() || windows_absolute(supplied) {
+        Ok(supplied.to_path_buf())
+    } else {
+        current_dir.map(|cwd| cwd.join(supplied))
+    }
+}
+
+fn windows_drive_relative(path: &Path) -> bool {
+    let text = display(path).replace('\\', "/");
+    text.as_bytes().get(1) == Some(&b':')
+        && text.as_bytes()[0].is_ascii_alphabetic()
+        && text.as_bytes().get(2) != Some(&b'/')
+}
+
+#[cfg(windows)]
+fn invalid_root_sentinel() -> PathBuf {
+    PathBuf::from(r"C:\.pane-invalid-relative-root")
+}
+
+#[cfg(not(windows))]
+fn invalid_root_sentinel() -> PathBuf {
+    PathBuf::from("/.pane-invalid-relative-root")
+}
+
 /// `path` as one string, for the sentence a person reads.
 ///
 /// The verbatim prefix is reduced here too, so a refusal quotes the spelling
@@ -1358,4 +1447,31 @@ fn same(expected: char, actual: char, fold: bool) -> bool {
         return true;
     }
     fold && expected.to_lowercase().eq(actual.to_lowercase())
+}
+
+#[cfg(test)]
+mod relative_root_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_cwd_does_not_return_the_relative_root_as_a_location() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "deleted cwd");
+        assert!(anchor_project_root(Path::new("."), Err(error)).is_err());
+    }
+
+    #[test]
+    fn an_invalid_root_refuses_implicit_paths_commands_and_mcp() {
+        let mut profile = Profile::compile(
+            std::env::temp_dir(),
+            Some(r#"{"permissions":{"allow":["Read(**)","Bash","mcp__demo__*"]}}"#),
+        );
+        profile.invalid_root = Some("invalid project root".into());
+        assert!(
+            profile
+                .check("Read", Access::Read, Path::new("file"))
+                .is_err()
+        );
+        assert!(profile.admits_command("pwd").is_err());
+        assert!(!profile.admits_mcp_tool("mcp__demo__read"));
+    }
 }

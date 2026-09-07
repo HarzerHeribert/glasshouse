@@ -1,14 +1,6 @@
-//! The bytes the model receives and the one thing it sends back —
-//! `docs/product/pane/model-contract.md`. This module renders the system
-//! block and each turn's result message, and extracts the model's program
-//! from its reply. It runs nothing and calls nothing outside itself: every
-//! function here is a pure string transformation over its own plain input
-//! types.
-//!
-//! **No message this module builds carries a second serialisation of a call
-//! and its outcome.** A handle's rendered text arrives already made, in
-//! [`CellResult::handle_table`]; this module has no type standing in for a
-//! provider-native call-and-answer pair and never produces one.
+//! The bytes the model receives for Pane's native cell contract. This module
+//! renders prompts and cell feedback; provider call correlation stays typed
+//! in [`crate::contract`].
 
 pub mod declarations;
 
@@ -18,12 +10,56 @@ use crate::tools::registry::{Arg, Tool};
 
 /// `model-contract.md` §2, verbatim. Compared byte for byte by
 /// `prompt_bytes.rs::the_preamble_is_the_contracts_verbatim`.
-pub const PREAMBLE: &str = "You are Pane, a coding assistant. Answer conversational questions directly\nin prose. To act with tools, write TypeScript in exactly one fenced `pane`\nblock:\n\n```pane\nconst file = await read({path: \"example.txt\"});\nconsole.log(file.text);\n```\n\nUse triple backticks, not XML tags. Only `pane` code executes; a syntax\nerror may offer `pane-edit` to amend it.\nTool results are live objects. Use their declared fields in code; the\nhandle table shows bounded previews, not full payloads.\n\nTop-level bindings persist between cells of the same user request only;\nredeclaring replaces them. A new user request starts a fresh runtime.\nEarlier requests are history, not unfinished work. Answer the current\nrequest; a prose answer ends the request without running tools.\nRunning off the end yields results and another turn. `yieldNow(reason)`\nalso yields. A top-level `return` ends the task; return a string to answer\nthe person, grounded in results you actually observed.\nTo interpret file contents, read and yield first, then answer from the\nnext turn's preview. You may return values computed directly from objects.\n\nA thrown error comes back with its source position and completed bindings.\nContinue from that state; failed or skipped calls did not succeed.\nPermissionDenied is final: code cannot widen the session's sandbox grant.";
+pub const PREAMBLE: &str = concat!(
+    "You are Pane, a coding assistant. Answer conversational questions naturally.\n",
+    "To act with tools, make exactly one `execute_cell` call in an assistant turn.\n",
+    "Put every operation in that one TypeScript program; `execute_cell` is the only\n",
+    "provider-native tool. Runtime tools are callable only inside its code.\n",
+    "While you construct the call, none of THIS cell has executed. Code may await\n",
+    "tools and branch on their actual returned values. Batch deterministic work\n",
+    "when useful; stop at the next decision that needs unseen evidence. After\n",
+    "submitting a cell, wait for its correlated result. Never invent output or\n",
+    "infer success: only that result is runtime evidence.\n\n",
+    "A cell is validated before it runs. A parse error runs nothing and may offer\n",
+    "`pane-edit`; a return, yield, or throw stops later code. Tool results are live\n",
+    "objects, but unseen fields are not model-visible. Use declared fields and\n",
+    "standard JavaScript; do not bind a declared tool or host-global name. Reuse\n",
+    "live handles rather than repeating reads. For an existing source change,\n",
+    "`context({path, symbol})` is the first source-reading tool; do not `read` or\n",
+    "print the whole source first. Its complete target is delivered automatically.\n",
+    "In the next cell use `edit({path, old, replacement})`; do not name a variable\n",
+    "`new`. Pane binds the edit to the sole visible source version. Use\n",
+    "compact structured summaries or bounded excerpts instead of broad prints.\n",
+    "`glob` may return directories, so select a file before `read`. A `bash`\n",
+    "result succeeded only when its\n",
+    "`exit_code` says so.\n\n",
+    "Bindings persist between cells of this user request; redeclaring replaces\n",
+    "them. Each new user request starts a fresh runtime. Earlier requests are\n",
+    "history, not unfinished work. Work on the current request, including its\n",
+    "requested tests. Running off the end or `yieldNow(reason)` gives results\n",
+    "and another turn. A top-level `return` ends the task; return an answer\n",
+    "grounded in results you observed.\n\n",
+    "A prose response with no `execute_cell` call ends the task as the answer.\n",
+    "Use prose-only output only when the request is finished; do not use it to\n",
+    "announce work you still intend to perform.\n",
+    "To interpret a file, inspect and yield first, then answer from the feedback.\n",
+    "You may return values computed directly from objects.\n\n",
+    "A thrown error carries its position and completed bindings. Continue from\n",
+    "that state; failed or skipped calls did not succeed. PermissionDenied is\n",
+    "final: code cannot widen the session's sandbox grant.",
+);
 
 /// Request-only context; keeps user text and saved conversation unchanged.
 /// A new runtime is created per user request, not per inference turn.
 pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
     let mut request = conversation.clone();
+    let task_index = request.messages.iter().rposition(|message| {
+        message.role == crate::contract::Role::User
+            && message.historical.is_none()
+            && message.content.len() == 1
+            && matches!(&message.content[0], Block::Text(text) if text == task)
+    });
+    project_runtime_history(&mut request, task_index.unwrap_or(0));
     request.system.push_str(&format!(
         "\n\nYou are Pane, a coding assistant. Configured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
         serde_json::to_string(model).expect("model name serializes")
@@ -38,6 +74,35 @@ pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -
         ));
     }
     request
+}
+
+/// Request-only projection of trusted runtime state. Historical stdout,
+/// errors, yield reasons and repair hints were rendered separately from the
+/// snapshots, so text that resembles a section header is never reinterpreted.
+pub fn project_runtime_history(conversation: &mut Conversation, active_from: usize) {
+    let latest = conversation
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, m)| (i >= active_from && m.historical.is_some()).then_some(i));
+    for (i, message) in conversation.messages.iter_mut().enumerate() {
+        if Some(i) != latest
+            && let Some(history) = &message.historical
+        {
+            // Keep native result correlation intact. A multi-block message
+            // has no unambiguous per-block historical projection, so retain
+            // it conservatively rather than orphaning any call id.
+            if message.content.len() == 1 {
+                match &mut message.content[0] {
+                    Block::Text(text) | Block::ToolResult { content: text, .. } => {
+                        *text = history.clone()
+                    }
+                    Block::ToolUse { .. } => {}
+                }
+            }
+        }
+    }
 }
 
 /// Why the preamble is being replaced: §6's spent task budget, or three
@@ -112,10 +177,11 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     };
     format!(
         "## This session\n\nThe project root is {root}. Relative paths resolve against it.\n\n\
-         The tools above are the whole set. To change part of a file, `read` it, edit the\n\
-         text here in the cell, and `write` it back — you hold the file as an object, so a\n\
-         replacement is `text.replace(a, b)` and not a shell command. `write` replaces the\n\
-         whole file and creates parent directories. Check the command you intend is\n\
+         The tools above are the whole set. To change existing source, call `context` with\n\
+         its target symbol, let that result reach the next turn, then call `edit` with the\n\
+         exact old text and replacement. Use `write` for new files or deliberate whole-file\n\
+         rewrites. File objects retain their bytes; do not print broad contents. Check the\n\
+         command you intend is\n\
          admitted before you build a plan on `bash`.\n\n\
          Sandbox: {writable}; {commands}; network: {network}. Anything outside that throws\n\
          PermissionDenied, which is final — no cell widens a grant, so a refusal means\n\
@@ -239,6 +305,14 @@ pub struct Budget {
 /// nothing to say — except `## Handles`, which is never omitted and writes
 /// `(none)` for an empty table.
 pub fn render_result(result: &CellResult) -> String {
+    render_result_with_state(result, true)
+}
+
+pub fn render_result_history(result: &CellResult) -> String {
+    render_result_with_state(result, false)
+}
+
+fn render_result_with_state(result: &CellResult, include_state: bool) -> String {
     let verb = if result.error.is_some() {
         "threw"
     } else {
@@ -252,11 +326,13 @@ pub fn render_result(result: &CellResult) -> String {
         out.push_str(reason);
     }
 
-    out.push_str("\n\n## Handles\n");
-    if result.handle_table.is_empty() {
-        out.push_str("(none)");
-    } else {
-        out.push_str(&result.handle_table);
+    if include_state {
+        out.push_str("\n\n## Handles\n");
+        if result.handle_table.is_empty() {
+            out.push_str("(none)");
+        } else {
+            out.push_str(&result.handle_table);
+        }
     }
 
     if let Some(error) = &result.error {
@@ -270,7 +346,7 @@ pub fn render_result(result: &CellResult) -> String {
         }
     }
 
-    if !result.plan.is_empty() {
+    if include_state && !result.plan.is_empty() {
         out.push_str("\n\n## Plan\n");
         let rows: Vec<String> = result
             .plan
@@ -285,8 +361,10 @@ pub fn render_result(result: &CellResult) -> String {
         out.push_str(stdout);
     }
 
-    out.push_str("\n\n## Budget\n");
-    out.push_str(&render_budget_line(&result.budget));
+    if include_state {
+        out.push_str("\n\n## Budget\n");
+        out.push_str(&render_budget_line(&result.budget));
+    }
 
     out
 }
@@ -323,57 +401,14 @@ fn thousands(n: u64) -> String {
     out
 }
 
-/// What one assistant message contained, per §5.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Extracted {
-    /// Exactly one fenced block tagged `pane`; its source, unparsed.
-    Program(String),
-    /// One complete `pane-edit` fence: JSON amending a parse-failed cell.
-    Edit(String),
-    /// Two or more `pane` blocks in the same message. Neither runs.
-    TwoBlocks,
-    /// No `pane` block — including a message whose only fenced block is
-    /// tagged something else, such as `ts`.
-    Prose,
-}
+mod protocol;
+pub use protocol::{
+    COMPLETE_MARKER, Extracted, MAX_PANE_BLOCKS, MAX_PROGRAM_BYTES, completion_text,
+    extract_program,
+};
 
-/// §5: the fence is three backticks at the start of a line, the info string
-/// is the rest of that line trimmed, and a block ends at the next line that
-/// is exactly three backticks.
-pub fn extract_program(assistant_text: &str) -> Extracted {
-    let lines: Vec<&str> = assistant_text.lines().collect();
-    let mut programs = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if let Some(rest) = lines[i].strip_prefix("```") {
-            let info = rest.trim();
-            let mut body = Vec::new();
-            let mut j = i + 1;
-            while j < lines.len() && lines[j] != "```" {
-                body.push(lines[j]);
-                j += 1;
-            }
-            if info == "pane" {
-                programs.push(Extracted::Program(body.join("\n")));
-            } else if info == "pane-edit" {
-                // An unfinished edit is invalid data, never an executable prefix.
-                programs.push(Extracted::Edit(if j < lines.len() {
-                    body.join("\n")
-                } else {
-                    String::new()
-                }));
-            }
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    match programs.len() {
-        0 => Extracted::Prose,
-        1 => programs.into_iter().next().expect("length checked above"),
-        _ => Extracted::TwoBlocks,
-    }
-}
+/// Feedback for a reply that announced work but supplied no action or completion.
+pub const CONTINUE_WORK: &str = "No executable action or usable answer was supplied. Continue with one Pane cell, or send the final answer as prose without a cell.";
 
 // --- compaction: what a past turn still has to say ---------------------
 
@@ -447,6 +482,8 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
     let last_rendered = conversation.messages.iter().rposition(|message| {
         message.content.iter().any(|block| match block {
             Block::Text(text) => is_rendered_result(text),
+            Block::ToolResult { content, .. } => is_rendered_result(content),
+            Block::ToolUse { .. } => false,
         })
     });
     let Some(last_rendered) = last_rendered else {
@@ -459,7 +496,10 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
             continue;
         }
         for block in message.content.iter_mut() {
-            let Block::Text(text) = block;
+            let text = match block {
+                Block::Text(text) | Block::ToolResult { content: text, .. } => text,
+                Block::ToolUse { .. } => continue,
+            };
             if !is_rendered_result(text) {
                 continue;
             }

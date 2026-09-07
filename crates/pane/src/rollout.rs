@@ -1,8 +1,8 @@
 //! The append-only rollout file: one JSON object per line, one file per
-//! session. [`contract::RolloutKind`]'s doc comment is why one file rather
+//! session. [`crate::contract::RolloutKind`]'s doc comment is why one file rather
 //! than two -- 61C's `"turn"` lines and 61E's `"cell"` lines share it so that
 //! append order is the session's order. [`resume`] rebuilds a
-//! [`contract::Conversation`] by reading the file, never by replaying it:
+//! [`crate::contract::Conversation`] by reading the file, never by replaying it:
 //! `runtime-contract.md` §4 fixes that a resumed program must not re-run a
 //! side effect, and "a program that deleted a branch would delete it twice"
 //! is the reason.
@@ -14,8 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::contract::{Conversation, Message, Role, RolloutKind, SessionId};
+use crate::contract::{Block, Conversation, Message, Role, RolloutKind, SessionId};
 use crate::runtime::outcome::CellRecord;
+use crate::tui::CellView;
 
 /// The `kind` pane writes for the one line per session that carries the
 /// system prompt. `RolloutKind` (`contract.rs`, frozen) only names the two
@@ -43,6 +44,68 @@ struct TurnLine {
     role: String,
     text: String,
     at_millis: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    historical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocks: Option<Vec<PersistedBlock>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PersistedBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
+impl PersistedBlock {
+    fn from_block(block: &Block) -> Self {
+        match block {
+            Block::Text(text) => Self::Text { text: text.clone() },
+            Block::ToolUse { id, name, input } => Self::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Self::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            },
+        }
+    }
+
+    fn into_block(self) -> Block {
+        match self {
+            Self::Text { text } => Block::Text(text),
+            Self::ToolUse { id, name, input } => Block::ToolUse { id, name, input },
+            Self::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
+        }
+    }
 }
 
 /// One cell's line: `runtime-contract.md` §4's own object, with the two
@@ -58,6 +121,14 @@ struct CellLine<'a> {
     session_id: &'a str,
     #[serde(flatten)]
     record: &'a CellRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ViewLine {
+    kind: String,
+    session_id: String,
+    ordinal: usize,
+    view: CellView,
 }
 
 fn now_millis() -> u64 {
@@ -98,8 +169,61 @@ impl Rollout {
         Ok(rollout)
     }
 
+    /// Append the effective context for a new task without changing chat history.
+    /// The original system row remains an immutable session-start record.
+    pub fn record_context(&mut self, system: &str) -> io::Result<()> {
+        self.append_line(&SystemLine {
+            kind: "context".into(),
+            session_id: self.session_id.as_str().to_string(),
+            text: system.to_string(),
+        })
+    }
+
     /// Appends one turn at the next turn number and advances it.
     pub fn record_turn(&mut self, role: Role, text: &str) -> io::Result<()> {
+        self.record_feedback(role, text, None)
+    }
+
+    /// Append a protocol message without flattening its typed content blocks.
+    pub fn record_message(&mut self, message: &Message) -> io::Result<()> {
+        let text = message.content.iter().map(Block::text).collect::<String>();
+        let blocks = message
+            .content
+            .iter()
+            .map(PersistedBlock::from_block)
+            .collect();
+        self.record_turn_parts(
+            message.role,
+            &text,
+            message.historical.as_deref(),
+            false,
+            Some(blocks),
+        )
+    }
+
+    /// Preserve renderer provenance across resume without changing the full
+    /// original text or inferring runtime state from a message's contents.
+    pub fn record_feedback(
+        &mut self,
+        role: Role,
+        text: &str,
+        historical: Option<&str>,
+    ) -> io::Result<()> {
+        self.record_turn_parts(role, text, historical, false, None)
+    }
+
+    pub fn record_checkpoint(&mut self, text: &str) -> io::Result<()> {
+        self.record_turn_parts(Role::User, text, None, true, None)
+    }
+
+    fn record_turn_parts(
+        &mut self,
+        role: Role,
+        text: &str,
+        historical: Option<&str>,
+        checkpoint: bool,
+        blocks: Option<Vec<PersistedBlock>>,
+    ) -> io::Result<()> {
         let line = TurnLine {
             kind: RolloutKind::Turn.as_str().to_string(),
             session_id: self.session_id.as_str().to_string(),
@@ -107,6 +231,9 @@ impl Rollout {
             role: role.as_str().to_string(),
             text: text.to_string(),
             at_millis: now_millis(),
+            historical: historical.map(str::to_owned),
+            checkpoint: checkpoint.then_some(true),
+            blocks,
         };
         self.append_line(&line)?;
         self.next_turn += 1;
@@ -128,6 +255,17 @@ impl Rollout {
             record,
         };
         self.append_line(&line)
+    }
+
+    /// Persist display-only cell evidence so restart can restore inspection
+    /// without parsing rendered prose or replaying source.
+    pub fn record_view(&mut self, ordinal: usize, view: &CellView) -> io::Result<()> {
+        self.append_line(&ViewLine {
+            kind: "view".into(),
+            session_id: self.session_id.as_str().into(),
+            ordinal,
+            view: view.clone(),
+        })
     }
 
     fn append_line<T: Serialize>(&mut self, line: &T) -> io::Result<()> {
@@ -163,7 +301,7 @@ pub fn resume(path: &Path) -> io::Result<Conversation> {
             Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
         };
         let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        if kind == SYSTEM_KIND {
+        if kind == SYSTEM_KIND || kind == "context" {
             if let Some(text) = value.get("text").and_then(|t| t.as_str()) {
                 system = text.to_string();
             }
@@ -174,10 +312,91 @@ pub fn resume(path: &Path) -> io::Result<Conversation> {
                 _ => continue,
             };
             let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            messages.push(Message::text(role, text));
+            if value.get("checkpoint").and_then(|v| v.as_bool()) == Some(true) {
+                continue;
+            }
+            let blocks = value
+                .get("blocks")
+                .cloned()
+                .and_then(|raw| serde_json::from_value::<Vec<PersistedBlock>>(raw).ok());
+            let mut message = if let Some(blocks) = blocks {
+                Message {
+                    role,
+                    content: blocks.into_iter().map(PersistedBlock::into_block).collect(),
+                    historical: None,
+                }
+            } else {
+                Message::text(role, text)
+            };
+            if role == Role::User {
+                message.historical = value
+                    .get("historical")
+                    .and_then(|h| h.as_str())
+                    .map(str::to_owned);
+            }
+            messages.push(message);
         }
         // Any other kind (e.g. `RolloutKind::Cell`'s `"cell"`) is skipped.
     }
 
     Ok(Conversation { system, messages })
+}
+
+/// The latest provider-only checkpoint and the visible-message index after
+/// which subsequent turns must be appended. Checkpoint rows are operational
+/// metadata, not chat messages, so [`resume`] keeps the full visible chat
+/// while this restores the smaller provider projection after restart.
+pub fn resume_checkpoint(path: &Path) -> io::Result<Option<(String, usize)>> {
+    let file = File::open(path)?;
+    let lines: Vec<String> = BufReader::new(file).lines().collect::<io::Result<_>>()?;
+    let mut visible_messages = 0usize;
+    let mut checkpoint = None;
+    for (index, raw) in lines.iter().enumerate() {
+        let value: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) if index + 1 == lines.len() => continue,
+            Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
+        };
+        if value.get("kind").and_then(|v| v.as_str()) != Some(RolloutKind::Turn.as_str()) {
+            continue;
+        }
+        if value.get("checkpoint").and_then(|v| v.as_bool()) == Some(true) {
+            checkpoint = Some((
+                value
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                visible_messages,
+            ));
+        } else if matches!(
+            value.get("role").and_then(|v| v.as_str()),
+            Some("user" | "assistant")
+        ) {
+            visible_messages += 1;
+        }
+    }
+    Ok(checkpoint)
+}
+
+/// Restore the latest persisted display view for each ordinal. Older logs
+/// simply return no views; nothing is inferred from model text.
+pub fn resume_views(path: &Path) -> io::Result<Vec<(usize, CellView)>> {
+    let file = File::open(path)?;
+    let lines: Vec<String> = BufReader::new(file).lines().collect::<io::Result<_>>()?;
+    let mut views = std::collections::BTreeMap::new();
+    for (index, raw) in lines.iter().enumerate() {
+        let value: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) if index + 1 == lines.len() => continue,
+            Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
+        };
+        if value.get("kind").and_then(|v| v.as_str()) != Some("view") {
+            continue;
+        }
+        let line: ViewLine = serde_json::from_value(value)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        views.insert(line.ordinal, line.view);
+    }
+    Ok(views.into_iter().collect())
 }

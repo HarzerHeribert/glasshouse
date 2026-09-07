@@ -5,6 +5,7 @@
 //! Composition only. [`registry`] declares what exists; [`invoke`] runs one,
 //! under the sandbox, and fires the hooks around it.
 
+pub mod exact_edit;
 pub mod invoke;
 pub mod registry;
 

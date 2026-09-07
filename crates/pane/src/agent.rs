@@ -77,13 +77,22 @@ pub fn run(
 ) -> AgentResult {
     let tools: Vec<&registry::Tool> = registry::ALL.iter().collect();
     let facts = crate::session::session_facts(profile);
-    let system = prompt::render_system(SUBAGENT_INSTRUCTIONS, &tools, &facts);
+    let instructions = format!(
+        "{}\n\n{}",
+        SUBAGENT_INSTRUCTIONS,
+        crate::project::instructions::root(profile)
+    );
+    let mut system = prompt::render_system(&instructions, &tools, &facts);
+    system.push_str("\n\n");
+    system.push_str(&crate::project::orientation::collect(profile));
     let mut conversation = Conversation {
         system,
         messages: vec![Message::text(Role::User, task)],
     };
 
-    let mut runtime = Runtime::new(profile, glasshouse, session).as_subagent();
+    let mut runtime = Runtime::new(profile, glasshouse, session)
+        .as_subagent()
+        .with_instruction_context();
     let mut tokens = 0u64;
     let turns_allowed = options.turns.clamp(1, MAX_TURNS);
 
@@ -91,7 +100,9 @@ pub fn run(
         if token.is_cancelled() {
             return finish("", "cancelled", turn - 1, tokens);
         }
-        let sent = match wire::send_turn_configured(&conversation, &options.model, options.effort) {
+        let mut request = conversation.clone();
+        prompt::project_runtime_history(&mut request, 0);
+        let sent = match wire::send_turn_configured(&request, &options.model, options.effort) {
             Ok(sent) => sent,
             Err(error) => return finish(&error.to_string(), "failed", turn, tokens),
         };
@@ -99,64 +110,162 @@ pub fn run(
             tokens += usage.input_tokens + usage.output_tokens;
         }
         let text = message_text(&sent.message);
-        if text.trim().is_empty() {
+        let calls: Vec<_> = sent
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                crate::contract::Block::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if text.trim().is_empty() && calls.is_empty() {
             return finish("the model returned an empty reply", "failed", turn, tokens);
         }
         conversation.messages.push(sent.message);
 
-        let program = match prompt::extract_program(&text) {
-            Extracted::Program(source) => source,
-            Extracted::Edit(json) => {
-                match runtime
-                    .syntax_failure()
-                    .ok_or_else(|| "No syntax-failed cell is available in this task.".to_string())
-                    .and_then(|failed| failed.apply(&json))
-                {
-                    Ok(source) => source,
-                    Err(error) => {
-                        let hint = runtime
-                            .syntax_failure()
-                            .map(|failed| failed.hint())
-                            .unwrap_or_default();
-                        conversation.messages.push(Message::text(
-                            Role::User,
-                            format!("CellEditError: {error} Nothing ran.\n{hint}"),
-                        ));
-                        continue;
-                    }
+        let native = calls.first().cloned();
+        if calls.len() > 1 || native.as_ref().is_some_and(|call| call.1 != "execute_cell") {
+            let explanation = if calls.len() > 1 {
+                "ProtocolError: exactly one execute_cell call is allowed; nothing ran."
+            } else {
+                "ProtocolError: unknown tool call; nothing ran."
+            };
+            conversation.messages.push(Message {
+                role: Role::User,
+                content: calls
+                    .iter()
+                    .map(|(id, _, _)| crate::contract::Block::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: explanation.into(),
+                        is_error: true,
+                    })
+                    .collect(),
+                historical: None,
+            });
+            continue;
+        }
+        let program = if let Some((id, _, input)) = &native {
+            match input
+                .as_object()
+                .filter(|object| object.len() == 1)
+                .and_then(|object| object.get("code"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(code) => code.to_string(),
+                None => {
+                    conversation.messages.push(Message::tool_result(
+                        id.clone(),
+                        "ProtocolError: execute_cell input must be exactly {\"code\": string}; nothing ran.",
+                        true,
+                    ));
+                    continue;
                 }
             }
-            // Prose from a subagent is its answer: it has no person to talk
-            // to and no next instruction coming, so waiting for a program it
-            // has already decided not to write would spend the budget on
-            // silence.
-            Extracted::Prose => return finish(&text, "returned", turn, tokens),
-            Extracted::TwoBlocks => {
-                conversation.messages.push(Message::text(
-                    Role::User,
-                    "two `pane` blocks arrived and neither ran; send exactly one",
-                ));
-                continue;
+        } else {
+            match prompt::extract_program(&text) {
+                Extracted::Program(source) => source,
+                Extracted::Edit(json) => {
+                    match runtime
+                        .syntax_failure()
+                        .ok_or_else(|| {
+                            "No syntax-failed cell is available in this task.".to_string()
+                        })
+                        .and_then(|failed| failed.apply(&json))
+                    {
+                        Ok(source) => source,
+                        Err(error) => {
+                            let hint = runtime
+                                .syntax_failure()
+                                .map(|failed| failed.hint())
+                                .unwrap_or_default();
+                            conversation.messages.push(Message::text(
+                                Role::User,
+                                format!("CellEditError: {error} Nothing ran.\n{hint}"),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                Extracted::Prose => {
+                    if let Some(answer) = prompt::completion_text(&text) {
+                        runtime.end_task();
+                        return finish(&answer, "returned", turn, tokens);
+                    }
+                    conversation
+                        .messages
+                        .push(Message::text(Role::User, prompt::CONTINUE_WORK));
+                    continue;
+                }
+                Extracted::Invalid(error) => {
+                    conversation.messages.push(Message::text(
+                        Role::User,
+                        format!("ProtocolError: {error} Nothing ran."),
+                    ));
+                    continue;
+                }
+                Extracted::TwoBlocks => {
+                    conversation.messages.push(Message::text(Role::User,
+                    "Mixed or multiple pane-edit blocks are ambiguous. Send one repair or ordinary Pane code; nothing ran."));
+                    continue;
+                }
             }
         };
 
         let outcome = runtime.run_cell(&program);
+        let instruction_boundary = runtime.pending_instructions();
+        if let Some(pending) = &instruction_boundary {
+            conversation.system.push_str("\n\n");
+            conversation.system.push_str(&pending.text);
+        }
         if let CellOutcome::Returned {
             value, terminal, ..
         } = &outcome
         {
             let answer = terminal.render(value);
+            if let Some((id, _, _)) = &native {
+                let result = result_message(&outcome, turn);
+                let mut feedback = prompt::render_result(&result);
+                feedback.push_str("\n\n## Return\n");
+                feedback.push_str(&answer);
+                conversation
+                    .messages
+                    .push(Message::tool_result(id.clone(), feedback, false));
+            }
             runtime.end_task();
             return finish(&answer, "returned", turn, tokens);
         }
-        let mut result = result_message(&outcome, turn);
+        let result = result_message(&outcome, turn);
+        let mut full = prompt::render_result(&result);
+        let mut historical = prompt::render_result_history(&result);
         if let Some(failed) = runtime.syntax_failure() {
-            result.push_str("\n\n");
-            result.push_str(&failed.hint());
+            for text in [&mut full, &mut historical] {
+                text.push_str("\n\n");
+                text.push_str(&failed.hint());
+            }
         }
-        conversation
-            .messages
-            .push(Message::text(Role::User, result));
+        if let Some((id, _, _)) = &native {
+            let message = Message::runtime_tool_result(
+                id.clone(),
+                full,
+                matches!(outcome, CellOutcome::Threw { .. }),
+                historical,
+            );
+            conversation.messages.push(message);
+        } else {
+            conversation
+                .messages
+                .push(Message::runtime(full, historical));
+        }
+        if let Some(pending) = instruction_boundary {
+            if pending.fatal {
+                runtime.end_task();
+                return finish(&pending.text, "failed", turn, tokens);
+            }
+            runtime.acknowledge_instructions();
+        }
     }
 
     runtime.end_task();
@@ -181,8 +290,9 @@ fn message_text(message: &Message) -> String {
     message
         .content
         .iter()
-        .map(|block| match block {
-            crate::contract::Block::Text(text) => text.as_str(),
+        .filter_map(|block| match block {
+            crate::contract::Block::Text(text) => Some(text.as_str()),
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -191,7 +301,7 @@ fn message_text(message: &Message) -> String {
 /// The subagent's own result message, which is the parent's renderer with no
 /// budget line: a subagent is bounded by its turn count, and a token figure it
 /// cannot act on is prompt it pays for.
-fn result_message(outcome: &CellOutcome, cell: u64) -> String {
+fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
     let turn = outcome.turn();
     let error = match outcome {
         CellOutcome::Threw { error, .. } => Some(ErrorSection {
@@ -205,7 +315,7 @@ fn result_message(outcome: &CellOutcome, cell: u64) -> String {
         }),
         _ => None,
     };
-    prompt::render_result(&CellResult {
+    CellResult {
         cell,
         elapsed_ms: turn.elapsed_ms,
         error,
@@ -220,7 +330,7 @@ fn result_message(outcome: &CellOutcome, cell: u64) -> String {
             cells_cap: 0,
         },
         plan: turn.plan.clone(),
-    })
+    }
 }
 
 /// What a subagent is told about itself, appended to the ordinary system

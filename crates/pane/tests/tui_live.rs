@@ -428,3 +428,22 @@ fn theme_picker_applies_local_palettes_without_a_request() {
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
+
+#[test]
+fn fragmented_mouse_reports_do_not_become_prompt_text() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"\x1b");
+    thread::sleep(Duration::from_millis(5));
+    app.send(b"[<65;101;28M");
+    app.send(b"WHEEL_INPUT_OK\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        request["messages"][0]["content"][0]["text"],
+        "WHEEL_INPUT_OK"
+    );
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}

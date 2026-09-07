@@ -110,9 +110,12 @@ pub(super) fn rail(
 ) {
     let border = Block::default()
         .borders(Borders::LEFT)
-        .title(" telemetry ")
+        .title("   telemetry ")
         .border_style(Style::default().fg(Color::DarkGray));
-    let inner = border.inner(area);
+    let mut inner = border.inner(area);
+    let padding = inner.width.min(2);
+    inner.x += padding;
+    inner.width = inner.width.saturating_sub(padding + 1);
     frame.render_widget(border, area);
     let width = usize::from(inner.width);
     let mut lines = vec![Line::styled(

@@ -28,24 +28,34 @@ impl Role {
     }
 }
 
-/// One content block.
-///
-/// **Text only, and that is the design rather than a stub.**
-/// `docs/product/pane/model-contract.md`'s contract is that the model never
-/// sends or receives a tool-use or tool-result block: it answers with one
-/// fenced program, and 61E's runtime is what reads that. A `ToolUse` variant
-/// added here for symmetry would be a second serialisation of a result into
-/// the conversation, which that contract's invariant forbids outright.
+/// One ordered provider content block. Native cell calls and their results
+/// remain structured so correlation survives replay and gateway translation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 impl Block {
-    /// The block's text, for a caller rendering or measuring it.
+    /// The block's actual display payload: prose, submitted cell source, or
+    /// returned cell feedback. Protocol ids and names are never synthesized
+    /// into prose here.
     pub fn text(&self) -> &str {
         match self {
-            Block::Text(text) => text,
+            Block::Text(text) | Block::ToolResult { content: text, .. } => text,
+            Block::ToolUse { input, .. } => input
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
         }
     }
 }
@@ -55,6 +65,10 @@ impl Block {
 pub struct Message {
     pub role: Role,
     pub content: Vec<Block>,
+    /// Trusted renderer-produced history after a newer live-state snapshot
+    /// supersedes this one. Never inferred from user/model text or included as
+    /// metadata in provider requests; the rollout preserves it for resume.
+    pub(crate) historical: Option<String>,
 }
 
 impl Message {
@@ -62,6 +76,46 @@ impl Message {
         Self {
             role,
             content: vec![Block::Text(text.into())],
+            historical: None,
+        }
+    }
+
+    pub fn runtime(text: impl Into<String>, historical: impl Into<String>) -> Self {
+        Self {
+            historical: Some(historical.into()),
+            ..Self::text(Role::User, text)
+        }
+    }
+
+    /// One real cell result correlated to the assistant call that requested
+    /// it. It is not duplicated into an adjacent text block.
+    pub fn tool_result(
+        tool_use_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![Block::ToolResult {
+                tool_use_id: tool_use_id.into(),
+                content: content.into(),
+                is_error,
+            }],
+            historical: None,
+        }
+    }
+
+    /// A correlated cell result with the trusted compact history renderer
+    /// produced for the same cell.
+    pub fn runtime_tool_result(
+        tool_use_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+        historical: impl Into<String>,
+    ) -> Self {
+        Self {
+            historical: Some(historical.into()),
+            ..Self::tool_result(tool_use_id, content, is_error)
         }
     }
 }

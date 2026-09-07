@@ -99,6 +99,83 @@ fn start_provider_sequence(replies: Vec<&'static str>) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+fn start_native_provider_sequence(replies: Vec<serde_json::Value>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for payload in replies {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = rest.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let payload = payload.to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(payload.as_bytes());
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn subagent_uses_native_cell_handoff_across_turns() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("native");
+    let reply = |id: &str, code: &str| {
+        serde_json::json!({
+            "role":"assistant", "content":[{"type":"tool_use","id":id,"name":"execute_cell","input":{"code":code}}],
+            "usage":{"input_tokens":11,"output_tokens":7}
+        })
+    };
+    let base = start_native_provider_sequence(vec![
+        reply("first", "const answer = 42; console.log(answer);"),
+        reply("second", "return `native ${answer}`;"),
+    ]);
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base);
+    }
+    let _handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "compute",
+        &AgentOptions {
+            turns: 4,
+            model: "test-model".into(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let events = wait_for_event(&fixture.session, Duration::from_secs(20));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    let done = events
+        .iter()
+        .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        .unwrap();
+    let result = bg::payload(&fixture.session, done.payload.as_str()).unwrap();
+    assert_eq!(result.status, "returned");
+    assert_eq!(result.stdout, "native 42");
+}
+
 fn wait_for_event(session: &SessionId, within: Duration) -> Vec<pane::events::Event> {
     let deadline = Instant::now() + within;
     loop {
@@ -237,4 +314,36 @@ fn a_subagent_can_amend_its_parse_failed_cell() {
     assert_eq!(result.status, "returned");
     assert_eq!(result.answer, "repaired");
     assert_eq!(result.turns, 2);
+}
+
+#[test]
+fn subagent_plain_prose_is_its_result_without_a_marker_round_trip() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("explicit-completion");
+    let base = start_provider_sequence(vec![
+        "I will calculate the answer next.",
+        "The answer is 42.\n<!-- pane:done -->",
+    ]);
+    // SAFETY: serialized with the other environment-dependent tests.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", base);
+    }
+    let result = pane::agent::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "Answer the question",
+        &AgentOptions {
+            turns: 2,
+            model: "test-model".into(),
+            effort: pane::wire::Effort::default(),
+        },
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    assert_eq!(result.status, "returned");
+    assert_eq!(result.answer, "I will calculate the answer next.");
+    assert_eq!(result.turns, 1);
 }
