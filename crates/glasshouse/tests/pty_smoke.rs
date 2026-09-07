@@ -2226,7 +2226,7 @@ fn the_shell_opens_in_a_real_terminal_and_answers_the_keyboard() {
         "the root field must show the project root; found `{field}`\n         --- screen ---\n{screen}\n--- end ---"
     );
     assert!(
-        screen.contains("glasshouse"),
+        screen.contains("GLASSHOUSE"),
         "the shell must name itself:\n{screen}"
     );
 

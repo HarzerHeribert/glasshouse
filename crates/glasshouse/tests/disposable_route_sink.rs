@@ -649,12 +649,17 @@ mod screen {
         /// The causal ready signal, not a delay: the banner cannot be on
         /// screen unless raw mode is already on and the event source exists.
         fn wait_for_first_frame(&mut self) {
-            let banner = format!("glasshouse {}", glasshouse::VERSION);
+            // The title and version accessory occupy separate parts of the header.
+            let banner = "GLASSHOUSE";
+            let version = format!("v{}", glasshouse::VERSION);
             let cols = self.parser.screen().size().1;
             let deadline = Instant::now() + STARTUP_TIMEOUT;
             while Instant::now() < deadline {
                 self.drain();
-                if self.row_containing(&banner, cols).is_some() {
+                if self
+                    .row_containing(banner, cols)
+                    .is_some_and(|row| row.contains(&version))
+                {
                     return;
                 }
                 if let Some(status) = self.child.try_wait().expect("try_wait") {
@@ -668,7 +673,7 @@ mod screen {
                 std::thread::sleep(READ_POLL);
             }
             panic!(
-                "glasshouse never drew {banner:?} within {STARTUP_TIMEOUT:?}.\n--- the screen \
+                "glasshouse never drew {banner:?} and {version:?} within {STARTUP_TIMEOUT:?}.\n--- the screen \
                  ---\n{}\n--- what it wrote ---\n{}\n--- end ---",
                 self.screen_text(),
                 self.raw_text()

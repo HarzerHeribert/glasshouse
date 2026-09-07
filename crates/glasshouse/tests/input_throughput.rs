@@ -320,11 +320,14 @@ impl Shell {
     /// Wait until the interface has drawn itself, or fail saying what it did
     /// instead.
     fn wait_for_first_frame(&mut self) {
-        let banner = format!("glasshouse {}", glasshouse::VERSION);
+        // The title and version accessory occupy separate parts of the header.
+        let banner = "GLASSHOUSE";
+        let version = format!("v{}", glasshouse::VERSION);
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         while Instant::now() < deadline {
             self.drain();
-            if strip_terminal_sequences(&self.output()).contains(&banner) {
+            let screen = strip_terminal_sequences(&self.output());
+            if screen.contains(banner) && screen.contains(&version) {
                 return;
             }
             if let Some(status) = self.try_wait() {
@@ -338,7 +341,7 @@ impl Shell {
             std::thread::sleep(READ_POLL);
         }
         panic!(
-            "glasshouse never drew {banner:?} within {STARTUP_TIMEOUT:?}\n--- output ---\n{}\n\
+            "glasshouse never drew {banner:?} and {version:?} within {STARTUP_TIMEOUT:?}\n--- output ---\n{}\n\
              --- end ---",
             self.output()
         );
