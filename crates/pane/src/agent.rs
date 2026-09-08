@@ -59,14 +59,25 @@ pub struct AgentOptions {
     pub effort: Effort,
 }
 
-/// Runs one subagent to its end. Blocking, and called on `bg`'s own worker
-/// thread — never on the thread that holds the parent isolate.
+/// A nested loop narrowed from a subagent to a helper.
 ///
-/// **The profile is the parent's, cloned and not recompiled.** A subagent that
-/// compiled its own profile could differ from its parent's by a file edited
-/// mid-session, which is a widening no one asked for; `sandbox-grants.md` §1.5
-/// computes a profile once per session and this honours that across the nested
-/// loop too.
+/// The invariant: **a helper holds only what its spec names, and is a leaf.**
+/// `little-helpers.md` puts both in the runtime rather than in a helper's
+/// prose, so this is what [`run_narrowed`] reads in place of `registry::ALL`
+/// and in place of granting the project's `[helpers]` onward.
+#[derive(Debug, Clone, Copy)]
+pub struct Narrowed {
+    /// Tool names, resolved against `registry::ALL`. `helpers::check_spec`
+    /// has already refused an unregistered or mutating name at startup.
+    pub tools: &'static [&'static str],
+    /// The instructions this loop opens with, in place of
+    /// [`SUBAGENT_INSTRUCTIONS`] — a helper's own `preamble`.
+    pub instructions: &'static str,
+}
+
+/// Runs one subagent to its end, holding every registered tool. Blocking, and
+/// called on `bg`'s own worker thread — never on the thread that holds the
+/// parent isolate.
 pub fn run(
     profile: &Profile,
     glasshouse: &Glasshouse,
@@ -75,11 +86,30 @@ pub fn run(
     options: &AgentOptions,
     token: &CancellationToken,
 ) -> AgentResult {
-    let tools: Vec<&registry::Tool> = registry::ALL.iter().collect();
+    run_narrowed(profile, glasshouse, session, task, options, token, None)
+}
+
+/// The same loop, optionally narrowed to one helper's toolset and preamble.
+///
+/// **The profile is the parent's, cloned and not recompiled.** A subagent that
+/// compiled its own profile could differ from its parent's by a file edited
+/// mid-session, which is a widening no one asked for; `sandbox-grants.md` §1.5
+/// computes a profile once per session and this honours that across the nested
+/// loop too.
+pub fn run_narrowed(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &AgentOptions,
+    token: &CancellationToken,
+    narrowed: Option<&Narrowed>,
+) -> AgentResult {
+    let tools = toolset(narrowed);
     let facts = crate::session::session_facts(profile);
     let instructions = format!(
         "{}\n\n{}",
-        SUBAGENT_INSTRUCTIONS,
+        narrowed.map_or(SUBAGENT_INSTRUCTIONS, |narrowed| narrowed.instructions),
         crate::project::instructions::root(profile)
     );
     let mut system = prompt::render_system(&instructions, &tools, &facts);
@@ -90,18 +120,22 @@ pub fn run(
         messages: vec![Message::text(Role::User, task)],
     };
 
-    // A subagent completes a goal, so it hits the same walls the task model
-    // does and gets the same helpers. It is handed a profile and nothing
-    // else — `bg` calls this on its own thread — so it reads `[helpers]`
-    // from the project itself; a file that will not parse leaves helpers
-    // off, which is the same fail-closed answer as an unset model.
-    let helpers = crate::config::PaneConfig::load(profile.root())
-        .unwrap_or_default()
-        .helpers;
     let mut runtime = Runtime::new(profile, glasshouse, session)
         .as_subagent()
-        .with_instruction_context()
-        .with_helpers(helpers);
+        .with_instruction_context();
+    if narrowed.is_none() {
+        // A subagent completes a goal, so it hits the same walls the task
+        // model does and gets the same helpers; a narrowed loop is itself a
+        // helper and gets none, which is what makes it a leaf. It is handed a
+        // profile and nothing else — `bg` calls this on its own thread — so it
+        // reads `[helpers]` from the project itself; a file that will not
+        // parse leaves helpers off, which is the same fail-closed answer as an
+        // unset model.
+        let helpers = crate::config::PaneConfig::load(profile.root())
+            .unwrap_or_default()
+            .helpers;
+        runtime = runtime.with_helpers(helpers);
+    }
     let mut tokens = 0u64;
     let turns_allowed = options.turns.clamp(1, MAX_TURNS);
 
@@ -287,6 +321,22 @@ pub fn run(
     )
 }
 
+/// The tools this loop is declared, by name.
+///
+/// The invariant: **a narrowed loop is declared only what its spec names.** A
+/// name that resolves to nothing is dropped rather than substituted, and
+/// `helpers::check_spec` has already refused such a name at startup.
+fn toolset(narrowed: Option<&Narrowed>) -> Vec<&'static registry::Tool> {
+    match narrowed {
+        None => registry::ALL.iter().collect(),
+        Some(narrowed) => narrowed
+            .tools
+            .iter()
+            .filter_map(|name| registry::lookup(name))
+            .collect(),
+    }
+}
+
 fn finish(answer: &str, status: &str, turns: u64, tokens: u64) -> AgentResult {
     AgentResult {
         answer: answer.to_string(),
@@ -359,3 +409,38 @@ you have it — your turns are counted against the session that started you. You
 have no inbox, no messages, and you cannot start a subagent of your own. If the \
 question cannot be answered with the grant you have, return that plainly \
 instead of working around it.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `little-helpers.md`'s first build cost: the tool list comes from the
+    /// caller instead of `registry::ALL`. The mutating tools are the point --
+    /// a narrowed loop is never declared them, so "a helper never writes" is
+    /// a list it does not have rather than a rule it might disregard.
+    #[test]
+    fn a_narrowed_loop_is_declared_only_the_tools_it_named() {
+        let every: Vec<&str> = toolset(None).iter().map(|tool| tool.name()).collect();
+        assert_eq!(
+            every.len(),
+            registry::ALL.len(),
+            "a subagent still holds every registered tool: {every:?}"
+        );
+
+        let scout = Narrowed {
+            tools: &["read", "grep"],
+            instructions: "",
+        };
+        let named: Vec<&str> = toolset(Some(&scout))
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+        assert_eq!(named, ["read", "grep"], "in the order the spec named them");
+        for forbidden in crate::helpers::FORBIDDEN_TOOLS {
+            assert!(
+                !named.contains(&forbidden),
+                "a narrowed loop must not be declared `{forbidden}`"
+            );
+        }
+    }
+}

@@ -577,6 +577,37 @@ fn render(
     }
 }
 
+/// The signal a helper call reaches the screen through while its own cell is
+/// still running.
+///
+/// **The notebook it draws is a snapshot taken before the cell started.** The
+/// loop's transcript is being mutated by the cell that is blocking, so the
+/// lane cannot borrow it; what the lane needs from it -- the conversation, the
+/// cells already finished -- cannot change until the cell returns anyway. The
+/// running cell's own view is the calls made so far, which is exactly what
+/// `tui`'s lane renders and what the folded header summarises after it.
+fn helper_lane(
+    publisher: ui::Publisher,
+    transcript: &Transcript,
+    served: &ServedBy,
+    ordinal: usize,
+) -> crate::runtime::state::HelperProgress {
+    let conversation = transcript.conversation.clone();
+    let notebook = transcript.notebook.clone();
+    let served = served.clone();
+    std::rc::Rc::new(move |records: &[crate::helpers::HelperRecord]| {
+        let mut notebook = notebook.clone();
+        notebook.set(
+            ordinal,
+            CellView {
+                helpers: records.to_vec(),
+                ..CellView::default()
+            },
+        );
+        publisher.publish(&conversation, &notebook, &served, tui::Activity::Executing);
+    })
+}
+
 /// Every acceptance test below, and any real pipe, takes this path. Draws
 /// through the identical `tui::render` a live terminal uses, into an
 /// in-memory buffer exactly as `tui.rs`'s own tests do, then prints each
@@ -622,6 +653,11 @@ fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
 /// project, resume or start the rollout, `SessionStart`, then one input (or
 /// stdin's, one per line) at a time until the input source is exhausted.
 fn run(args: SessionArgs) -> Result<(), String> {
+    // `little-helpers.md`: a malformed roster is a refusal with one sentence,
+    // and it is made here because this is the last moment before anything a
+    // helper can be called from exists. A guardrail checked after the first
+    // cell runs is not a guardrail.
+    crate::helpers::validate().map_err(|reason| format!("pane cannot start: {reason}"))?;
     let project = project::load(&args.root);
     let config = PaneConfig::load(&args.root)?;
     if config.supervisor.model.is_none() {
@@ -1362,14 +1398,24 @@ fn run_task_inner(
         if let Some(ui) = session.ui {
             ui.publish(transcript, &served, tui::Activity::Executing);
         }
-        let mut step = act_on(
+        // The cell owns this thread until it returns, so a helper it calls can
+        // only be seen while it runs through a signal installed before it
+        // starts. Uninstalled on the way out, including the error path.
+        let previous = crate::runtime::state::install_helper_progress(
+            session
+                .ui
+                .map(|ui| helper_lane(ui.publisher(), transcript, &served, ordinal)),
+        );
+        let step = act_on(
             &assistant_message,
             &mut runtime,
             &mut budget,
             rollout,
             session.interrupt,
             session.profile,
-        )?;
+        );
+        crate::runtime::state::install_helper_progress(previous);
+        let mut step = step?;
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let notices = runtime.take_handler_notices().join("\n");
@@ -2432,6 +2478,86 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The roster is checked where the session starts, and this pins the call
+    /// rather than the predicate: `helpers::validate()` passes for the shipped
+    /// roster whether or not anything calls it, so only reading `fn run` can
+    /// tell a startup refusal from a unit test nobody's production path runs.
+    #[test]
+    fn the_session_start_refuses_a_malformed_helper_roster() {
+        const SOURCE: &str = include_str!("session.rs");
+        let after = SOURCE
+            .split_once("fn run(args: SessionArgs)")
+            .expect("`fn run` must still be session start")
+            .1;
+        let (body, _) = after
+            .split_once("\n}\n")
+            .expect("`fn run` must still close at column zero");
+        assert!(
+            body.contains("helpers::validate()"),
+            "session start must validate the helper roster before any helper can be called"
+        );
+        crate::helpers::validate().expect("the shipped roster must pass its own guardrails");
+    }
+
+    /// A call in flight reaches the screen under the cell that made it, with
+    /// the screen still executing -- the state `tui`'s lane draws and the
+    /// only state a helper that has not answered yet can be shown in.
+    #[test]
+    fn a_helper_call_in_flight_is_published_under_its_own_cell() {
+        let (publisher, updates) = ui::test_publisher();
+        let transcript = Transcript {
+            conversation: Conversation::default(),
+            notebook: Notebook::default(),
+            provider_checkpoint: None,
+            provider_start: 0,
+        };
+        let lane = helper_lane(publisher, &transcript, &ServedBy::default(), 3);
+
+        lane(&[crate::helpers::HelperRecord {
+            helper: "reduce".into(),
+            verb: "reducing".into(),
+            asked: "cargo build log · 4118 lines".into(),
+            ..crate::helpers::HelperRecord::default()
+        }]);
+
+        let (notebook, activity) = match updates.try_recv() {
+            Ok(ui::Update::Snapshot(snapshot)) => (snapshot.1, snapshot.3),
+            _ => panic!("a helper call in flight must publish a snapshot"),
+        };
+        assert_eq!(activity, tui::Activity::Executing);
+        assert_eq!(notebook.cells.len(), 3, "the lane hangs under cell 3");
+        let helpers = &notebook.cells[2].helpers;
+        assert_eq!(helpers.len(), 1, "the call in flight must be in the view");
+        assert_eq!(helpers[0].helper, "reduce");
+        assert!(
+            !helpers[0].outcome.ok,
+            "a call that has not answered yet must not publish as one that has"
+        );
+    }
+
+    /// The lane is installed **before** the cell runs, and a cell blocks this
+    /// thread until it returns, so an install that came after it would show
+    /// only finished calls. `helper_lane` is provable on its own; that it is
+    /// reached at all is only readable here.
+    #[test]
+    fn the_cell_loop_installs_the_helper_lane_before_the_cell_runs() {
+        const SOURCE: &str = include_str!("session.rs");
+        let installed = SOURCE
+            .find("install_helper_progress(")
+            .expect("the cell loop must install a helper progress signal");
+        let ran = SOURCE
+            .find("let step = act_on(")
+            .expect("the cell loop must still run the cell through `act_on`");
+        assert!(
+            installed < ran,
+            "the signal must be installed before the cell runs, or no call can be seen in flight"
+        );
+        assert!(
+            SOURCE[installed..ran].contains("helper_lane("),
+            "the installed signal must be the lane"
+        );
+    }
 
     #[test]
     fn only_a_tool_line_is_a_tool_invocation() {

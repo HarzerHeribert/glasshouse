@@ -57,7 +57,7 @@ impl Drop for Restore {
     }
 }
 
-enum Update {
+pub(super) enum Update {
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
     Model(String),
     Delta(String),
@@ -140,6 +140,12 @@ impl LiveUi {
             activity,
         ))));
     }
+    /// A publisher onto this terminal's channel that borrows nothing.
+    pub(super) fn publisher(&self) -> Publisher {
+        Publisher {
+            updates: self.updates.clone(),
+        }
+    }
     pub(super) fn append_delta(&self, text: &str) {
         let _ = self.updates.send(Update::Delta(text.into()));
     }
@@ -159,6 +165,42 @@ impl LiveUi {
         let _ = self.updates.send(Update::Model(model.into()));
     }
 }
+/// Publishes a snapshot while holding no borrow of the [`LiveUi`] it came from.
+///
+/// The invariant: a caller deeper in the stack than the session loop can draw
+/// the screen. A cell blocks the task thread for as long as it runs, so
+/// anything it wants shown while it runs -- a helper call in flight -- must
+/// publish through a handle it owns; the channel is already `Send`-free and
+/// cheap to clone, so this is that same channel without the borrow.
+#[derive(Clone)]
+pub(super) struct Publisher {
+    updates: mpsc::Sender<Update>,
+}
+impl Publisher {
+    pub(super) fn publish(
+        &self,
+        conversation: &Conversation,
+        notebook: &Notebook,
+        served: &ServedBy,
+        activity: Activity,
+    ) {
+        let _ = self.updates.send(Update::Snapshot(Box::new((
+            conversation.clone(),
+            notebook.clone(),
+            served.clone(),
+            activity,
+        ))));
+    }
+}
+
+/// A publisher with no terminal thread behind it, paired with the receiving
+/// end, so `session`'s tests can read what a publish would have drawn.
+#[cfg(test)]
+pub(super) fn test_publisher() -> (Publisher, mpsc::Receiver<Update>) {
+    let (updates, receiver) = mpsc::channel();
+    (Publisher { updates }, receiver)
+}
+
 impl Drop for LiveUi {
     fn drop(&mut self) {
         OUTPUT.with(|slot| *slot.borrow_mut() = None);

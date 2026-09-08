@@ -10,6 +10,73 @@ a const table. The guardrails live in the runtime, so a new helper cannot
 introduce a new failure mode — it can only choose within a boundary already
 enforced.
 
+## Status — what is built, measured 2026-09-08
+
+This section is the truth about the code; everything below it is the design.
+
+| Part | State |
+|---|---|
+| The contract: `HelperSpec`, `HELPERS`, `check_spec`, one `run` dispatcher | **built** |
+| REDUCER, callable from a cell as `helper.reduce(text)` | **built, measured** |
+| SCOUT and CHECKER specs, and the agent loop that runs them | **built, not callable from a cell** — see below |
+| Generic install: every roster entry, no per-helper code | **built** |
+| `call_sites` enforced — install and declaration both gate on it | **built** |
+| `validate()` at startup | **built** |
+| The lane and the `/cell` HELPERS section | **built for resolved calls** |
+| A lane while a helper is still running | **not reachable end to end** |
+| The preflight hook (`Pushed`) | **not built** |
+
+**Tool-holding helpers are deliberately not callable from a cell.**
+`run_with_tools` goes through `agent::run_narrowed`, which builds a second V8
+isolate. `agent.rs`'s module doc names the hazard: *the isolate is borrowed
+while the cell runs, so re-entering the loop from a host callback would re-enter
+V8* — `bg` solves it by running that loop on another thread (`bg.rs:453`). Until
+a tool-holding helper rides that seam, SCOUT and CHECKER omit `CallSite::Cell`,
+and because `install` gates on that field the hazard is unreachable rather than
+merely discouraged. `no_tool_holding_helper_is_reachable_from_a_cell` pins it as
+a rule over the roster, so a future spec cannot reopen it by accident.
+
+### What was measured
+
+**The Reducer helps, and the measurement corrected the spec twice.** Four
+fixtures with planted oracles, two of them negative controls, the preamble
+extracted byte-identical from `helpers.rs`, reducer `gpt-5.6-luna`, downstream
+`deepseek-v4-flash-0731` (a different model, so the answerer does not mark its
+own homework):
+
+| fixture | raw input | reduced input | both arms correct |
+|---|---|---|---|
+| decisive error buried at line ~1200 of 1308 | 11,390 | 154 | yes |
+| 2 failures among 212 passes | 2,055 | 119 | yes |
+| a clean build (control) | 3,676 | 45 | yes, no invented failures |
+| a tiny log (control) | 109 | 71 | yes, no harm |
+
+Two defects were found **in the preamble, not in the idea**: warnings were
+reported as failures, and identity was dropped in favour of a `file:line` —
+useless when the question is *which test failed*. Both are fixed and both
+reasons are now stated in the preamble so they are not trimmed later.
+
+**Not claimed:** the reduced arm does not use fewer TOTAL tokens on a single
+question — the reduction costs them. The win is the task model's context window,
+permanently, and moving those tokens to a cheap model once instead of re-sending
+them every turn. Correctness was neutral, not improved.
+
+**The preflight format question is answered, weakly.** Three arms, same request
+and served files, `deepseek-v4-flash-0731`, N=5, scored on whether the first
+action pursued the meta-material instead of the task:
+
+| arm | drifted |
+|---|---|
+| no preflight | 0/5 |
+| selection record behind a handle | 0/5 |
+| record inline as sections | **2/5** |
+
+So the handle rule survives — but N=5 on one model, and three of five inline
+runs were fine. This is evidence for keeping the rule, not proof, and the first
+run of this experiment had to be thrown away: asking for *"your first action in
+one sentence, then stop"* suppresses exploration by itself and produced a false
+0/5 everywhere.
+
 ## A helper is not a subagent
 
 They share one implementation and are different kinds. Confusing them is how a

@@ -272,13 +272,27 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     }
     set_fixed_key(scope, global, "bg", background.into());
 
-    // Little helpers (`little-helpers.md`, *Pulled*). One `fn` item per
-    // roster name and no loop: `v8::Function::builder` coerces a closure
-    // built in a loop to a fn pointer and fails inside the v8 crate, naming
-    // none of this code.
+    // Little helpers (`little-helpers.md`, *Pulled*), installed from the
+    // roster so appending a `HelperSpec` is the whole of adding a helper, and
+    // only where `call_sites` says a cell may reach it.
+    //
+    // One shared `fn` item routed by the name in its own data slot, exactly
+    // as the tools above are: `v8::Function::builder` takes a `fn` item, so a
+    // closure per entry built in a loop coerces to a fn pointer and fails
+    // inside the v8 crate, naming none of this code.
     let helper = v8::Object::new(scope);
-    if let Some(function) = v8::Function::builder(helper_reduce_callback).build(scope) {
-        set_fixed_key(scope, helper, crate::helpers::REDUCER.name, function.into());
+    for spec in crate::helpers::HELPERS {
+        if !crate::prompt::declarations::callable_from_a_cell(spec) {
+            continue;
+        }
+        let data = js_string(scope, spec.name);
+        let Some(function) = v8::Function::builder(helper_callback)
+            .data(data)
+            .build(scope)
+        else {
+            continue;
+        };
+        set_fixed_key(scope, helper, spec.name, function.into());
     }
     set_fixed_key(scope, global, "helper", helper.into());
 
@@ -1980,29 +1994,41 @@ fn agent_run_callback(
     retval.set(object);
 }
 
-// --- helper.reduce -----------------------------------------------------
+// --- helper.<name> -----------------------------------------------------
 
-/// `helper.reduce(text)` — `little-helpers.md`'s pulled half: one metered
-/// wire call from inside the running cell, so a question costs no turn.
+/// `helper.<name>(text)` for every roster entry — `little-helpers.md`'s
+/// pulled half: one metered wire call from inside the running cell, so a
+/// question costs no turn.
 ///
 /// The invariant: **a helper either answers or throws.** Unconfigured, over
 /// the cell's ceiling, and a call that failed are all a catchable
-/// `ToolError`; nothing here can return text that looks like a reduction
-/// when no reduction was made. Shaped like `mcp`, not like `bash`: nothing
-/// new runs on the machine, so no grant is consulted.
-fn helper_reduce_callback(
+/// `ToolError`; nothing here can return text that looks like an answer when
+/// no answer was made. Shaped like `mcp`, not like `bash`: nothing new runs
+/// on the machine, so no grant is consulted.
+///
+/// Which helper this is comes from the function's own data slot, set by
+/// [`install`] from the spec's `name` — the same routing `tool_callback`
+/// uses, and the reason one `fn` item serves the whole roster.
+fn helper_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut retval: v8::ReturnValue,
 ) {
-    let spec = &crate::helpers::REDUCER;
+    let name = args.data().to_rust_string_lossy(scope);
+    let Some(spec) = crate::helpers::lookup(&name) else {
+        // Unreachable through `install`, which binds only roster names, and a
+        // refusal rather than a panic if it ever is reached.
+        throw_tool_error(scope, &format!("no helper named `{name}` is in the roster"));
+        return;
+    };
+    let wanted = format!("helper.{name} takes the text to work on");
     if !args.get(0).is_string() {
-        throw_tool_error(scope, "helper.reduce takes the text to reduce");
+        throw_tool_error(scope, &wanted);
         return;
     }
     let input = args.get(0).to_rust_string_lossy(scope);
     if input.trim().is_empty() {
-        throw_tool_error(scope, "helper.reduce takes the text to reduce");
+        throw_tool_error(scope, &wanted);
         return;
     }
 
@@ -2019,16 +2045,26 @@ fn helper_reduce_callback(
         return;
     }
 
-    let asked = reduction_asked(&input);
-    let outcome = crate::helpers::run_once(spec, &model, &input);
-    let ok = outcome.ok;
-    let answer = outcome.text.clone();
+    let asked = asked_summary(&input);
+    let call = crate::helpers::run(
+        spec,
+        &model,
+        &input,
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+    );
+    let ok = call.outcome.ok;
+    let answer = call.outcome.text.clone();
+    // `turns` is what the call took, not what the spec allowed: a Scout that
+    // burned its ceiling to serve two files is a bad call the inspector must
+    // show as one.
     state.record_helper(crate::helpers::HelperRecord {
         helper: spec.name.to_string(),
         verb: spec.verb.to_string(),
         asked: asked.clone(),
-        outcome,
-        turns: spec.max_turns,
+        outcome: call.outcome,
+        turns: call.turns,
     });
     // The trajectory says a helper ran and how big the question was, never
     // the payload: §9.4 explains the cell, and a build log is not an
@@ -2053,12 +2089,12 @@ fn helper_reduce_callback(
     retval.set(value);
 }
 
-/// What the lane and the `/cell` inspector show for one `reduce` call.
+/// What the lane and the `/cell` inspector show for one helper call.
 ///
 /// A size, never the payload: the caller still holds the text, the record is
 /// persisted to the rollout, and a 4,000-line build log in a lane line is
 /// neither readable nor cheap.
-fn reduction_asked(input: &str) -> String {
+fn asked_summary(input: &str) -> String {
     format!("{} lines", thousands(input.lines().count() as u64))
 }
 

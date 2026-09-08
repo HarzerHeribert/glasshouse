@@ -87,6 +87,26 @@ pub struct Binding {
     pub declaration: &'static str,
 }
 
+/// Whether a cell may invoke `spec` — `little-helpers.md`'s `call_sites`,
+/// consulted rather than described.
+///
+/// The invariant: **the `helper` global and this declaration carry the same
+/// set, and it is the set `call_sites` allows.** `runtime::bindings::install`
+/// binds on this predicate and [`HELPER_DECLARATION`] is generated through it,
+/// so a spec that may only run at preflight is neither installed nor
+/// mentioned — the model is never told about a helper it cannot call, and no
+/// helper is reachable from a call site its spec excludes.
+pub const fn callable_from_a_cell(spec: &crate::helpers::HelperSpec) -> bool {
+    let mut i = 0;
+    while i < spec.call_sites.len() {
+        if matches!(spec.call_sites[i], crate::helpers::CallSite::Cell) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// The `helper` binding, **generated from [`crate::helpers::HELPERS`]**, so
 /// appending a `HelperSpec` is the whole of declaring a helper to the model
 /// and there is no second place that can fall behind the roster.
@@ -122,12 +142,14 @@ const fn helper_declaration_len() -> usize {
     let mut i = 0;
     while i < crate::helpers::HELPERS.len() {
         let spec = &crate::helpers::HELPERS[i];
-        len += HELPER_INDENT.len() + spec.name.len() + HELPER_SIGNATURE.len();
-        len += HELPER_BULLET.len()
-            + spec.name.len()
-            + HELPER_GAP.len()
-            + spec.summary.len()
-            + HELPER_NEWLINE.len();
+        if callable_from_a_cell(spec) {
+            len += HELPER_INDENT.len() + spec.name.len() + HELPER_SIGNATURE.len();
+            len += HELPER_BULLET.len()
+                + spec.name.len()
+                + HELPER_GAP.len()
+                + spec.summary.len()
+                + HELPER_NEWLINE.len();
+        }
         i += 1;
     }
     len
@@ -140,19 +162,23 @@ const fn helper_declaration_bytes() -> [u8; HELPER_DECLARATION_LEN] {
     let mut at = copy(&mut out, 0, HELPER_HEAD.as_bytes());
     let mut i = 0;
     while i < crate::helpers::HELPERS.len() {
-        at = copy(&mut out, at, HELPER_INDENT.as_bytes());
-        at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
-        at = copy(&mut out, at, HELPER_SIGNATURE.as_bytes());
+        if callable_from_a_cell(&crate::helpers::HELPERS[i]) {
+            at = copy(&mut out, at, HELPER_INDENT.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+            at = copy(&mut out, at, HELPER_SIGNATURE.as_bytes());
+        }
         i += 1;
     }
     at = copy(&mut out, at, HELPER_CLOSE.as_bytes());
     i = 0;
     while i < crate::helpers::HELPERS.len() {
-        at = copy(&mut out, at, HELPER_BULLET.as_bytes());
-        at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
-        at = copy(&mut out, at, HELPER_GAP.as_bytes());
-        at = copy(&mut out, at, crate::helpers::HELPERS[i].summary.as_bytes());
-        at = copy(&mut out, at, HELPER_NEWLINE.as_bytes());
+        if callable_from_a_cell(&crate::helpers::HELPERS[i]) {
+            at = copy(&mut out, at, HELPER_BULLET.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+            at = copy(&mut out, at, HELPER_GAP.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].summary.as_bytes());
+            at = copy(&mut out, at, HELPER_NEWLINE.as_bytes());
+        }
         i += 1;
     }
     assert!(

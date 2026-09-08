@@ -9,6 +9,8 @@
 use pane::config::HelpersConfig;
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
+use pane::helpers::{CallSite, HelperSpec, REDUCER};
+use pane::prompt::declarations::callable_from_a_cell;
 use pane::runtime::isolate::Runtime;
 use pane::runtime::outcome::CellOutcome;
 use pane::sandbox::profile::Profile;
@@ -305,22 +307,29 @@ fn a_failed_helper_call_throws_and_is_recorded_as_failed() {
 }
 
 /// The roster declares itself: appending a `HelperSpec` is what puts a helper
-/// in front of the model, with no second place to edit.
+/// in front of the model, with no second place to edit — and `call_sites` is
+/// what decides which helpers a cell is told about at all.
 #[test]
 fn every_helper_in_the_roster_is_declared_to_the_model() {
     let runtime = pane::prompt::render_runtime();
     assert!(runtime.contains("declare const helper: {"), "{runtime}");
     for spec in pane::helpers::HELPERS {
-        assert!(
-            runtime.contains(&format!("  {}(text: string): Promise<string>;", spec.name)),
-            "`{}` is in the roster and undeclared",
-            spec.name
-        );
-        assert!(
-            runtime.contains(spec.summary),
-            "`{}`'s summary is not what the model is shown",
-            spec.name
-        );
+        let declared =
+            runtime.contains(&format!("  {}(text: string): Promise<string>;", spec.name));
+        if callable_from_a_cell(spec) {
+            assert!(declared, "`{}` is in the roster and undeclared", spec.name);
+            assert!(
+                runtime.contains(spec.summary),
+                "`{}`'s summary is not what the model is shown",
+                spec.name
+            );
+        } else {
+            assert!(
+                !declared,
+                "`{}` may not be called from a cell, so a cell must not be told it exists",
+                spec.name
+            );
+        }
     }
     assert!(
         pane::prompt::declarations::declares_global("helper"),
@@ -380,13 +389,16 @@ fn helpers_disabled_with_a_model_configured_still_refuse_and_never_reach_the_wir
     );
 }
 
-/// Every helper the model is TOLD about must actually be installed.
+/// The `helper` global carries **exactly** the roster entries a cell may
+/// call: every one of them, and nothing else.
 ///
-/// The declaration is generated from `HELPERS` while the bindings are
-/// installed by hand, so appending a second `HelperSpec` would declare a
-/// method that does not exist and the model would call it and get a
-/// `TypeError` instead of the catchable `ToolError` the declaration promises.
-/// This is the test that fails the moment those two drift.
+/// The declaration is generated from `HELPERS` and the bindings are installed
+/// from `HELPERS`, so this is the test that fails the moment those two drift.
+/// A declared helper that is not installed would hand the model a `TypeError`
+/// where the declaration promises a catchable `ToolError`; an installed
+/// helper that is not declared would be reachable from a cell the spec says
+/// may not reach it. Both directions are the same equality, so it is asserted
+/// as a set rather than as a loop that only checks one of them.
 #[test]
 fn every_declared_helper_is_actually_installed() {
     let fixture = Fixture::new("declared-installed");
@@ -396,15 +408,83 @@ fn every_declared_helper_is_actually_installed() {
         &SessionId::new("helpers-declared"),
     );
 
-    for spec in pane::helpers::HELPERS {
-        let probe = format!("return typeof helper[{:?}];", spec.name);
-        let kind = returned_text(&runtime.run_cell(&probe));
+    let mut expected: Vec<&str> = pane::helpers::HELPERS
+        .iter()
+        .filter(|spec| callable_from_a_cell(spec))
+        .map(|spec| spec.name)
+        .collect();
+    expected.sort_unstable();
+    assert!(
+        !expected.is_empty(),
+        "the roster must offer a cell at least one helper, or this proves nothing"
+    );
+
+    let installed = returned_text(
+        &runtime.run_cell("return Object.getOwnPropertyNames(helper).sort().join(\",\");\n"),
+    );
+    assert_eq!(
+        installed,
+        expected.join(","),
+        "the `helper` global must carry exactly the helpers a cell may call"
+    );
+
+    for name in expected {
+        let kind = returned_text(&runtime.run_cell(&format!("return typeof helper[{name:?}];")));
         assert_eq!(
             kind, "function",
-            "`helper.{}` is declared to the model but is {kind} on the global",
-            spec.name
+            "`helper.{name}` is declared to the model but is {kind} on the global"
         );
     }
+}
+
+/// A helper whose `call_sites` exclude `Cell` reaches neither the global nor
+/// the declaration — `little-helpers.md`'s "where it may be invoked from".
+///
+/// `HELPERS` is a `const`, so no test can append a rogue entry to the shipped
+/// roster and watch it be filtered out, and every entry today names `Cell`.
+/// The seam is the predicate, driven with a legal spec naming every call site
+/// *except* `Cell` — and because a predicate nothing consults filters nothing,
+/// the second half reads `install` and pins that its roster loop is gated on
+/// that same function, the way `session.rs` pins its startup validation.
+#[test]
+fn a_helper_that_may_not_be_called_from_a_cell_is_not_installed() {
+    let preflight_only = HelperSpec {
+        call_sites: &[
+            CallSite::Preflight,
+            CallSite::PostResult,
+            CallSite::CompletionGate,
+        ],
+        ..REDUCER
+    };
+    assert!(
+        pane::helpers::check_spec(&preflight_only).is_ok(),
+        "the rogue must be a legal spec, or its exclusion proves nothing"
+    );
+    assert!(
+        !callable_from_a_cell(&preflight_only),
+        "a spec whose call sites exclude `Cell` must be neither installed nor declared"
+    );
+    assert!(
+        callable_from_a_cell(&HelperSpec {
+            call_sites: &[CallSite::Preflight, CallSite::Cell],
+            ..REDUCER
+        }),
+        "a spec naming `Cell` among its call sites must pass the same filter"
+    );
+
+    const BINDINGS: &str = include_str!("../src/runtime/bindings.rs");
+    let loop_body = BINDINGS
+        .split_once("for spec in crate::helpers::HELPERS {")
+        .expect("`install` must bind the `helper` global from the roster itself")
+        .1
+        .split_once("\n    }")
+        .expect("that loop must still close at one level inside `install`")
+        .0;
+    assert!(
+        loop_body.contains("callable_from_a_cell"),
+        "`install` binds every roster entry without consulting `call_sites`, so a \
+         preflight-only helper would be on the global: {loop_body}"
+    );
 }
 
 /// `helper` may not be shadowed by a cell's own binding.
@@ -429,5 +509,51 @@ fn a_cell_may_not_shadow_the_helper_global() {
     assert!(
         !runtime.is_live("marker"),
         "the cell must be refused before it runs, but `marker` survived"
+    );
+}
+
+/// **No tool-holding helper may be callable from a cell.**
+///
+/// `run_with_tools` goes through `agent::run_narrowed`, which builds a second
+/// V8 isolate. `agent.rs`'s module doc states the hazard directly: the isolate
+/// is borrowed while the cell runs, so re-entering the loop from a host
+/// callback would re-enter V8 — `bg` runs that loop on another thread instead
+/// (`bg.rs:453`). Until a tool-holding helper rides that seam, this asserts the
+/// hazard is unreachable.
+///
+/// Stated as a rule over the roster rather than by naming today's specs, so it
+/// also refuses a future spec that adds `CallSite::Cell` beside a toolset.
+#[test]
+fn no_tool_holding_helper_is_reachable_from_a_cell() {
+    let fixture = Fixture::new("no-nested-isolate");
+    let mut runtime = Runtime::new(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-no-nested"),
+    );
+
+    let mut checked = 0;
+    for spec in pane::helpers::HELPERS {
+        if spec.tools.is_empty() {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            !spec.call_sites.contains(&CallSite::Cell),
+            "`{}` holds tools and declares CallSite::Cell; calling it from a cell \
+             would build a nested isolate on the thread already holding one",
+            spec.name
+        );
+        let kind =
+            returned_text(&runtime.run_cell(&format!("return typeof helper[{:?}];", spec.name)));
+        assert_eq!(
+            kind, "undefined",
+            "`helper.{}` holds tools and must not be on the global",
+            spec.name
+        );
+    }
+    assert!(
+        checked >= 2,
+        "the roster should carry the tool-holding specs this guards; checked {checked}"
     );
 }

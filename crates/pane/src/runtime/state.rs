@@ -19,13 +19,34 @@ use std::sync::{Arc, OnceLock};
 use crate::config::HelpersConfig;
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
-use crate::helpers::HelperRecord;
+use crate::helpers::{HelperCall, HelperOutcome, HelperRecord};
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
 use crate::runtime::instructions::{InstructionContext, PendingInstructions};
 use crate::runtime::outcome::{PlanItem, SourceEvidence};
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::{Access, Profile};
 use crate::tools::invoke::CancellationToken;
+
+/// Told when a helper call starts and again when it ends, with every call
+/// this cell has made so far.
+pub(crate) type HelperProgress = Rc<dyn Fn(&[HelperRecord])>;
+
+thread_local! {
+    static HELPER_PROGRESS: RefCell<Option<HelperProgress>> = const { RefCell::new(None) };
+}
+
+/// Installs the signal helper progress is reported through on this thread,
+/// and answers with whatever it replaced.
+///
+/// **Thread-local, and it is the seam `session::ui`'s `OUTPUT` already is**: a
+/// task's cells run on the session's own thread, so the terminal a running
+/// helper must reach is the one belonging to the thread the call is made
+/// from, and `runtime/**` names no terminal type of its own. A runtime built
+/// without a session -- `agent.rs`'s subagents, every test -- finds none,
+/// which is the absent case rather than a special one.
+pub(crate) fn install_helper_progress(signal: Option<HelperProgress>) -> Option<HelperProgress> {
+    HELPER_PROGRESS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), signal))
+}
 
 /// A `console` capture bounded ahead of rendering.
 ///
@@ -325,8 +346,70 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// A helper call starting: the record is kept with its outcome unfilled
+    /// and the progress signal fires, so the lane can show the call **while
+    /// it is in flight**. Answers with the slot [`finish_helper`] resolves.
+    ///
+    /// The invariant: a call is visible from the moment it starts. Its wire
+    /// call blocks this thread, so a record kept only on return can never be
+    /// rendered as running -- which is the whole of `little-helpers.md`'s
+    /// lane. `record.outcome` and `record.turns` are what the call has
+    /// produced so far, which at the start is nothing: leave them at their
+    /// defaults rather than at the spec's ceiling.
+    ///
+    /// [`finish_helper`]: RuntimeState::finish_helper
+    pub(crate) fn begin_helper(&self, record: HelperRecord) -> usize {
+        let slot = {
+            let mut current = self.current.borrow_mut();
+            current.helpers.push(record);
+            current.helpers.len() - 1
+        };
+        self.report_helper_progress();
+        slot
+    }
+
+    /// The call in `slot` resolving: what came back and the turns it actually
+    /// took replace the unfilled ones, and the progress signal fires again.
+    ///
+    /// It takes the whole [`HelperCall`] rather than its outcome because
+    /// `turns` is only known once the call has answered, and a record left at
+    /// the turns it was allowed is exactly what the inspector section exists
+    /// to make visible.
+    pub(crate) fn finish_helper(&self, slot: usize, call: HelperCall) {
+        if let Some(record) = self.current.borrow_mut().helpers.get_mut(slot) {
+            record.outcome = call.outcome;
+            record.turns = call.turns;
+        }
+        self.report_helper_progress();
+    }
+
+    /// One call that has already resolved, for a caller with nothing to show
+    /// in flight. It is [`begin_helper`] and [`finish_helper`] back to back,
+    /// so there is one path a record reaches the lane by rather than two.
+    ///
+    /// [`begin_helper`]: RuntimeState::begin_helper
+    /// [`finish_helper`]: RuntimeState::finish_helper
     pub(crate) fn record_helper(&self, record: HelperRecord) {
-        self.current.borrow_mut().helpers.push(record);
+        let call = HelperCall {
+            outcome: record.outcome.clone(),
+            turns: record.turns,
+        };
+        let slot = self.begin_helper(HelperRecord {
+            outcome: HelperOutcome::default(),
+            turns: 0,
+            ..record
+        });
+        self.finish_helper(slot, call);
+    }
+
+    /// Hands this cell's calls to the installed signal, if there is one. The
+    /// signal is cloned out before it runs, so it may install another.
+    fn report_helper_progress(&self) {
+        let Some(signal) = HELPER_PROGRESS.with(|slot| slot.borrow().clone()) else {
+            return;
+        };
+        let records = self.current.borrow().helpers.clone();
+        signal(&records);
     }
 
     /// Every helper call the cell that just ran completed, in call order.
@@ -528,6 +611,93 @@ mod tests {
         // The tail is the *end* of the output, which is what a model needs.
         assert!(tail.contains("line 1999"), "{tail}");
         assert!(!tail.contains("line 0 "), "{tail}");
+    }
+
+    fn state() -> RuntimeState {
+        RuntimeState::new(
+            &Profile::compile(
+                std::env::temp_dir(),
+                Some(r#"{"permissions":{"allow":[]}}"#),
+            ),
+            &Glasshouse::Command {
+                glasshouse: PathBuf::from("glasshouse"),
+            },
+            &SessionId::new("progress"),
+        )
+    }
+
+    fn asked(name: &str) -> HelperRecord {
+        HelperRecord {
+            helper: name.to_string(),
+            verb: "reducing".to_string(),
+            asked: "4118 lines".to_string(),
+            ..HelperRecord::default()
+        }
+    }
+
+    /// The lane exists to say a helper is running, so the signal must arrive
+    /// **before** the answer does: one call, two reports, the first carrying a
+    /// record nothing has resolved yet.
+    #[test]
+    fn a_helper_call_reports_its_start_and_then_its_end() {
+        let seen: Rc<RefCell<Vec<Vec<HelperRecord>>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorder = Rc::clone(&seen);
+        let previous = install_helper_progress(Some(Rc::new(move |records: &[HelperRecord]| {
+            recorder.borrow_mut().push(records.to_vec());
+        })));
+
+        let state = state();
+        let slot = state.begin_helper(asked("reduce"));
+        state.finish_helper(
+            slot,
+            HelperCall {
+                outcome: HelperOutcome {
+                    text: "3 distinct root failures".to_string(),
+                    ok: true,
+                    elapsed_ms: 1_100,
+                },
+                turns: 1,
+            },
+        );
+        install_helper_progress(previous);
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2, "one call must report a start and an end");
+        assert_eq!(seen[0].len(), 1);
+        assert!(
+            !seen[0][0].outcome.ok && seen[0][0].outcome.text.is_empty(),
+            "the first report must carry an unresolved call: {:?}",
+            seen[0][0].outcome
+        );
+        assert_eq!(seen[0][0].helper, "reduce");
+        assert!(seen[1][0].outcome.ok, "the second report must be resolved");
+        assert_eq!(seen[1][0].outcome.text, "3 distinct root failures");
+        assert_eq!(state.helper_records().len(), 1, "one call, one record");
+    }
+
+    /// Every runtime built without a session -- `agent.rs`'s subagents and
+    /// every test -- finds no signal, and that is the ordinary case rather
+    /// than a special one.
+    #[test]
+    fn a_helper_call_with_no_terminal_installed_still_records() {
+        let previous = install_helper_progress(None);
+        let state = state();
+        let slot = state.begin_helper(asked("reduce"));
+        state.finish_helper(
+            slot,
+            HelperCall {
+                outcome: HelperOutcome {
+                    text: "nothing failed".to_string(),
+                    ok: true,
+                    elapsed_ms: 40,
+                },
+                turns: 1,
+            },
+        );
+        install_helper_progress(previous);
+        let records = state.helper_records();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].outcome.ok);
     }
 
     #[test]

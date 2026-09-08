@@ -94,6 +94,45 @@ pub struct HelperSpec {
     pub call_sites: &'static [CallSite],
 }
 
+/// Find where something lives in this project, as spans the caller can open.
+///
+/// It holds the four reading tools and nothing else, so the worst it can do
+/// is look in the wrong place -- and `max_turns` is what stops it looking
+/// forever.
+pub const SCOUT: HelperSpec = HelperSpec {
+    name: "find",
+    summary: "Find where something lives in this project and answer with file:line spans, never a diagnosis.",
+    verb: "scanning",
+    preamble: "You find where something lives in this project. You can read, glob, grep and \
+        fetch context, and you can change nothing.\n\
+        \n\
+        Answer with spans only. For each: the path and the line as `path/to/file.rs:120`, a line \
+        you actually opened rather than one you inferred, then one short sentence saying what is \
+        there in the file's own words. Put the spans that answer the question first. If nothing \
+        matches, say that in one line.\n\
+        \n\
+        Never state a cause. Never propose a fix. Never report anything you did not read \
+        — you are returning evidence, and a wrong diagnosis the caller trusts is worse than no \
+        diagnosis. Prose is never a substitute for a span: a caller who asked where something is \
+        cannot open a paragraph about it. Name what you did not look at — the patterns you did \
+        not run, the directories you skipped, and whether you ran out of turns — as your last \
+        line.",
+    tools: &["read", "glob", "grep", "context"],
+    max_tokens: 2048,
+    max_turns: 8,
+    input: InputKind::Request,
+    output: OutputKind::Spans,
+    // NOT `CallSite::Cell`: `run_with_tools` goes through `agent::run_narrowed`,
+    // which builds a Runtime -- a second V8 isolate. `agent.rs`'s own module doc
+    // states the hazard: "the isolate is borrowed while the cell runs, so
+    // re-entering the loop from a host callback would re-enter V8", and `bg`
+    // solves it by running the loop on another thread (`bg.rs:453`). Until a
+    // tool-holding helper rides that seam, it is not callable from a cell --
+    // and because `install` gates on this field, that is enforced rather than
+    // merely intended.
+    call_sites: &[CallSite::Preflight],
+};
+
 /// Reduce build output, logs and test results to their distinct failures.
 ///
 /// `tools` is empty, so this helper cannot reach the filesystem at all -- the
@@ -125,8 +164,45 @@ pub const REDUCER: HelperSpec = HelperSpec {
     call_sites: &[CallSite::PostResult, CallSite::Cell],
 };
 
+/// Check a claim against a diff, and return the evidence with the verdict.
+///
+/// `read` and `grep` only: it decides whether something holds, and a helper
+/// that could also change it would be deciding about its own work.
+pub const CHECKER: HelperSpec = HelperSpec {
+    name: "check",
+    summary: "Check a claim against a diff and answer with a verdict plus the file:line evidence for it.",
+    verb: "checking",
+    preamble: "You check whether a claim holds for a diff you are given. You can read and grep, \
+        and you can change nothing.\n\
+        \n\
+        Open with the verdict alone on the first line: `holds`, `does not hold`, or `cannot \
+        tell`. `cannot tell` is a real verdict and is the honest one whenever the diff does not \
+        contain what the claim is about. Under it, the evidence and nothing else: each point as \
+        `path/to/file.rs:120` and the text there that decides it, quoted as it stands. A verdict \
+        with no evidence under it is not a verdict.\n\
+        \n\
+        Never propose a fix, never write the corrected code, and never report anything the diff \
+        or the files do not say — you are returning evidence, and a wrong verdict the caller \
+        trusts is worse than no verdict. Name what you did not check — the parts of the diff \
+        you did not open, and whether you ran out of turns — as your last line.",
+    tools: &["read", "grep"],
+    max_tokens: 2048,
+    max_turns: 3,
+    input: InputKind::Diff,
+    output: OutputKind::Verdict,
+    // NOT `CallSite::Cell`: `run_with_tools` goes through `agent::run_narrowed`,
+    // which builds a Runtime -- a second V8 isolate. `agent.rs`'s own module doc
+    // states the hazard: "the isolate is borrowed while the cell runs, so
+    // re-entering the loop from a host callback would re-enter V8", and `bg`
+    // solves it by running the loop on another thread (`bg.rs:453`). Until a
+    // tool-holding helper rides that seam, it is not callable from a cell --
+    // and because `install` gates on this field, that is enforced rather than
+    // merely intended.
+    call_sites: &[CallSite::CompletionGate],
+};
+
 /// The roster. **This array is the whole extension point.**
-pub const HELPERS: &[HelperSpec] = &[REDUCER];
+pub const HELPERS: &[HelperSpec] = &[SCOUT, REDUCER, CHECKER];
 
 /// Find a helper by the name the model calls it with.
 pub fn lookup(name: &str) -> Option<&'static HelperSpec> {
@@ -261,6 +337,49 @@ impl HelperRecord {
     }
 }
 
+/// What one helper call produced, and what it actually cost in turns.
+///
+/// The invariant: **`turns` is what the call took, never what it was
+/// allowed.** A [`HelperRecord`] built from `spec.max_turns` renders a scout
+/// that answered on its first turn as one that burned eight, and
+/// `little-helpers.md`'s inspector section exists precisely so a bad call is
+/// visible rather than hidden behind an `OK`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperCall {
+    pub outcome: HelperOutcome,
+    pub turns: u32,
+}
+
+/// Run any helper in the roster: the one entry point a caller uses.
+///
+/// Dispatches on the spec rather than on its name, so a new `HelperSpec`
+/// needs no call-site edit. A toolless one-turn spec is [`run_once`]; a spec
+/// holding tools or asking for more than one turn needs the agent loop and
+/// goes to [`run_with_tools`].
+pub fn run(
+    spec: &HelperSpec,
+    model: &str,
+    input: &str,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+) -> HelperCall {
+    if one_shot(spec) {
+        HelperCall {
+            outcome: run_once(spec, model, input),
+            turns: 1,
+        }
+    } else {
+        run_with_tools(spec, model, input, profile, glasshouse, session)
+    }
+}
+
+/// Whether one wire call serves this spec: nothing to call a tool with, and
+/// one turn to do it in.
+fn one_shot(spec: &HelperSpec) -> bool {
+    spec.tools.is_empty() && spec.max_turns == 1
+}
+
 /// Run a one-turn, toolless helper: the spec's preamble as the system block,
 /// the caller's input as the one user message, the purpose header set.
 ///
@@ -293,6 +412,71 @@ pub fn run_once(spec: &HelperSpec, model: &str, input: &str) -> HelperOutcome {
             }
         }
         Err(err) => HelperOutcome::failed(format!("request failed: {err}"), started),
+    }
+}
+
+/// Run a helper that holds tools, through the subagent loop with its toolset
+/// narrowed to `spec.tools`, its instructions replaced by the preamble, and
+/// its model set to the tier.
+///
+/// The invariant: **only a returned answer is an answer.** The loop can also
+/// end out of turns, cancelled or failed, and every one of those is `ok:
+/// false` with the reason in the text -- a helper that ran out of turns
+/// having said nothing must not read as a healthy short answer.
+pub fn run_with_tools(
+    spec: &HelperSpec,
+    model: &str,
+    input: &str,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+) -> HelperCall {
+    let started = Instant::now();
+    let options = crate::agent::AgentOptions {
+        turns: u64::from(spec.max_turns.min(HELPER_MAX_TURNS)),
+        model: model.to_string(),
+        effort: crate::wire::Effort::default(),
+    };
+    let narrowed = crate::agent::Narrowed {
+        tools: spec.tools,
+        instructions: spec.preamble,
+    };
+    let result = crate::agent::run_narrowed(
+        profile,
+        glasshouse,
+        session,
+        input,
+        &options,
+        &crate::tools::invoke::CancellationToken::new(),
+        Some(&narrowed),
+    );
+
+    let answer = result.answer.trim();
+    let outcome = if result.status != "returned" {
+        HelperOutcome::failed(
+            format!(
+                "the call ended `{}`: {}",
+                result.status,
+                if answer.is_empty() {
+                    "no answer"
+                } else {
+                    answer
+                }
+            ),
+            started,
+        )
+    } else if answer.is_empty() {
+        HelperOutcome::failed("the helper returned nothing", started)
+    } else {
+        HelperOutcome {
+            text: result.answer.clone(),
+            ok: true,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }
+    };
+    HelperCall {
+        outcome,
+        turns: u32::try_from(result.turns).unwrap_or(u32::MAX),
     }
 }
 
@@ -372,10 +556,83 @@ mod tests {
         );
     }
 
+    /// The three `little-helpers.md` starts with, by the names the model
+    /// calls them by. `lookup` is the production path a binding uses, so a
+    /// spec that is written but not appended to `HELPERS` fails here.
+    #[test]
+    fn the_roster_holds_the_three_the_spec_starts_with() {
+        for name in ["find", "reduce", "check"] {
+            assert!(
+                lookup(name).is_some(),
+                "`{name}` must be in the roster the model is offered"
+            );
+        }
+        assert_eq!(
+            HELPERS.len(),
+            3,
+            "the roster is the whole extension point; nothing else may be in it"
+        );
+    }
+
+    /// `run` routes on the spec rather than on the name: a toolless one-turn
+    /// spec is one wire call, and anything else needs the agent loop. Driven
+    /// through the production predicate, because a test that re-derived the
+    /// condition would stay green with the branch deleted.
+    #[test]
+    fn each_spec_is_routed_to_the_runtime_that_can_serve_it() {
+        assert!(
+            one_shot(&REDUCER),
+            "the reducer holds nothing and takes one turn"
+        );
+        for spec in [&SCOUT, &CHECKER] {
+            assert!(
+                !one_shot(spec),
+                "`{}` holds tools, so it needs the agent loop",
+                spec.name
+            );
+        }
+    }
+
     #[test]
     fn the_reducer_holds_no_tools_and_takes_one_turn() {
         assert!(REDUCER.tools.is_empty(), "the reducer must reach nothing");
         assert_eq!(REDUCER.max_turns, 1);
+    }
+
+    /// `little-helpers.md`: the two contracts no toolset can express stay in
+    /// **each** helper's preamble. Asserted over the whole roster rather than
+    /// per spec, so a helper appended tomorrow cannot ship without them.
+    #[test]
+    fn every_helper_states_the_two_contracts_in_its_own_preamble() {
+        for spec in HELPERS {
+            for phrase in [
+                "you are returning evidence",
+                "Never propose a fix",
+                "as your last line",
+            ] {
+                assert!(
+                    spec.preamble.contains(phrase),
+                    "`{}` must say `{phrase}`: evidence never conclusions, and say what you \
+                     did not look at",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    /// The toolsets are driven through the production predicate: re-listing
+    /// them here would pass with `check_spec` deleted, and `check_spec` is
+    /// what refuses a mutating or unregistered name.
+    #[test]
+    fn the_scout_and_the_checker_hold_only_registered_read_only_tools() {
+        for spec in [&SCOUT, &CHECKER] {
+            check_spec(spec).unwrap_or_else(|refused| panic!("{refused}"));
+            assert!(
+                !spec.tools.is_empty(),
+                "`{}` reads the project, so an empty toolset would make it a one-shot",
+                spec.name
+            );
+        }
     }
 
     #[test]
