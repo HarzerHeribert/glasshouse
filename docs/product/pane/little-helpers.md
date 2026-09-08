@@ -17,24 +17,22 @@ This section is the truth about the code; everything below it is the design.
 | Part | State |
 |---|---|
 | The contract: `HelperSpec`, `HELPERS`, `check_spec`, one `run` dispatcher | **built** |
-| REDUCER, callable from a cell as `helper.reduce(text)` | **built, measured** |
-| SCOUT and CHECKER specs, and the agent loop that runs them | **built, not callable from a cell** — see below |
-| Generic install: every roster entry, no per-helper code | **built** |
-| `call_sites` enforced — install and declaration both gate on it | **built** |
+| REDUCER, SCOUT and CHECKER, all callable from a cell | **built, all three measured** |
+| The capability boundary — a helper binds only the tools its spec named | **built, mutation-pinned** |
+| Pure search tools `rg`, `fd`, `jq` | **built** |
+| Generic install and declaration, both gating on `call_sites` | **built** |
 | `validate()` at startup | **built** |
-| The lane and the `/cell` HELPERS section | **built for resolved calls** |
-| A lane while a helper is still running | **not reachable end to end** |
-| The preflight hook (`Pushed`) | **not built** |
+| The lane, the `/cell` HELPERS section, and the `looked` trajectory | **built** |
+| Preflight · PostResult · CompletionGate producers | **built** |
+| A lane while a helper is still running | **built, not proven end to end** |
 
-**Tool-holding helpers are deliberately not callable from a cell.**
-`run_with_tools` goes through `agent::run_narrowed`, which builds a second V8
-isolate. `agent.rs`'s module doc names the hazard: *the isolate is borrowed
-while the cell runs, so re-entering the loop from a host callback would re-enter
-V8* — `bg` solves it by running that loop on another thread (`bg.rs:453`). Until
-a tool-holding helper rides that seam, SCOUT and CHECKER omit `CallSite::Cell`,
-and because `install` gates on that field the hazard is unreachable rather than
-merely discouraged. `no_tool_holding_helper_is_reachable_from_a_cell` pins it as
-a rule over the roster, so a future spec cannot reopen it by accident.
+**What is NOT done, plainly.** Preflight's gate is a four-word floor rather than
+a classification — `glasshouse classify` is the intended producer and is not
+wired. The preflight scout's `HelperRecord` is discarded, so that one helper gets
+no lane and no `/cell` row. The `## Evidence` section of the preflight block is
+not emitted. The recap has rendering but no producer. `OutputKind::Spans` is
+still returned as text rather than a structured array. And a helper's context
+still binds `helper` and `agent`, closed by refusal rather than by absence.
 
 ### What was measured
 
@@ -60,6 +58,26 @@ reasons are now stated in the preamble so they are not trimmed later.
 question — the reduction costs them. The win is the task model's context window,
 permanently, and moving those tokens to a cheap model once instead of re-sending
 them every turn. Correctness was neutral, not improved.
+
+**SCOUT is the one that buys correctness.** On a real 38,718-line codebase,
+asked where a per-cell ceiling is enforced and where its default is set
+(`gpt-5.6-sol` as the task model, `gpt-5.6-luna` as the helper):
+
+| arm | sites found | context | spend |
+|---|---|---|---|
+| SCOUT | **4** | 4.1k | **4.2k** |
+| the task model alone | 2 | 11.2k | 50.2k |
+
+It also closed with what it had not inspected, unprompted. **CHECKER** caught a
+planted off-by-one in a diff (`> ceiling` where `>= ceiling` was asked for),
+naming the line and the reasoning, and returned *holds* on the corrected
+control — so it does not simply cry wolf. N=1 per question; a question needing
+inference rather than search is untested.
+
+**A helper computes rather than estimates.** Asked to total fifteen two-decimal
+durations it answered 39.84s on four separate runs, matching ground truth
+exactly. Its `looked` trajectory shows it read the file; it does not show the
+arithmetic, which happens as plain JS inside its own cell.
 
 **The preflight format question is answered, weakly.** Three arms, same request
 and served files, `deepseek-v4-flash-0731`, N=5, scored on whether the first
