@@ -17,7 +17,12 @@
 # mechanism for generating shims for *users*, it writes a different file, and
 # nothing here pre-authorizes anything: a generated user shim still resolves a
 # launch profile and is still refused if that profile wants an unacknowledged
-# bypass. When Glasshouse is installed for real, delete this link.
+# bypass.
+#
+# It STAYS on PATH after `scripts/install-local.sh` installs a real build. The
+# two are not rivals: inside a Glasshouse checkout this must resolve to that
+# checkout's binary, which no installed artifact can do, and everywhere else it
+# execs the install. Deleting the link would trade that safety for nothing.
 set -euo pipefail
 
 # Resolve symlinks — this is invoked through ~/.local/bin/glasshouse, and the
@@ -55,17 +60,26 @@ if git_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
   RESOLVED_FROM_CWD=1
 fi
 # Standing outside any Glasshouse checkout is legitimate — that is how you test
-# the binary against a scratch project — so this warns rather than refusing.
-# But it must not be silent, because the one thing it cannot tell you afterwards
-# is which binary you actually ran.
+# the binary against a scratch project — and once `scripts/install-local.sh`
+# has installed a real build, THAT is the right binary there: it is the shipped
+# artifact, built from a commit, and it is what dogfooding is supposed to
+# exercise. Falling back to some checkout's debug build instead is the older,
+# worse behaviour this branch replaced, and it is kept only for a machine with
+# nothing installed — where it still warns, because the one thing it could not
+# tell you afterwards is which binary you actually ran.
+INSTALLED="${GLASSHOUSE_PREFIX:-$HOME/.local}/lib/glasshouse/current/bin/glasshouse"
 if [ "$RESOLVED_FROM_CWD" -eq 0 ]; then
   case "$PWD/" in
     "$SCRIPT_REPO"/*) ;;
     *)
+      if [ -x "$INSTALLED" ]; then
+        exec "$INSTALLED" "$@"
+      fi
       echo "glasshouse (dev shim): you are not standing in a Glasshouse checkout," >&2
-      echo "  so this runs ${SCRIPT_REPO}'s binary, which may be a different" >&2
-      echo "  branch or an older build than the tree you are testing." >&2
-      echo "  Run <that checkout>/target/debug/glasshouse directly to be certain." >&2
+      echo "  and nothing is installed, so this runs ${SCRIPT_REPO}'s binary, which" >&2
+      echo "  may be a different branch or an older build than the tree you are testing." >&2
+      echo "  Install the real thing with scripts/install-local.sh, or run" >&2
+      echo "  <that checkout>/target/debug/glasshouse directly to be certain." >&2
       ;;
   esac
 fi
