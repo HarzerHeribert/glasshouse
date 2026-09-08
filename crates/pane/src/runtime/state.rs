@@ -65,6 +65,14 @@ pub(crate) struct ConsoleCapture {
 /// `chars / 4` estimate the whole crate shares.
 const KEEP_CHARS: usize = preview::STDOUT_TOKEN_CAP * 4;
 
+/// How many `CallSite::PostResult` reductions one task remembers, so a
+/// repeated command is served rather than reduced again.
+///
+/// Small on purpose: this answers "did *this* task already reduce exactly
+/// this output", which is a question about the last few tool calls, not a
+/// cache of the session.
+const REDUCTIONS_KEPT: usize = 16;
+
 impl ConsoleCapture {
     pub(crate) fn write_line(&mut self, line: &str) {
         self.buffer.push_str(line);
@@ -215,6 +223,19 @@ pub(crate) struct RuntimeState {
     /// which is helpers **off**: a runtime nobody configured spends nothing
     /// on the user's behalf.
     helpers: RefCell<HelpersConfig>,
+    /// What `CallSite::PostResult` has already reduced this task, keyed by
+    /// the SHA-256 of the text it reduced.
+    ///
+    /// The invariant: **no value is reduced twice.** A cell is code, so the
+    /// same command inside a loop is ordinary; without this, each identical
+    /// result would buy an answer the task already holds. A hit is served
+    /// from here and claims no helper call, so the ceiling is spent on
+    /// distinct outputs only.
+    ///
+    /// Bounded by discarding the oldest. What is stored is the reduction, not
+    /// the output -- one helper `max_tokens` each -- so a long task pays a
+    /// small fixed cost rather than one that grows with it.
+    reductions: RefCell<Vec<(String, String)>>,
     /// Versions whose exact editing context has crossed a completed cell
     /// boundary and therefore reached the model.
     visible_sources: RefCell<HashSet<(PathBuf, String)>>,
@@ -223,6 +244,10 @@ pub(crate) struct RuntimeState {
     pending_sources: RefCell<HashSet<(PathBuf, String)>>,
     pending_context_output: RefCell<Option<String>>,
 }
+
+/// Slots a pushed helper may never take, so the model's own `helper.*` calls
+/// survive an automatic reduction that fired several times first.
+const RESERVED_FOR_THE_MODEL: u32 = 2;
 
 impl RuntimeState {
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
@@ -247,6 +272,7 @@ impl RuntimeState {
             model: RefCell::new(crate::wire::MODEL.to_string()),
             instructions: RefCell::new(InstructionContext::default()),
             helpers: RefCell::new(HelpersConfig::default()),
+            reductions: RefCell::new(Vec::new()),
             visible_sources: RefCell::new(HashSet::new()),
             pending_sources: RefCell::new(HashSet::new()),
             pending_context_output: RefCell::new(None),
@@ -335,9 +361,34 @@ impl RuntimeState {
     /// is code, so a helper call sits inside a loop, and the refusal is what
     /// the model catches instead of the loop running away.
     pub(crate) fn claim_helper_call(&self) -> Result<(), String> {
+        self.claim_helper_slot(0)
+    }
+
+    /// A slot claimed by a helper the MODEL DID NOT ASK FOR — today the
+    /// post-result reduction.
+    ///
+    /// The invariant: **a pushed helper never starves a pulled one.** Both
+    /// spend the same per-cell budget, so an automatic reduction firing on
+    /// several oversized results could leave a model that then reaches for
+    /// `helper.find` refused for a call it never made. `reserved` slots stay
+    /// for the model's own calls.
+    pub(crate) fn claim_pushed_helper_call(&self) -> Result<(), String> {
+        self.claim_helper_slot(RESERVED_FOR_THE_MODEL)
+    }
+
+    fn claim_helper_slot(&self, reserved: u32) -> Result<(), String> {
         let ceiling = self.helpers.borrow().calls_per_cell;
+        // Reserve only what there is room to reserve. At a ceiling of one or
+        // two there is nothing to protect — the model is refused either way —
+        // so a pushed call still gets its single slot rather than the feature
+        // silently turning itself off on a small budget.
+        let available = if ceiling == 0 {
+            0
+        } else {
+            ceiling.saturating_sub(reserved).max(1)
+        };
         let mut current = self.current.borrow_mut();
-        if current.helper_calls >= ceiling {
+        if current.helper_calls >= available {
             return Err(format!(
                 "this cell has used its {ceiling} helper call(s); yield and start another cell"
             ));
@@ -413,6 +464,31 @@ impl RuntimeState {
         signal(&records);
     }
 
+    /// The reduction already made for text with this digest, if there is one.
+    ///
+    /// Answering from here is what makes the second identical result free:
+    /// it is read before [`claim_helper_call`] so a hit spends neither a
+    /// request nor a slot of the cell's ceiling.
+    ///
+    /// [`claim_helper_call`]: RuntimeState::claim_helper_call
+    pub(crate) fn reduction_of(&self, digest: &str) -> Option<String> {
+        self.reductions
+            .borrow()
+            .iter()
+            .find(|(seen, _)| seen == digest)
+            .map(|(_, reduction)| reduction.clone())
+    }
+
+    /// Keeps one reduction against the digest of the text it reduced,
+    /// discarding the oldest once [`REDUCTIONS_KEPT`] are held.
+    pub(crate) fn remember_reduction(&self, digest: String, reduction: String) {
+        let mut reductions = self.reductions.borrow_mut();
+        if reductions.len() >= REDUCTIONS_KEPT {
+            reductions.remove(0);
+        }
+        reductions.push((digest, reduction));
+    }
+
     /// Every helper call the cell that just ran completed, in call order.
     pub(crate) fn helper_records(&self) -> Vec<HelperRecord> {
         self.current.borrow().helpers.clone()
@@ -441,6 +517,9 @@ impl RuntimeState {
         // it: a next task inheriting the last one's checklist would be
         // reporting work it never did.
         self.plan.borrow_mut().clear();
+        // Reductions describe results that were held behind the handles this
+        // just dropped, so they end with them.
+        self.reductions.borrow_mut().clear();
         self.visible_sources.borrow_mut().clear();
         self.pending_sources.borrow_mut().clear();
         self.pending_context_output.borrow_mut().take();

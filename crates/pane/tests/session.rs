@@ -4490,3 +4490,182 @@ fn disabled_handler_notice_reaches_the_first_preview_once_before_next_inference(
     assert_eq!(handlers, 1, "disabled handler retried on next delivery");
     fs::remove_dir_all(root).unwrap();
 }
+
+// ---------------------------------------------------------------------
+// Preflight -- SCOUT once per task, before the model's first turn.
+// `little-helpers.md`, *Pushed -- the preflight hook*.
+// ---------------------------------------------------------------------
+
+/// `[helpers] model` is the whole configuration a preflight needs: unset is
+/// off, exactly as `[supervisor] model` unset is.
+fn write_helpers_pane_toml(root: &Path, model: &str) {
+    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::write(
+        root.join(".glasshouse").join("pane.toml"),
+        format!("[helpers]\nmodel = \"{model}\"\n"),
+    )
+    .unwrap();
+}
+
+/// The system block of one recorded request body.
+fn request_system(body: &str) -> String {
+    let request: serde_json::Value = serde_json::from_str(body).unwrap();
+    request["system"][0]["text"].as_str().unwrap().to_string()
+}
+
+/// **With helpers unconfigured nothing changes at all.** No request is sent
+/// on the user's behalf and the system block is the one
+/// `the_system_block_is_render_systems_own_bytes` pins, byte for byte up to
+/// the orientation snapshot this test does not regenerate.
+///
+/// The mutation this kills: a preflight that runs whenever the roster has a
+/// `Preflight` spec. `helpers::preflight` itself checks no configuration --
+/// it cannot, it is handed a model -- so the fail-closed direction lives at
+/// this call site and nowhere else.
+#[test]
+fn preflight_does_not_fire_with_helpers_unconfigured() {
+    let root = scratch_dir("preflight-off-root");
+    fs::write(root.join("CLAUDE.md"), "PROJECT-INSTRUCTION-ONE").unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-preflight-off",
+        "where is the retry budget applied",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "an unconfigured helper must send no request of its own"
+    );
+
+    let profile = pane::sandbox::profile::Profile::compile(&root, None);
+    let expected = pane::prompt::render_system(
+        &pane::project::instructions::root(&profile),
+        &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
+        &pane::session::session_facts(&profile),
+    );
+    let saved = pane::rollout::resume(&rollout).unwrap().system;
+    let (prefix, orientation) = saved.split_once("\n\n## Environment orientation").unwrap();
+    assert_eq!(prefix, expected);
+    assert!(
+        !orientation.contains("## Request (verbatim"),
+        "no preflight block may be appended: {orientation}"
+    );
+}
+
+/// The measured rule of `little-helpers.md`: **the verbatim request is never
+/// replaced.** A paraphrase that adds a clause becomes the criterion the
+/// model solves for, so the request is the first section and is the bytes the
+/// user typed; the scout's reading is advisory under it, what it named is
+/// served, and its own report stays out of the prompt behind a one-line
+/// record.
+#[test]
+fn preflight_serves_the_scouts_files_under_the_verbatim_request() {
+    let root = scratch_dir("preflight-on-root");
+    write_helpers_pane_toml(&root, "helper-tier");
+    fs::write(root.join("haystack.rs"), "// the needle is on this line\n").unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let task = "find the needle, and do not change the colour";
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nreturn \"haystack.rs:1 where the needle is\";\n```"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-preflight-on",
+        task,
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one scout request, then the task's own turn"
+    );
+    assert!(
+        request_system(&bodies[0]).contains("Answer with spans only"),
+        "the first request must be the scout's, carrying its preamble"
+    );
+
+    let system = request_system(&bodies[1]);
+    assert!(
+        system.contains(&format!("## Request (verbatim, authoritative)\n{task}")),
+        "the request must appear unmodified and first: {system}"
+    );
+    assert!(
+        system.contains("## Served in full (1)"),
+        "the file the scout named must be served: {system}"
+    );
+    assert!(
+        system.contains("// the needle is on this line"),
+        "served means its contents, not its path: {system}"
+    );
+    assert!(
+        system.contains("## Selection record"),
+        "the record is one line, and it is present: {system}"
+    );
+    assert!(
+        !system.contains("Could not determine"),
+        "the scout's uncertainty is not a section: {system}"
+    );
+}
+
+/// **A failed preflight is never fatal.** The scout's reply is empty, which
+/// its own loop reports as a failure; the task then runs on exactly as it
+/// does with helpers off, and gets the next scripted reply.
+///
+/// Before the preflight existed this run failed: the empty reply was the
+/// *task's* first turn, and an empty reply ends a task with an error.
+#[test]
+fn a_failed_preflight_still_runs_the_task() {
+    let root = scratch_dir("preflight-failed-root");
+    write_helpers_pane_toml(&root, "helper-tier");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![assistant_reply(""), ending_reply()]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-preflight-failed",
+        "find the needle, and do not change the colour",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "a failed preflight must leave the session runnable; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the scout tried once, the task ran once");
+    let system = request_system(&bodies[1]);
+    assert!(
+        !system.contains("## Request (verbatim"),
+        "a failed preflight appends nothing: {system}"
+    );
+}

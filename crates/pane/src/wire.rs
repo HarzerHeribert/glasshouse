@@ -503,12 +503,30 @@ pub fn send_turn_configured(
     model: &str,
     effort: Effort,
 ) -> Result<Turn, WireError> {
+    send_turn_bounded(conversation, model, effort, None)
+}
+
+/// A task turn, optionally bounded.
+///
+/// The task path passes `None`: a person is watching it and can stop it. A
+/// **helper's** loop passes [`SIDE_ERRAND_TIMEOUT`], because it runs inside a
+/// native callback on another thread where nothing can interrupt it — the same
+/// reason [`send_turn_with`] carries the ceiling, and it applies verbatim here
+/// once a helper started taking turns of its own.
+pub fn send_turn_bounded(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    timeout: Option<std::time::Duration>,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let body = request_body_configured(conversation, model, effort);
 
-    let mut request = ureq::post(&url)
-        .config()
-        .http_status_as_error(false)
+    let mut builder = ureq::post(&url).config().http_status_as_error(false);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout_global(Some(timeout));
+    }
+    let mut request = builder
         .build()
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION);
@@ -551,7 +569,7 @@ pub fn send_turn_configured(
 /// `cell_wall_clock_s` and `/stop` both. Generous against a real answer
 /// (measured: 7.5s for `gpt-5.6-luna`, 32s for a reasoning model) and finite
 /// against a hang.
-const SIDE_ERRAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const SIDE_ERRAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub fn send_turn_with(
     conversation: &Conversation,

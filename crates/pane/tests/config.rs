@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pane::config::PaneConfig;
+use pane::config::{CompletionStyle, PaneConfig};
 
 fn unique() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -95,4 +95,56 @@ fn pane_toml_names_no_tool_path_or_grant() {
     write_pane_toml(&root, "[supervisor]\nmodel = \"../etc/passwd\"\n");
     let err = PaneConfig::load(&root).unwrap_err();
     assert!(err.contains("names no tool, path or grant"), "{err}");
+}
+
+/// `[helpers] completion` -- the only thing that decides whether an accepted
+/// task says anything at all. The default is silence: a line printed after
+/// every task is a line nobody reads, so the recap is opt-in and its key
+/// takes exactly two values.
+#[test]
+fn completion_parses_both_styles_and_defaults_to_silent() {
+    let root = scratch_dir("completion-absent");
+    let config = PaneConfig::load(&root).unwrap();
+    assert_eq!(
+        config.helpers.completion,
+        CompletionStyle::Silent,
+        "an absent key is silence, not a recap nobody asked for"
+    );
+
+    let root = scratch_dir("completion-silent");
+    write_pane_toml(&root, "[helpers]\ncompletion = \"silent\"\n");
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.completion,
+        CompletionStyle::Silent
+    );
+
+    let root = scratch_dir("completion-recap");
+    write_pane_toml(&root, "[helpers]\ncompletion = \"recap\"\n");
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.completion,
+        CompletionStyle::Recap
+    );
+}
+
+#[test]
+fn a_third_completion_style_is_refused_with_one_sentence() {
+    let root = scratch_dir("completion-bogus");
+    write_pane_toml(&root, "[helpers]\ncompletion = \"chatty\"\n");
+    let err = PaneConfig::load(&root).unwrap_err();
+    assert!(err.contains("completion"), "{err}");
+    assert!(
+        err.contains("chatty"),
+        "the refusal names what was written: {err}"
+    );
+    assert!(
+        err.contains("silent") && err.contains("recap"),
+        "and what would have been accepted: {err}"
+    );
+    assert_eq!(err.lines().count(), 1, "refused with one sentence: {err}");
+
+    let root = scratch_dir("completion-not-a-string");
+    write_pane_toml(&root, "[helpers]\ncompletion = true\n");
+    let err = PaneConfig::load(&root).unwrap_err();
+    assert!(err.contains("completion"), "{err}");
+    assert_eq!(err.lines().count(), 1, "refused with one sentence: {err}");
 }

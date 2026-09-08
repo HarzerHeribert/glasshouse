@@ -8,11 +8,13 @@ use pane::helpers::{HelperOutcome, HelperRecord};
 use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::{
-    CellError, CellView, Counted, Notebook, SupervisorStatus, TaskTokens, cell_ordinal, render,
+    CellError, CellView, Counted, Notebook, ScreenState, SupervisorStatus, TaskTokens,
+    cell_ordinal, render, render_screen,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 
 fn conversation(messages: Vec<Message>) -> Conversation {
     Conversation {
@@ -1117,5 +1119,161 @@ fn four_helpers_collapse_to_a_count_and_a_total() {
     assert!(
         !text.contains("2 root errors"),
         "the individual lanes are gone:\n{text}"
+    );
+}
+
+// --- little-helpers.md, "In the TUI": the completion gate's recap ------
+
+/// What the session actually did, and one specific next prompt -- the shape
+/// `helpers::RECAP_PREAMBLE` asks the helper for.
+const RECAP_TEXT: &str = "Renamed the parser entry point and updated its two callers.\n\
+                          Next: run the full gate before pushing.";
+
+/// The recap as the completion gate hands it over: one helper call that
+/// either came back (`ok`) or did not.
+fn recap_record(text: &str, ok: bool) -> HelperRecord {
+    HelperRecord {
+        helper: "recap".to_string(),
+        verb: "recapping".to_string(),
+        asked: "the finished task".to_string(),
+        outcome: HelperOutcome {
+            text: text.to_string(),
+            ok,
+            elapsed_ms: 900,
+        },
+        turns: 1,
+        looked: Vec::new(),
+    }
+}
+
+/// A finished task -- a request and the model's own answer -- with `recap`
+/// as the session's closing output. `None` is `completion = "silent"`.
+fn recap_screen(recap: Option<HelperRecord>) -> Buffer {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "rename the parser entry point"),
+        Message::text(Role::Assistant, ASSISTANT_ANSWER),
+    ]);
+    let state = ScreenState {
+        recap,
+        ..ScreenState::default()
+    };
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_screen(
+                frame,
+                &conversation,
+                &known_served_by(),
+                &HandleTable::new(),
+                &Notebook::default(),
+                &state,
+            )
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+const ASSISTANT_ANSWER: &str = "I renamed it and updated the callers.";
+
+/// The foreground colour a row is drawn in: the first glyph of that row that
+/// is neither blank nor part of a border.
+fn fg_of_row(buffer: &Buffer, needle: &str) -> Color {
+    let text = buffer_text(buffer);
+    let y = text
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} not found in buffer:\n{text}")) as u16;
+    for x in 0..buffer.area.width {
+        let cell = buffer.cell((x, y)).expect("inside the buffer");
+        let symbol = cell.symbol();
+        if !symbol.trim().is_empty() && !"│┃╭╰─".contains(symbol) {
+            return cell.fg;
+        }
+    }
+    panic!("row {y} carries no glyph:\n{text}");
+}
+
+/// `completion = "recap"`: one or two sentences on what the session did and
+/// one suggested next prompt, rendered where the session's closing output
+/// belongs -- under the transcript it summarises.
+///
+/// **Visually distinct, deliberately.** A recap the reader takes for the
+/// assistant's answer is worse than no recap, so it carries its own header
+/// naming its author and is drawn muted rather than in the model's own
+/// prose style.
+#[test]
+fn a_recap_renders_its_sentences_and_its_next_line() {
+    let buffer = recap_screen(Some(recap_record(RECAP_TEXT, true)));
+    let text = buffer_text(&buffer);
+
+    assert!(
+        text.contains("Renamed the parser entry point and updated its two callers."),
+        "the recap says what the session did:\n{text}"
+    );
+    let next = text
+        .lines()
+        .find(|line| line.trim_start_matches(['│', ' ']).starts_with("Next:"))
+        .unwrap_or_else(|| panic!("the recap suggests one next prompt:\n{text}"));
+    assert!(
+        next.contains("run the full gate before pushing."),
+        "and says which one: {next}"
+    );
+
+    let header = text
+        .lines()
+        .find(|line| line.contains("RECAP"))
+        .unwrap_or_else(|| panic!("the recap carries its own header:\n{text}"));
+    assert!(
+        header.contains("not the assistant"),
+        "which says whose words these are not: {header}"
+    );
+
+    assert_eq!(
+        fg_of_row(&buffer, "Renamed the parser entry point"),
+        Color::Gray,
+        "the recap is muted:\n{text}"
+    );
+    assert_ne!(
+        fg_of_row(&buffer, ASSISTANT_ANSWER),
+        Color::Gray,
+        "and the model's own prose is not, so the two cannot be confused:\n{text}"
+    );
+    assert!(
+        text.contains(ASSISTANT_ANSWER),
+        "the answer itself is untouched:\n{text}"
+    );
+}
+
+/// The default. A line printed after every task is a line nobody reads, so
+/// an accepted task says nothing at all unless it was asked to.
+#[test]
+fn silent_renders_nothing_at_all() {
+    let text = buffer_text(&recap_screen(None));
+    assert!(!text.contains("RECAP"), "no header:\n{text}");
+    assert!(!text.contains("Next:"), "no suggestion:\n{text}");
+    assert!(
+        text.contains(ASSISTANT_ANSWER),
+        "the answer still renders:\n{text}"
+    );
+}
+
+/// A recap that failed prints nothing -- not its failure, not a header, not
+/// a blank frame. It must never replace or delay the answer above it, and
+/// the screen is the one `completion = "silent"` already draws.
+#[test]
+fn a_failed_recap_prints_nothing() {
+    let failed = buffer_text(&recap_screen(Some(recap_record(
+        "request failed: 429",
+        false,
+    ))));
+    assert!(
+        !failed.contains("429"),
+        "the failure is not the answer:\n{failed}"
+    );
+    assert_eq!(
+        failed,
+        buffer_text(&recap_screen(None)),
+        "a failed recap draws exactly the silent screen"
     );
 }

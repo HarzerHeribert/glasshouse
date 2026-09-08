@@ -42,6 +42,14 @@ impl Fixture {
     fn profile(&self) -> Profile {
         Profile::compile(&self.root, Some(r#"{"permissions":{"allow":[]}}"#))
     }
+
+    /// A profile with a grant, for the `CallSite::PostResult` tests. Gated
+    /// like its only callers: the Windows cell denies warnings and a helper
+    /// whose callers are all `unix` tests is dead there.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn profile_with(&self, settings: &str) -> Profile {
+        Profile::compile(&self.root, Some(settings))
+    }
 }
 
 impl Drop for Fixture {
@@ -110,6 +118,7 @@ fn configured(model: &str, calls_per_cell: u32) -> HelpersConfig {
         model: model.to_string().into(),
         enabled: true,
         calls_per_cell,
+        ..HelpersConfig::default()
     }
 }
 
@@ -364,6 +373,7 @@ fn helpers_disabled_with_a_model_configured_still_refuse_and_never_reach_the_wir
         model: "a-real-model".to_string().into(),
         enabled: false,
         calls_per_cell: 8,
+        ..HelpersConfig::default()
     });
     let outcome = runtime.run_cell(
         "try { await helper.reduce(\"a log line\"); return \"no refusal\"; }\n\
@@ -679,4 +689,359 @@ fn the_narrowed_loop_is_what_asks_for_a_narrowed_runtime() {
              globals its spec never named"
         );
     }
+}
+
+// --- CallSite::PostResult -----------------------------------------------
+//
+// The pushed half nothing asks for: an oversized command result is reduced
+// by the host, without the model spending a turn to request it. Every test
+// below spawns, so each is gated to the platforms with a sandbox applier —
+// on Windows `tools::invoke` refuses rather than spawning unconfined, and a
+// "the tool ran" assertion would fail there for an unrelated reason.
+
+/// The whole grant these tests need. `printf` and brace expansion are both
+/// bash builtins, so `bash` is the only binary that is ever exec'd.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const PRINTF_ONLY: &str = r#"{"permissions":{"allow":["Bash(printf*)"]}}"#;
+
+/// A command line whose output is comfortably over
+/// `preview::STDOUT_TOKEN_CAP`, so the automatic reduction's own trigger is
+/// what fires rather than a number this file chose.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn oversized_command(marker: &str) -> String {
+    format!(r#"printf '{marker} %s\n' {{1..4000}}"#)
+}
+
+/// `const r = await bash(…); return r.stdout.length + "|" + <the reduction>`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn report_program(command: &str) -> String {
+    format!(
+        "const r = await bash({{ command: {command:?} }});\n\
+         return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n"
+    )
+}
+
+/// Splits `"<length>|<reduction-or-none>"` back into the two facts.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reported(outcome: &CellOutcome) -> (usize, String) {
+    let text = returned_text(outcome);
+    let (length, reduction) = text
+        .split_once('|')
+        .unwrap_or_else(|| panic!("expected `<length>|<reduction>`, got {text:?}"));
+    (length.parse().expect(length), reduction.to_string())
+}
+
+/// **A result the model could have printed whole is left alone.**
+///
+/// The reduction fires without being asked for, so the case that matters
+/// most is the one where it must not fire at all: an ordinary command result
+/// carries no `reduced`, leaves no record, and reaches no wire.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_small_command_result_is_untouched_and_costs_no_helper_call() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-small");
+    let provider = provider("never asked");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-small"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let outcome = runtime.run_cell(&report_program(r"printf 'error: boom\n'"));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let (length, reduction) = reported(&outcome);
+    assert_eq!(length, "error: boom\n".len(), "{outcome:?}");
+    assert_eq!(
+        reduction, "none",
+        "a result under the cap is not worth a request"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        0,
+        "a small result must not reach the wire at all"
+    );
+    assert!(
+        runtime.helper_records().is_empty(),
+        "a call that never ran is not a helper record: {:?}",
+        runtime.helper_records()
+    );
+}
+
+/// **An oversized result is reduced, and the full output is still there.**
+///
+/// Three facts in one, because they are one path: the handle table offers
+/// `reduced` as a key the next turn can read, the program still holds every
+/// byte `stdout` carried, and one `HelperRecord` says what the lane and
+/// `/cell` show. A summary that replaced the output would make the helper
+/// the only witness to it; a reduction nothing names would never be read.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn an_oversized_command_result_is_reduced_and_the_full_output_remains() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-big");
+    let provider = provider("3 distinct failures");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-big"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    let first = runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+
+    // The turn the model actually gets: the reduction is a key it can read,
+    // never text injected into its context — `little-helpers.md`'s "output
+    // never injects itself".
+    let table = match &first {
+        CellOutcome::Yielded { turn } => turn.table.clone(),
+        other => panic!("expected a yield, got {other:?}"),
+    };
+    assert!(
+        table.contains("\"reduced\": string"),
+        "the next turn must be told the reduction is there to read: {table}"
+    );
+
+    let records = runtime.helper_records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record.helper, "reduce", "{record:?}");
+    assert_eq!(record.verb, "reducing", "{record:?}");
+    assert!(record.outcome.ok, "{record:?}");
+    assert_eq!(record.asked, "4,000 lines", "{record:?}");
+
+    let (length, reduction) = reported(&runtime.run_cell(
+        "return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n",
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert!(
+        length / 4 > pane::runtime::preview::STDOUT_TOKEN_CAP,
+        "the full output must still be there, and over the cap: {length} chars"
+    );
+    assert_eq!(
+        reduction, "3 distinct failures",
+        "the reduction must reach the program as `reduced`"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        1,
+        "one oversized result is one reduction"
+    );
+}
+
+/// **Do not reduce the same value twice.**
+///
+/// A cell is code, so the same command inside a loop is the ordinary case.
+/// The second identical result is served the reduction the first one paid
+/// for: one request, one record, and both results carry it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn the_same_output_is_never_reduced_twice() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-twice");
+    let provider = provider("3 distinct failures");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-twice"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    let outcome = runtime.run_cell(&format!(
+        "const first = await bash({{ command: {command:?} }});\n\
+         const second = await bash({{ command: {command:?} }});\n\
+         return first.reduced + \"|\" + second.reduced;\n"
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert_eq!(
+        returned_text(&outcome),
+        "3 distinct failures|3 distinct failures",
+        "the second identical result must still carry the reduction"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        1,
+        "the second identical result must not be reduced again"
+    );
+    assert_eq!(
+        runtime.helper_records().len(),
+        1,
+        "a served reduction is not a second call"
+    );
+}
+
+/// **With helpers unconfigured, an oversized result behaves exactly as
+/// today.**
+///
+/// This is the gate that fails OPEN when it is deleted: a user who never
+/// configured a helper would have one run and spend on every large command
+/// result, silently.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn an_oversized_result_is_untouched_when_helpers_are_unconfigured() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-off");
+    let provider = provider("never asked");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    // No `with_helpers`: the default carries no model, which is helpers off.
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-off"),
+    );
+    let outcome = runtime.run_cell(&report_program(&oversized_command("error: boom")));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let (length, reduction) = reported(&outcome);
+    assert!(
+        length / 4 > pane::runtime::preview::STDOUT_TOKEN_CAP,
+        "the fixture must be over the cap, got {length} chars"
+    );
+    assert_eq!(
+        reduction, "none",
+        "an unconfigured helper must leave the result exactly as it was"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        0,
+        "an unconfigured helper must not reach the wire at all"
+    );
+    assert!(
+        runtime.helper_records().is_empty(),
+        "a call that never ran is not a helper record"
+    );
+}
+
+/// **The per-cell ceiling still applies, and reaching it degrades rather
+/// than throwing.**
+///
+/// A reduction the model did not ask for must never be the thing that fails
+/// its program: the second oversized result simply arrives without
+/// `reduced`, which is today's behaviour.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn the_cell_ceiling_bounds_reductions_nobody_asked_for() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-ceiling");
+    let provider = provider("3 distinct failures");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-ceiling"),
+    )
+    .with_helpers(configured("test-helper-model", 1));
+    // Two *different* oversized outputs, so the second is a fresh value and
+    // the ceiling is the only thing that can stop it.
+    let first = oversized_command("error: boom");
+    let second = oversized_command("error: other");
+    let outcome = runtime.run_cell(&format!(
+        "const a = await bash({{ command: {first:?} }});\n\
+         const b = await bash({{ command: {second:?} }});\n\
+         return (a.reduced === undefined ? \"none\" : a.reduced)\n\
+         \x20 + \"|\" + (b.reduced === undefined ? \"none\" : b.reduced);\n"
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert_eq!(
+        returned_text(&outcome),
+        "3 distinct failures|none",
+        "the call past the ceiling must be skipped, not thrown"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        1,
+        "the refused reduction must not reach the wire"
+    );
+    assert_eq!(
+        runtime.helper_records().len(),
+        1,
+        "only the reduction that ran is a record"
+    );
+}
+
+/// **A reduction nobody asked for never starves a call the model made.**
+///
+/// Both halves spend one per-cell budget, so an automatic reduction firing on
+/// several oversized results could leave the model refused for a `helper.*`
+/// call it did make. Slots are reserved for the pulled half.
+#[test]
+fn a_pushed_reduction_leaves_slots_for_the_models_own_calls() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("pushed-vs-pulled");
+    let provider = provider("reduced");
+    // SAFETY: the environment lock serialises every test in this file.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    // The default ceiling, so the reservation has room to bite.
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("pushed-vs-pulled"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+
+    // NINE distinct oversized results against a ceiling of eight: without the
+    // reservation the pushed half consumes every slot and the model's own call
+    // is refused for a call it did make. Seven would not discriminate — the
+    // model's call would still fit — and a mutation proved that version green.
+    let mut program = String::new();
+    for i in 0..9 {
+        let command = oversized_command(&format!("error: boom {i}"));
+        program.push_str(&format!("await bash({{ command: {command:?} }});\n"));
+    }
+    // Then a call the MODEL makes. It must still be served.
+    program.push_str("return await helper.reduce(\"a log the model asked about\");\n");
+
+    let outcome = runtime.run_cell(&program);
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert_eq!(
+        returned_text(&outcome),
+        "reduced",
+        "the model's own helper call must survive the pushed reductions"
+    );
 }

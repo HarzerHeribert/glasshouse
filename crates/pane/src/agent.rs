@@ -165,7 +165,11 @@ pub fn run_narrowed(
         }
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
-        let sent = match wire::send_turn_configured(&request, &options.model, options.effort) {
+        // A narrowed loop is a helper: it runs on another thread inside a
+        // native callback, where nothing can interrupt it. Bound it.
+        let deadline = narrowed.map(|_| wire::SIDE_ERRAND_TIMEOUT);
+        let sent = match wire::send_turn_bounded(&request, &options.model, options.effort, deadline)
+        {
             Ok(sent) => sent,
             Err(error) => return finish(&error.to_string(), "failed", turn, tokens, trajectory),
         };

@@ -67,6 +67,14 @@ pub struct ScreenState {
     pub telemetry_selected: Option<usize>,
     pub reduced_motion: bool,
     pub pulse: Pulse,
+    /// The completion gate's recap of the task just accepted, when
+    /// `[helpers] completion = "recap"` asked for one.
+    ///
+    /// `None` -- the silent default, no helper model, or a call that never
+    /// came back -- renders nothing at all, and neither does a record that
+    /// failed: a recap must never replace or delay the answer it follows.
+    /// The caller clears it when the next task begins.
+    pub recap: Option<HelperRecord>,
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
@@ -1199,6 +1207,7 @@ fn conversation_lines(
             content.extend(markdown::code(code));
         }
     }
+    push_recap(&mut content, state.recap.as_ref());
     let mut active = false;
     for line in &mut content {
         let mut cell_header = false;
@@ -1484,6 +1493,41 @@ fn push_helper_lane(
     for record in shown {
         lines.push(helper_lane(record, tick, width));
     }
+}
+
+/// The recap's own header. It names the author and denies the mistake,
+/// because a recap read as the assistant's answer is worse than no recap:
+/// the answer is the model's, this is a cheap helper's summary of it.
+const RECAP_LABEL: &str = "RECAP · a helper's summary, not the assistant";
+
+/// The session's closing output when `[helpers] completion = "recap"` asked
+/// for one: what the session did, then the `Next:` line the preamble asks
+/// for, under the transcript they summarise.
+///
+/// **Nothing at all unless a recap was asked for and came back.** A missing
+/// or failed record renders no header, no reason and no blank frame -- the
+/// screen is the one the silent default already draws, because a recap must
+/// never replace or delay the answer above it.
+///
+/// It is drawn in [`MUTED`] with the helper lane's indent rather than in the
+/// model's own prose style, and nothing here adds a tick, a colour or a word
+/// that would claim more than the sentences themselves do.
+fn push_recap(lines: &mut Vec<Line<'static>>, recap: Option<&HelperRecord>) {
+    let Some(record) = recap.filter(|record| record.outcome.ok) else {
+        return;
+    };
+    let text = record.outcome.text.trim();
+    if text.is_empty() {
+        return;
+    }
+    turn_header(lines, RECAP_LABEL.to_string(), MUTED);
+    for line in text.lines() {
+        lines.push(Line::styled(
+            format!("  {}", line.trim_end()),
+            Style::default().fg(MUTED),
+        ));
+    }
+    lines.push(Line::styled("╰─", Style::default().fg(MUTED)));
 }
 
 /// A cell's regions, in the order `runtime-contract.md` §1 and §5 put them:

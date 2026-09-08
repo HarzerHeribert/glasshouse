@@ -512,6 +512,84 @@ pub fn run_with_tools(
     }
 }
 
+// ---------------------------------------------------------------------
+// The three call sites that are not a cell.
+//
+// Each is a thin entry point rather than a second runtime: they all reach
+// `run`, so a helper invoked automatically is the same helper the model can
+// call, under the same guardrails.
+// ---------------------------------------------------------------------
+
+/// SCOUT at `CallSite::Preflight` -- once per task, after the request arrives
+/// and before the model's first turn.
+///
+/// Returns the block to append to the system prompt, or `None` when helpers
+/// are off, no spec serves this site, or the call failed. **A failed preflight
+/// is never fatal**: the task runs with the static orientation, exactly as it
+/// does today.
+pub fn preflight(
+    task: &str,
+    model: &str,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+) -> Option<HelperRecord> {
+    let spec = HELPERS
+        .iter()
+        .find(|spec| spec.call_sites.contains(&CallSite::Preflight))?;
+    let call = run(spec, model, task, profile, glasshouse, session);
+    Some(HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: bounded_ask(task),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+    })
+}
+
+/// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted.
+pub fn check_completion(
+    evidence: &str,
+    model: &str,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+) -> Option<HelperRecord> {
+    let spec = HELPERS
+        .iter()
+        .find(|spec| spec.call_sites.contains(&CallSite::CompletionGate))?;
+    let call = run(spec, model, evidence, profile, glasshouse, session);
+    Some(HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: bounded_ask(evidence),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+    })
+}
+
+/// The recap `[helpers] completion = "recap"` asks for: one or two sentences
+/// on what the session did, and one suggested next prompt.
+///
+/// A one-shot toolless call by construction -- it summarises what already
+/// happened and must not go looking for more.
+pub const RECAP_PREAMBLE: &str = "You close out a coding session. In at most two sentences, say what was actually done — \
+     from the transcript only, never inferred. Then, on a new line beginning `Next:`, suggest \
+     one specific next prompt the user could send. Never invent work that did not happen, and \
+     never claim something succeeded that the transcript does not show succeeding.";
+
+/// One short description of an input, bounded, never the payload itself.
+fn bounded_ask(input: &str) -> String {
+    let line = input.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= 60 {
+        line.to_string()
+    } else {
+        format!("{}…", line.chars().take(59).collect::<String>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

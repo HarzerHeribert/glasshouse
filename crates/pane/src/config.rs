@@ -55,16 +55,46 @@ impl Default for SupervisorConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpersConfig {
     pub model: Option<String>,
+    /// What the completion gate does once a task is accepted.
+    pub completion: CompletionStyle,
     pub enabled: bool,
     /// The most helper calls one cell may make, so a loop cannot issue three
     /// hundred requests inside a single program.
     pub calls_per_cell: u32,
 }
 
+/// `[helpers] completion` -- what the gate says when a task is ACCEPTED.
+///
+/// A refusal is not affected: an unverified completion is reported either way.
+/// This is only about the accepted case, where the honest default is silence —
+/// a line printed after every task is a line nobody reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionStyle {
+    /// Say nothing on acceptance.
+    #[default]
+    Silent,
+    /// One or two sentences recapping the session, and one suggested next
+    /// prompt. Costs one cheap request per completed task.
+    Recap,
+}
+
+impl CompletionStyle {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "silent" => Ok(Self::Silent),
+            "recap" => Ok(Self::Recap),
+            other => Err(format!(
+                "pane.toml: `completion` must be \"silent\" or \"recap\", not `{other}`"
+            )),
+        }
+    }
+}
+
 impl Default for HelpersConfig {
     fn default() -> Self {
         Self {
             model: None,
+            completion: CompletionStyle::Silent,
             enabled: true,
             calls_per_cell: 8,
         }
@@ -278,7 +308,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
     let defaults = HelpersConfig::default();
 
     for key in table.keys() {
-        if !["model", "enabled", "calls_per_cell"].contains(&key.as_str()) {
+        if !["model", "enabled", "calls_per_cell", "completion"].contains(&key.as_str()) {
             return Err(format!("pane.toml: unknown key `{key}` in [helpers]"));
         }
     }
@@ -304,8 +334,18 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         None => defaults.calls_per_cell,
     };
 
+    let completion = match table.get("completion") {
+        None => defaults.completion,
+        Some(value) => CompletionStyle::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `completion` must be a string".to_string())?,
+        )?,
+    };
+
     Ok(HelpersConfig {
         model,
+        completion,
         enabled,
         calls_per_cell,
     })

@@ -25,7 +25,8 @@ use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
 use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence};
 use crate::runtime::preview::{
-    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, STDOUT_TOKEN_CAP, StringValue, Value,
+    estimate_tokens, thousands,
 };
 use crate::runtime::state::{RecordedCall, RuntimeState, provenance};
 use crate::sandbox::profile::PermissionDenied;
@@ -868,7 +869,8 @@ fn typed_result<'s>(
             (value, preview, "Code.Edit")
         }
         _ => {
-            let (value, preview) = build_bash(scope, result);
+            let reduction = reduce_oversized(result, state);
+            let (value, preview) = build_bash(scope, result, reduction.as_deref());
             (value, preview, "Bash.Result")
         }
     };
@@ -1332,9 +1334,83 @@ fn build_glob<'s>(
     )
 }
 
+/// `little-helpers.md`'s `CallSite::PostResult`: a command result the model
+/// would otherwise have to page is reduced by REDUCER, without the model
+/// spending a turn to ask.
+///
+/// **The trigger is [`STDOUT_TOKEN_CAP`]**, which is not a number chosen
+/// here: it is the exact size at which this runtime stops carrying console
+/// output whole. Print less and nothing is lost; print more and
+/// `ConsoleCapture::tail` gives the model the suffix behind
+/// `[console: ~N tokens omitted before this true tail]`. Below the cap the
+/// reduction would buy nothing the model could not read for itself, so the
+/// cap is where a cheap request starts being worth making.
+///
+/// **Evidence, never substrate.** Only [`typed_result`]'s command-output arm
+/// reaches here, so `read`, `context`, `edit`, `grep` and `glob` — every
+/// shape a model edits or quotes from — are excluded structurally rather
+/// than by a list. (`write` builds this shape too; its output is one
+/// sentence and can never reach the cap.)
+///
+/// **It is additive.** `stdout` and `stderr` keep every byte and the handle
+/// is untouched; the reduction is one more property beside them.
+///
+/// Every refusal is `None`, which is today's behaviour exactly: under the
+/// cap, no spec serving this site, helpers unconfigured or off, the cell's
+/// ceiling spent, or a call that failed. **A helper failing here is never
+/// fatal** — the program gets the result it would have got anyway.
+fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<String> {
+    if estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr) <= STDOUT_TOKEN_CAP {
+        return None;
+    }
+    let spec = crate::helpers::HELPERS.iter().find(|spec| {
+        spec.call_sites
+            .contains(&crate::helpers::CallSite::PostResult)
+    })?;
+    let model = state.helper_model().ok()?;
+
+    // Both streams, because a build writes its failures to whichever it
+    // likes and the reduction is of the output, not of one pipe.
+    let mut text = result.stdout.clone();
+    text.push_str(&result.stderr);
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    if let Some(reduction) = state.reduction_of(&digest) {
+        return Some(reduction);
+    }
+    // After the cache and before the call: a served reduction spends neither
+    // a request nor a slot, and a claimed slot is always a request made.
+    state.claim_pushed_helper_call().ok()?;
+
+    let call = crate::helpers::run(
+        spec,
+        &model,
+        &text,
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+    );
+    let ok = call.outcome.ok;
+    let reduction = call.outcome.text.clone();
+    state.record_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked_summary(&text),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+    });
+    if !ok {
+        return None;
+    }
+    state.remember_reduction(digest, reduction.clone());
+    Some(reduction)
+}
+
 fn build_bash<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: &ToolResult,
+    reduced: Option<&str>,
 ) -> (v8::Local<'s, v8::Value>, Value) {
     let object = v8::Object::new(scope);
     let stdout = js_string(scope, &result.stdout);
@@ -1351,7 +1427,7 @@ fn build_bash<'s>(
             set_key(scope, object, "exit_code", null.into());
         }
     }
-    let preview = Value::object(vec![
+    let mut entries = vec![
         ("stdout".to_string(), Value::string(&result.stdout)),
         ("stderr".to_string(), Value::string(&result.stderr)),
         (
@@ -1360,8 +1436,15 @@ fn build_bash<'s>(
                 .exit_code
                 .map_or(Value::Null, |code| Value::Number(f64::from(code))),
         ),
-    ]);
-    (object.into(), preview)
+    ];
+    // Present only when a reduction was actually made, so an absent key is
+    // the honest signal that this result was never summarised.
+    if let Some(reduced) = reduced {
+        let value = js_string(scope, reduced);
+        set_key(scope, object, "reduced", value);
+        entries.push(("reduced".to_string(), Value::string(reduced)));
+    }
+    (object.into(), Value::object(entries))
 }
 
 // --- the handle functions ----------------------------------------------
