@@ -277,22 +277,22 @@ and permissions, `.claude/commands` and skills with nothing edited. It works a
 real task to a real result, keeps a plan it writes itself, runs background jobs
 and monitors whose completions arrive as one batched event rather than one turn
 each, resumes from a rollout file, and is watched by a cheaper model that catches
-a planted three-turn loop within two turns.
+a planted three-turn loop within two turns. It runs subagents — `pane`'s own,
+spawned by a session and returning into it, which is inside-a-session work and a
+different thing from Glasshouse's delegation between peer sessions you can see. It
+calls the MCP servers your `.mcp.json` names, under the same sandbox profile
+those permission patterns compile into. Standing handlers run against the
+batched events, and a session inbox delivers what other sessions send it.
 
 **What is not built, stated plainly:**
 
-- **The comparison that would justify the whole thing.** The ruler scores per
-  workload tier and refuses to measure tokens per turn, but the two-column run
-  against Claude Code on a fixed task set has not happened. Every performance
-  claim here except the 205-token one is therefore architecture, not evidence.
-- **MCP tools are read, not callable.** `.mcp.json` is parsed and its permission
-  patterns compile into the sandbox profile; no server is connected yet.
-- **Subagents.** Planned, and `pane`'s rather than Glasshouse's: a subagent is
-  spawned by one session and returns into it, which is inside-a-session work.
-  Glasshouse's delegation is between peer sessions you can see, which is a
-  different thing.
-- **Standing handlers and a session inbox.** The batch machinery they would ride
-  is built; these two are not.
+- **The comparison that would justify the whole thing.** A first matched run
+  against Claude Code — same frozen prompt, same fixture, same model and
+  entitlement, an external oracle scoring correctness before efficiency — has
+  happened, and its findings are driving the current work. What has not happened
+  is the repetition a claim needs: several tasks, several models, repeated
+  trials. Until that exists, every performance claim here except the 205-token
+  one is architecture, not evidence.
 - **The terminal interface.** Turn blocks, a persistent input area, slash-command
   completion and a status line are being built now.
 
