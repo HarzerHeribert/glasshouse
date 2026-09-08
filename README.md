@@ -340,20 +340,20 @@ scripts/install-local.sh --list      # what is installed, and which is live
 scripts/install-local.sh --rollback  # point `current` at the previous version
 ```
 
-Installs into `~/.local/lib/glasshouse/versions/<git describe>/` and links
-`~/.local/bin/pane` through a `current` symlink, so an update is a pointer flip
-and a rollback is the same flip backwards. Each version carries a
-`manifest.json` naming its commit, toolchain and binary hashes; a build that
-cannot print its own version is refused before `current` moves. Override the
-location with `GLASSHOUSE_PREFIX`.
+Installs into `~/.local/lib/glasshouse/versions/<git describe>/` and links both
+`~/.local/bin/glasshouse` and `~/.local/bin/pane` through a `current` symlink,
+so an update is a pointer flip and a rollback is the same flip backwards. Each
+version carries a `manifest.json` naming its commit, toolchain and binary
+hashes; a build that cannot print its own version is refused before `current`
+moves, and a dirty tree is refused outright, so an installed binary always maps
+to a commit. Override the location with `GLASSHOUSE_PREFIX`.
 
 Once installed, `glasshouse doctor` discovers `pane` on `PATH` like any other
 harness, and no invocation needs an explicit binary path.
 
-`glasshouse` on `PATH` stays the development shim
-(`scripts/dev/glasshouse`): inside a Glasshouse checkout it runs *that*
-checkout's build, which no installed artifact can do, and everywhere else it
-execs the install.
+`glasshouse-dev` is also linked, for the one thing an installed binary cannot
+do: inside a Glasshouse checkout it runs *that* checkout's build rather than
+the installed one. Everywhere else it execs the install.
 
 No code-signing certificate is involved in any of this. The linker ad-hoc signs
 what it produces and nothing carries `com.apple.quarantine`, because nothing was

@@ -84,10 +84,11 @@ list)
   done
   exit 0 ;;
 uninstall)
-  rm -f "$BINDIR/pane"
-  # The `glasshouse` PATH entry belongs to the dev shim; leave it alone.
+  for l in glasshouse pane glasshouse-dev; do
+    [ -L "$BINDIR/$l" ] && rm -f "$BINDIR/$l"
+  done
   rm -rf "$ROOT"
-  echo "removed $ROOT and $BINDIR/pane"
+  echo "removed $ROOT and the glasshouse, pane and glasshouse-dev links in $BINDIR"
   exit 0 ;;
 rollback)
   live="$(live_version)"
@@ -159,21 +160,22 @@ PY
 previous="$(live_version)"
 mkdir -p "$BINDIR"
 point_current_at "$DEST"
-ln -sfn "$CURRENT/bin/pane" "$BINDIR/pane"
+for b in glasshouse pane; do
+  ln -sfn "$CURRENT/bin/$b" "$BINDIR/$b"
+done
 
-# `glasshouse` on PATH stays the dev shim on purpose. Inside a Glasshouse
-# checkout it must keep resolving to THAT checkout's build -- a Phase 2C worker
-# once tested the main checkout's binary believing it was its own -- and the
-# shim now falls through to this install everywhere else.
-if [ ! -e "$BINDIR/glasshouse" ]; then
-  ln -sfn "$REPO/scripts/dev/glasshouse" "$BINDIR/glasshouse"
-fi
+# The development shim keeps its behaviour under its own name. Inside a
+# Glasshouse checkout it resolves to THAT checkout's build, which no installed
+# artifact can do -- a Phase 2C worker once tested the main checkout's binary
+# believing it was its own. It is no longer what `glasshouse` means.
+ln -sfn "$REPO/scripts/dev/glasshouse" "$BINDIR/glasshouse-dev"
 
 echo
 echo "installed $VERSION -> $DEST"
 [ -n "$previous" ] && [ "$previous" != "$VERSION" ] && echo "current:  $previous -> $VERSION"
-echo "pane:     $BINDIR/pane"
-echo "glasshouse: $BINDIR/glasshouse (dev shim; installed build used outside a checkout)"
+echo "glasshouse: $BINDIR/glasshouse"
+echo "pane:       $BINDIR/pane"
+echo "glasshouse-dev: $BINDIR/glasshouse-dev (runs the checkout you stand in)"
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
   *) echo; echo "NOTE: $BINDIR is not on PATH. Add it to your shell profile." ;;

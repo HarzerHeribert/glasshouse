@@ -19,10 +19,11 @@
 # launch profile and is still refused if that profile wants an unacknowledged
 # bypass.
 #
-# It STAYS on PATH after `scripts/install-local.sh` installs a real build. The
-# two are not rivals: inside a Glasshouse checkout this must resolve to that
-# checkout's binary, which no installed artifact can do, and everywhere else it
-# execs the install. Deleting the link would trade that safety for nothing.
+# After `scripts/install-local.sh` runs, `glasshouse` on PATH is the INSTALLED
+# binary and this is linked as `glasshouse-dev`. It keeps the one thing an
+# installed artifact cannot do: inside a Glasshouse checkout it resolves to
+# that checkout's build. Everywhere else it execs the install, so the two
+# names differ only where the difference matters.
 set -euo pipefail
 
 # Resolve symlinks — this is invoked through ~/.local/bin/glasshouse, and the
