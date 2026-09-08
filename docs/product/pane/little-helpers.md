@@ -437,6 +437,45 @@ tokens saved. The matched benchmark had pane at 247k tokens against a control's
 372k–444k while losing 4/6 on correctness; a helper that only makes a wrong
 answer cheaper has closed nothing.
 
+## Split subscriptions — the helper tier's real economics
+
+**The problem.** Anthropic has nothing in the helper tier. Measured 2026-09-08:
+`claude-haiku-4.5` is 1.00/5.00 per M at coding 43.9 with a 200k window, against
+`gpt-5.6-luna` at 0.20/1.20 and coding 71.4 with 1.05M, and `glm-5.3-flash` at
+0.075/0.250 and coding 71.5 with 1.31M. So a Claude-subscription session has no
+cheap helper worth using, and the tier's first criterion — context ≥ 1M — rules
+Haiku out on its own.
+
+**What is needed: the task model on one subscription, the helper on another.**
+
+**Why it does not work today, in two places.**
+
+1. **pane sends one endpoint.** `wire::send_turn_bounded` and `send_turn_with`
+   both use the global `base_url()` and `credential_header()`. `[helpers] model`
+   changes only the model *name* in the body, so a helper request goes to the
+   same host with the same credential as a task turn.
+2. **The gateway pins one entitlement per session.** Its own routing output says
+   *"entitlement `claude-max` … will serve this session"*, and
+   `entitlements --json` marks the others unselectable with *"current gateway
+   route is pinned to X"*.
+
+**The hook already exists.** Every helper request is stamped
+`x-glasshouse-purpose: helper` — the seam `supervisor.rs` introduced and this
+spec reuses. That header is exactly what a per-purpose route keys on: *task
+turns to the subscription, helper turns to the cheap tier.* The gateway already
+translates protocols and already knows several entitlements; what is missing is
+routing on **purpose** rather than pinning per session.
+
+**This is a Glasshouse change, not a pane one**, and it is what makes the
+architecture pay: without it, the only pairings that work are ones where the big
+model and the cheap model live behind the same endpoint —
+`gpt-5.6-sol` + `gpt-5.6-luna`, or any Gemini + `gemini-3.8-flash`.
+
+**Not decided here:** whether the route keys on the purpose header alone, on the
+model name, or on an explicit `[helpers] entitlement`; and whether a helper may
+run on an entitlement the session itself is not pinned to, which is a spend
+question as much as a routing one.
+
 ## Open, not decided here
 
 Whether one tier model serves all three specs or each names its own. Whether
