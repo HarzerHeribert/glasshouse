@@ -20,7 +20,6 @@ pub mod view;
 use std::collections::HashMap;
 
 use anyhow::Result;
-use ratatui::layout::Rect;
 
 use crate::Runtime;
 use crate::checkpoint::{Checkpoint, CheckpointReason, CheckpointStore, ProjectCheckpoints};
@@ -108,6 +107,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     loop {
         match events.next()? {
             Event::Key(key) => {
+                let mode_before = state.mode();
                 let action = state.handle_key(key);
                 match &action {
                     Action::None | Action::Redraw => {}
@@ -131,7 +131,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             &mut live,
                             &sessions,
                             presentation,
-                            viewport_terminal_size(&screen),
+                            viewport_terminal_size(&screen, &state),
                             &mut index_snapshots,
                         ) {
                             Ok(()) => {
@@ -162,7 +162,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             &mut live,
                             &sessions,
                             id,
-                            viewport_terminal_size(&screen),
+                            viewport_terminal_size(&screen, &state),
                         ) {
                             Ok(()) => {
                                 if let Ok(records) = sessions.store().list() {
@@ -400,21 +400,15 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         state.close_overlay();
                     }
                 }
-                sync_focus(&mut live, &state);
+                let outer = screen.size().unwrap_or_default();
+                sync_focus(&mut live, &state, outer, state.mode() != mode_before);
                 if !matches!(action, Action::None) {
                     screen.draw(|frame| view::render(&state, frame))?;
                 }
             }
             Event::Resize(cols, rows) => {
                 screen.on_resize(cols, rows)?;
-                if let Some(id) = live.focused().cloned() {
-                    // Inner size, not the terminal's outer one — see
-                    // `view::viewport_slot` — or a harness draws over chrome.
-                    let slot = view::viewport_slot(Rect::new(0, 0, cols, rows));
-                    if let Err(err) = live.resize(&id, TerminalSize::new(slot.height, slot.width)) {
-                        tracing::warn!(session = %id, %err, "could not resize the focused session");
-                    }
-                }
+                sync_focus(&mut live, &state, TerminalSize::new(rows, cols), true);
                 screen.draw(|frame| view::render(&state, frame))?;
             }
             Event::Tick => {
@@ -774,35 +768,42 @@ fn send_session_text(
     }
 }
 
-/// Bring the runtime's focus in line with whichever session the bar shows.
+/// Bring the runtime in line with what the bar shows: the focused session,
+/// and — when `moved` says the chrome around it just changed — the room that
+/// session now has, since entering session mode collapses four rows of chrome
+/// into one, or into none at all in fullscreen. Nothing else resizes: a
+/// `SIGWINCH` per keystroke would have every harness redrawing while typing.
 /// `RuntimeError::NotLive` is ignored on purpose: a session the bar lists
 /// but that is not running in this invocation is normal. Never touches a
 /// process — see [`SessionRuntime::focus`] — only changes which live
 /// session the keyboard reaches.
-fn sync_focus(live: &mut SessionRuntime, state: &ShellState) {
-    let Some(active) = state.active_session() else {
-        return;
-    };
-    if live.focused() == Some(&active.id) {
-        return;
+fn sync_focus(live: &mut SessionRuntime, state: &ShellState, outer: TerminalSize, moved: bool) {
+    // Focus moves FIRST: resizing before it hands the recovered rows to the
+    // session leaving the viewport and starves the one arriving in it.
+    if let Some(active) = state.active_session()
+        && live.focused() != Some(&active.id)
+    {
+        match live.focus(&active.id) {
+            Ok(()) | Err(RuntimeError::NotLive { .. }) => {}
+            // A headless session has no viewport to bring forward — the bar
+            // moving onto one leaves the keyboard where it was rather than
+            // logging a failure on every key; see `ShellState::enter_session_mode`.
+            Err(RuntimeError::Headless { .. }) => {}
+            Err(err) => tracing::warn!(session = %active.id, %err, "could not focus a session"),
+        }
     }
-    match live.focus(&active.id) {
-        Ok(()) | Err(RuntimeError::NotLive { .. }) => {}
-        // A headless session has no viewport to bring forward — the bar
-        // moving onto one leaves the keyboard where it was rather than
-        // logging a failure on every key; see `ShellState::enter_session_mode`.
-        Err(RuntimeError::Headless { .. }) => {}
-        Err(err) => tracing::warn!(session = %active.id, %err, "could not focus a session"),
+    if moved
+        && let Some(id) = live.focused().cloned()
+        && let Err(err) = live.resize(&id, view::viewport_terminal_size(outer, state.chrome()))
+    {
+        tracing::warn!(session = %id, %err, "could not resize the focused session");
     }
 }
 
 /// The viewport's own inner size, in the shape a freshly spawned session's
-/// pseudo-terminal needs — not the terminal's outer size. See
-/// `view::viewport_slot`'s doc comment.
-fn viewport_terminal_size(screen: &Screen) -> TerminalSize {
-    let outer = screen.size().unwrap_or_default();
-    let slot = view::viewport_slot(Rect::new(0, 0, outer.cols, outer.rows));
-    TerminalSize::new(slot.height, slot.width)
+/// pseudo-terminal needs — see `view::viewport_terminal_size`.
+fn viewport_terminal_size(screen: &Screen, state: &ShellState) -> TerminalSize {
+    view::viewport_terminal_size(screen.size().unwrap_or_default(), state.chrome())
 }
 
 /// Convert `vt100`'s colour model to Ratatui's — the one place either module

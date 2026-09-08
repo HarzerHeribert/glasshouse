@@ -6135,9 +6135,15 @@ fn a_session_started_headless_runs_and_is_listed_but_never_reaches_the_viewport(
         !screen.contains(MARKER),
         "a headless session's output reached the viewport:\n--- output ---\n{screen}\n--- end ---"
     );
+    // Session mode no longer draws a footer at all — it collapses to one
+    // header line — so `!contains("SESSION MODE")` became true for every
+    // possible run and stopped guarding anything. Control mode's footer is
+    // what is on screen when the keyboard stayed here, so assert its presence:
+    // a positive claim fails when the shell leaves control mode, which is the
+    // regression this test exists to catch.
     assert!(
-        !screen.contains("SESSION MODE"),
-        "a headless session took the keyboard:\n--- output ---\n{screen}\n--- end ---"
+        screen.contains("f fullscreen"),
+        "the shell left control mode for a headless session:\n--- output ---\n{screen}\n--- end ---"
     );
 }
 

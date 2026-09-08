@@ -440,6 +440,53 @@ fn entering_session_mode_closes_any_open_overlay() {
     );
 }
 
+/// `f` arms fullscreen; it does not enter it.
+///
+/// The two are deliberately separate. Arming is a control-mode decision the
+/// user makes with the session bar and the footer still on screen, and the
+/// chrome only goes when a session actually takes the keyboard — so the same
+/// key that armed it is still readable, and still pressable, until then.
+#[test]
+fn f_arms_fullscreen_without_taking_the_chrome_away() {
+    let mut state = state_with(2);
+    assert!(!state.fullscreen());
+    assert_eq!(state.chrome(), Chrome::Full);
+
+    assert_eq!(state.handle_key(press(KeyCode::Char('f'))), Action::Redraw);
+    assert!(state.fullscreen());
+    assert_eq!(state.mode(), Mode::Control, "arming owns no keyboard");
+    assert_eq!(
+        state.chrome(),
+        Chrome::Full,
+        "control mode keeps its bands however fullscreen is armed"
+    );
+    assert!(
+        state
+            .status()
+            .is_some_and(|note| note.contains("fullscreen")),
+        "a key that changes nothing visible yet must say what it did"
+    );
+
+    state.handle_key(press(KeyCode::Enter));
+    assert_eq!(state.chrome(), Chrome::None);
+    assert_eq!(
+        state.status(),
+        Some(FULLSCREEN_HINT),
+        "the way out is the one thing a frame-free screen still says"
+    );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+    assert_eq!(state.chrome(), Chrome::Full);
+    state.handle_key(press(KeyCode::Char('f')));
+    assert!(!state.fullscreen());
+    assert_eq!(
+        state.handle_key(press(KeyCode::Enter)),
+        Action::Redraw,
+        "and a focused session is back to the collapsed header"
+    );
+    assert_eq!(state.chrome(), Chrome::Header);
+}
+
 #[test]
 fn n_starts_a_new_session_from_control_mode() {
     let mut state = state_with(1);

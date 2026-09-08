@@ -180,6 +180,26 @@ pub enum Mode {
     Session,
 }
 
+/// How much of Glasshouse's own furniture is on screen, which is the only
+/// thing the vertical split is a function of.
+///
+/// Separate from [`Mode`] because who owns the keyboard and how much chrome
+/// is drawn are two facts, and fullscreen changes only the second: it is a
+/// third answer here rather than a third `Mode`, so every binding, every
+/// escape chord and every "is a session focused" test keeps its two-valued
+/// question. [`ShellState::chrome`] is where the two facts combine, and
+/// `super::view::viewport_slot` is the only reader that matters — it is what
+/// tells the harness's pseudo-terminal how large its screen is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chrome {
+    /// Control mode's five bands: title, root, session bar, viewport, footer.
+    Full,
+    /// Session mode's single header line, then the viewport.
+    Header,
+    /// Nothing at all — the focused session has the terminal itself.
+    None,
+}
+
 /// What the run loop should do after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -415,6 +435,14 @@ pub(crate) fn short_session_id(id: &SessionId) -> String {
 /// and draw than it is worth to a user who only ever looks at the tail of it.
 pub const ACTIVITY_ROWS: usize = 8;
 
+/// The one thing a fullscreen session puts on screen that is not the harness.
+///
+/// [`Chrome::None`] draws no band that could carry `ctrl-] back`, so the note
+/// carries it instead, once, over the harness's own top row — a note rather
+/// than a reserved row, because a reserved row is the mode we already have.
+/// It is an ordinary status note, so the next keystroke clears it.
+pub(super) const FULLSCREEN_HINT: &str = "fullscreen · ctrl-] back to glasshouse";
+
 /// One line for the activity view, naming exactly what happened.
 ///
 /// Exhaustive with **no `_` arm**: every [`LifecycleEvent`] variant this
@@ -495,6 +523,11 @@ pub struct ShellState {
     status: Option<String>,
     /// Who currently owns the keyboard. See [`Mode`].
     mode: Mode,
+    /// Whether a focused session is drawn frame-free. Armed and disarmed in
+    /// control mode only, because [`Mode::Session`] forwards every key to the
+    /// harness; it takes effect the moment a session is focused. See
+    /// [`ShellState::chrome`].
+    fullscreen: bool,
     /// The screen shown in the session viewport — the focused session's
     /// `vt100` screen, converted by the run loop and set via
     /// [`ShellState::set_viewport_grid`]. Not the runtime itself: see the
@@ -551,6 +584,7 @@ impl ShellState {
             overlay: None,
             status: None,
             mode: Mode::Control,
+            fullscreen: false,
             viewport_grid: ViewportGrid::default(),
             settings: None,
             overview: None,
@@ -633,6 +667,28 @@ impl ShellState {
     /// Who currently owns the keyboard.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Whether fullscreen is armed. Armed is not the same as drawn — see
+    /// [`ShellState::chrome`], which is what the view and the run loop ask.
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    /// How much chrome this frame draws, and so how large the focused
+    /// session's screen is.
+    ///
+    /// Control mode keeps its five bands whatever fullscreen says: this is
+    /// the way out. A focused session is left by `Ctrl-]`, which lands the
+    /// user here, and if arming fullscreen also stripped control mode the
+    /// user would be returned to a blank terminal with nothing on it naming
+    /// a key — including the key that disarms it.
+    pub fn chrome(&self) -> Chrome {
+        match (self.mode, self.fullscreen) {
+            (Mode::Control, _) => Chrome::Full,
+            (Mode::Session, false) => Chrome::Header,
+            (Mode::Session, true) => Chrome::None,
+        }
     }
 
     /// The screen currently shown in the session viewport. Empty until the
@@ -885,7 +941,35 @@ impl ShellState {
             // context-dependent meaning would be confusing even though the
             // two never overlap at runtime.
             KeyCode::Char('M') => Action::OpenProjectMemory,
-            KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
+            // `f` for fullscreen: free in this table, and safe despite the
+            // Settings overlay binding `f` twice of its own
+            // (`settings/keys.rs`, the Providers and Routing sections).
+            // An overlay handler runs INSTEAD of this table rather than
+            // after it, so the two never contend — the letter is reused, not
+            // shared, which is the same arrangement `M` above describes.
+            KeyCode::Char('f') if !ctrl => {
+                self.fullscreen = !self.fullscreen;
+                self.set_status(if self.fullscreen {
+                    "fullscreen on · enter focuses a session with no chrome at all"
+                } else {
+                    "fullscreen off · a focused session keeps its header"
+                });
+                Action::Redraw
+            }
+            KeyCode::Enter | KeyCode::Char('i') => {
+                let action = self.enter_session_mode();
+                // The way out of a screen that has nothing on it to read it
+                // from. Set here, after the transition, because only a
+                // transition that actually reached [`Chrome::None`] owes it:
+                // `enter_session_mode` refuses a headless session and a
+                // project with none at all, and both of those already have
+                // their own note. The view paints it over the harness's top
+                // row and the next keystroke clears it like any other note.
+                if self.chrome() == Chrome::None {
+                    self.set_status(FULLSCREEN_HINT);
+                }
+                action
+            }
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
             // Phase 4's headless presentation mode. Deliberately next to `n`

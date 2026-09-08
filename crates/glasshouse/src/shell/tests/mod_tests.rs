@@ -3412,8 +3412,11 @@ mod native_session_facts_tests {
 
     /// A [`Runtime`] whose config directory already names one installed,
     /// harmless harness — a shell script that exits immediately, exactly like
-    /// `tests/session_model.rs`'s fake `claude-code`.
-    fn runtime_with_fake_claude_code() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+    /// `tests/session_model.rs`'s fake `claude-code`. Shared with
+    /// `session_mode_geometry_tests`, which needs the same real session and
+    /// would otherwise copy forty lines to get one.
+    pub(super) fn runtime_with_fake_claude_code()
+    -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
         use clap::Parser;
 
         let data = tempfile::tempdir().expect("tempdir");
@@ -3505,6 +3508,198 @@ mod native_session_facts_tests {
         assert!(record.protocol.is_some(), "record: {record:?}");
         assert!(record.response_profile.is_some(), "record: {record:?}");
         assert!(record.response_mechanism.is_some(), "record: {record:?}");
+    }
+}
+
+/// The rows session mode recovers reaching the harness itself.
+///
+/// [`sync_focus`] is where the run loop hands a live session its geometry,
+/// and entering session mode *is* a change of geometry: four rows of chrome
+/// collapse into one. Asserted on the emulator's own size — what the harness
+/// is told it has — rather than on the rectangle `view` drew, since a frame
+/// three rows taller than the session's screen would leave the bottom of the
+/// viewport blank. Same shape as `native_session_facts_tests` above: a real
+/// `SessionRuntime`, a fake installed harness, no terminal.
+#[cfg(test)]
+mod session_mode_geometry_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// The rows the focused session's `vt100` emulator believes it has.
+    fn emulator_rows(live: &SessionRuntime, id: &SessionId) -> u16 {
+        live.get(id)
+            .expect("the session is live")
+            .with_screen(|screen| screen.size().0)
+    }
+
+    #[test]
+    fn entering_session_mode_hands_the_focused_harness_three_more_rows() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let outer = TerminalSize::new(24, 80);
+
+        start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            view::viewport_terminal_size(outer, state::Chrome::Full),
+            &mut index_snapshots,
+        )
+        .expect("starting a session from the shell must succeed");
+
+        let records = sessions.store().list().expect("list sessions");
+        let id = records[0].id.clone();
+        live.focus(&id).expect("focus the session just started");
+        let control = emulator_rows(&live, &id);
+        assert_eq!(control, 20, "24 rows less control mode's four of chrome");
+
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records);
+        sync_focus(&mut live, &state, outer, false);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            control,
+            "an ordinary keystroke must not resize the harness"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+        sync_focus(&mut live, &state, outer, true);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            control + 3,
+            "the collapsed chrome's three rows must reach the harness"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        assert_eq!(state.mode(), Mode::Control);
+        sync_focus(&mut live, &state, outer, true);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            control,
+            "and must be given back when the chrome returns"
+        );
+    }
+
+    /// The session being ENTERED is the one that gets the room, not the one
+    /// being left.
+    ///
+    /// `sync_focus` resizes and re-focuses in the same call, and with a single
+    /// session the two orders are indistinguishable — which is why the test
+    /// above passes against both, and why two independent reviews were needed
+    /// to see it. With two, resizing before the focus move hands the three
+    /// recovered rows to the session about to leave the viewport and leaves the
+    /// one arriving in it sized for chrome that is no longer drawn.
+    #[test]
+    fn moving_the_bar_and_entering_together_resizes_the_session_arriving() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let outer = TerminalSize::new(24, 80);
+
+        for _ in 0..2 {
+            start_session(
+                &runtime,
+                &mut live,
+                &sessions,
+                SessionPresentation::Embedded,
+                view::viewport_terminal_size(outer, state::Chrome::Full),
+                &mut index_snapshots,
+            )
+            .expect("starting a session from the shell must succeed");
+        }
+
+        let records = sessions.store().list().expect("list sessions");
+        assert_eq!(records.len(), 2, "the fixture must give us two sessions");
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records.clone());
+
+        // Focus whichever session the bar is NOT about to move to, so the
+        // focus change and the chrome change land in one `sync_focus`.
+        let selected = state.selected_index();
+        let leaving = records[selected].id.clone();
+        live.focus(&leaving).expect("focus the selected session");
+        let control = emulator_rows(&live, &leaving);
+        assert_eq!(control, 20, "24 rows less control mode's four of chrome");
+
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let arriving = records[state.selected_index()].id.clone();
+        assert_ne!(
+            arriving, leaving,
+            "Tab must move the bar to the other session"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+        sync_focus(&mut live, &state, outer, true);
+
+        assert_eq!(
+            emulator_rows(&live, &arriving),
+            control + 3,
+            "the session entering the viewport must be told about the collapsed chrome"
+        );
+        assert_eq!(
+            emulator_rows(&live, &leaving),
+            control,
+            "the session being left must not be resized for chrome it will never draw under"
+        );
+    }
+
+    /// Fullscreen's own claim, on the emulator rather than on the frame: the
+    /// harness is *told* it has the terminal itself.
+    ///
+    /// This is the failure that would be invisible on screen and ruinous
+    /// inside the harness — a paint with no chrome over a pseudo-terminal
+    /// still sized for one draws its last row into nothing — so it is
+    /// asserted where the harness would notice. It is also the honest
+    /// measure of what fullscreen buys once the header has collapsed: one
+    /// row, 23 to 24, and the deliverable is the frame-free render.
+    #[test]
+    fn fullscreen_hands_the_focused_harness_the_terminal_itself() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let outer = TerminalSize::new(24, 80);
+
+        start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            view::viewport_terminal_size(outer, state::Chrome::Full),
+            &mut index_snapshots,
+        )
+        .expect("starting a session from the shell must succeed");
+
+        let records = sessions.store().list().expect("list sessions");
+        let id = records[0].id.clone();
+        live.focus(&id).expect("focus the session just started");
+        assert_eq!(emulator_rows(&live, &id), 20);
+
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records);
+        state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.chrome(), state::Chrome::None);
+        sync_focus(&mut live, &state, outer, true);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            outer.rows,
+            "fullscreen must reach the pseudo-terminal, not only the paint"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        sync_focus(&mut live, &state, outer, true);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            20,
+            "leaving gives control mode's four rows of chrome back"
+        );
     }
 }
 

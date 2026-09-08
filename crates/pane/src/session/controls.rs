@@ -212,7 +212,7 @@ pub(super) fn command(
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nLimits: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nLimits: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),

@@ -263,6 +263,79 @@ fn the_collapsed_sidebar_gives_its_width_to_the_conversation() {
     assert_eq!(shown.details.width, 34);
 }
 
+/// Fullscreen's hide-set is header, status, sidebar and activity ribbon --
+/// and never the composer. A screen that cannot be typed into has taken
+/// something away rather than given room back, so `input` keeps its rows and
+/// the transcript claims everything the four hidden regions gave up.
+#[test]
+// The *restore* half of fullscreen -- that leaving it gives back exactly the
+// layout the user had -- is NOT testable here and deliberately is not tested
+// here. `screen_regions` is a pure function of `(area, &ScreenState)` taking
+// the state by shared reference, so it cannot write to `sidebar` or
+// `status_line`, and any assertion that they survive a toggle holds by
+// construction rather than by the implementation being right. The claim is
+// carried where the toggle actually runs: `ctrl_f_takes_the_screen_and_gives_
+// it_back_with_the_draft_intact` in tests/tui_live.rs, which a one-way-latch
+// mutation of Ctrl-F kills.
+fn fullscreen_hides_every_chrome_region_and_keeps_the_composer() {
+    use pane::tui::{Activity, ScreenState, screen_regions};
+    let area = ratatui::layout::Rect::new(0, 0, 160, 40);
+    // Every hidden region is at its widest here: Full status, a shown
+    // sidebar, and a moving activity that earns the ribbon.
+    let chrome = ScreenState {
+        activity: Activity::Streaming,
+        sidebar: pane::tui::SidebarVisibility::Shown,
+        ..ScreenState::default()
+    };
+    let before = screen_regions(area, &chrome);
+    assert!(before.header.height > 0, "header should be drawn normally");
+    assert!(before.status.height > 0, "status should be drawn normally");
+    assert!(before.details.width > 0, "sidebar should be drawn normally");
+    assert!(
+        before.activity.height > 0,
+        "ribbon should be drawn normally"
+    );
+
+    let full = screen_regions(
+        area,
+        &ScreenState {
+            fullscreen: true,
+            ..chrome.clone()
+        },
+    );
+    assert_eq!(full.header.height, 0, "fullscreen must hide the header");
+    assert_eq!(full.status.height, 0, "fullscreen must hide the status bar");
+    assert_eq!(full.details.width, 0, "fullscreen must hide the sidebar");
+    assert_eq!(full.activity.height, 0, "fullscreen must hide the ribbon");
+
+    assert!(
+        full.input.height >= 3,
+        "fullscreen must keep the composer, got {:?}",
+        full.input
+    );
+    assert_eq!(
+        full.input.height, before.input.height,
+        "the composer is not part of the hide-set and must not shrink"
+    );
+    assert!(
+        full.transcript.height > before.transcript.height
+            && full.transcript.width > before.transcript.width,
+        "the transcript must claim the rows and columns the chrome gave up: \
+         {:?} then {:?}",
+        before.transcript,
+        full.transcript
+    );
+    assert_eq!(full.transcript.y, area.y, "no header row is left reserved");
+    assert_eq!(
+        full.transcript.width, area.width,
+        "no sidebar column is left reserved"
+    );
+}
+
+/// The flag overrides the two presentation preferences for as long as it is
+/// set and never writes to them, so leaving fullscreen restores the exact
+/// layout the user had chosen before entering it.
+
 #[test]
 fn a_message_containing_terminal_escapes_cannot_repaint_the_screen() {
     let hostile = "\x1b[2J\x1b[H\x1b[?1049hpwned";

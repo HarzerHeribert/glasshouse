@@ -58,6 +58,14 @@ pub struct ScreenState {
     pub inspection: Option<Inspection>,
     /// User preference, retained across resizes. The caller toggles this field.
     pub sidebar: SidebarVisibility,
+    /// Chrome off, composer kept: the transcript takes the whole terminal.
+    ///
+    /// It overrides `sidebar`, `status_line` and the activity ribbon for as
+    /// long as it is set rather than writing to them, which is why leaving
+    /// fullscreen restores exactly the layout the user had before entering.
+    /// The composer is never part of the hide-set: a screen that cannot be
+    /// typed into has taken something away rather than given room back.
+    pub fullscreen: bool,
     pub theme: Theme,
     pub mode: Mode,
     pub effort: crate::wire::Effort,
@@ -228,17 +236,21 @@ pub struct ScreenRegions {
 }
 
 pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
-    let status_h = area.height.min(match state.status_line {
-        StatusLine::Full => {
-            if area.width < 140 {
-                3
-            } else {
-                2
+    let status_h = if state.fullscreen {
+        0
+    } else {
+        area.height.min(match state.status_line {
+            StatusLine::Full => {
+                if area.width < 140 {
+                    3
+                } else {
+                    2
+                }
             }
-        }
-        StatusLine::Compact => 1,
-        StatusLine::Hidden => 0,
-    });
+            StatusLine::Compact => 1,
+            StatusLine::Hidden => 0,
+        })
+    };
     let status = Rect::new(area.x, area.bottom() - status_h, area.width, status_h);
     let remaining = status.y - area.y;
     let input_h = (wrapped_input(state, area.width)
@@ -258,7 +270,11 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
         0
     };
     let notice = Rect::new(area.x, completions.y - notice_h, area.width, notice_h);
-    let header_h = (notice.y - area.y).min(2);
+    let header_h = if state.fullscreen {
+        0
+    } else {
+        (notice.y - area.y).min(2)
+    };
     let header = Rect::new(area.x, area.y, area.width, header_h);
     let available_body = notice.y - header.bottom();
     let moving = matches!(
@@ -271,6 +287,7 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
             | Activity::Compacting
     ) || state.completion_tick.is_some();
     let activity_h = if moving
+        && !state.fullscreen
         && !state.telemetry_open
         && area.height >= 28
         && area.width >= 60
@@ -287,11 +304,12 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
         activity_h,
     );
     let body_h = activity.y - header.bottom();
-    let sidebar_visible = match state.sidebar {
-        SidebarVisibility::Auto => area.width >= 120,
-        SidebarVisibility::Hidden => false,
-        SidebarVisibility::Shown => area.width >= 80,
-    };
+    let sidebar_visible = !state.fullscreen
+        && match state.sidebar {
+            SidebarVisibility::Auto => area.width >= 120,
+            SidebarVisibility::Hidden => false,
+            SidebarVisibility::Shown => area.width >= 80,
+        };
     let transcript_w = if sidebar_visible {
         area.width.saturating_sub(36)
     } else {
@@ -374,6 +392,10 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                 ),
                 ("/status".to_string(), "inspect session status"),
                 ("/statusline".to_string(), "full, compact or hidden status"),
+                (
+                    "/fullscreen".to_string(),
+                    "transcript only, composer kept · Ctrl-F",
+                ),
                 (
                     "/permissions".to_string(),
                     "inspect or configure next-session grants",

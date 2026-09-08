@@ -821,6 +821,10 @@ fn run(
                             };
                             continue;
                         }
+                        KeyCode::Char('f') => {
+                            state.fullscreen = !state.fullscreen;
+                            continue;
+                        }
                         KeyCode::Home => {
                             state.scrollback = previous_rows.saturating_sub(viewport_height);
                             continue;
@@ -883,6 +887,16 @@ fn run(
                         editor.take();
                         state.telemetry_open = !state.telemetry_open;
                         state.panel = None;
+                        state.notice = None;
+                        continue;
+                    }
+                    // Sits with the other argument-less presentation toggles
+                    // rather than with `/sidebar`, so it still works while a
+                    // task runs -- watching a long stream fill the screen is
+                    // the case this command exists for.
+                    if editor.text.trim() == "/fullscreen" {
+                        editor.take();
+                        state.fullscreen = !state.fullscreen;
                         state.notice = None;
                         continue;
                     }

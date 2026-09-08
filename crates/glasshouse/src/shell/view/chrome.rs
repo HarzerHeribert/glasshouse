@@ -91,7 +91,7 @@ pub(super) fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Re
         .sessions()
         .iter()
         .enumerate()
-        .map(|(i, row)| format!(" {} {} · {} ", i + 1, row.harness, row.lifecycle))
+        .map(|(index, row)| tab_label(index, row))
         .collect();
     let mut start = 0;
     while start < selected
@@ -132,6 +132,197 @@ pub(super) fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Re
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// One tab's label. Written once so [`render_header`] can reserve exactly
+/// what the strip is going to draw rather than restating its arithmetic.
+fn tab_label(index: usize, row: &SessionRecord) -> String {
+    format!(" {} {} · {} ", index + 1, row.harness, row.lifecycle)
+}
+
+/// A field of session mode's collapsed header.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeaderField {
+    Wordmark,
+    Tabs,
+    Root,
+    Model,
+    Exit,
+}
+
+/// The order the header sheds fields as the terminal narrows — first here is
+/// first to go, and whatever is last is what a one-column terminal still gets.
+///
+/// This ordering is the decision the collapse makes. The tab strip is how one
+/// focused session is left for another and `ctrl-] back` is the only way out
+/// of session mode at all, so both sit behind the branding, the root and the
+/// model rather than competing with them for room. Move the wordmark past
+/// them and a narrow terminal keeps the logo while losing the way back, which
+/// is the failure [`render_footer`]'s design note exists to prevent.
+const DROP_ORDER: [HeaderField; 5] = [
+    HeaderField::Wordmark,
+    HeaderField::Root,
+    HeaderField::Model,
+    HeaderField::Tabs,
+    HeaderField::Exit,
+];
+
+/// The gap between header fields, and the width every field reserves for it.
+const GAP: &str = "   ";
+
+/// Session mode's single line of chrome: the wordmark, the tab strip, what
+/// survived from the title and root bands, and the way out.
+///
+/// A ribbon that drops fields rather than wrapping — a second line would take
+/// back a row this mode exists to hand the harness — in [`DROP_ORDER`], and
+/// never past the last field standing, so `ctrl-] back` is on screen at every
+/// width a terminal can actually draw.
+pub(super) fn render_header(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let mut kept = header_fields(state);
+    for field in DROP_ORDER {
+        if kept.len() <= 1 || header_width(&kept) <= usize::from(area.width) {
+            break;
+        }
+        kept.retain(|(candidate, _)| *candidate != field);
+    }
+    let value = |wanted: HeaderField| {
+        kept.iter()
+            .find(|(field, _)| *field == wanted)
+            .map(|(_, text)| text.clone())
+    };
+
+    let theme = state.theme();
+    let mut accessory: Vec<Span> = Vec::new();
+    for text in [value(HeaderField::Root), value(HeaderField::Model)]
+        .into_iter()
+        .flatten()
+    {
+        if !accessory.is_empty() {
+            accessory.push(Span::raw(GAP));
+        }
+        accessory.push(Span::styled(text, Style::default().fg(Color::White)));
+    }
+    if let Some(exit) = value(HeaderField::Exit) {
+        if !accessory.is_empty() {
+            accessory.push(Span::raw(GAP));
+        }
+        let (chord, back) = exit.split_once(' ').unwrap_or((exit.as_str(), ""));
+        accessory.push(Span::styled(
+            chord.to_owned(),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+        accessory.push(Span::styled(
+            format!(" {back}"),
+            Style::default().fg(theme.quiet()),
+        ));
+    }
+    let accessory = Line::from(accessory);
+
+    let [wordmark_area, tabs_area, accessory_area] = Layout::horizontal([
+        Constraint::Length(value(HeaderField::Wordmark).map_or(0, |text| field_cells(&text))),
+        Constraint::Min(0),
+        Constraint::Length(u16::try_from(accessory.width()).unwrap_or(u16::MAX)),
+    ])
+    .areas(area);
+
+    if let Some(wordmark) = value(HeaderField::Wordmark) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                wordmark,
+                Style::default()
+                    .fg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            wordmark_area,
+        );
+    }
+    if value(HeaderField::Tabs).is_some() {
+        render_session_bar(state, frame, tabs_area);
+    }
+    frame.render_widget(Paragraph::new(accessory), accessory_area);
+}
+
+/// Every field the header could carry, with the text it would draw.
+///
+/// The tab strip's entry carries the *selected* tab's label: the strip pans
+/// and clips itself, so the width it needs reserved is the one tab it must
+/// always show, not the whole row of them.
+fn header_fields(state: &ShellState) -> Vec<(HeaderField, String)> {
+    let selected = state.selected_index();
+    let mut fields = vec![
+        (HeaderField::Wordmark, "GLASSHOUSE".to_owned()),
+        (
+            HeaderField::Tabs,
+            state
+                .sessions()
+                .get(selected)
+                .map_or_else(String::new, |row| tab_label(selected, row)),
+        ),
+    ];
+    // The tail identifies the project and the head does not — the same
+    // reasoning `render_root` truncates by, at the width a ribbon can afford.
+    if let Some(name) = state.project_root().file_name() {
+        fields.push((HeaderField::Root, format!("…/{}", name.to_string_lossy())));
+    }
+    if let Some(model) = state
+        .active_session()
+        .and_then(|session| session.model.as_ref())
+    {
+        fields.push((HeaderField::Model, model.label().to_owned()));
+    }
+    fields.push((HeaderField::Exit, "ctrl-] back".to_owned()));
+    fields
+}
+
+/// What a set of header fields needs, each one's gap included.
+fn header_width(fields: &[(HeaderField, String)]) -> usize {
+    fields
+        .iter()
+        .map(|(_, text)| text.chars().count() + GAP.len())
+        .sum()
+}
+
+/// One field's own columns, gap included, clamped rather than wrapped: a
+/// width no terminal has is still a width the layout must be given.
+fn field_cells(text: &str) -> u16 {
+    u16::try_from(text.chars().count() + GAP.len()).unwrap_or(u16::MAX)
+}
+
+/// The whole of fullscreen's chrome: the current status note, painted over
+/// the harness's own top row, which is how the way out reaches a screen with
+/// no band to carry it.
+///
+/// A note rather than a band, because a band is [`render_header`]'s mode and
+/// this one exists to spend that row on the harness. It reserves nothing —
+/// `super::viewport_slot` has already given the session every row, and these
+/// cells are repainted from the emulator on the next frame — and
+/// `ShellState::handle_key` clears the status on any key, so it is gone the
+/// moment the user types. Right-aligned because a harness draws its own title
+/// on the left.
+pub(super) fn render_fullscreen_hint(state: &ShellState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(note) = state.status() else {
+        return;
+    };
+    let text = format!(" {note} ");
+    let width = u16::try_from(text.chars().count())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let [_, note_area] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
+        .areas(Rect::new(area.x, area.y, area.width, 1));
+    frame.render_widget(
+        Paragraph::new(text).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(state.theme().accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        note_area,
+    );
+}
+
 /// The bottom status bar: which mode owns the keyboard, Glasshouse's own key
 /// bindings, plus a note when the last key needs explaining.
 ///
@@ -139,10 +330,11 @@ pub(super) fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Re
 /// replacing the hints, so learning the keys and being told why one did nothing
 /// are not mutually exclusive.
 ///
-/// In session mode this is the *only* thing on screen that says how to get
-/// back — see the design note: "A user who cannot see how to get out is the
-/// failure this design exists to prevent." so the escape chord is shown here
-/// on every frame session mode is active, not just the first.
+/// Control mode's bar. Session mode collapses its four rows of chrome into
+/// [`render_header`], which is what carries the escape chord there — see the
+/// design note: "A user who cannot see how to get out is the failure this
+/// design exists to prevent." The session arm below survives because the mode
+/// is a runtime value and a footer drawn without one would say nothing at all.
 pub(super) fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
     let hint = match (state.mode(), state.overlay()) {
         (Mode::Session, _) => "SESSION MODE   ctrl-] for glasshouse   keys go to the session",
@@ -161,8 +353,9 @@ pub(super) fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::RouteDecisions)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
         (Mode::Control, None) => {
-            "tab session   enter session   n new   N headless   o overview   q quit   s settings   \
-             M memory   p project   k knowledge   e events   r routes   h health   d decisions"
+            "tab session   enter session   f fullscreen   n new   N headless   o overview   \
+             q quit   s settings   M memory   p project   k knowledge   e events   r routes   \
+             h health   d decisions"
         }
     };
     let mut spans = Vec::new();

@@ -500,6 +500,33 @@ fn theme_picker_applies_local_palettes_without_a_request() {
     assert_eq!(app.exited(), 0);
 }
 
+/// Only a real terminal can show that Ctrl-F reaches `screen_regions` at all:
+/// the structural test proves the layout, and this proves the key is bound and
+/// that the composer it leaves behind still accepts and keeps a draft.
+#[test]
+fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("PANE /");
+    app.contains("sandbox 0p/0c");
+    app.send(b"a draft mid-thought");
+    app.contains("a draft mid-thought");
+    app.send(b"\x06");
+    app.wait("header and status gone after Ctrl-F", |screen| {
+        let screen = screen.contents();
+        !screen.contains("PANE /") && !screen.contains("sandbox 0p/0c")
+    });
+    // The composer is not part of the hide-set, and neither is what is in it.
+    app.contains("a draft mid-thought");
+    app.send(b" still typing");
+    app.contains("a draft mid-thought still typing");
+    app.send(b"\x06");
+    app.contains("PANE /");
+    app.contains("sandbox 0p/0c");
+    app.contains("a draft mid-thought still typing");
+    app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
 #[test]
 fn fragmented_mouse_reports_do_not_become_prompt_text() {
     let (base, requests) = provider();

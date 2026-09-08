@@ -40,6 +40,16 @@ fn lone_session() -> SessionRecord {
     record("only-one", "claude-code", SessionLifecycle::Running)
 }
 
+/// The top row of a rendered frame, trimmed — session mode's whole chrome.
+fn first_row(state: &ShellState, width: u16, height: u16) -> String {
+    rendered(state, width, height)
+        .lines()
+        .next()
+        .expect("a frame has rows")
+        .trim_end()
+        .to_owned()
+}
+
 /// The bottom row of a rendered frame, trimmed.
 fn last_row(state: &ShellState, width: u16, height: u16) -> String {
     rendered(state, width, height)
@@ -381,6 +391,16 @@ fn renders_without_panicking_at_absurd_sizes() {
     for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
         rendered(&state, w, h);
     }
+
+    // Fullscreen, with its way-out note showing: the one thing drawn there
+    // takes a single row out of an area that may not have one.
+    let mut state = sample();
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.chrome(), Chrome::None);
+    for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+        rendered(&state, w, h);
+    }
 }
 
 #[test]
@@ -477,15 +497,16 @@ fn the_status_bar_always_shows_the_key_bindings() {
     // 234's `M memory` pushed it past 120 in turn, so this became 132.
     // Phase 47 line 1765's `h health` took the whole row to exactly 140
     // columns, so this was 142; `d decisions` adds fourteen more, taking
-    // it to exactly 154, so this is 156 — measured against the row, not
+    // it to exactly 154, so this was 156; `f fullscreen` adds fourteen
+    // more again, taking it to exactly 168 — measured against the row, not
     // guessed.
-    let bottom = last_row(&state, 156, 24);
+    let bottom = last_row(&state, 170, 24);
     assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
     assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
     assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
     state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-    let bottom = last_row(&state, 156, 24);
+    let bottom = last_row(&state, 170, 24);
     assert!(
         bottom.contains("esc") && bottom.contains("quit"),
         "the overlay's bindings must be shown too: `{bottom}`"
@@ -725,23 +746,253 @@ fn a_cursor_outside_the_render_area_does_not_panic() {
 }
 
 /// The design note: "A user who cannot see how to get out is the
-/// failure this design exists to prevent" — so the mode and the escape
-/// chord are on screen in session mode at all times.
+/// failure this design exists to prevent" — so the escape chord is on
+/// screen in session mode at all times. The *header* carries it now: the
+/// status bar is one of the three rows the collapse hands the harness.
 #[test]
-fn the_status_bar_names_session_mode_and_the_escape_chord() {
+fn the_header_names_the_escape_chord_in_session_mode() {
     let mut state = sample();
     state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(state.mode(), Mode::Session);
 
-    let bottom = last_row(&state, 100, 24).to_lowercase();
+    let header = first_row(&state, 100, 24);
     assert!(
-        bottom.contains("session"),
-        "the active mode must be named: `{bottom}`"
+        header.contains("ctrl-] back"),
+        "the escape chord must always be on screen in session mode: `{header}`"
+    );
+}
+
+/// Session mode's chrome is one line, and the row under it is the
+/// harness's. Asserted on where the session's own first row lands, not on
+/// the absence of the bands, because "the harness starts three rows
+/// higher" is the whole of what this mode buys.
+#[test]
+fn session_mode_collapses_the_chrome_to_a_single_header() {
+    let mut state = sample();
+    state.set_viewport_grid(grid_from_lines(&["harness first row"]));
+
+    let control = rendered(&state, 100, 24);
+    let control_rows: Vec<&str> = control.lines().collect();
+    assert!(
+        control_rows[1].starts_with("root "),
+        "control mode keeps its bands:\n{control}"
     );
     assert!(
-        bottom.contains("ctrl-]"),
-        "the escape chord must always be on screen in session mode: `{bottom}`"
+        control_rows[3].starts_with("harness first row"),
+        "control mode puts the session under three bands:\n{control}"
     );
+
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.mode(), Mode::Session);
+    let session = rendered(&state, 100, 24);
+    let session_rows: Vec<&str> = session.lines().collect();
+    assert!(
+        session_rows[1].starts_with("harness first row"),
+        "session mode puts the session directly under the header:\n{session}"
+    );
+    assert!(
+        !session.contains("SESSION MODE"),
+        "the status bar is gone with the rest of the chrome:\n{session}"
+    );
+}
+
+/// The point of the collapse, in the one function the run loop asks: the
+/// harness is told about the rows the chrome stopped taking. Nothing else
+/// in the shell may compute that size — `shell::viewport_terminal_size`
+/// funnels through here — so this is where it is pinned.
+#[test]
+fn session_mode_hands_the_viewport_three_more_rows() {
+    let area = Rect::new(0, 0, 100, 24);
+    let control = viewport_slot(area, Chrome::Full);
+    let session = viewport_slot(area, Chrome::Header);
+    assert_eq!(
+        session.height,
+        control.height + 3,
+        "control {control:?} against session {session:?}"
+    );
+    assert_eq!(
+        session.width, control.width,
+        "the harness already had the full width"
+    );
+    assert_eq!(
+        viewport_terminal_size(TerminalSize::new(24, 100), Chrome::Header).rows,
+        session.height,
+        "the size handed to the pseudo-terminal must be the slot itself"
+    );
+}
+
+/// Fullscreen's geometry, in the same one function: the harness is handed
+/// the terminal itself.
+///
+/// The honest size is here too — one row over the collapsed header, not
+/// four. Fullscreen is a frame-free render, and the row is a side effect.
+#[test]
+fn fullscreen_hands_the_harness_the_whole_terminal() {
+    let area = Rect::new(0, 0, 100, 24);
+    let header = viewport_slot(area, Chrome::Header);
+    let full = viewport_slot(area, Chrome::None);
+    assert_eq!(full, area, "fullscreen reserves nothing: {full:?}");
+    assert_eq!(
+        full.height,
+        header.height + 1,
+        "one row over the collapsed header, and only one: {header:?} against {full:?}"
+    );
+    assert_eq!(
+        viewport_terminal_size(TerminalSize::new(24, 100), Chrome::None),
+        TerminalSize::new(24, 100),
+        "the pseudo-terminal is told the terminal's own size, not a band of it"
+    );
+}
+
+/// The mode's whole claim: no Glasshouse furniture on screen at all.
+///
+/// Asserted against the rendered buffer rather than the layout, because
+/// "zero chrome" is a statement about what a user sees — the harness's own
+/// first row is the frame's first row, and neither the wordmark, the root,
+/// the tab strip nor the footer is anywhere on it.
+#[test]
+fn fullscreen_draws_no_glasshouse_chrome() {
+    let mut state = sample();
+    state.set_viewport_grid(grid_from_lines(&[
+        "harness first row",
+        "harness second row",
+    ]));
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.chrome(), Chrome::None);
+
+    let text = rendered(&state, 100, 24);
+    let rows: Vec<&str> = text.lines().collect();
+    assert!(
+        rows[0].starts_with("harness first row"),
+        "the harness starts at the terminal's own first row:\n{text}"
+    );
+    assert!(
+        rows[1].starts_with("harness second row"),
+        "and continues without a band between:\n{text}"
+    );
+    for furniture in ["GLASSHOUSE", "/Users/someone/projects/glasshouse", "q quit"] {
+        assert!(
+            !text.contains(furniture),
+            "fullscreen draws no `{furniture}`:\n{text}"
+        );
+    }
+}
+
+/// The decision this mode makes: a screen with no chrome on it still tells
+/// the user how to leave, and the user can.
+///
+/// Both halves are asserted, because either alone is a trap — a note naming
+/// a chord that no longer works, or a working chord nothing names. The
+/// return lands in control mode with its five bands back, which is why
+/// `ShellState::chrome` refuses to strip control mode however fullscreen is
+/// armed: a user returned to a blank terminal has been handed no key at all,
+/// including the one that disarms this.
+#[test]
+fn a_user_who_enters_fullscreen_can_leave_it() {
+    let mut state = sample();
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.chrome(), Chrome::None);
+
+    let entered = first_row(&state, 100, 24);
+    assert!(
+        entered.contains("ctrl-]"),
+        "entering a frame-free screen must name the way out: `{entered}`"
+    );
+
+    // The chord that note names, spelled the way a real terminal delivers
+    // it — `Ctrl-]` arrives as Ctrl plus `'5'`; see `is_session_escape`.
+    state.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL));
+    assert_eq!(
+        state.mode(),
+        Mode::Control,
+        "the chord the note names must be the chord that works"
+    );
+    assert_eq!(
+        state.chrome(),
+        Chrome::Full,
+        "the chrome comes back with the keyboard"
+    );
+
+    let text = rendered(&state, 170, 24);
+    assert!(text.contains("GLASSHOUSE"), "the bands are back:\n{text}");
+    assert!(
+        text.contains("f fullscreen"),
+        "and with them the key that disarms it:\n{text}"
+    );
+}
+
+/// The note is transient, which is what keeps it a note rather than chrome.
+///
+/// It survives exactly as long as any other status note — until the next
+/// keystroke — and what is underneath it is the harness's own row, not a
+/// reserved one.
+#[test]
+fn the_way_out_note_goes_at_the_first_keystroke() {
+    let mut state = sample();
+    state.set_viewport_grid(grid_from_lines(&[
+        "harness first row that is long enough to reach under the note",
+    ]));
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(first_row(&state, 100, 24).contains("ctrl-]"));
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    let typed = first_row(&state, 100, 24);
+    assert!(
+        !typed.contains("ctrl-]"),
+        "a keystroke clears the note like any other: `{typed}`"
+    );
+    assert!(
+        typed.starts_with("harness first row that is long enough to reach under the note"),
+        "and the harness's own row is what was underneath: `{typed}`"
+    );
+}
+
+/// The decision the header makes: its drop order.
+///
+/// At a width that cannot hold every field, the two a focused session
+/// cannot be worked without survive — the tab strip is how another session
+/// is reached, `ctrl-] back` is the only way out — and the branding is
+/// what goes. Reorder `chrome::DROP_ORDER` so the wordmark outlives the
+/// chord and this fails on the row it renders.
+#[test]
+fn a_narrow_header_keeps_the_way_out_and_drops_the_wordmark() {
+    let mut state = sample();
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.mode(), Mode::Session);
+
+    let header = first_row(&state, 44, 12);
+    assert!(
+        header.contains("ctrl-]"),
+        "the way out is never dropped: `{header}`"
+    );
+    assert!(
+        header.contains("claude-code"),
+        "the session tabs are never dropped: `{header}`"
+    );
+    assert!(
+        !header.contains("GLASSHOUSE"),
+        "the wordmark is the first field to go: `{header}`"
+    );
+}
+
+/// The other half of the drop order: given the room, every field is drawn,
+/// so the narrow case above is a header that dropped fields rather than a
+/// header that never had them.
+#[test]
+fn a_wide_header_carries_the_wordmark_the_root_and_the_way_out() {
+    let mut state = sample();
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let header = first_row(&state, 120, 12);
+    for expected in ["GLASSHOUSE", "claude-code", "…/glasshouse", "ctrl-] back"] {
+        assert!(
+            header.contains(expected),
+            "a 120-column header has room for `{expected}`: `{header}`"
+        );
+    }
 }
 
 /// Control mode's own footer must not claim to be session mode.
@@ -749,8 +1000,8 @@ fn the_status_bar_names_session_mode_and_the_escape_chord() {
 fn the_status_bar_shows_control_mode_bindings_by_default() {
     let state = sample();
     assert_eq!(state.mode(), Mode::Control);
-    // 156, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
-    let bottom = last_row(&state, 156, 24).to_lowercase();
+    // 170, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
+    let bottom = last_row(&state, 170, 24).to_lowercase();
     assert!(!bottom.contains("session mode"), "got: `{bottom}`");
     assert!(bottom.contains("quit"), "got: `{bottom}`");
 }
@@ -2213,9 +2464,9 @@ fn the_routing_decisions_footer_names_its_own_key() {
         "routing decisions footer:\n{text}"
     );
 
-    // 156 for the reason `the_status_bar_always_shows_the_key_bindings`
-    // records: the control row is exactly 154 columns now.
-    let control_text = rendered(&sample(), 156, 24);
+    // 170 for the reason `the_status_bar_always_shows_the_key_bindings`
+    // records: the control row is exactly 168 columns now.
+    let control_text = rendered(&sample(), 170, 24);
     assert!(
         control_text.contains("d decisions"),
         "control-mode footer must advertise the key:\n{control_text}"

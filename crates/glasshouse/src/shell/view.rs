@@ -10,7 +10,10 @@
 //! the bottom render at 1x1 to keep it honest.
 
 mod chrome;
-use chrome::{render_footer, render_root, render_session_bar, render_title};
+use chrome::{
+    render_footer, render_fullscreen_hint, render_header, render_root, render_session_bar,
+    render_title,
+};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -21,17 +24,18 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::{Layer, RoutingModelChoice};
 use crate::provider::discovery::ProbeOutcome;
+use crate::pty::TerminalSize;
 use crate::session::{
     SessionDisposition, SessionLifecycle, SessionPairingClass, SessionPresentation, SessionRecord,
     SessionRole,
 };
 
 use super::state::{
-    KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind, ProviderRow,
+    Chrome, KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind, ProviderRow,
     SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid, format_usd,
 };
 
-/// The shell's fixed vertical chrome: title, root, session bar, viewport,
+/// Control mode's fixed vertical chrome: title, root, session bar, viewport,
 /// footer, in that order. The one place this split is computed, so
 /// [`viewport_slot`] can hand the run loop the same rectangle [`render`]
 /// hands [`render_viewport`] without the two ever drifting apart.
@@ -48,27 +52,76 @@ fn regions(area: Rect) -> [Rect; 5] {
         .areas(area)
 }
 
+/// Session mode's chrome: one header line, then the viewport.
+///
+/// Four rows of chrome become one while the keyboard belongs to a session,
+/// and the three that buys go to the harness — [`render_header`] is what
+/// survives the collapse, and the order it drops the rest.
+fn session_regions(area: Rect) -> [Rect; 2] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .areas(area)
+}
+
 /// The rectangle [`render`] reserves for the session viewport, before any
 /// border the viewport itself draws.
 ///
 /// The run loop uses this — not the terminal's outer size — to tell a
 /// session's pseudo-terminal and its `vt100` emulator how large a screen
 /// they actually have: whichever chrome surrounds the viewport must be
-/// excluded first, or the harness draws for space it does not have.
-pub fn viewport_slot(area: Rect) -> Rect {
-    regions(area)[3]
+/// excluded first, or the harness draws for space it does not have. The
+/// [`Chrome`] is an argument because the bands are not the same in all
+/// three: a focused session is worth three more rows than the fleet view
+/// around it, and a fullscreen one is worth the header too.
+pub fn viewport_slot(area: Rect, chrome: Chrome) -> Rect {
+    match chrome {
+        Chrome::Full => regions(area)[3],
+        Chrome::Header => session_regions(area)[1],
+        // No bands to compute, which is the whole point: nothing is
+        // reserved, so the harness is handed the terminal itself and lays
+        // itself out for it. Going through this function rather than around
+        // it is what makes that true of the pseudo-terminal and not only of
+        // the paint.
+        Chrome::None => area,
+    }
+}
+
+/// The size a session's pseudo-terminal and `vt100` emulator are given for an
+/// `outer` terminal under `chrome` — never the outer size itself, except in
+/// [`Chrome::None`], where they are the same thing.
+///
+/// Here rather than in the run loop so that the chrome's height and the
+/// harness's idea of its own screen are computed by the same function.
+pub fn viewport_terminal_size(outer: TerminalSize, chrome: Chrome) -> TerminalSize {
+    let slot = viewport_slot(Rect::new(0, 0, outer.cols, outer.rows), chrome);
+    TerminalSize::new(slot.height, slot.width)
 }
 
 /// Draw the shell.
 pub fn render(state: &ShellState, frame: &mut Frame) {
     let area = frame.area();
-    let [title_area, root_area, bar_area, viewport_area, footer_area] = regions(area);
-
-    render_title(state, frame, title_area);
-    render_root(state, frame, root_area);
-    render_session_bar(state, frame, bar_area);
-    render_viewport(state, frame, viewport_area);
-    render_footer(state, frame, footer_area);
+    match state.chrome() {
+        Chrome::Full => {
+            let [title_area, root_area, bar_area, viewport_area, footer_area] = regions(area);
+            render_title(state, frame, title_area);
+            render_root(state, frame, root_area);
+            render_session_bar(state, frame, bar_area);
+            render_viewport(state, frame, viewport_area);
+            render_footer(state, frame, footer_area);
+        }
+        Chrome::Header => {
+            let [header_area, viewport_area] = session_regions(area);
+            render_header(state, frame, header_area);
+            render_viewport(state, frame, viewport_area);
+        }
+        // Frame-free: the viewport is the whole terminal, and the only mark
+        // Glasshouse leaves is the transient note naming the way out.
+        Chrome::None => {
+            render_viewport(state, frame, area);
+            render_fullscreen_hint(state, frame, area);
+        }
+    }
 
     match state.overlay() {
         Some(Overlay::Overview) => render_overview(state, frame, area),
