@@ -415,4 +415,10 @@ from, and reads no value to do it.
 
 ## License
 
-MIT OR Apache-2.0
+Copyright (c) 2026 HarzerHeribert. **All rights reserved** — see
+[LICENSE](LICENSE).
+
+The source is public so it can be read, reviewed and referenced. That is not a
+licence: no right to use, copy, modify or distribute it is granted, and the
+crates are marked `publish = false` so neither can reach crates.io, which would
+require an open licence. Ask if you want one.

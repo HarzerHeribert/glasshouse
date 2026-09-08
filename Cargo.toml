@@ -12,7 +12,14 @@ default-members = ["crates/glasshouse"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-license = "MIT OR Apache-2.0"
+# All rights reserved -- see LICENSE. `license-file` rather than an SPDX
+# `license` expression because no SPDX identifier describes "published for
+# reading, nothing granted", and a permissive identifier here would BE the
+# grant: cargo metadata is where downstream tooling looks for permission.
+# `publish = false` is the enforcing half, so no `cargo publish` can put a
+# crate on crates.io -- which requires an open licence -- by accident.
+license-file = "LICENSE"
+publish = false
 repository = "https://github.com/HarzerHeribert/glasshouse"
 
 # The compiler both gates build with. Declared once; ci.yml and

@@ -11,7 +11,8 @@ edition.workspace = true
 # oxc crates). `crates/glasshouse` still declares 1.88 and is unaffected:
 # nothing in this crate is in its tree. The declared CI compiler is 1.98.
 rust-version = "1.96"
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 
 [[bin]]
