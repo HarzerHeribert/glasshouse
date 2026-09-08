@@ -55,6 +55,23 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 live_version() { [ -L "$CURRENT" ] && basename "$(readlink "$CURRENT")" || true; }
 
+# Repoint a symlink onto an existing symlink, atomically.
+#
+# NOT `mv`: BSD mv stats the destination, follows `current` to the directory it
+# names, and deposits the temp link INSIDE the old version -- which leaves
+# `current` still pointing at the previous build while the script reports a
+# successful flip. rename(2) operates on the link itself and never follows it.
+# Measured on 2026-09-08, on this script's own second install.
+point_current_at() {
+  python3 -c 'import os,sys
+target, link = sys.argv[1], sys.argv[2]
+tmp = link + ".tmp"
+try: os.remove(tmp)
+except FileNotFoundError: pass
+os.symlink(target, tmp)
+os.replace(tmp, link)' "$1" "$CURRENT"
+}
+
 case "$ACTION" in
 list)
   [ -d "$VERSIONS" ] || die "nothing installed under $ROOT"
@@ -80,7 +97,7 @@ rollback)
             printf '%s\t%s\n' "$(python3 -c "import json;print(json.load(open('$d/manifest.json'))['built_at'])" 2>/dev/null || echo 0)" "$v"
           done | sort -r | head -1 | cut -f2)"
   [ -n "$prev" ] || die "only $live is installed; nothing to roll back to"
-  ln -sfn "$VERSIONS/$prev" "$CURRENT.tmp" && mv -f "$CURRENT.tmp" "$CURRENT"
+  point_current_at "$VERSIONS/$prev"
   echo "current: $live -> $prev"
   exit 0 ;;
 esac
@@ -141,7 +158,7 @@ PY
 
 previous="$(live_version)"
 mkdir -p "$BINDIR"
-ln -sfn "$DEST" "$CURRENT.tmp" && mv -f "$CURRENT.tmp" "$CURRENT"
+point_current_at "$DEST"
 ln -sfn "$CURRENT/bin/pane" "$BINDIR/pane"
 
 # `glasshouse` on PATH stays the dev shim on purpose. Inside a Glasshouse
