@@ -17,6 +17,7 @@
 mod start;
 use start::start_session;
 mod appearance;
+mod settings_open;
 pub mod state;
 pub mod view;
 use std::collections::HashMap;
@@ -99,6 +100,12 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     // is a frozen interface, a defect this project has already shipped once.
     let (reported, reported_inbox) = std::sync::mpsc::channel::<Vec<RecordedEvent>>();
     spawn_event_tail(runtime, &reported, &events.sender());
+    // Where Settings' rows come back. `build_settings` runs every enabled
+    // harness binary, so it is not allowed on this thread — see
+    // [`settings_open`]. `settings_pending` is the one in-flight request.
+    let (settings_results, settings_inbox) =
+        std::sync::mpsc::channel::<anyhow::Result<SettingsRows>>();
+    let mut settings_pending: Option<settings_open::Placement> = None;
 
     screen.draw(|frame| view::render(&state, frame))?;
 
@@ -190,22 +197,16 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             }
                         }
                     }
-                    Action::OpenSettings => match build_settings(runtime) {
-                        Ok((harnesses, integrations, providers, profiles, routing, memory)) => {
-                            state.open_settings_with_routing(
-                                harnesses,
-                                integrations,
-                                providers,
-                                profiles,
-                                routing,
-                                memory,
-                            );
-                        }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "could not open settings");
-                            state.set_status(format!("could not open settings: {err:#}"));
-                        }
-                    },
+                    Action::OpenSettings => {
+                        settings_open::request_settings(
+                            runtime,
+                            &mut state,
+                            &mut settings_pending,
+                            &settings_results,
+                            &events.sender(),
+                            settings_open::Purpose::Open,
+                        );
+                    }
                     Action::OpenProjectOverview => {
                         let resources = build_project_overview_capacity(runtime);
                         let routing = build_project_overview_routing(runtime);
@@ -335,7 +336,14 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             state.set_status(format!("could not save settings: {err:#}"));
                         } else {
                             state.set_status("saved to user configuration");
-                            refresh_settings_after_save(runtime, &mut state);
+                            settings_open::request_settings(
+                                runtime,
+                                &mut state,
+                                &mut settings_pending,
+                                &settings_results,
+                                &events.sender(),
+                                settings_open::Purpose::Refresh,
+                            );
                         }
                     }
                     Action::SaveProjectSettings => {
@@ -362,7 +370,14 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             ) {
                                 Ok(path) => {
                                     state.set_status(format!("saved to {}", path.display()));
-                                    refresh_settings_after_save(runtime, &mut state);
+                                    settings_open::request_settings(
+                                        runtime,
+                                        &mut state,
+                                        &mut settings_pending,
+                                        &settings_results,
+                                        &events.sender(),
+                                        settings_open::Purpose::Refresh,
+                                    );
                                 }
                                 Err(err) => {
                                     tracing::warn!(
@@ -498,6 +513,10 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 if drain_provider_probes(&probe_inbox, &mut state) {
                     redraw = true;
                 }
+                if settings_open::drain_settings(&settings_inbox, &mut state, &mut settings_pending)
+                {
+                    redraw = true;
+                }
                 // Otherwise the in-flight line draws once and looks hung.
                 if state.provider_probe_in_flight() {
                     redraw = true;
@@ -528,7 +547,12 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 // Re-read the records rather than trusting the sender to
                 // describe what moved — the list is small.
                 let probed = drain_provider_probes(&probe_inbox, &mut state);
-                if state.refresh(sessions.store().list()?) == Action::Redraw || probed {
+                let settled = settings_open::drain_settings(
+                    &settings_inbox,
+                    &mut state,
+                    &mut settings_pending,
+                );
+                if state.refresh(sessions.store().list()?) == Action::Redraw || probed || settled {
                     screen.draw(|frame| view::render(&state, frame))?;
                 }
             }
@@ -1886,27 +1910,6 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         routing,
         memory,
     ))
-}
-
-/// Re-read Settings' rows after a successful save and hand them to
-/// [`state::ShellState::refresh_settings`], which also clears the landed
-/// edits. A failure here is not the save failing, so it only costs a stale
-/// display.
-fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
-    match build_settings(runtime) {
-        Ok((harnesses, integrations, providers, profiles, routing, memory)) => state
-            .refresh_settings_with_routing(
-                harnesses,
-                integrations,
-                providers,
-                profiles,
-                routing,
-                memory,
-            ),
-        Err(err) => {
-            tracing::warn!(error = %err, "could not refresh settings after saving");
-        }
-    }
 }
 
 /// Write the credential the user just typed into the OS's own secure store.

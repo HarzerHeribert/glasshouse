@@ -3926,3 +3926,44 @@ mod shell_entitlement_scrub_tests {
         );
     }
 }
+
+/// A session the shell started is `Running`, not `Starting`.
+///
+/// `Starting` means "spawned, not yet known to be serving". Nothing else in
+/// the shell moves a session out of it — `run` writes a lifecycle only on
+/// exit, and `resume_session` only for a session it reopened — so without the
+/// transition in `start_session` a session opened with `n` reads `starting`
+/// in every listing for its whole life. The user saw exactly that: two
+/// minutes and counting on a harness that takes seconds.
+mod shell_started_session_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn a_session_started_from_the_shell_is_recorded_running() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let outer = TerminalSize::new(24, 80);
+
+        start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            None,
+            view::viewport_terminal_size(outer, state::Chrome::Full),
+            &mut index_snapshots,
+        )
+        .expect("starting a session from the shell must succeed");
+
+        let records = sessions.store().list().expect("list sessions");
+        assert_eq!(records.len(), 1, "the fixture must give us one session");
+        assert_eq!(
+            records[0].lifecycle,
+            SessionLifecycle::Running,
+            "a shell-started session whose harness spawned must leave `Starting`"
+        );
+    }
+}

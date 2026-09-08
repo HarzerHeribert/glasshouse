@@ -192,5 +192,25 @@ pub(super) fn start_session(
         return Err(err);
     }
 
+    // A shell-started session leaves `Starting` exactly when the CLI path's
+    // does, and for the same reason: `live.start` returning `Ok` means
+    // `HarnessLaunch::spawn` produced a child, so a harness is serving. The
+    // record written above is not that proof — it exists before the process
+    // does, and the branch above turns the same record `Failed` when the
+    // spawn is what fails. Without this the shell recorded no success
+    // transition at all and `n` sat in `Starting` until the session ended.
+    //
+    // Best effort, `commands::launch`'s precedent: from here the session is
+    // real and running, so a store error is a diagnostics problem. Turning it
+    // into an error would make a database hiccup look like a harness failure
+    // and tear down a session the user is already talking to.
+    if let Err(store_err) = store.set_lifecycle(&record.id, SessionLifecycle::Running) {
+        tracing::warn!(
+            session = %record.id,
+            error = %store_err,
+            "could not record a started session"
+        );
+    }
+
     Ok(())
 }
