@@ -105,6 +105,54 @@ fn section(lines: &mut Vec<Line<'static>>, name: &str, text: Option<&str>) {
     );
 }
 
+/// `HELPERS · what was asked and what came back` -- one block per call the
+/// cell made, in call order.
+///
+/// The toolset comes from the roster rather than from the record, so a
+/// helper that held tools is visible as having held them. A failed call is
+/// labelled a failure here too: what came back was not an answer.
+fn helpers_block(view: &CellView) -> Option<String> {
+    if view.helpers.is_empty() {
+        return None;
+    }
+    let mut block = String::new();
+    for record in &view.helpers {
+        let tools = match crate::helpers::lookup(&record.helper) {
+            Some(spec) if spec.tools.is_empty() => "no tools".to_string(),
+            Some(spec) => spec.tools.join(" "),
+            None => "toolset unknown".to_string(),
+        };
+        block.push_str(&format!(
+            "  {} · {} · {} turn{} · {tools}\n",
+            record.helper,
+            helper_seconds(record.outcome.elapsed_ms),
+            record.turns,
+            if record.turns == 1 { "" } else { "s" },
+        ));
+        push_labelled(&mut block, "asked", &record.asked);
+        let (label, text) = if record.outcome.ok {
+            ("gave", record.outcome.text.as_str())
+        } else if record.outcome.text.is_empty() {
+            ("running", "no answer yet")
+        } else {
+            ("failed", record.outcome.text.as_str())
+        };
+        push_labelled(&mut block, label, text);
+    }
+    Some(block)
+}
+
+/// One labelled entry, its continuation lines under the value's own column.
+fn push_labelled(block: &mut String, label: &str, text: &str) {
+    for (row, line) in text.lines().enumerate() {
+        if row == 0 {
+            block.push_str(&format!("    {label:<8} {line}\n"));
+        } else {
+            block.push_str(&format!("             {line}\n"));
+        }
+    }
+}
+
 fn content(conversation: &Conversation, notebook: &Notebook, cell: usize) -> Vec<Line<'static>> {
     let Some(view) = notebook.cell(cell) else {
         return vec![Line::from("No recorded cell at this number.")];
@@ -134,6 +182,13 @@ fn content(conversation: &Conversation, notebook: &Notebook, cell: usize) -> Vec
         "ACTUAL CALLS · runtime evidence",
         view.execution.as_deref(),
     );
+    if let Some(helpers) = helpers_block(view) {
+        section(
+            &mut lines,
+            "HELPERS · what was asked and what came back",
+            Some(&helpers),
+        );
+    }
     section(
         &mut lines,
         "CONSOLE OUTPUT · recorded cell output",

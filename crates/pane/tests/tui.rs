@@ -4,6 +4,7 @@
 //! a terminal.
 
 use pane::contract::{Conversation, Message, Role, ServedBy};
+use pane::helpers::{HelperOutcome, HelperRecord};
 use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::{
@@ -509,6 +510,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
     notebook.set(
         1,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -571,6 +573,7 @@ fn a_throw_renders_as_the_cells_error_region() {
     notebook.set(
         1,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -634,6 +637,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
     notebook.set(
         1,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -683,6 +687,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
     notebook.set(
         1,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -736,6 +741,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         1,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -753,6 +759,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         2,
         CellView {
+            helpers: Vec::new(),
             executed_source: None,
             repaired_from: None,
             changes: None,
@@ -907,4 +914,167 @@ fn sidebar_shows_real_inbox_and_batch_counts_without_changing_narrow_layout() {
         12,
     );
     assert!(!buffer_text(&narrow).contains("inbox 7"));
+}
+
+// --- docs/product/pane/little-helpers.md, "In the TUI": the lane --------
+
+/// One helper call, as the runtime records it once the call has resolved.
+fn resolved_helper(asked: &str, gave: &str, elapsed_ms: u64) -> HelperRecord {
+    HelperRecord {
+        helper: "reduce".to_string(),
+        verb: "reducing".to_string(),
+        asked: asked.to_string(),
+        outcome: HelperOutcome {
+            text: gave.to_string(),
+            ok: true,
+            elapsed_ms,
+        },
+        turns: 1,
+    }
+}
+
+/// A call still in flight: no answer and no failure sentence yet.
+fn running_helper(asked: &str, elapsed_ms: u64) -> HelperRecord {
+    HelperRecord {
+        outcome: HelperOutcome {
+            text: String::new(),
+            ok: false,
+            elapsed_ms,
+        },
+        ..resolved_helper(asked, "", 0)
+    }
+}
+
+/// A call that came back with a failure rather than an answer.
+fn failed_helper(asked: &str, reason: &str, elapsed_ms: u64) -> HelperRecord {
+    HelperRecord {
+        outcome: HelperOutcome {
+            text: reason.to_string(),
+            ok: false,
+            elapsed_ms,
+        },
+        ..resolved_helper(asked, "", 0)
+    }
+}
+
+/// One executed cell whose view carries `helpers`, rendered at a width that
+/// leaves the lane room for its own line.
+fn helper_screen(helpers: Vec<HelperRecord>) -> String {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(Role::Assistant, "```pane\nconst n = 1;\n```"),
+    ]);
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            helpers,
+            execution: Some("No tool calls ran in this cell.".to_string()),
+            table: Some("n  number  1".to_string()),
+            ..CellView::default()
+        },
+    );
+    buffer_text(&rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        32,
+    ))
+}
+
+/// The lane's whole point: while a helper runs, the user can see what is
+/// happening on their behalf -- what it is doing, and what it was handed.
+#[test]
+fn a_running_helper_shows_its_verb_and_what_it_was_asked() {
+    let text = helper_screen(vec![running_helper("cargo build log · 4118 lines", 900)]);
+
+    let lane = text
+        .lines()
+        .find(|line| line.contains("reduce"))
+        .unwrap_or_else(|| panic!("the lane renders under the cell header:\n{text}"));
+    assert!(lane.contains("reducing"), "the verb renders: {lane}");
+    assert!(
+        lane.contains("cargo build log · 4118 lines"),
+        "what it was asked renders: {lane}"
+    );
+    assert!(
+        lane.contains("-."),
+        "a running call carries the reaching-out frame: {lane}"
+    );
+    assert!(lane.contains("0.9s"), "elapsed is text: {lane}");
+    assert!(
+        text.contains("· 1 helper"),
+        "the cell header folds the lane into a count:\n{text}"
+    );
+}
+
+/// A helper that failed renders ` !! ` with its reason and stays there --
+/// the supervisor shipped for weeks rendering a permanently failing look as
+/// a healthy one, and the collapse must not rebuild that.
+#[test]
+fn a_failed_helper_shows_its_reason_and_survives_the_collapse() {
+    let failed = failed_helper("4118 lines", "request failed: 429", 400);
+    let alone = helper_screen(vec![failed.clone()]);
+    let lane = alone
+        .lines()
+        .find(|line| line.contains("reduce"))
+        .unwrap_or_else(|| panic!("a failed call renders its own lane:\n{alone}"));
+    assert!(lane.contains("!!"), "a failure is not an OK: {lane}");
+    assert!(
+        lane.contains("request failed: 429"),
+        "the failure names its reason: {lane}"
+    );
+    assert!(lane.contains("4118 lines"), "and what was asked: {lane}");
+
+    let crowded = helper_screen(vec![
+        resolved_helper("first log", "1 root error", 1000),
+        resolved_helper("second log", "2 root errors", 1000),
+        failed,
+        resolved_helper("fourth log", "4 root errors", 1000),
+    ]);
+    assert!(
+        crowded.contains("4 helpers"),
+        "four lanes collapse to a count:\n{crowded}"
+    );
+    assert!(
+        crowded.contains("request failed: 429"),
+        "a failed helper does not fold into the count:\n{crowded}"
+    );
+}
+
+/// A lane that appears and vanishes on every cheap call is the banner nobody
+/// reads, so a call this short leaves only the header's folded summary.
+#[test]
+fn a_helper_that_resolved_under_three_hundred_milliseconds_renders_no_lane() {
+    let text = helper_screen(vec![resolved_helper("a short log", "no failures", 120)]);
+    assert!(
+        !text.contains("no failures"),
+        "a sub-300ms call renders no lane:\n{text}"
+    );
+    assert!(!text.contains("0.1s"), "and no elapsed of its own:\n{text}");
+    assert!(
+        text.contains("· 1 helper"),
+        "but the header still says it happened:\n{text}"
+    );
+}
+
+/// Helpers run in parallel; past three lanes the cell itself would be pushed
+/// off screen.
+#[test]
+fn four_helpers_collapse_to_a_count_and_a_total() {
+    let text = helper_screen(vec![
+        resolved_helper("first log", "1 root error", 1000),
+        resolved_helper("second log", "2 root errors", 1000),
+        resolved_helper("third log", "3 root errors", 1000),
+        resolved_helper("fourth log", "4 root errors", 1100),
+    ]);
+    assert!(
+        text.contains("4 helpers · 4.1s"),
+        "four lanes collapse to a count and a total:\n{text}"
+    );
+    assert!(
+        !text.contains("2 root errors"),
+        "the individual lanes are gone:\n{text}"
+    );
 }

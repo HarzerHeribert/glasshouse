@@ -1222,7 +1222,8 @@ fn run_task_inner(
         Duration::from_secs(session.config.limits.cell_wall_clock_s),
     )
     .with_response_byte_cap(session.config.limits.response_bytes)
-    .with_instruction_context();
+    .with_instruction_context()
+    .with_helpers(session.config.helpers.clone());
     let mut budget = TaskSpend::new(session.config.limits.cells);
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
@@ -1858,6 +1859,10 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
+        // Read after the cell rather than from the trajectory: the record
+        // carries what came back and how long it took, which is what the
+        // lane and the `HELPERS` inspector section both draw.
+        helpers: runtime.helper_records(),
         executed_source: (native.is_some() || repaired_from.is_some()).then(|| source.clone()),
         repaired_from,
         changes,

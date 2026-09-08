@@ -272,6 +272,16 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     }
     set_fixed_key(scope, global, "bg", background.into());
 
+    // Little helpers (`little-helpers.md`, *Pulled*). One `fn` item per
+    // roster name and no loop: `v8::Function::builder` coerces a closure
+    // built in a loop to a fn pointer and fails inside the v8 crate, naming
+    // none of this code.
+    let helper = v8::Object::new(scope);
+    if let Some(function) = v8::Function::builder(helper_reduce_callback).build(scope) {
+        set_fixed_key(scope, helper, crate::helpers::REDUCER.name, function.into());
+    }
+    set_fixed_key(scope, global, "helper", helper.into());
+
     // Subagents. Fixed for the same reason as `bg`: a program that replaced
     // `agent` could not stop what it started.
     let agent = v8::Object::new(scope);
@@ -1968,6 +1978,88 @@ fn agent_run_callback(
     });
     let object = agent_object(scope, &handle);
     retval.set(object);
+}
+
+// --- helper.reduce -----------------------------------------------------
+
+/// `helper.reduce(text)` — `little-helpers.md`'s pulled half: one metered
+/// wire call from inside the running cell, so a question costs no turn.
+///
+/// The invariant: **a helper either answers or throws.** Unconfigured, over
+/// the cell's ceiling, and a call that failed are all a catchable
+/// `ToolError`; nothing here can return text that looks like a reduction
+/// when no reduction was made. Shaped like `mcp`, not like `bash`: nothing
+/// new runs on the machine, so no grant is consulted.
+fn helper_reduce_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let spec = &crate::helpers::REDUCER;
+    if !args.get(0).is_string() {
+        throw_tool_error(scope, "helper.reduce takes the text to reduce");
+        return;
+    }
+    let input = args.get(0).to_rust_string_lossy(scope);
+    if input.trim().is_empty() {
+        throw_tool_error(scope, "helper.reduce takes the text to reduce");
+        return;
+    }
+
+    let state = state(scope);
+    let model = match state.helper_model() {
+        Ok(model) => model,
+        Err(reason) => {
+            throw_tool_error(scope, &reason);
+            return;
+        }
+    };
+    if let Err(reason) = state.claim_helper_call() {
+        throw_tool_error(scope, &reason);
+        return;
+    }
+
+    let asked = reduction_asked(&input);
+    let outcome = crate::helpers::run_once(spec, &model, &input);
+    let ok = outcome.ok;
+    let answer = outcome.text.clone();
+    state.record_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked.clone(),
+        outcome,
+        turns: spec.max_turns,
+    });
+    // The trajectory says a helper ran and how big the question was, never
+    // the payload: §9.4 explains the cell, and a build log is not an
+    // explanation.
+    trace(scope).record(CallRecord {
+        tool: format!("helper.{}", spec.name),
+        args: [("asked".to_string(), asked)].into_iter().collect(),
+        evidence: None,
+        ended: if ok {
+            Ended::Ok
+        } else {
+            Ended::Threw {
+                class: "ToolError".into(),
+            }
+        },
+    });
+    if !ok {
+        throw_tool_error(scope, &answer);
+        return;
+    }
+    let value = js_string(scope, &answer);
+    retval.set(value);
+}
+
+/// What the lane and the `/cell` inspector show for one `reduce` call.
+///
+/// A size, never the payload: the caller still holds the text, the record is
+/// persisted to the rollout, and a 4,000-line build log in a lane line is
+/// neither readable nor cheap.
+fn reduction_asked(input: &str) -> String {
+    format!("{} lines", thousands(input.lines().count() as u64))
 }
 
 /// What a task must have left before a subagent may start. One ordinary

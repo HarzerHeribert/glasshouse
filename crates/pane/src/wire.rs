@@ -541,6 +541,18 @@ pub fn send_turn_configured(
 ///
 /// The serializer is shared with task requests. This call supplies its own
 /// model and token limit; [`send_turn`] keeps the default [`MODEL`].
+/// A side errand's hard ceiling.
+///
+/// [`send_turn_with`] has exactly two callers -- the supervisor's look and a
+/// little helper -- and neither is the task path. Both are supposed to be
+/// quick questions answered on a cheap model, and a helper's call runs inside
+/// a native v8 callback where `terminate_execution` cannot reach it: without
+/// this, a provider that accepts and never answers outlives the cell's
+/// `cell_wall_clock_s` and `/stop` both. Generous against a real answer
+/// (measured: 7.5s for `gpt-5.6-luna`, 32s for a reasoning model) and finite
+/// against a hang.
+const SIDE_ERRAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub fn send_turn_with(
     conversation: &Conversation,
     model: &str,
@@ -553,6 +565,7 @@ pub fn send_turn_with(
     let mut request = ureq::post(&url)
         .config()
         .http_status_as_error(false)
+        .timeout_global(Some(SIDE_ERRAND_TIMEOUT))
         .build()
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION);

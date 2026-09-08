@@ -1,7 +1,8 @@
 use pane::contract::{Conversation, Message, Role, ServedBy};
+use pane::helpers::{HelperOutcome, HelperRecord};
 use pane::runtime::handles::HandleTable;
 use pane::tui::{
-    Activity, CellError, CellView, ContextTokens, Counted, Notebook, ScreenState,
+    Activity, CellError, CellView, ContextTokens, Counted, Inspection, Notebook, ScreenState,
     SidebarVisibility, SupervisorStatus, render_screen, screen_regions, slash_matches,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
@@ -1200,5 +1201,111 @@ fn ordered_action_blocks_do_not_leak_a_second_raw_code_block_into_narration() {
     assert!(
         !shown.contains("hidden_second_source"),
         "second source leaked out of collapsed actions: {shown}"
+    );
+}
+
+// --- docs/product/pane/little-helpers.md, "In the TUI" ------------------
+
+fn helper_record(gave: &str, ok: bool, elapsed_ms: u64) -> HelperRecord {
+    HelperRecord {
+        helper: "reduce".to_string(),
+        verb: "reducing".to_string(),
+        asked: "cargo build log, 4118 lines".to_string(),
+        outcome: HelperOutcome {
+            text: gave.to_string(),
+            ok,
+            elapsed_ms,
+        },
+        turns: 1,
+    }
+}
+
+fn helper_notebook(records: Vec<HelperRecord>) -> Notebook {
+    Notebook {
+        cells: vec![CellView {
+            helpers: records,
+            executed_source: Some("const n = 1;".to_string()),
+            execution: Some("No tool calls ran in this cell.".to_string()),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    }
+}
+
+/// *Is it alive* is the question the lane answers, so `/motion off` freezes
+/// the glyph and leaves the seconds counting.
+#[test]
+fn reduced_motion_freezes_the_helper_glyph_and_keeps_its_seconds() {
+    let notebook = helper_notebook(vec![helper_record("", false, 2000)]);
+    let lane = |state: &ScreenState| {
+        let rendered = text(&draw(110, 30, state, &conversation(), &notebook));
+        rendered
+            .lines()
+            .find(|line| line.contains("reducing"))
+            .unwrap_or_else(|| panic!("the lane renders:\n{rendered}"))
+            .to_string()
+    };
+
+    let mut state = state();
+    state.reduced_motion = true;
+    let still = lane(&state);
+    state.animation_frame = 2;
+    assert_eq!(still, lane(&state), "reduced motion must freeze the glyph");
+    assert!(
+        still.contains("2.0s"),
+        "the seconds are text, not animation: {still}"
+    );
+
+    state.reduced_motion = false;
+    assert_ne!(
+        still,
+        lane(&state),
+        "with motion on the glyph must move: {still}"
+    );
+}
+
+/// `/cell` gains one section in the inspector's existing vocabulary: what
+/// each helper was asked, and what came back.
+#[test]
+fn the_inspector_names_what_each_helper_was_asked_and_what_came_back() {
+    let notebook = helper_notebook(vec![helper_record("3 distinct root failures", true, 1100)]);
+    let mut state = state();
+    state.inspection = Inspection::open(1, &notebook);
+    let rendered = text(&draw(110, 30, &state, &conversation(), &notebook));
+
+    assert!(
+        rendered.contains("HELPERS · what was asked and what came back"),
+        "the section heads in the inspector's own vocabulary:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("reduce · 1.1s · 1 turn · no tools"),
+        "a toolless helper is visible as having held no tools:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("cargo build log, 4118 lines"),
+        "what it was asked:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("3 distinct root failures"),
+        "and what came back:\n{rendered}"
+    );
+}
+
+/// A failed call is named as a failure in the inspector too, never rendered
+/// as an answer.
+#[test]
+fn the_inspector_names_a_failed_helper_as_failed() {
+    let notebook = helper_notebook(vec![helper_record("request failed: 429", false, 400)]);
+    let mut state = state();
+    state.inspection = Inspection::open(1, &notebook);
+    let rendered = text(&draw(110, 30, &state, &conversation(), &notebook));
+
+    assert!(
+        rendered.contains("failed   request failed: 429"),
+        "a failure is labelled a failure:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("gave     request failed"),
+        "and never rendered as an answer:\n{rendered}"
     );
 }

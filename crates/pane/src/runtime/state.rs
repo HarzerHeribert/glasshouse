@@ -16,8 +16,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::config::HelpersConfig;
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
+use crate::helpers::HelperRecord;
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
 use crate::runtime::instructions::{InstructionContext, PendingInstructions};
 use crate::runtime::outcome::{PlanItem, SourceEvidence};
@@ -128,6 +130,14 @@ pub(crate) struct CellState {
     /// one is skipped: `runtime-contract.md` §2 makes `free` a lifetime
     /// event, and re-capturing at the end of the cell would undo it.
     pub(crate) freed: Vec<String>,
+    /// Every helper call this cell completed, in call order — the one field
+    /// `CellView.helpers` is built from.
+    pub(crate) helpers: Vec<HelperRecord>,
+    /// Helper calls **claimed** this cell, which is what the per-cell ceiling
+    /// counts. A call in flight has claimed its slot and left no record yet,
+    /// so counting the records instead would let a loop overrun the ceiling
+    /// by whatever is outstanding.
+    pub(crate) helper_calls: u32,
 }
 
 /// What every host callback can reach.
@@ -180,6 +190,10 @@ pub(crate) struct RuntimeState {
     /// than silently falling back to the compiled-in default.
     pub(crate) model: RefCell<String>,
     pub(crate) instructions: RefCell<InstructionContext>,
+    /// `[helpers]` as the session read it. The default carries no `model`,
+    /// which is helpers **off**: a runtime nobody configured spends nothing
+    /// on the user's behalf.
+    helpers: RefCell<HelpersConfig>,
     /// Versions whose exact editing context has crossed a completed cell
     /// boundary and therefore reached the model.
     visible_sources: RefCell<HashSet<(PathBuf, String)>>,
@@ -211,6 +225,7 @@ impl RuntimeState {
             budget_remaining: std::cell::Cell::new(0),
             model: RefCell::new(crate::wire::MODEL.to_string()),
             instructions: RefCell::new(InstructionContext::default()),
+            helpers: RefCell::new(HelpersConfig::default()),
             visible_sources: RefCell::new(HashSet::new()),
             pending_sources: RefCell::new(HashSet::new()),
             pending_context_output: RefCell::new(None),
@@ -269,7 +284,54 @@ impl RuntimeState {
         current.console.clear();
         current.captures.clear();
         current.freed.clear();
+        current.helpers.clear();
+        current.helper_calls = 0;
         cell
+    }
+
+    pub(crate) fn set_helpers(&self, helpers: HelpersConfig) {
+        *self.helpers.borrow_mut() = helpers;
+    }
+
+    /// The model helpers run on, or the sentence saying why there is none.
+    ///
+    /// The invariant: **a helper never runs unasked.** `[helpers] model`
+    /// unset is off, exactly as `[supervisor] model` unset is, because a
+    /// helper spends money on the user's behalf and the fail-closed direction
+    /// is *not configured, not run*.
+    pub(crate) fn helper_model(&self) -> Result<String, String> {
+        let helpers = self.helpers.borrow();
+        if !helpers.enabled {
+            return Err("helpers are off: `[helpers] enabled` is false in pane.toml".to_string());
+        }
+        helpers.model.clone().ok_or_else(|| {
+            "helpers are not configured: set `[helpers] model` in .glasshouse/pane.toml".to_string()
+        })
+    }
+
+    /// Takes one of this cell's helper-call slots, or says the ceiling is
+    /// reached. `little-helpers.md`'s *cost is bounded per cell*: a program
+    /// is code, so a helper call sits inside a loop, and the refusal is what
+    /// the model catches instead of the loop running away.
+    pub(crate) fn claim_helper_call(&self) -> Result<(), String> {
+        let ceiling = self.helpers.borrow().calls_per_cell;
+        let mut current = self.current.borrow_mut();
+        if current.helper_calls >= ceiling {
+            return Err(format!(
+                "this cell has used its {ceiling} helper call(s); yield and start another cell"
+            ));
+        }
+        current.helper_calls += 1;
+        Ok(())
+    }
+
+    pub(crate) fn record_helper(&self, record: HelperRecord) {
+        self.current.borrow_mut().helpers.push(record);
+    }
+
+    /// Every helper call the cell that just ran completed, in call order.
+    pub(crate) fn helper_records(&self) -> Vec<HelperRecord> {
+        self.current.borrow().helpers.clone()
     }
 
     /// Records a call whose result became a live object, and answers with the

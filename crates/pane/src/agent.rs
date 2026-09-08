@@ -90,9 +90,18 @@ pub fn run(
         messages: vec![Message::text(Role::User, task)],
     };
 
+    // A subagent completes a goal, so it hits the same walls the task model
+    // does and gets the same helpers. It is handed a profile and nothing
+    // else — `bg` calls this on its own thread — so it reads `[helpers]`
+    // from the project itself; a file that will not parse leaves helpers
+    // off, which is the same fail-closed answer as an unset model.
+    let helpers = crate::config::PaneConfig::load(profile.root())
+        .unwrap_or_default()
+        .helpers;
     let mut runtime = Runtime::new(profile, glasshouse, session)
         .as_subagent()
-        .with_instruction_context();
+        .with_instruction_context()
+        .with_helpers(helpers);
     let mut tokens = 0u64;
     let turns_allowed = options.turns.clamp(1, MAX_TURNS);
 

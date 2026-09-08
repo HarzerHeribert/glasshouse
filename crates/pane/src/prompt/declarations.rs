@@ -87,6 +87,89 @@ pub struct Binding {
     pub declaration: &'static str,
 }
 
+/// The `helper` binding, **generated from [`crate::helpers::HELPERS`]**, so
+/// appending a `HelperSpec` is the whole of declaring a helper to the model
+/// and there is no second place that can fall behind the roster.
+///
+/// It is assembled at compile time into a fixed buffer because
+/// [`Binding::declaration`] is a `&'static str`: a `LazyLock` would make
+/// [`RUNTIME`] something its callers cannot iterate.
+const HELPER_HEAD: &str = "declare const helper: {\n";
+const HELPER_SIGNATURE: &str = "(text: string): Promise<string>;\n";
+const HELPER_CLOSE: &str = "};\n\
+    // Ask a cheap model one narrow question from inside the cell. It costs no turn,\n\
+    // returns a value, and leaves nothing behind: it holds no tools, writes nothing,\n\
+    // and reports evidence rather than conclusions. It throws ToolError when helpers\n\
+    // are not configured, when this cell has used its call ceiling, or when the call\n\
+    // itself failed — so attempt the work first and pay for a helper only in the\n\
+    // branch that needs one. What it returns is yours to keep or drop.\n";
+const HELPER_INDENT: &str = "  ";
+const HELPER_BULLET: &str = "// ";
+const HELPER_GAP: &str = ": ";
+const HELPER_NEWLINE: &str = "\n";
+
+const fn copy(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+    let mut i = 0;
+    while i < bytes.len() {
+        out[at + i] = bytes[i];
+        i += 1;
+    }
+    at + bytes.len()
+}
+
+const fn helper_declaration_len() -> usize {
+    let mut len = HELPER_HEAD.len() + HELPER_CLOSE.len();
+    let mut i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        let spec = &crate::helpers::HELPERS[i];
+        len += HELPER_INDENT.len() + spec.name.len() + HELPER_SIGNATURE.len();
+        len += HELPER_BULLET.len()
+            + spec.name.len()
+            + HELPER_GAP.len()
+            + spec.summary.len()
+            + HELPER_NEWLINE.len();
+        i += 1;
+    }
+    len
+}
+
+const HELPER_DECLARATION_LEN: usize = helper_declaration_len();
+
+const fn helper_declaration_bytes() -> [u8; HELPER_DECLARATION_LEN] {
+    let mut out = [0u8; HELPER_DECLARATION_LEN];
+    let mut at = copy(&mut out, 0, HELPER_HEAD.as_bytes());
+    let mut i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        at = copy(&mut out, at, HELPER_INDENT.as_bytes());
+        at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+        at = copy(&mut out, at, HELPER_SIGNATURE.as_bytes());
+        i += 1;
+    }
+    at = copy(&mut out, at, HELPER_CLOSE.as_bytes());
+    i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        at = copy(&mut out, at, HELPER_BULLET.as_bytes());
+        at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+        at = copy(&mut out, at, HELPER_GAP.as_bytes());
+        at = copy(&mut out, at, crate::helpers::HELPERS[i].summary.as_bytes());
+        at = copy(&mut out, at, HELPER_NEWLINE.as_bytes());
+        i += 1;
+    }
+    assert!(
+        at == HELPER_DECLARATION_LEN,
+        "the generated helper declaration must fill its buffer exactly"
+    );
+    out
+}
+
+const HELPER_DECLARATION_BYTES: [u8; HELPER_DECLARATION_LEN] = helper_declaration_bytes();
+
+/// The generated `helper` declaration, as [`RUNTIME`] carries it.
+pub const HELPER_DECLARATION: &str = match std::str::from_utf8(&HELPER_DECLARATION_BYTES) {
+    Ok(text) => text,
+    Err(_) => panic!("a roster name or summary is not UTF-8"),
+};
+
 /// Every host global that is not a registered tool.
 pub const RUNTIME: &[Binding] = &[
     Binding {
@@ -177,6 +260,10 @@ pub const RUNTIME: &[Binding] = &[
                       // grant, spends this task's budget, and cannot start a subagent of its\n\
                       // own. Use it only when the question is separable and its working would\n\
                       // otherwise fill your context. `bg.cancel` stops one.",
+    },
+    Binding {
+        global: "helper",
+        declaration: HELPER_DECLARATION,
     },
     Binding {
         global: "todo",

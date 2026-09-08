@@ -506,6 +506,21 @@ impl Runtime {
         self
     }
 
+    /// The `[helpers]` roster this runtime's cells may call. Not passing it
+    /// leaves helpers off, which is the same answer an unset `[helpers]
+    /// model` gives: a runtime nobody configured spends nothing.
+    #[must_use]
+    pub fn with_helpers(self, helpers: crate::config::HelpersConfig) -> Self {
+        self.state.set_helpers(helpers);
+        self
+    }
+
+    /// Every helper call the cell that just ran made, in call order — the one
+    /// field `CellView.helpers` is built from.
+    pub fn helper_records(&self) -> Vec<crate::helpers::HelperRecord> {
+        self.state.helper_records()
+    }
+
     pub fn pending_instructions(
         &self,
     ) -> Option<crate::runtime::instructions::PendingInstructions> {

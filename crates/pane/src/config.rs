@@ -47,11 +47,36 @@ impl Default for SupervisorConfig {
 }
 
 /// The whole of `pane.toml`. `project.rs`'s own invariant -- loading edits
+/// `[helpers]` -- the little-helper tier (`docs/product/pane/little-helpers.md`).
+///
+/// `model` has no default, exactly as `[supervisor] model` has none: unset
+/// means helpers are off, said once at start. A helper spends money on the
+/// user's behalf, so the fail-closed direction is *not configured, not run*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpersConfig {
+    pub model: Option<String>,
+    pub enabled: bool,
+    /// The most helper calls one cell may make, so a loop cannot issue three
+    /// hundred requests inside a single program.
+    pub calls_per_cell: u32,
+}
+
+impl Default for HelpersConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            enabled: true,
+            calls_per_cell: 8,
+        }
+    }
+}
+
 /// nothing -- holds here too: nothing in this module opens a path for writing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PaneConfig {
     pub limits: Limits,
     pub supervisor: SupervisorConfig,
+    pub helpers: HelpersConfig,
 }
 
 /// One integer key's valid range, spelled once so the refusal sentence and
@@ -77,6 +102,12 @@ const CELLS: Range = Range {
     min: 1,
     max: 1000,
 };
+const CALLS_PER_CELL: Range = Range {
+    key: "calls_per_cell",
+    min: 1,
+    max: 64,
+};
+
 const EVERY: Range = Range {
     key: "every",
     min: 1,
@@ -108,14 +139,14 @@ impl PaneConfig {
 
     fn parse(text: &str) -> Result<Self, String> {
         let value: toml::Value = toml::from_str(text).map_err(|e| format!("pane.toml: {e}"))?;
-        let table = value
-            .as_table()
-            .ok_or_else(|| "pane.toml: must be a table of [limits] and [supervisor]".to_string())?;
+        let table = value.as_table().ok_or_else(|| {
+            "pane.toml: must be a table of [limits], [supervisor] and [helpers]".to_string()
+        })?;
 
         for key in table.keys() {
-            if key != "limits" && key != "supervisor" {
+            if key != "limits" && key != "supervisor" && key != "helpers" {
                 return Err(format!(
-                    "pane.toml: unknown table `[{key}]`; only [limits] and [supervisor] are \
+                    "pane.toml: unknown table `[{key}]`; only [limits], [supervisor] and [helpers] are \
                      recognised"
                 ));
             }
@@ -130,7 +161,16 @@ impl PaneConfig {
             None => SupervisorConfig::default(),
         };
 
-        Ok(Self { limits, supervisor })
+        let helpers = match table.get("helpers") {
+            Some(value) => parse_helpers(value)?,
+            None => HelpersConfig::default(),
+        };
+
+        Ok(Self {
+            limits,
+            supervisor,
+            helpers,
+        })
     }
 }
 
@@ -230,6 +270,44 @@ fn parse_supervisor(value: &toml::Value) -> Result<SupervisorConfig, String> {
         every,
         model,
         enabled,
+    })
+}
+
+fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
+    let table = table_of(value, "helpers")?;
+    let defaults = HelpersConfig::default();
+
+    for key in table.keys() {
+        if !["model", "enabled", "calls_per_cell"].contains(&key.as_str()) {
+            return Err(format!("pane.toml: unknown key `{key}` in [helpers]"));
+        }
+    }
+
+    let model = match table.get("model") {
+        None => None,
+        Some(value) => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `model` must be a string".to_string())?;
+            check_names_no_tool_path_or_grant("model", text)?;
+            Some(text.to_string())
+        }
+    };
+    let enabled = match table.get("enabled") {
+        None => defaults.enabled,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `enabled` must be true or false".to_string())?,
+    };
+    let calls_per_cell = match int_field(table, "calls_per_cell")? {
+        Some(v) => u32::try_from(CALLS_PER_CELL.check(v)?).expect("range is non-negative"),
+        None => defaults.calls_per_cell,
+    };
+
+    Ok(HelpersConfig {
+        model,
+        enabled,
+        calls_per_cell,
     })
 }
 
