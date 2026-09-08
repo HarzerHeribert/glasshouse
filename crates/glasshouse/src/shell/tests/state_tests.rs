@@ -446,6 +446,62 @@ fn entering_session_mode_closes_any_open_overlay() {
 /// user makes with the session bar and the footer still on screen, and the
 /// chrome only goes when a session actually takes the keyboard — so the same
 /// key that armed it is still readable, and still pressable, until then.
+/// Refusing to guess between enabled harnesses is right; sending the user to
+/// the CLI to answer is not. The refusal already names the enabled set, so the
+/// shell asks with it rather than converting it to an error string.
+///
+/// The decision this pins: the picker resumes the presentation the user asked
+/// for. `N` interrupted by the question must still start a HEADLESS session,
+/// because silently handing back an embedded one is the failure the user would
+/// not notice until the viewport appeared.
+#[test]
+fn choosing_a_harness_resumes_the_presentation_that_was_interrupted() {
+    use crate::integrations::IntegrationId;
+
+    let mut state = state_with(0);
+    let enabled = vec![IntegrationId::ClaudeCode, IntegrationId::Codex];
+
+    assert_eq!(
+        state.open_harness_choice(enabled.clone(), SessionPresentation::Headless),
+        Action::Redraw
+    );
+    assert_eq!(state.overlay(), Some(Overlay::HarnessChoice));
+    assert_eq!(state.harness_choice().expect("open").options, enabled);
+
+    // Down then Enter takes the SECOND harness, not the first: a picker that
+    // always answered with the cursor's start would pass a one-option test.
+    assert_eq!(state.handle_key(press(KeyCode::Down)), Action::Redraw);
+    assert_eq!(
+        state.handle_key(press(KeyCode::Enter)),
+        Action::StartSessionWith {
+            harness: IntegrationId::Codex,
+            presentation: SessionPresentation::Headless,
+        },
+        "the picker must answer with the harness under the cursor, in the presentation asked for"
+    );
+    assert_eq!(state.overlay(), None, "answering closes the question");
+    assert!(state.harness_choice().is_none());
+}
+
+/// Esc leaves the question unanswered and starts nothing.
+#[test]
+fn cancelling_the_harness_choice_starts_no_session() {
+    use crate::integrations::IntegrationId;
+
+    let mut state = state_with(0);
+    state.open_harness_choice(
+        vec![IntegrationId::ClaudeCode, IntegrationId::Codex],
+        SessionPresentation::Embedded,
+    );
+    let action = state.handle_key(press(KeyCode::Esc));
+    assert!(
+        !matches!(action, Action::StartSessionWith { .. }),
+        "cancelling must not start a session, got {action:?}"
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.harness_choice().is_none());
+}
+
 #[test]
 fn f_arms_fullscreen_without_taking_the_chrome_away() {
     let mut state = state_with(2);

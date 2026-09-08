@@ -3481,6 +3481,7 @@ mod native_session_facts_tests {
             &mut live,
             &sessions,
             SessionPresentation::Embedded,
+            None,
             TerminalSize::new(24, 80),
             &mut index_snapshots,
         )
@@ -3546,6 +3547,7 @@ mod session_mode_geometry_tests {
             &mut live,
             &sessions,
             SessionPresentation::Embedded,
+            None,
             view::viewport_terminal_size(outer, state::Chrome::Full),
             &mut index_snapshots,
         )
@@ -3608,6 +3610,7 @@ mod session_mode_geometry_tests {
                 &mut live,
                 &sessions,
                 SessionPresentation::Embedded,
+                None,
                 view::viewport_terminal_size(outer, state::Chrome::Full),
                 &mut index_snapshots,
             )
@@ -3672,6 +3675,7 @@ mod session_mode_geometry_tests {
             &mut live,
             &sessions,
             SessionPresentation::Embedded,
+            None,
             view::viewport_terminal_size(outer, state::Chrome::Full),
             &mut index_snapshots,
         )
@@ -3825,6 +3829,7 @@ mod shell_entitlement_scrub_tests {
             &mut live,
             &sessions,
             SessionPresentation::Embedded,
+            None,
             TerminalSize::new(24, 80),
             &mut index_snapshots,
         );

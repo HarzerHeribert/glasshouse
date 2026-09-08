@@ -120,18 +120,19 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             );
                         }
                     }
-                    Action::StartSession | Action::StartHeadlessSession => {
-                        let presentation = if matches!(action, Action::StartHeadlessSession) {
-                            SessionPresentation::Headless
-                        } else {
-                            SessionPresentation::Embedded
+                    Action::StartSession
+                    | Action::StartHeadlessSession
+                    | Action::StartSessionWith { .. } => {
+                        let Some((presentation, harness)) = action.start_request() else {
+                            continue;
                         };
                         match start_session(
                             runtime,
                             &mut live,
                             &sessions,
                             presentation,
-                            viewport_terminal_size(&screen, &state),
+                            harness,
+                            view::terminal_size_for(&screen, &state),
                             &mut index_snapshots,
                         ) {
                             Ok(()) => {
@@ -145,7 +146,12 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     state.set_status("started a headless session — `o` lists it");
                                 }
                             }
+                            // Refusing to guess is right; sending the user away to answer is not.
                             Err(err) => {
+                                if let Some(ids) = session::select::ambiguous_harnesses(&err) {
+                                    state.open_harness_choice(ids.to_vec(), presentation);
+                                    continue;
+                                }
                                 tracing::warn!(error = %err, "could not start a session");
                                 state.set_status(format!("could not start a session: {err:#}"));
                             }
@@ -162,7 +168,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             &mut live,
                             &sessions,
                             id,
-                            viewport_terminal_size(&screen, &state),
+                            view::terminal_size_for(&screen, &state),
                         ) {
                             Ok(()) => {
                                 if let Ok(records) = sessions.store().list() {
@@ -769,10 +775,9 @@ fn send_session_text(
 }
 
 /// Bring the runtime in line with what the bar shows: the focused session,
-/// and — when `moved` says the chrome around it just changed — the room that
-/// session now has, since entering session mode collapses four rows of chrome
-/// into one, or into none at all in fullscreen. Nothing else resizes: a
-/// `SIGWINCH` per keystroke would have every harness redrawing while typing.
+/// and — when `moved` says the chrome just changed — the room it now has,
+/// since session mode collapses four rows into one or none. Nothing else
+/// resizes: a `SIGWINCH` per keystroke would redraw every harness as you type.
 /// `RuntimeError::NotLive` is ignored on purpose: a session the bar lists
 /// but that is not running in this invocation is normal. Never touches a
 /// process — see [`SessionRuntime::focus`] — only changes which live
@@ -798,12 +803,6 @@ fn sync_focus(live: &mut SessionRuntime, state: &ShellState, outer: TerminalSize
     {
         tracing::warn!(session = %id, %err, "could not resize the focused session");
     }
-}
-
-/// The viewport's own inner size, in the shape a freshly spawned session's
-/// pseudo-terminal needs — see `view::viewport_terminal_size`.
-fn viewport_terminal_size(screen: &Screen, state: &ShellState) -> TerminalSize {
-    view::viewport_terminal_size(screen.size().unwrap_or_default(), state.chrome())
 }
 
 /// Convert `vt100`'s colour model to Ratatui's — the one place either module
@@ -880,13 +879,14 @@ fn start_session(
     live: &mut SessionRuntime,
     sessions: &ProjectSessions,
     presentation: SessionPresentation,
+    harness: Option<IntegrationId>,
     size: TerminalSize,
     index_snapshots: &mut HashMap<SessionId, session::native_id::IndexSnapshot>,
 ) -> anyhow::Result<()> {
     let user = UserConfig::load(app_runtime.paths())?;
     let project_config = config::load_project_config(app_runtime.project())?;
     let effective = EffectiveConfig::new(&user, project_config.as_ref());
-    let selection = session::select::select(None, effective)?;
+    let selection = session::select::select(harness.map(IntegrationId::slug), effective)?;
 
     let store = sessions.store();
     let native = selection

@@ -345,6 +345,7 @@ pub(super) fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
             "tab section   up/down move   space toggle   section keys edit   \
              w save   W project   r setup   esc close"
         }
+        (Mode::Control, Some(Overlay::HarnessChoice)) => "up/down pick   enter start   esc cancel",
         (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",

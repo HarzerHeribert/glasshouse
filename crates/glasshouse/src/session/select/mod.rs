@@ -360,6 +360,20 @@ fn merge_settings(document: &str, keys: &[(&'static str, String)]) -> anyhow::Re
 ///
 /// Every variant's message is written to be shown to the user verbatim: it
 /// names what went wrong and states the concrete remedy.
+/// The harnesses an [`SelectionError::Ambiguous`] refusal named, if that is
+/// what this error is.
+///
+/// `start_session` returns `anyhow::Result`, so the refusal reaches a caller
+/// with its type erased — but the set it carries is exactly what a picker
+/// needs, and re-running discovery to rebuild it could answer differently from
+/// the message the user was shown.
+pub fn ambiguous_harnesses(error: &anyhow::Error) -> Option<&[IntegrationId]> {
+    match error.downcast_ref::<SelectionError>() {
+        Some(SelectionError::Ambiguous { enabled }) => Some(enabled),
+        _ => None,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
     #[error(

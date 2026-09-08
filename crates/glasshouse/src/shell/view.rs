@@ -98,6 +98,16 @@ pub fn viewport_terminal_size(outer: TerminalSize, chrome: Chrome) -> TerminalSi
     TerminalSize::new(slot.height, slot.width)
 }
 
+/// The viewport's inner size for a session about to be spawned, taken from the
+/// screen the shell is drawing on rather than from the terminal's outer size.
+///
+/// The adapter to [`viewport_slot`] for callers holding a `Screen`: a harness
+/// TUI lays itself out from the size it sees at startup, so the wrong geometry
+/// draws its first frame short.
+pub fn terminal_size_for(screen: &crate::tui::Screen, state: &ShellState) -> TerminalSize {
+    viewport_terminal_size(screen.size().unwrap_or_default(), state.chrome())
+}
+
 /// Draw the shell.
 pub fn render(state: &ShellState, frame: &mut Frame) {
     let area = frame.area();
@@ -124,6 +134,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
     }
 
     match state.overlay() {
+        Some(Overlay::HarnessChoice) => render_harness_choice(state, frame, area),
         Some(Overlay::Overview) => render_overview(state, frame, area),
         Some(Overlay::Settings) => render_settings(state, frame, area),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
@@ -242,6 +253,65 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
 /// Over, not instead of: the shell stays visible around the edges so it is
 /// obvious the session is still there and still running, and that leaving the
 /// overlay goes back to it.
+/// Which harness to start, when Glasshouse refused to guess.
+///
+/// Deliberately small and centred rather than a full overlay: it is one
+/// question with a short answer, and the fleet behind it stays visible so it
+/// is obvious nothing has started yet.
+fn render_harness_choice(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let Some(choice) = state.harness_choice() else {
+        return;
+    };
+    let height = (choice.options.len() as u16 + 4).min(area.height);
+    let width = 52.min(area.width);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(width)) / 2,
+        area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+
+    let title = match choice.presentation {
+        SessionPresentation::Headless => " start a headless session in ",
+        _ => " start a session in ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, id) in choice.options.iter().enumerate() {
+        let selected = index == choice.cursor;
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(state.theme().accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(state.theme().secondary())
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} {} ",
+                if selected { "▸" } else { " " },
+                id.display_name()
+            ),
+            style,
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "up/down pick   enter start   esc cancel",
+        Style::default().fg(state.theme().quiet()),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     let popup = centered(area, 80, 70);
     frame.render_widget(Clear, popup);

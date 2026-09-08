@@ -117,6 +117,12 @@ pub enum Overlay {
     /// window and context state (warm, cold, or unknown). Deliberately
     /// narrow — see [`RouteEvidenceRow`] for exactly which columns this
     /// build can honestly show and why the rest have no producer yet.
+    /// Which harness to start, when more than one is enabled and Glasshouse
+    /// therefore refuses to guess. It is the *answer* to
+    /// `SelectionError::Ambiguous`, not a menu offered up front: with one
+    /// harness enabled `n` still starts it without asking, because there is
+    /// nothing to ask about.
+    HarnessChoice,
     /// Read-only, like [`Overlay::ProjectOverview`] and
     /// [`Overlay::SessionEvents`]. See [`RouteEvidenceState`] for the data
     /// behind it.
@@ -252,6 +258,16 @@ pub enum Action {
     /// request leaves this module, and `shell::spawn_provider_probe`, which
     /// is the only thing that makes it.
     RunProviderProbe,
+    /// Start a session in the harness the user just picked, because more
+    /// than one was enabled and `session::select` refused to guess. Carries
+    /// the harness and the presentation rather than leaving the run loop to
+    /// re-derive either: the presentation is the `n` or `N` the user pressed
+    /// before the question interrupted them, and re-running discovery could
+    /// answer differently from the list they were shown.
+    StartSessionWith {
+        harness: IntegrationId,
+        presentation: SessionPresentation,
+    },
     /// Start a new session with no viewport — Phase 4's headless
     /// presentation mode. Identical to [`Action::StartSession`] in every
     /// respect except the presentation the session is recorded and started
@@ -503,6 +519,19 @@ pub(crate) fn describe_event(event: &LifecycleEvent) -> String {
 }
 
 /// Everything the shell displays.
+/// The state behind [`Overlay::HarnessChoice`].
+#[derive(Debug, Clone)]
+pub struct HarnessChoice {
+    /// Exactly the set `SelectionError::Ambiguous` named. Not re-derived
+    /// here: the refusal already knows which harnesses are enabled, and a
+    /// second discovery could disagree with the message the user just saw.
+    pub options: Vec<IntegrationId>,
+    pub cursor: usize,
+    /// `n` or `N`. Resuming the wrong one would silently give the user a
+    /// headless session where they asked for a viewport.
+    pub presentation: SessionPresentation,
+}
+
 pub struct ShellState {
     theme: super::appearance::Theme,
     artwork_frame: u64,
@@ -515,6 +544,10 @@ pub struct ShellState {
     /// accessor guards for that rather than trusting it.
     selected: usize,
     overlay: Option<Overlay>,
+    /// The harnesses `n` is choosing between, the cursor over them, and the
+    /// presentation the interrupted request asked for — a choice made here
+    /// has to resume the `n`/`N` the user actually pressed.
+    harness_choice: Option<HarnessChoice>,
     /// A one-line note for the status bar, cleared by the next keystroke.
     ///
     /// Its job is to explain a key that appeared to do nothing. Without it a
@@ -565,6 +598,26 @@ pub struct ShellState {
     activity: Vec<RecordedEvent>,
 }
 
+impl Action {
+    /// What a start action is asking for: the presentation, and the harness if
+    /// the user has already been asked which one.
+    ///
+    /// It lives here rather than in the run loop because `shell/mod.rs` is a
+    /// `mod.rs` — dispatch and composition — and this is a property of the
+    /// action itself. `None` for every action that starts nothing.
+    pub fn start_request(&self) -> Option<(SessionPresentation, Option<IntegrationId>)> {
+        match self {
+            Action::StartSession => Some((SessionPresentation::Embedded, None)),
+            Action::StartHeadlessSession => Some((SessionPresentation::Headless, None)),
+            Action::StartSessionWith {
+                harness,
+                presentation,
+            } => Some((*presentation, Some(*harness))),
+            _ => None,
+        }
+    }
+}
+
 impl ShellState {
     pub fn new(
         project_name: impl Into<String>,
@@ -582,6 +635,7 @@ impl ShellState {
             sessions,
             selected: 0,
             overlay: None,
+            harness_choice: None,
             status: None,
             mode: Mode::Control,
             fullscreen: false,
@@ -660,6 +714,71 @@ impl ShellState {
     }
 
     /// Show a note in the status bar until the next keystroke.
+    /// Ask which harness to start.
+    ///
+    /// The invariant: this is only ever reached from a refusal that already
+    /// listed the enabled harnesses, so the options shown and the options the
+    /// refusal named are the same list. A cursor starting at 0 is the first
+    /// harness that refusal would have suggested.
+    pub fn open_harness_choice(
+        &mut self,
+        options: Vec<IntegrationId>,
+        presentation: SessionPresentation,
+    ) -> Action {
+        if options.is_empty() {
+            // `Ambiguous` cannot carry an empty set, but a picker with nothing
+            // in it would be a dead overlay with no way to answer it.
+            self.set_status("no harness is enabled — run `glasshouse setup`");
+            return Action::Redraw;
+        }
+        self.harness_choice = Some(HarnessChoice {
+            options,
+            cursor: 0,
+            presentation,
+        });
+        self.overlay = Some(Overlay::HarnessChoice);
+        Action::Redraw
+    }
+
+    pub fn harness_choice(&self) -> Option<&HarnessChoice> {
+        self.harness_choice.as_ref()
+    }
+
+    pub(super) fn handle_harness_choice_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        let Some(choice) = self.harness_choice.as_mut() else {
+            return self.close_overlay();
+        };
+        let len = choice.options.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.harness_choice = None;
+                self.close_overlay()
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                choice.cursor = (choice.cursor + len - 1) % len;
+                Action::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                choice.cursor = (choice.cursor + 1) % len;
+                Action::Redraw
+            }
+            KeyCode::Enter => {
+                let harness = choice.options[choice.cursor];
+                let presentation = choice.presentation;
+                self.harness_choice = None;
+                self.overlay = None;
+                Action::StartSessionWith {
+                    harness,
+                    presentation,
+                }
+            }
+            _ => {
+                let _ = had_status;
+                Action::None
+            }
+        }
+    }
+
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
     }
@@ -841,6 +960,10 @@ impl ShellState {
         // and the two that act on the session under it — and passes
         // everything else through, so ordinary navigation keeps working
         // underneath the popup.
+        if self.overlay == Some(Overlay::HarnessChoice) {
+            return self.handle_harness_choice_key(key, had_status);
+        }
+
         if self.overlay == Some(Overlay::Overview) {
             return self.handle_overview_key(key, had_status);
         }
