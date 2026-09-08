@@ -34,6 +34,21 @@ pub const ENTRIES: &[Entry] = &[
         summary: "Search the project for a regular expression.",
     },
     Entry {
+        name: "rg",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "Search the project with ripgrep: `file:line:text` on stdout, one match per line. Faster than `grep` and it skips ignored files. `exit_code` is 1 when nothing matched, which is not a failure.",
+    },
+    Entry {
+        name: "fd",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "List paths beneath `path` whose name matches a regular expression, one per line on stdout. Prefer it to `glob` when you are matching a name rather than a shape.",
+    },
+    Entry {
+        name: "jq",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "Apply one jq filter to one JSON file and read the result on stdout. `path` is a file, never a directory.",
+    },
+    Entry {
         name: "write",
         return_type: "string",
         summary: "Replace one whole file, creating parents. Pass exactly one of `content` or `lines`. For scripts, prefer `lines`: each item is one logical line, Pane adds the separators/final newline, and a trailing newline on an item is harmless. Use double-quoted JS strings, never template literals: `await write({path: \"run.sh\", lines: [\"#!/bin/bash\", \"src=\\\"${BASH_SOURCE[0]}\\\"\", \"echo \\\"caller's $WORKTREE\\\"\"]})`. Prefer `edit` for an existing region.",

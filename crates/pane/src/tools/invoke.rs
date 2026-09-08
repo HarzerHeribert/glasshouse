@@ -1290,6 +1290,39 @@ fn build_argv(
             argv.push("--".into());
             argv.push(path.into());
         }
+        // The three pure search shapes, and their separators are
+        // load-bearing rather than tidy: a declared flag list is the whole
+        // flag list only while no model-authored element can become one.
+        // `rg` puts the pattern behind `-e` and the path behind `--`; `fd`
+        // and `jq` have no option form for theirs, so `--` is what holds.
+        // Drop one and `fd --help` and `jq --version` are flags.
+        Argv::SearchIn => {
+            let pattern = text(checked, "pattern").ok_or_else(|| missing("pattern"))?;
+            let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
+            argv.push("--no-config".into());
+            argv.push("--line-number".into());
+            argv.push("--no-heading".into());
+            argv.push("--color=never".into());
+            argv.push("-e".into());
+            argv.push(pattern.into());
+            argv.push("--".into());
+            argv.push(path.into());
+        }
+        Argv::FindIn => {
+            let pattern = text(checked, "pattern").ok_or_else(|| missing("pattern"))?;
+            let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
+            argv.push("--color=never".into());
+            argv.push("--".into());
+            argv.push(pattern.into());
+            argv.push(path.into());
+        }
+        Argv::JsonFilter => {
+            let filter = text(checked, "filter").ok_or_else(|| missing("filter"))?;
+            let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
+            argv.push("--".into());
+            argv.push(filter.into());
+            argv.push(path.into());
+        }
         Argv::ShellCommand => {
             let command = text(checked, "command").ok_or_else(|| missing("command"))?;
             argv.push("-c".into());

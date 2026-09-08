@@ -985,9 +985,13 @@ fn helper_screen(helpers: Vec<HelperRecord>) -> String {
 
 /// The lane's whole point: while a helper runs, the user can see what is
 /// happening on their behalf -- what it is doing, and what it was handed.
+///
+/// **Elapsed zero and still a lane.** A call that has not answered has no
+/// duration yet, so the 300ms floor cannot be what decides whether it is
+/// drawn; the floor is about a resolved call whose lane would vanish.
 #[test]
 fn a_running_helper_shows_its_verb_and_what_it_was_asked() {
-    let text = helper_screen(vec![running_helper("cargo build log · 4118 lines", 900)]);
+    let text = helper_screen(vec![running_helper("cargo build log · 4118 lines", 0)]);
 
     let lane = text
         .lines()
@@ -1002,10 +1006,46 @@ fn a_running_helper_shows_its_verb_and_what_it_was_asked() {
         lane.contains("-."),
         "a running call carries the reaching-out frame: {lane}"
     );
-    assert!(lane.contains("0.9s"), "elapsed is text: {lane}");
+    assert!(lane.contains("0.0s"), "elapsed is text: {lane}");
     assert!(
-        text.contains("· 1 helper"),
-        "the cell header folds the lane into a count:\n{text}"
+        !text.contains("· 1 helper"),
+        "a call still in flight is not folded into the header yet:\n{text}"
+    );
+}
+
+/// `little-helpers.md`'s order, and the reason the lane exists at all: the
+/// running lane appears, resolves to what the caller got, and only then
+/// folds into the cell header.
+#[test]
+fn a_helper_lane_runs_then_resolves_then_folds() {
+    let asked = "cargo build log · 4118 lines";
+    let running = helper_screen(vec![running_helper(asked, 1200)]);
+    assert!(
+        running.lines().any(|line| line.contains("reducing")),
+        "the lane runs first:\n{running}"
+    );
+    assert!(
+        !running.contains("· 1 helper"),
+        "the header does not count a call that has not resolved:\n{running}"
+    );
+
+    let resolved = helper_screen(vec![resolved_helper(
+        asked,
+        "3 distinct root failures",
+        1200,
+    )]);
+    let lane = resolved
+        .lines()
+        .find(|line| line.contains("reduce"))
+        .unwrap_or_else(|| panic!("the resolved call keeps its lane:\n{resolved}"));
+    assert!(lane.contains("OK"), "it resolves to OK: {lane}");
+    assert!(
+        lane.contains("3 distinct root failures"),
+        "and says what the caller got: {lane}"
+    );
+    assert!(
+        resolved.contains("· 1 helper"),
+        "and only then folds into the header:\n{resolved}"
     );
 }
 

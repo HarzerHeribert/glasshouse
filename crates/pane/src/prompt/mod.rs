@@ -5,6 +5,7 @@
 pub mod declarations;
 
 use crate::contract::{Block, Conversation};
+use crate::runtime::bindings::HostGlobals;
 use crate::runtime::outcome::PlanItem;
 use crate::tools::registry::{Arg, Tool};
 
@@ -198,11 +199,26 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
 /// §1's system block: the preamble, one declaration per tool in `tools`'
 /// order, this session's own facts, then the project's own instructions.
 pub fn render_system(instructions: &str, tools: &[&Tool], facts: &SessionFacts) -> String {
+    render_system_for(instructions, tools, facts, HostGlobals::Every)
+}
+
+/// [`render_system`] for a context whose host globals are narrowed.
+///
+/// The invariant: **the Runtime block declares what the context actually
+/// binds.** A helper told about `bg` it does not hold gets a `TypeError` on a
+/// name the system block promised, where the point of the narrowing is that
+/// the capability is absent and the refusal is clean.
+pub fn render_system_for(
+    instructions: &str,
+    tools: &[&Tool],
+    facts: &SessionFacts,
+    globals: HostGlobals,
+) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     format!(
         "{PREAMBLE}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{instructions}",
         rendered.join("\n\n"),
-        render_runtime(),
+        render_runtime_for(globals),
         render_session_facts(facts)
     )
 }
@@ -213,8 +229,15 @@ pub fn render_system(instructions: &str, tools: &[&Tool], facts: &SessionFacts) 
 /// a name this block declares. It is rendered from the same table the
 /// enumeration test checks, so the two cannot drift.
 pub fn render_runtime() -> String {
+    render_runtime_for(HostGlobals::Every)
+}
+
+/// [`render_runtime`] for a narrowed context: the same table, filtered by the
+/// predicate `bindings::install` itself binds on.
+pub fn render_runtime_for(globals: HostGlobals) -> String {
     declarations::RUNTIME
         .iter()
+        .filter(|binding| globals.installs(binding.global))
         .map(|binding| binding.declaration.to_string())
         .collect::<Vec<_>>()
         .join("\n\n")

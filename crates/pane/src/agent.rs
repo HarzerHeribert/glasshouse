@@ -20,6 +20,7 @@
 use crate::contract::{Conversation, Message, Role, SessionId};
 use crate::glasshouse::Glasshouse;
 use crate::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
+use crate::runtime::bindings::HostGlobals;
 use crate::runtime::isolate::Runtime;
 use crate::runtime::outcome::CellOutcome;
 use crate::sandbox::profile::Profile;
@@ -112,7 +113,15 @@ pub fn run_narrowed(
         narrowed.map_or(SUBAGENT_INSTRUCTIONS, |narrowed| narrowed.instructions),
         crate::project::instructions::root(profile)
     );
-    let mut system = prompt::render_system(&instructions, &tools, &facts);
+    // One value decides both what the context binds and what it is told it
+    // binds: a helper never receives `bg`, `send` or `mcp`, because none of
+    // the three is a tool and narrowing `spec.tools` therefore left every one
+    // of them installed.
+    let globals = match narrowed {
+        Some(narrowed) => HostGlobals::Helper(narrowed.tools),
+        None => HostGlobals::Every,
+    };
+    let mut system = prompt::render_system_for(&instructions, &tools, &facts, globals);
     system.push_str("\n\n");
     system.push_str(&crate::project::orientation::collect(profile));
     let mut conversation = Conversation {
@@ -120,9 +129,12 @@ pub fn run_narrowed(
         messages: vec![Message::text(Role::User, task)],
     };
 
-    let mut runtime = Runtime::new(profile, glasshouse, session)
-        .as_subagent()
-        .with_instruction_context();
+    let mut runtime = match globals {
+        HostGlobals::Helper(tools) => Runtime::for_helper(profile, glasshouse, session, tools),
+        HostGlobals::Every => Runtime::new(profile, glasshouse, session),
+    }
+    .as_subagent()
+    .with_instruction_context();
     if narrowed.is_none() {
         // A subagent completes a goal, so it hits the same walls the task
         // model does and gets the same helpers; a narrowed loop is itself a

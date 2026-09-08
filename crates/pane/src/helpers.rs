@@ -441,15 +441,40 @@ pub fn run_with_tools(
         tools: spec.tools,
         instructions: spec.preamble,
     };
-    let result = crate::agent::run_narrowed(
-        profile,
-        glasshouse,
-        session,
-        input,
-        &options,
-        &crate::tools::invoke::CancellationToken::new(),
-        Some(&narrowed),
-    );
+    // **On another thread, always.** `run_narrowed` builds a Runtime, which is
+    // a second V8 isolate, and this function is reached from a host callback
+    // while the caller's isolate is borrowed -- `agent.rs`'s module doc names
+    // that hazard and `bg::serve_once` already solves it the same way. A V8
+    // isolate belongs to one thread, so giving the nested loop its own is what
+    // makes a tool-holding helper safe to call at all.
+    let token = crate::tools::invoke::CancellationToken::new();
+    let result = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                crate::agent::run_narrowed(
+                    profile,
+                    glasshouse,
+                    session,
+                    input,
+                    &options,
+                    &token,
+                    Some(&narrowed),
+                )
+            })
+            .join()
+    });
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => {
+            return HelperCall {
+                outcome: HelperOutcome::failed(
+                    format!("`{}` panicked while running", spec.name),
+                    started,
+                ),
+                turns: 0,
+            };
+        }
+    };
 
     let answer = result.answer.trim();
     let outcome = if result.status != "returned" {

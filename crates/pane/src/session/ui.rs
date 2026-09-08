@@ -1,6 +1,6 @@
 //! One thread owns the terminal and keys; the task thread only sends view state.
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -366,6 +366,36 @@ impl Editor {
     }
 }
 
+/// Dates every helper call still in flight from the frame it first appeared
+/// in, and writes that wall clock into the copy of the notebook this thread
+/// is about to draw.
+///
+/// The invariant: **a running call's elapsed comes from the clock, not from
+/// its record.** The cell owns the task thread until the call returns, so
+/// the record reaches the screen once, with `elapsed_ms` still zero, and
+/// cannot be republished while it runs. `little-helpers.md` makes elapsed
+/// text rather than animation precisely so it keeps counting under
+/// `/motion off`, where the glyph is frozen and *is it alive* is the only
+/// question left. Presentation only: this notebook is the terminal thread's
+/// own clone, and a resolved record carries its real duration already.
+fn tick_helper_clocks(notebook: &mut Notebook, since: &mut HashMap<(usize, usize), Instant>) {
+    since.retain(|(cell, call), _| {
+        notebook
+            .cells
+            .get(*cell)
+            .and_then(|cell| cell.helpers.get(*call))
+            .is_some_and(tui::helper_in_flight)
+    });
+    for (index, cell) in notebook.cells.iter_mut().enumerate() {
+        for (call, record) in cell.helpers.iter_mut().enumerate() {
+            if tui::helper_in_flight(record) {
+                let started = since.entry((index, call)).or_insert_with(Instant::now);
+                record.outcome.elapsed_ms = started.elapsed().as_millis() as u64;
+            }
+        }
+    }
+}
+
 fn run(
     mut state: ScreenState,
     mut conversation: Conversation,
@@ -407,6 +437,7 @@ fn run(
     let mut dirty = true;
     let mut last_tick = Instant::now();
     let mut task_started: Option<Instant> = None;
+    let mut helper_clocks: HashMap<(usize, usize), Instant> = HashMap::new();
     let mut previous_rows = 0usize;
     let mut viewport_height = 10usize;
     loop {
@@ -520,6 +551,7 @@ fn run(
             dirty = true;
         }
         if dirty {
+            tick_helper_clocks(&mut notebook, &mut helper_clocks);
             state.input = editor.text.clone();
             state.cursor = Some(editor.cursor);
             state.completion_selected = editor.selected;
@@ -1023,6 +1055,58 @@ fn refresh_handler_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call in flight is dated from the frame it first appeared in, so its
+    /// lane's seconds keep counting while the cell that made it blocks the
+    /// task thread. A call that has resolved keeps what it actually took.
+    #[test]
+    fn a_running_helper_is_timed_by_the_clock_and_a_resolved_one_by_its_record() {
+        use crate::helpers::{HelperOutcome, HelperRecord};
+        let running = HelperRecord {
+            helper: "reduce".into(),
+            verb: "reducing".into(),
+            asked: "cargo build log".into(),
+            ..HelperRecord::default()
+        };
+        let resolved = HelperRecord {
+            outcome: HelperOutcome {
+                text: "3 distinct root failures".into(),
+                ok: true,
+                elapsed_ms: 120,
+            },
+            ..running.clone()
+        };
+        let mut notebook = Notebook::default();
+        // `set` numbers cells from one; this is the notebook's first cell.
+        notebook.set(
+            1,
+            tui::CellView {
+                helpers: vec![running, resolved],
+                ..tui::CellView::default()
+            },
+        );
+        let mut clocks = HashMap::new();
+        clocks.insert((0, 0), Instant::now() - Duration::from_millis(1500));
+        clocks.insert((0, 1), Instant::now());
+
+        tick_helper_clocks(&mut notebook, &mut clocks);
+
+        let helpers = &notebook.cells[0].helpers;
+        assert!(
+            helpers[0].outcome.elapsed_ms >= 1500,
+            "a running call's elapsed comes from the clock: {}",
+            helpers[0].outcome.elapsed_ms
+        );
+        assert_eq!(
+            helpers[1].outcome.elapsed_ms, 120,
+            "a resolved call keeps the duration it actually took"
+        );
+        assert!(
+            !clocks.contains_key(&(0, 1)),
+            "a call that resolved no longer holds a clock"
+        );
+    }
+
     #[test]
     fn an_open_handler_panel_tracks_runs_disable_cancel_and_clear_with_selection() {
         use crate::runtime::handlers::HandlerInfo;

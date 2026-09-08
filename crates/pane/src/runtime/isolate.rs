@@ -569,6 +569,33 @@ impl Runtime {
         )
     }
 
+    /// [`Runtime::new`] for one helper's nested loop, and the whole of what
+    /// makes a helper's toolset a capability boundary rather than a list.
+    ///
+    /// The invariant: **a helper's runtime holds only what its spec named,
+    /// and nothing that can cause an effect.** `spec.tools` narrows
+    /// `registry::ALL`; `bg`, `send` and `mcp` are not in it, so narrowing
+    /// the toolset alone left a helper able to execute a command.
+    ///
+    /// `tools` is the spec's own list, and a name absent from it is a name
+    /// this context does not bind — a helper that named no tool reaches
+    /// nothing at all.
+    pub fn for_helper(
+        profile: &Profile,
+        glasshouse: &Glasshouse,
+        session: &SessionId,
+        tools: &'static [&'static str],
+    ) -> Self {
+        Self::with_limits_and_globals(
+            profile,
+            glasshouse,
+            session,
+            DEFAULT_HEAP_LIMIT_BYTES,
+            DEFAULT_CELL_WALL_CLOCK_LIMIT,
+            bindings::HostGlobals::Helper(tools),
+        )
+    }
+
     /// Both ceilings explicitly, so a test can reach the timeout path
     /// without waiting out the default.
     pub fn with_limits(
@@ -577,6 +604,26 @@ impl Runtime {
         session: &SessionId,
         heap_limit_bytes: usize,
         wall_clock_limit: Duration,
+    ) -> Self {
+        Self::with_limits_and_globals(
+            profile,
+            glasshouse,
+            session,
+            heap_limit_bytes,
+            wall_clock_limit,
+            bindings::HostGlobals::Every,
+        )
+    }
+
+    /// The one constructor. Every public one above reaches it, and `globals`
+    /// is the only thing they disagree about.
+    fn with_limits_and_globals(
+        profile: &Profile,
+        glasshouse: &Glasshouse,
+        session: &SessionId,
+        heap_limit_bytes: usize,
+        wall_clock_limit: Duration,
+        globals: bindings::HostGlobals,
     ) -> Self {
         initialize_v8();
         let external = Arc::new(ExternalMemory {
@@ -633,7 +680,7 @@ impl Runtime {
             v8::scope!(let handle_scope, &mut isolate);
             let context = v8::Context::new(handle_scope, v8::ContextOptions::default());
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-            bindings::install(scope);
+            bindings::install(scope, globals);
             if let Some(source) = v8::String::new(scope, bindings::BOOTSTRAP)
                 && let Some(script) = v8::Script::compile(scope, source, None)
             {

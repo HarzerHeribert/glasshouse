@@ -11,6 +11,7 @@ use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
 use pane::helpers::{CallSite, HelperSpec, REDUCER};
 use pane::prompt::declarations::callable_from_a_cell;
+use pane::runtime::bindings::HostGlobals;
 use pane::runtime::isolate::Runtime;
 use pane::runtime::outcome::CellOutcome;
 use pane::sandbox::profile::Profile;
@@ -556,4 +557,117 @@ fn no_tool_holding_helper_is_reachable_from_a_cell() {
         checked >= 2,
         "the roster should carry the tool-holding specs this guards; checked {checked}"
     );
+}
+
+/// **A helper's runtime holds nothing that can cause an effect.**
+///
+/// `little-helpers.md` makes the toolset the safety boundary, and that is
+/// true of the registered tools and false of the host globals installed
+/// beside them: `bg.run` executes a command, `send` messages another session,
+/// `mcp.call` reaches a server. Not one of the three is a tool, so narrowing
+/// `spec.tools` never touched them and a Scout could have shelled out.
+///
+/// The runtime is built the way `helpers::run_with_tools` builds one, through
+/// `agent::run_narrowed`. The second half is what stops the first passing for
+/// the wrong reason: an ordinary cell still holds all three, so a name that
+/// does not exist would fail here rather than read as a narrowing.
+#[test]
+fn a_helpers_runtime_holds_no_global_that_can_cause_an_effect() {
+    // Every name that reaches outside the isolate: the three host globals AND
+    // the three mutating tools. The tools are the half that matters most --
+    // `bash` executes, and a helper runs `.as_subagent()`, which skips the
+    // approval gate entirely.
+    const PROGRAM: &str = "return [\"bg\", \"send\", \"mcp\", \"bash\", \"write\", \"edit\"]\n\
+         \x20 .map(n => n + \"=\" + typeof globalThis[n]).join(\",\");\n";
+    let fixture = Fixture::new("narrowed-globals");
+
+    // A Scout-shaped toolset: read-only tools only, exactly as its spec names.
+    let mut helper = Runtime::for_helper(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-narrowed"),
+        &["read", "grep"],
+    )
+    .as_subagent()
+    .with_instruction_context();
+    assert_eq!(
+        returned_text(&helper.run_cell(PROGRAM)),
+        "bg=undefined,send=undefined,mcp=undefined,bash=undefined,write=undefined,edit=undefined",
+        "a helper's runtime must bind nothing that reaches outside the isolate"
+    );
+    assert_eq!(
+        returned_text(
+            &helper.run_cell(
+                "return [\"read\", \"grep\"].map(n => typeof globalThis[n]).join(\",\");\n"
+            )
+        ),
+        "function,function",
+        "and it must still bind the tools its spec did name"
+    );
+
+    let mut cell = Runtime::new(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-ordinary-cell"),
+    );
+    assert_eq!(
+        returned_text(&cell.run_cell(PROGRAM)),
+        "bg=object,send=function,mcp=object,bash=function,write=function,edit=function",
+        "an ordinary cell keeps every host global and tool it had"
+    );
+}
+
+/// The declaration matches what is installed.
+///
+/// Telling a helper about a global its context does not bind buys a
+/// `TypeError` on a name the system block promised, where the point of the
+/// narrowing is that the capability is simply absent.
+#[test]
+fn a_helper_is_never_declared_a_global_its_runtime_does_not_hold() {
+    let every = pane::prompt::render_runtime();
+    let helper = pane::prompt::render_runtime_for(HostGlobals::Helper(&["read", "grep"]));
+    for head in [
+        "declare const bg: {",
+        "declare function send(",
+        "declare const mcp: {",
+    ] {
+        assert!(every.contains(head), "`{head}` is what a cell is shown");
+        assert!(
+            !helper.contains(head),
+            "a helper is told about `{head}`, which its runtime does not bind"
+        );
+    }
+    assert!(
+        helper.contains("declare function keep("),
+        "the narrowed block must still declare what a helper does hold"
+    );
+}
+
+/// The production caller is what asks for the narrowing.
+///
+/// A helper's loop cannot be run from here without a wire call, so the seam is
+/// pinned by reading `agent::run_narrowed`, exactly as this file pins
+/// `install`'s roster loop: the branch that decides, the runtime it builds,
+/// and the declaration it renders from the same value.
+#[test]
+fn the_narrowed_loop_is_what_asks_for_a_narrowed_runtime() {
+    const AGENT: &str = include_str!("../src/agent.rs");
+    let production = AGENT
+        .split_once("#[cfg(test)]")
+        .map_or(AGENT, |(before, _)| before);
+    // The decisive expressions, not their surrounding shape: the narrowing is
+    // derived from the SPEC'S OWN toolset, and the same value reaches both the
+    // runtime and the system block — so a helper can never be told about a
+    // capability it does not hold, nor hold one it was not told about.
+    for named in [
+        "HostGlobals::Helper(narrowed.tools)",
+        "Runtime::for_helper(profile, glasshouse, session, tools)",
+        "prompt::render_system_for(&instructions, &tools, &facts, globals)",
+    ] {
+        assert!(
+            production.contains(named),
+            "`run_narrowed` no longer carries `{named}`, so a helper's loop may hold \
+             globals its spec never named"
+        );
+    }
 }

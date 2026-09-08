@@ -1338,11 +1338,19 @@ const HELPER_LANE_MAX: usize = 3;
 const HELPER_NAME_WIDTH: usize = 9;
 
 /// Whether a call came back with a failure sentence instead of an answer.
-///
-/// A record with neither -- no answer and no failure -- is still in flight,
-/// which is the only state the lane's moving frames are for.
 fn helper_failed(record: &HelperRecord) -> bool {
     !record.outcome.ok && !record.outcome.text.is_empty()
+}
+
+/// Whether a call has neither answered nor failed: the state the lane's
+/// moving frames are for, and the one the seconds are counted for.
+///
+/// It is [`HelperOutcome::default()`] -- what `begin_helper` keeps until
+/// `finish_helper` fills it in.
+///
+/// [`HelperOutcome::default()`]: crate::helpers::HelperOutcome
+pub(crate) fn helper_in_flight(record: &HelperRecord) -> bool {
+    !record.outcome.ok && record.outcome.text.is_empty()
 }
 
 /// Whether one call is worth a lane of its own.
@@ -1350,8 +1358,14 @@ fn helper_failed(record: &HelperRecord) -> bool {
 /// **A failure always is, however short.** `supervisor.rs` shipped for weeks
 /// rendering a permanently failing look as a healthy one; a helper that is
 /// not working must never be quieter than one that is.
+///
+/// **A call still in flight always is too.** The floor is measured on a
+/// duration a running call does not have yet, and what it forbids is a lane
+/// that *vanishes*: an in-flight lane resolves into its own answer instead.
 fn helper_shows_a_lane(record: &HelperRecord) -> bool {
-    helper_failed(record) || record.outcome.elapsed_ms >= HELPER_LANE_MIN_MS
+    helper_in_flight(record)
+        || helper_failed(record)
+        || record.outcome.elapsed_ms >= HELPER_LANE_MIN_MS
 }
 
 /// Elapsed as text rather than as animation: under `/motion off` the glyph
@@ -1371,8 +1385,18 @@ fn helper_count(calls: usize) -> String {
 
 /// The cell header's own summary of its helpers -- one line, and it persists
 /// in scrollback after the lane is gone.
+///
+/// **Only calls that have resolved are counted.** The header is what the
+/// cell has already got back; counting a call still in flight folds it
+/// before its lane has said anything, which is the reverse of
+/// `little-helpers.md`'s order -- run, resolve, then fold.
 fn helper_fold(view: Option<&CellView>) -> String {
-    match view.map_or(0, |view| view.helpers.len()) {
+    match view.map_or(0, |view| {
+        view.helpers
+            .iter()
+            .filter(|record| !helper_in_flight(record))
+            .count()
+    }) {
         0 => String::new(),
         calls => format!(" · {}", helper_count(calls)),
     }
