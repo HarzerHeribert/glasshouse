@@ -170,6 +170,18 @@ pub enum Argv {
     ReadPath,
     /// `<exe> -r -n -e <pattern> -- <path>`.
     GrepIn,
+    /// `<exe> --no-config --line-number --no-heading --color=never -e
+    /// <pattern> -- <path>`.
+    ///
+    /// `--no-config` is part of the shape rather than a preference: ripgrep
+    /// otherwise reads `RIPGREP_CONFIG_PATH`, and flags this declaration
+    /// never named are the one way a call declared [`Purity::Pure`] could
+    /// stop reproducing its own bytes.
+    SearchIn,
+    /// `<exe> --color=never -- <pattern> <path>`.
+    FindIn,
+    /// `<exe> -- <filter> <path>`.
+    JsonFilter,
     /// `<exe> -c <command line>`. The one variant whose argument was
     /// admitted by `Profile::admits_command` rather than by `Profile::check`.
     ShellCommand,
@@ -331,6 +343,69 @@ const GREP: Tool = Tool::declare(
     Purity::Pure,
 );
 
+// Why `rg`, `fd` and `jq` and not `sed` or `awk`: a tool is `exec`'d
+// directly and never through a shell, so there is no `>` to redirect with
+// and a tool can only write if its own binary can. These three cannot.
+// `sed -i` edits in place, and an `awk` program can `print > "file"` from
+// inside its own program text — the argument a model authors — so neither is
+// pure and neither belongs here.
+
+/// `rg({ pattern, path? })` — the question [`GREP`] answers, asked of a tree
+/// ripgrep already knows how to skip.
+///
+/// Pure: ripgrep reads and has no flag that writes a file. `--replace`
+/// rewrites the output line, not the file, and `--pre` runs a preprocessor
+/// per file — the one command-shaped flag it has, and unreachable, because
+/// [`Argv::SearchIn`] fixes every flag at compile time, passes the pattern
+/// behind `-e` and the path behind `--`. `-e` is the load-bearing half here:
+/// a pattern spelled `--pre` is that option's value before it is anything
+/// else.
+const RIPGREP: Tool = Tool::declare(
+    "rg",
+    "rg",
+    &[
+        Arg::required("pattern", ArgKind::Pattern),
+        Arg::rooted("path"),
+    ],
+    Argv::SearchIn,
+    Purity::Pure,
+);
+
+/// `fd({ pattern, path? })` — names matching a regex beneath `path`.
+///
+/// Pure, and the one entry here where that is a claim about the argv rather
+/// than about the binary: `fd -x` runs a command per match. Reaching it needs
+/// a flag position and a third positional element, and [`Argv::FindIn`] emits
+/// exactly two positionals, both after `--`, so `-x` arriving as `pattern` is
+/// a regex.
+const FD: Tool = Tool::declare(
+    "fd",
+    "fd",
+    &[
+        Arg::required("pattern", ArgKind::Pattern),
+        Arg::rooted("path"),
+    ],
+    Argv::FindIn,
+    Purity::Pure,
+);
+
+/// `jq({ filter, path })` — one value out of one JSON file.
+///
+/// `path` is required and not [`Arg::rooted`]: jq reads a file, and the
+/// substitute the root offers is a directory. Pure: jq has no builtin that
+/// writes, and the flags that read a second file (`-f`, `--rawfile`) sit in
+/// the option position [`Argv::JsonFilter`]'s `--` closes.
+const JQ: Tool = Tool::declare(
+    "jq",
+    "jq",
+    &[
+        Arg::required("filter", ArgKind::Pattern),
+        Arg::required("path", ArgKind::Path),
+    ],
+    Argv::JsonFilter,
+    Purity::Pure,
+);
+
 /// `bash({ command })` — a command line, admitted by
 /// `Profile::admits_command` and by nothing else.
 ///
@@ -409,7 +484,9 @@ const EDIT: Tool = Tool::declare_in_process(
 /// Small on purpose: each entry is a program that gets exec'd inside a
 /// sandbox, so the set is the attack surface and it grows by a package, not
 /// by a convenience.
-pub const ALL: [Tool; 7] = [READ, GLOB, GREP, BASH, WRITE, CONTEXT, EDIT];
+pub const ALL: [Tool; 10] = [
+    READ, GLOB, GREP, RIPGREP, FD, JQ, BASH, WRITE, CONTEXT, EDIT,
+];
 
 /// Tools that are **absent**, by name, and why.
 ///

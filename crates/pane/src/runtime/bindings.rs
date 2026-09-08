@@ -25,7 +25,8 @@ use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
 use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence};
 use crate::runtime::preview::{
-    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, STDOUT_TOKEN_CAP, StringValue, Value,
+    estimate_tokens, thousands,
 };
 use crate::runtime::state::{RecordedCall, RuntimeState, provenance};
 use crate::sandbox::profile::PermissionDenied;
@@ -210,13 +211,67 @@ fn set_fixed_key(
     }
 }
 
-/// Installs every host function on the context's global object.
-pub(crate) fn install(scope: &mut v8::PinScope) {
+/// Which host globals a context is given.
+///
+/// The invariant: **a helper's context holds only what its spec named, and
+/// nothing that can cause an effect.** `little-helpers.md` makes the toolset
+/// the safety boundary, which is true of the registered tools and false of
+/// the host globals installed beside them — `bg.run` executes a command,
+/// `send` messages another session, `mcp.call` reaches a server, and not one
+/// of the three is in `registry::ALL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostGlobals {
+    /// Every global: an ordinary cell, and an ordinary subagent.
+    Every,
+    /// A helper's: exactly the tools its spec named, and no global that can
+    /// cause an effect. The slice is the spec's own `tools`, so
+    /// `little-helpers.md`'s claim — *a Scout cannot write because `write` is
+    /// not in its registry subset* — is true of the binding and not only of
+    /// the validator.
+    Helper(&'static [&'static str]),
+}
+
+impl HostGlobals {
+    /// The globals a helper never holds, whatever else it was given.
+    pub const WITHHELD_FROM_A_HELPER: [&'static str; 3] = ["bg", "send", "mcp"];
+
+    /// Whether `global` is installed under this narrowing — the one predicate
+    /// [`install`] and [`crate::prompt::render_runtime_for`] both read, so
+    /// the block the model is shown cannot name a global its context lacks.
+    #[must_use]
+    pub fn installs(self, global: &str) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Helper(_) => !Self::WITHHELD_FROM_A_HELPER.contains(&global),
+        }
+    }
+
+    /// Whether a **registered tool** is bound under this narrowing.
+    ///
+    /// Separate from [`Self::installs`] because a tool is admitted by the
+    /// spec's own list while a host global is admitted by absence from
+    /// [`Self::WITHHELD_FROM_A_HELPER`]. A helper that named no tool binds
+    /// none, which is why `REDUCER` can reach nothing at all.
+    #[must_use]
+    pub fn binds_tool(self, tool: &str) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Helper(tools) => tools.contains(&tool),
+        }
+    }
+}
+
+/// Installs the host functions `globals` admits on the context's global
+/// object.
+pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
     let context = scope.get_current_context();
     let global = context.global(scope);
 
     for tool in registry::ALL {
         let name = tool.name();
+        if !globals.binds_tool(name) {
+            continue;
+        }
         let data = js_string(scope, name);
         let Some(function) = v8::Function::builder(tool_callback).data(data).build(scope) else {
             continue;
@@ -224,7 +279,9 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, global, name, function.into());
     }
 
-    if let Some(function) = v8::Function::builder(send_callback).build(scope) {
+    if globals.installs("send")
+        && let Some(function) = v8::Function::builder(send_callback).build(scope)
+    {
         set_fixed_key(scope, global, "send", function.into());
     }
     if let Some(function) = v8::Function::builder(on_callback).build(scope) {
@@ -234,14 +291,16 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, global, "off", function.into());
     }
 
-    let mcp = v8::Object::new(scope);
-    if let Some(function) = v8::Function::builder(mcp_list_callback).build(scope) {
-        set_fixed_key(scope, mcp, "list", function.into());
+    if globals.installs("mcp") {
+        let mcp = v8::Object::new(scope);
+        if let Some(function) = v8::Function::builder(mcp_list_callback).build(scope) {
+            set_fixed_key(scope, mcp, "list", function.into());
+        }
+        if let Some(function) = v8::Function::builder(mcp_call_callback).build(scope) {
+            set_fixed_key(scope, mcp, "call", function.into());
+        }
+        set_fixed_key(scope, global, "mcp", mcp.into());
     }
-    if let Some(function) = v8::Function::builder(mcp_call_callback).build(scope) {
-        set_fixed_key(scope, mcp, "call", function.into());
-    }
-    set_fixed_key(scope, global, "mcp", mcp.into());
 
     if let Some(function) = v8::Function::builder(keep_callback).build(scope) {
         set_fixed_key(scope, global, "keep", function.into());
@@ -260,17 +319,43 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     // fixed object for the same reason every host function above is fixed: a
     // program that replaced `bg` would lose the only way it has to stop what
     // it started, and nothing could put it back.
-    let background = v8::Object::new(scope);
-    if let Some(function) = v8::Function::builder(bg_run_callback).build(scope) {
-        set_fixed_key(scope, background, "run", function.into());
+    if globals.installs("bg") {
+        let background = v8::Object::new(scope);
+        if let Some(function) = v8::Function::builder(bg_run_callback).build(scope) {
+            set_fixed_key(scope, background, "run", function.into());
+        }
+        if let Some(function) = v8::Function::builder(bg_watch_callback).build(scope) {
+            set_fixed_key(scope, background, "watch", function.into());
+        }
+        if let Some(function) = v8::Function::builder(bg_cancel_callback).build(scope) {
+            set_fixed_key(scope, background, "cancel", function.into());
+        }
+        set_fixed_key(scope, global, "bg", background.into());
     }
-    if let Some(function) = v8::Function::builder(bg_watch_callback).build(scope) {
-        set_fixed_key(scope, background, "watch", function.into());
+
+    // Little helpers (`little-helpers.md`, *Pulled*), installed from the
+    // roster so appending a `HelperSpec` is the whole of adding a helper, and
+    // only where `call_sites` says a cell may reach it.
+    //
+    // One shared `fn` item routed by the name in its own data slot, exactly
+    // as the tools above are: `v8::Function::builder` takes a `fn` item, so a
+    // closure per entry built in a loop coerces to a fn pointer and fails
+    // inside the v8 crate, naming none of this code.
+    let helper = v8::Object::new(scope);
+    for spec in crate::helpers::HELPERS {
+        if !crate::prompt::declarations::callable_from_a_cell(spec) {
+            continue;
+        }
+        let data = js_string(scope, spec.name);
+        let Some(function) = v8::Function::builder(helper_callback)
+            .data(data)
+            .build(scope)
+        else {
+            continue;
+        };
+        set_fixed_key(scope, helper, spec.name, function.into());
     }
-    if let Some(function) = v8::Function::builder(bg_cancel_callback).build(scope) {
-        set_fixed_key(scope, background, "cancel", function.into());
-    }
-    set_fixed_key(scope, global, "bg", background.into());
+    set_fixed_key(scope, global, "helper", helper.into());
 
     // Subagents. Fixed for the same reason as `bg`: a program that replaced
     // `agent` could not stop what it started.
@@ -784,7 +869,8 @@ fn typed_result<'s>(
             (value, preview, "Code.Edit")
         }
         _ => {
-            let (value, preview) = build_bash(scope, result);
+            let reduction = reduce_oversized(result, state);
+            let (value, preview) = build_bash(scope, result, reduction.as_deref());
             (value, preview, "Bash.Result")
         }
     };
@@ -913,7 +999,9 @@ fn call_failure(tool: &str, result: &ToolResult) -> Option<String> {
     };
     let tolerated = match tool {
         "bash" => return None,
-        "grep" | "glob" => code <= 1,
+        // `rg` exits 1 for "no match", exactly as `grep` does: an empty
+        // result is an answer, not a failure.
+        "grep" | "glob" | "rg" => code <= 1,
         _ => code == 0,
     };
     if tolerated {
@@ -1246,9 +1334,83 @@ fn build_glob<'s>(
     )
 }
 
+/// `little-helpers.md`'s `CallSite::PostResult`: a command result the model
+/// would otherwise have to page is reduced by REDUCER, without the model
+/// spending a turn to ask.
+///
+/// **The trigger is [`STDOUT_TOKEN_CAP`]**, which is not a number chosen
+/// here: it is the exact size at which this runtime stops carrying console
+/// output whole. Print less and nothing is lost; print more and
+/// `ConsoleCapture::tail` gives the model the suffix behind
+/// `[console: ~N tokens omitted before this true tail]`. Below the cap the
+/// reduction would buy nothing the model could not read for itself, so the
+/// cap is where a cheap request starts being worth making.
+///
+/// **Evidence, never substrate.** Only [`typed_result`]'s command-output arm
+/// reaches here, so `read`, `context`, `edit`, `grep` and `glob` — every
+/// shape a model edits or quotes from — are excluded structurally rather
+/// than by a list. (`write` builds this shape too; its output is one
+/// sentence and can never reach the cap.)
+///
+/// **It is additive.** `stdout` and `stderr` keep every byte and the handle
+/// is untouched; the reduction is one more property beside them.
+///
+/// Every refusal is `None`, which is today's behaviour exactly: under the
+/// cap, no spec serving this site, helpers unconfigured or off, the cell's
+/// ceiling spent, or a call that failed. **A helper failing here is never
+/// fatal** — the program gets the result it would have got anyway.
+fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<String> {
+    if estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr) <= STDOUT_TOKEN_CAP {
+        return None;
+    }
+    let spec = crate::helpers::HELPERS.iter().find(|spec| {
+        spec.call_sites
+            .contains(&crate::helpers::CallSite::PostResult)
+    })?;
+    let model = state.helper_model().ok()?;
+
+    // Both streams, because a build writes its failures to whichever it
+    // likes and the reduction is of the output, not of one pipe.
+    let mut text = result.stdout.clone();
+    text.push_str(&result.stderr);
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    if let Some(reduction) = state.reduction_of(&digest) {
+        return Some(reduction);
+    }
+    // After the cache and before the call: a served reduction spends neither
+    // a request nor a slot, and a claimed slot is always a request made.
+    state.claim_pushed_helper_call().ok()?;
+
+    let call = crate::helpers::run(
+        spec,
+        &model,
+        &text,
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+    );
+    let ok = call.outcome.ok;
+    let reduction = call.outcome.text.clone();
+    state.record_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked_summary(&text),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+    });
+    if !ok {
+        return None;
+    }
+    state.remember_reduction(digest, reduction.clone());
+    Some(reduction)
+}
+
 fn build_bash<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: &ToolResult,
+    reduced: Option<&str>,
 ) -> (v8::Local<'s, v8::Value>, Value) {
     let object = v8::Object::new(scope);
     let stdout = js_string(scope, &result.stdout);
@@ -1265,7 +1427,7 @@ fn build_bash<'s>(
             set_key(scope, object, "exit_code", null.into());
         }
     }
-    let preview = Value::object(vec![
+    let mut entries = vec![
         ("stdout".to_string(), Value::string(&result.stdout)),
         ("stderr".to_string(), Value::string(&result.stderr)),
         (
@@ -1274,8 +1436,15 @@ fn build_bash<'s>(
                 .exit_code
                 .map_or(Value::Null, |code| Value::Number(f64::from(code))),
         ),
-    ]);
-    (object.into(), preview)
+    ];
+    // Present only when a reduction was actually made, so an absent key is
+    // the honest signal that this result was never summarised.
+    if let Some(reduced) = reduced {
+        let value = js_string(scope, reduced);
+        set_key(scope, object, "reduced", value);
+        entries.push(("reduced".to_string(), Value::string(reduced)));
+    }
+    (object.into(), Value::object(entries))
 }
 
 // --- the handle functions ----------------------------------------------
@@ -1968,6 +2137,111 @@ fn agent_run_callback(
     });
     let object = agent_object(scope, &handle);
     retval.set(object);
+}
+
+// --- helper.<name> -----------------------------------------------------
+
+/// `helper.<name>(text)` for every roster entry — `little-helpers.md`'s
+/// pulled half: one metered wire call from inside the running cell, so a
+/// question costs no turn.
+///
+/// The invariant: **a helper either answers or throws.** Unconfigured, over
+/// the cell's ceiling, and a call that failed are all a catchable
+/// `ToolError`; nothing here can return text that looks like an answer when
+/// no answer was made. Shaped like `mcp`, not like `bash`: nothing new runs
+/// on the machine, so no grant is consulted.
+///
+/// Which helper this is comes from the function's own data slot, set by
+/// [`install`] from the spec's `name` — the same routing `tool_callback`
+/// uses, and the reason one `fn` item serves the whole roster.
+fn helper_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let name = args.data().to_rust_string_lossy(scope);
+    let Some(spec) = crate::helpers::lookup(&name) else {
+        // Unreachable through `install`, which binds only roster names, and a
+        // refusal rather than a panic if it ever is reached.
+        throw_tool_error(scope, &format!("no helper named `{name}` is in the roster"));
+        return;
+    };
+    let wanted = format!("helper.{name} takes the text to work on");
+    if !args.get(0).is_string() {
+        throw_tool_error(scope, &wanted);
+        return;
+    }
+    let input = args.get(0).to_rust_string_lossy(scope);
+    if input.trim().is_empty() {
+        throw_tool_error(scope, &wanted);
+        return;
+    }
+
+    let state = state(scope);
+    let model = match state.helper_model() {
+        Ok(model) => model,
+        Err(reason) => {
+            throw_tool_error(scope, &reason);
+            return;
+        }
+    };
+    if let Err(reason) = state.claim_helper_call() {
+        throw_tool_error(scope, &reason);
+        return;
+    }
+
+    let asked = asked_summary(&input);
+    let call = crate::helpers::run(
+        spec,
+        &model,
+        &input,
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+    );
+    let ok = call.outcome.ok;
+    let answer = call.outcome.text.clone();
+    // `turns` is what the call took, not what the spec allowed: a Scout that
+    // burned its ceiling to serve two files is a bad call the inspector must
+    // show as one.
+    state.record_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked.clone(),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+    });
+    // The trajectory says a helper ran and how big the question was, never
+    // the payload: §9.4 explains the cell, and a build log is not an
+    // explanation.
+    trace(scope).record(CallRecord {
+        tool: format!("helper.{}", spec.name),
+        args: [("asked".to_string(), asked)].into_iter().collect(),
+        evidence: None,
+        ended: if ok {
+            Ended::Ok
+        } else {
+            Ended::Threw {
+                class: "ToolError".into(),
+            }
+        },
+    });
+    if !ok {
+        throw_tool_error(scope, &answer);
+        return;
+    }
+    let value = js_string(scope, &answer);
+    retval.set(value);
+}
+
+/// What the lane and the `/cell` inspector show for one helper call.
+///
+/// A size, never the payload: the caller still holds the text, the record is
+/// persisted to the rollout, and a 4,000-line build log in a lane line is
+/// neither readable nor cheap.
+fn asked_summary(input: &str) -> String {
+    format!("{} lines", thousands(input.lines().count() as u64))
 }
 
 /// What a task must have left before a subagent may start. One ordinary

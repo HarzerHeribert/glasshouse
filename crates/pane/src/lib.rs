@@ -12,6 +12,7 @@ pub mod config;
 pub mod contract;
 pub mod events;
 pub mod glasshouse;
+pub mod helpers;
 pub mod project;
 pub mod prompt;
 pub mod rollout;

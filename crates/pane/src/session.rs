@@ -492,6 +492,198 @@ fn build_system_prompt(_project: &ProjectConfig, profile: &Profile) -> String {
     system.push_str(&crate::project::orientation::collect(profile));
     system
 }
+/// The most files one preflight serves in full, and the most bytes one of
+/// them may hold to be served at all.
+///
+/// **A file too large to serve whole is not served.** The section says *in
+/// full*, and a truncated file under that heading is a claim the model cannot
+/// check: it would read the first half as the whole of it.
+const PREFLIGHT_SERVE_FILES: usize = 6;
+const PREFLIGHT_SERVE_BYTES: u64 = 32 * 1024;
+
+/// How many lines of the scout's own report are kept as advisory reading;
+/// `little-helpers.md`'s format fixes it at three.
+const PREFLIGHT_READING_LINES: usize = 3;
+
+/// The stand-in gate: a request of fewer words than this gets no preflight.
+const PREFLIGHT_MIN_WORDS: usize = 4;
+
+/// Whether this request plausibly needs the repository at all.
+///
+/// **This is a stand-in, and it is not the gate the spec asks for.**
+/// `little-helpers.md` names `glasshouse classify` as the producer of that
+/// judgement; it is not wired to pane, so the only honest gate available is a
+/// cheap one that says what it is. A request under [`PREFLIGHT_MIN_WORDS`]
+/// words — "hi", "thanks", "carry on" — gets no preflight and everything else
+/// does: it keeps chatter out, not irrelevant files, and it is what a real
+/// classification replaces the day one arrives.
+fn request_may_need_the_repository(task: &str) -> bool {
+    task.split_whitespace().count() >= PREFLIGHT_MIN_WORDS
+}
+
+/// One preflight block to append to this task's system prompt, or `None` when
+/// no scout ran or none answered.
+///
+/// The invariant: **a failed preflight leaves the session exactly as it is
+/// today.** Helpers off, `[helpers] model` unset, a request that needs no
+/// repository, or a scout that failed all return `None`, and the system block
+/// stays [`build_system_prompt`]'s bytes.
+///
+/// The configuration gate is here rather than in `helpers::preflight`, which
+/// is handed a model and so cannot see that there is none. This is the call
+/// site, and *not configured, not run* is decided where the money is spent.
+fn preflight_block(task: &str, session: &Session<'_>) -> Option<String> {
+    let helpers = &session.config.helpers;
+    if !helpers.enabled || !request_may_need_the_repository(task) {
+        return None;
+    }
+    let model = helpers.model.as_deref()?;
+    let record =
+        crate::helpers::preflight(task, model, session.profile, session.glasshouse, session.id)?;
+    record
+        .outcome
+        .ok
+        .then(|| render_preflight(task, &record.outcome.text, session.profile))
+}
+
+/// The block `little-helpers.md`'s *What preflight emits* specifies, in its
+/// order: the request first and authoritative, the scout's reading advisory
+/// under it, the files it named served whole, then one line of record.
+///
+/// **The scout's own report is not a section.** A heading that reads as an
+/// open question gets answered and a list of rejected candidates is a menu to
+/// browse — measured at 2/5 first turns spent on the meta-material with the
+/// record inline against 0/5 with it held back — so the counts go in the
+/// record and the report itself stays out of the prompt.
+fn render_preflight(task: &str, report: &str, profile: &Profile) -> String {
+    let named = preflight_spans(report);
+    let served = preflight_served(profile, &named);
+
+    let mut block = String::from("\n\n## Request (verbatim, authoritative)\n");
+    block.push_str(task);
+    block.push_str("\n\n## Reading (advisory, at most three lines — the request above governs)\n");
+    for line in report
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(PREFLIGHT_READING_LINES)
+    {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(&format!("\n## Served in full ({})\n", served.len()));
+    for (path, why, text) in &served {
+        block.push_str(&format!(
+            "### {path}\n{why}\n```\n{}\n```\n\n",
+            text.trim_end()
+        ));
+    }
+    block.push_str(&format!(
+        "## Selection record\nscout · {} named · {} served in full · {} not served · the rest of its report is not carried here.\n",
+        named.len(),
+        served.len(),
+        named.len() - served.len(),
+    ));
+    block
+}
+
+/// The `file:line` spans a scout named, in its own order, one entry per path
+/// with the rest of that line as its single line of why.
+///
+/// **Text is what a scout returns today**, so this reads its lines rather
+/// than a structured span; `little-helpers.md` keeps the structured type as a
+/// separate change, and until then a line naming no path is simply not a
+/// span.
+fn preflight_spans(report: &str) -> Vec<(String, String)> {
+    let mut named: Vec<(String, String)> = Vec::new();
+    for line in report.lines() {
+        let Some((path, why)) = preflight_span(line) else {
+            continue;
+        };
+        if named.iter().any(|(seen, _)| *seen == path) {
+            continue;
+        }
+        named.push((path, why));
+    }
+    named
+}
+
+/// The first `path:line` on one line of a report, and the rest of that line.
+///
+/// A path must carry an extension: `line 12:3` and a bare `Makefile:9` are
+/// not spans here, and serving nothing is the safe direction — the request
+/// above the reading is what governs either way.
+fn preflight_span(line: &str) -> Option<(String, String)> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    for (index, word) in words.iter().enumerate() {
+        let token = word.trim_matches(|c: char| {
+            !c.is_ascii_alphanumeric() && !matches!(c, '.' | '/' | '_' | '-' | ':')
+        });
+        let Some((path, number)) = token.rsplit_once(':') else {
+            continue;
+        };
+        if path.is_empty()
+            || !path.contains('.')
+            || number.is_empty()
+            || !number.chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let rest = words[index + 1..].join(" ");
+        let why = rest.trim_start_matches(['-', '—', '–', ':', ' ']).trim();
+        return Some((
+            path.to_string(),
+            if why.is_empty() {
+                "named by the scout.".to_string()
+            } else {
+                why.to_string()
+            },
+        ));
+    }
+    None
+}
+
+/// The named files that can be served whole: inside the grant, a regular
+/// file, UTF-8, and small enough that *in full* is true of it.
+///
+/// **The profile decides, not this function.** A scout that named a path
+/// outside the grant has it refused here for the same reason `read` would
+/// refuse it, and a preflight is not a way around a grant.
+fn preflight_served(
+    profile: &Profile,
+    named: &[(String, String)],
+) -> Vec<(String, String, String)> {
+    let mut served = Vec::new();
+    for (path, why) in named {
+        if served.len() == PREFLIGHT_SERVE_FILES {
+            break;
+        }
+        let candidate = std::path::Path::new(path);
+        let absolute = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            profile.root().join(candidate)
+        };
+        let Ok(granted) = profile.check(
+            "preflight",
+            crate::sandbox::profile::Access::Read,
+            &absolute,
+        ) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&granted) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > PREFLIGHT_SERVE_BYTES {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&granted) else {
+            continue;
+        };
+        served.push((path.clone(), why.clone(), text));
+    }
+    served
+}
 
 /// The compiled profile, as the model needs to read it.
 ///
@@ -577,6 +769,37 @@ fn render(
     }
 }
 
+/// The signal a helper call reaches the screen through while its own cell is
+/// still running.
+///
+/// **The notebook it draws is a snapshot taken before the cell started.** The
+/// loop's transcript is being mutated by the cell that is blocking, so the
+/// lane cannot borrow it; what the lane needs from it -- the conversation, the
+/// cells already finished -- cannot change until the cell returns anyway. The
+/// running cell's own view is the calls made so far, which is exactly what
+/// `tui`'s lane renders and what the folded header summarises after it.
+fn helper_lane(
+    publisher: ui::Publisher,
+    transcript: &Transcript,
+    served: &ServedBy,
+    ordinal: usize,
+) -> crate::runtime::state::HelperProgress {
+    let conversation = transcript.conversation.clone();
+    let notebook = transcript.notebook.clone();
+    let served = served.clone();
+    std::rc::Rc::new(move |records: &[crate::helpers::HelperRecord]| {
+        let mut notebook = notebook.clone();
+        notebook.set(
+            ordinal,
+            CellView {
+                helpers: records.to_vec(),
+                ..CellView::default()
+            },
+        );
+        publisher.publish(&conversation, &notebook, &served, tui::Activity::Executing);
+    })
+}
+
 /// Every acceptance test below, and any real pipe, takes this path. Draws
 /// through the identical `tui::render` a live terminal uses, into an
 /// in-memory buffer exactly as `tui.rs`'s own tests do, then prints each
@@ -622,6 +845,11 @@ fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
 /// project, resume or start the rollout, `SessionStart`, then one input (or
 /// stdin's, one per line) at a time until the input source is exhausted.
 fn run(args: SessionArgs) -> Result<(), String> {
+    // `little-helpers.md`: a malformed roster is a refusal with one sentence,
+    // and it is made here because this is the last moment before anything a
+    // helper can be called from exists. A guardrail checked after the first
+    // cell runs is not a guardrail.
+    crate::helpers::validate().map_err(|reason| format!("pane cannot start: {reason}"))?;
     let project = project::load(&args.root);
     let config = PaneConfig::load(&args.root)?;
     if config.supervisor.model.is_none() {
@@ -1137,6 +1365,14 @@ fn run_task_inner(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     transcript.conversation.system = build_system_prompt(session.project, session.profile);
+    // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
+    // the static orientation already has. It fires **once per task**, before
+    // the model's first turn, so the block is paid for as one cache write
+    // against the read turns it removes — and it appends nothing at all when
+    // no scout ran or none answered.
+    if let Some(block) = preflight_block(task, session) {
+        transcript.conversation.system.push_str(&block);
+    }
     {
         let _line = session.interrupt.writing();
         rollout
@@ -1222,7 +1458,8 @@ fn run_task_inner(
         Duration::from_secs(session.config.limits.cell_wall_clock_s),
     )
     .with_response_byte_cap(session.config.limits.response_bytes)
-    .with_instruction_context();
+    .with_instruction_context()
+    .with_helpers(session.config.helpers.clone());
     let mut budget = TaskSpend::new(session.config.limits.cells);
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
@@ -1361,14 +1598,24 @@ fn run_task_inner(
         if let Some(ui) = session.ui {
             ui.publish(transcript, &served, tui::Activity::Executing);
         }
-        let mut step = act_on(
+        // The cell owns this thread until it returns, so a helper it calls can
+        // only be seen while it runs through a signal installed before it
+        // starts. Uninstalled on the way out, including the error path.
+        let previous = crate::runtime::state::install_helper_progress(
+            session
+                .ui
+                .map(|ui| helper_lane(ui.publisher(), transcript, &served, ordinal)),
+        );
+        let step = act_on(
             &assistant_message,
             &mut runtime,
             &mut budget,
             rollout,
             session.interrupt,
             session.profile,
-        )?;
+        );
+        crate::runtime::state::install_helper_progress(previous);
+        let mut step = step?;
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let notices = runtime.take_handler_notices().join("\n");
@@ -1858,6 +2105,10 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
+        // Read after the cell rather than from the trajectory: the record
+        // carries what came back and how long it took, which is what the
+        // lane and the `HELPERS` inspector section both draw.
+        helpers: runtime.helper_records(),
         executed_source: (native.is_some() || repaired_from.is_some()).then(|| source.clone()),
         repaired_from,
         changes,
@@ -2427,6 +2678,86 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The roster is checked where the session starts, and this pins the call
+    /// rather than the predicate: `helpers::validate()` passes for the shipped
+    /// roster whether or not anything calls it, so only reading `fn run` can
+    /// tell a startup refusal from a unit test nobody's production path runs.
+    #[test]
+    fn the_session_start_refuses_a_malformed_helper_roster() {
+        const SOURCE: &str = include_str!("session.rs");
+        let after = SOURCE
+            .split_once("fn run(args: SessionArgs)")
+            .expect("`fn run` must still be session start")
+            .1;
+        let (body, _) = after
+            .split_once("\n}\n")
+            .expect("`fn run` must still close at column zero");
+        assert!(
+            body.contains("helpers::validate()"),
+            "session start must validate the helper roster before any helper can be called"
+        );
+        crate::helpers::validate().expect("the shipped roster must pass its own guardrails");
+    }
+
+    /// A call in flight reaches the screen under the cell that made it, with
+    /// the screen still executing -- the state `tui`'s lane draws and the
+    /// only state a helper that has not answered yet can be shown in.
+    #[test]
+    fn a_helper_call_in_flight_is_published_under_its_own_cell() {
+        let (publisher, updates) = ui::test_publisher();
+        let transcript = Transcript {
+            conversation: Conversation::default(),
+            notebook: Notebook::default(),
+            provider_checkpoint: None,
+            provider_start: 0,
+        };
+        let lane = helper_lane(publisher, &transcript, &ServedBy::default(), 3);
+
+        lane(&[crate::helpers::HelperRecord {
+            helper: "reduce".into(),
+            verb: "reducing".into(),
+            asked: "cargo build log · 4118 lines".into(),
+            ..crate::helpers::HelperRecord::default()
+        }]);
+
+        let (notebook, activity) = match updates.try_recv() {
+            Ok(ui::Update::Snapshot(snapshot)) => (snapshot.1, snapshot.3),
+            _ => panic!("a helper call in flight must publish a snapshot"),
+        };
+        assert_eq!(activity, tui::Activity::Executing);
+        assert_eq!(notebook.cells.len(), 3, "the lane hangs under cell 3");
+        let helpers = &notebook.cells[2].helpers;
+        assert_eq!(helpers.len(), 1, "the call in flight must be in the view");
+        assert_eq!(helpers[0].helper, "reduce");
+        assert!(
+            !helpers[0].outcome.ok,
+            "a call that has not answered yet must not publish as one that has"
+        );
+    }
+
+    /// The lane is installed **before** the cell runs, and a cell blocks this
+    /// thread until it returns, so an install that came after it would show
+    /// only finished calls. `helper_lane` is provable on its own; that it is
+    /// reached at all is only readable here.
+    #[test]
+    fn the_cell_loop_installs_the_helper_lane_before_the_cell_runs() {
+        const SOURCE: &str = include_str!("session.rs");
+        let installed = SOURCE
+            .find("install_helper_progress(")
+            .expect("the cell loop must install a helper progress signal");
+        let ran = SOURCE
+            .find("let step = act_on(")
+            .expect("the cell loop must still run the cell through `act_on`");
+        assert!(
+            installed < ran,
+            "the signal must be installed before the cell runs, or no call can be seen in flight"
+        );
+        assert!(
+            SOURCE[installed..ran].contains("helper_lane("),
+            "the installed signal must be the lane"
+        );
+    }
 
     #[test]
     fn only_a_tool_line_is_a_tool_invocation() {

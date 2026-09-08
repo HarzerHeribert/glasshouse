@@ -26,7 +26,7 @@ use pane::runtime::outcome::CellOutcome;
 use pane::sandbox::profile::Access;
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::{self, Args, ToolContext};
-use pane::tools::registry::{self, Purity, Tool};
+use pane::tools::registry::{self, ArgKind, Purity, Tool};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -176,7 +176,9 @@ fn no_registered_tool_needs_the_network() {
     }
     assert_eq!(
         names,
-        vec!["read", "glob", "grep", "bash", "write", "context", "edit"]
+        vec![
+            "read", "glob", "grep", "rg", "fd", "jq", "bash", "write", "context", "edit"
+        ]
     );
 
     // The profile half of the same clause: no `permissions` pattern can
@@ -1607,5 +1609,309 @@ fn an_object_passed_as_content_is_refused_and_writes_no_file() {
         !target.exists(),
         "a stringified object was written to {}",
         target.display()
+    );
+}
+
+// --- the pure search tools ---------------------------------------------
+
+/// Whether a registered tool's binary is installed on this machine.
+///
+/// `grep` and `cat` ship with every system; `rg` and `fd` are optional
+/// installs. Each test below says which half of itself ran rather than
+/// passing quietly on a machine that has neither.
+///
+/// Gated with its only callers: every one of them spawns a child, and
+/// Windows has no applier that has ever executed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn installed(name: &str) -> bool {
+    let tool = registry::lookup(name).unwrap_or_else(|| panic!("`{name}` is registered"));
+    let executable = tool
+        .executable()
+        .unwrap_or_else(|| panic!("`{name}` names a binary"));
+    !invoke::exec_grant(executable).fell_back_to_roots
+}
+
+/// Each of the three is declared `Pure` and either resolves to a real binary
+/// or reports the fallback — the same value `exec_grant` returns for any
+/// other unresolvable name, and never a panic.
+#[test]
+fn the_pure_search_tools_are_pure_and_resolve_or_report_their_absence() {
+    for name in ["rg", "fd", "jq"] {
+        let tool = registry::lookup(name).unwrap_or_else(|| panic!("`{name}` is registered"));
+        assert_eq!(tool.purity(), Purity::Pure, "`{name}` is not declared pure");
+        let executable = tool
+            .executable()
+            .expect("a program, not an in-process tool");
+        let grant = invoke::exec_grant(executable);
+        if grant.fell_back_to_roots {
+            eprintln!("`{name}` is not installed here; the fallback was reported, not panicked");
+            assert_eq!(grant.binary, PathBuf::from(executable));
+        } else {
+            assert!(grant.binary.is_absolute(), "{grant:?}");
+            assert_eq!(
+                grant.binary,
+                std::fs::canonicalize(&grant.binary).unwrap(),
+                "the grant is not on a canonical path"
+            );
+        }
+    }
+}
+
+/// A registered tool whose binary is absent is a returned refusal, exactly
+/// as a denied path is: the call comes back as an `Err` naming the tool.
+///
+/// The branch only runs where the tool really is missing, and the test says
+/// so on the machine where all three are installed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn an_absent_search_tool_is_a_returned_refusal_and_not_a_panic() {
+    let fixture = Fixture::new("search-absent");
+    let json = fixture.write(&fixture.root.join("c.json"), "{\"name\":\"pane\"}\n");
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("search-absent");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    let mut exercised = 0;
+    for name in ["rg", "fd", "jq"] {
+        if installed(name) {
+            continue;
+        }
+        exercised += 1;
+        let args = if name == "jq" {
+            Args::new()
+                .with("filter", ".name")
+                .with("path", &*json.to_string_lossy())
+        } else {
+            Args::new().with("pattern", "pane")
+        };
+        let error = invoke::run(&ctx, name, &args)
+            .expect_err("an absent binary cannot answer, so the call must refuse");
+        assert!(
+            error.to_string().contains(name),
+            "the refusal does not name `{name}`: {error}"
+        );
+    }
+    if exercised == 0 {
+        eprintln!("all three search tools are installed here; the absent branch did not run");
+    }
+}
+
+/// `rg` answers with the file and the line, which is what makes a match
+/// usable without a second read.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn rg_returns_matches_with_file_and_line() {
+    if !installed("rg") {
+        eprintln!("skipped: `rg` is not installed on this machine");
+        return;
+    }
+    let fixture = Fixture::new("rg");
+    fixture.write(&fixture.root.join("a.txt"), "alpha beta\nrate limit here\n");
+    fixture.write(&fixture.root.join("sub").join("b.txt"), "nothing\n");
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("rg");
+
+    let result = invoke::run(
+        &context(&profile, &glasshouse, &session),
+        "rg",
+        &Args::new().with("pattern", "rate limit"),
+    )
+    .expect("`rg` searches the project root by default");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    let line = result.stdout.lines().next().expect("one match");
+    assert!(line.contains("a.txt"), "the match names no file: {line}");
+    assert!(
+        line.ends_with(":2:rate limit here"),
+        "the match carries no line number: {line}"
+    );
+    assert!(
+        !result.stdout.contains("nothing"),
+        "an unmatched file was reported: {result:?}"
+    );
+}
+
+/// `fd` answers with paths, and it reaches the whole checked tree.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn fd_lists_the_paths_matching_a_name() {
+    if !installed("fd") {
+        eprintln!("skipped: `fd` is not installed on this machine");
+        return;
+    }
+    let fixture = Fixture::new("fd");
+    fixture.write(&fixture.root.join("a.txt"), "alpha\n");
+    fixture.write(&fixture.root.join("sub").join("b.txt"), "nothing\n");
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("fd");
+
+    let result = invoke::run(
+        &context(&profile, &glasshouse, &session),
+        "fd",
+        &Args::new().with("pattern", r"b\.txt"),
+    )
+    .expect("`fd` walks the project root by default");
+    let found = result.stdout.trim();
+    assert!(
+        found.ends_with("sub/b.txt"),
+        "the nested match was not found: {result:?}"
+    );
+    assert!(
+        !found.contains("a.txt"),
+        "an unmatched path was reported: {result:?}"
+    );
+}
+
+/// `jq` extracts one field from one file. `path` is required rather than
+/// rooted: jq reads a file and the project root is a directory.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn jq_extracts_one_field_from_a_json_file() {
+    if !installed("jq") {
+        eprintln!("skipped: `jq` is not installed on this machine");
+        return;
+    }
+    let fixture = Fixture::new("jq");
+    let json = fixture.write(
+        &fixture.root.join("c.json"),
+        "{\"name\":\"pane\",\"version\":\"0.1\"}\n",
+    );
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("jq");
+
+    let result = invoke::run(
+        &context(&profile, &glasshouse, &session),
+        "jq",
+        &Args::new()
+            .with("filter", ".name")
+            .with("path", &*json.to_string_lossy()),
+    )
+    .expect("`jq` runs on a file inside the root");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert_eq!(result.stdout.trim(), "\"pane\"", "{result:?}");
+}
+
+/// The declaration half of the safety assertion, and it holds on every
+/// platform: not one of the three asks for a writable path, and each names a
+/// binary, so `perform_in_process`'s `write` arm — the only code in pane that
+/// puts a tool's bytes on disk — is unreachable from all three.
+#[test]
+fn no_pure_search_tool_declares_a_writable_path_or_is_performed_in_process() {
+    for name in ["rg", "fd", "jq"] {
+        let tool = registry::lookup(name).unwrap_or_else(|| panic!("`{name}` is registered"));
+        assert!(
+            tool.args()
+                .iter()
+                .all(|arg| arg.kind() != ArgKind::WritePath),
+            "`{name}` declares a writable path"
+        );
+        assert!(
+            tool.executable().is_some(),
+            "`{name}` is in-process and could reach the write arm"
+        );
+    }
+}
+
+/// **The safety assertion.** None of the three can write, and the reason is
+/// mechanical rather than a property of the three binaries: every flag lives
+/// in the `Argv` shape at compile time and `--` precedes every model-authored
+/// element, so a pattern spelled like a flag is a pattern.
+///
+/// `fd -x` and `rg --pre` are the two real write paths — each runs a command
+/// per match — and both need a flag position the argv does not have. Each
+/// probe below is one that *would* answer if the separator were missing:
+/// `fd --help` and `jq --version` print, and `rg --files` lists the tree
+/// unless the pattern is behind `-e`. `jq` has no write path at all, so the
+/// rest of its half is an absence — no writable argument, and a file that is
+/// byte-identical afterwards.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn no_pure_search_tool_can_write_and_no_flag_shaped_argument_becomes_a_flag() {
+    let fixture = Fixture::new("search-safety");
+    let canary = fixture.write(&fixture.root.join("canary.txt"), "CANARY\n");
+    let json = fixture.write(&fixture.root.join("c.json"), "{\"name\":\"pane\"}\n");
+    let before_canary = std::fs::read(&canary).unwrap();
+    let before_json = std::fs::read(&json).unwrap();
+    let pwned = fixture.root.join("PWNED");
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("search-safety");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    if installed("fd") {
+        for pattern in [
+            "-x",
+            "--exec",
+            "--help",
+            "-x touch PWNED",
+            "--exec touch PWNED",
+        ] {
+            let result = invoke::run(&ctx, "fd", &Args::new().with("pattern", pattern))
+                .unwrap_or_else(|error| panic!("`{pattern}` was not read as a pattern: {error}"));
+            assert!(
+                result.stdout.trim().is_empty(),
+                "`{pattern}` matched something: {result:?}"
+            );
+        }
+    } else {
+        eprintln!("skipped fd's half: `fd` is not installed on this machine");
+    }
+
+    if installed("rg") {
+        // `--files` would list the whole tree if it were read as a flag.
+        let files = invoke::run(&ctx, "rg", &Args::new().with("pattern", "--files"))
+            .expect("a flag-shaped pattern is still a pattern");
+        assert!(
+            files.stdout.is_empty(),
+            "`--files` was read as a flag: {files:?}"
+        );
+        for pattern in ["--pre", "-r", "--pre touch"] {
+            let result = invoke::run(&ctx, "rg", &Args::new().with("pattern", pattern))
+                .unwrap_or_else(|error| panic!("`{pattern}` was not read as a pattern: {error}"));
+            assert!(
+                result.stdout.is_empty(),
+                "`{pattern}` matched something: {result:?}"
+            );
+        }
+    } else {
+        eprintln!("skipped rg's half: `rg` is not installed on this machine");
+    }
+
+    if installed("jq") {
+        // `--version` would print one if it were read as a flag.
+        let version = invoke::run(
+            &ctx,
+            "jq",
+            &Args::new()
+                .with("filter", "--version")
+                .with("path", &*json.to_string_lossy()),
+        )
+        .expect("a flag-shaped filter is still a filter");
+        assert!(
+            !version.stdout.contains("jq-"),
+            "`--version` was read as a flag: {version:?}"
+        );
+        assert_ne!(version.exit_code, Some(0), "{version:?}");
+    } else {
+        eprintln!("skipped jq's half: `jq` is not installed on this machine");
+    }
+
+    assert!(
+        !pwned.exists(),
+        "a pure search tool created {}",
+        pwned.display()
+    );
+    assert_eq!(
+        std::fs::read(&canary).unwrap(),
+        before_canary,
+        "a pure search tool changed a file"
+    );
+    assert_eq!(
+        std::fs::read(&json).unwrap(),
+        before_json,
+        "a pure search tool changed a file"
     );
 }

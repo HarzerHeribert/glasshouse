@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::contract::{Block as ContentBlock, Conversation, Message, Role, ServedBy};
+use crate::helpers::HelperRecord;
 use crate::prompt::{Extracted, extract_program};
 use crate::runtime::handles::{HandleTable, render_table};
 use crate::runtime::preview::PREVIEW_TOKEN_CAP;
@@ -66,6 +67,14 @@ pub struct ScreenState {
     pub telemetry_selected: Option<usize>,
     pub reduced_motion: bool,
     pub pulse: Pulse,
+    /// The completion gate's recap of the task just accepted, when
+    /// `[helpers] completion = "recap"` asked for one.
+    ///
+    /// `None` -- the silent default, no helper model, or a call that never
+    /// came back -- renders nothing at all, and neither does a record that
+    /// failed: a recap must never replace or delay the answer it follows.
+    /// The caller clears it when the next task begins.
+    pub recap: Option<HelperRecord>,
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
@@ -392,6 +401,9 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CellView {
+    /// Helper calls this cell made, in call order -- the lane while they run
+    /// and the `HELPERS` inspector section afterwards read this one field.
+    pub helpers: Vec<crate::helpers::HelperRecord>,
     /// Corrected source for an executed pane-edit; display only, never another model message.
     pub executed_source: Option<String>,
     pub repaired_from: Option<u64>,
@@ -1073,7 +1085,7 @@ pub fn notebook_height(
     handles: &HandleTable,
     notebook: &Notebook,
 ) -> usize {
-    notebook_lines(conversation, handles, notebook, false, false, 98).len()
+    notebook_lines(conversation, handles, notebook, false, false, 98, 0).len()
 }
 
 /// One line with nothing to show. Never collapses to no line at all -- the
@@ -1130,6 +1142,11 @@ fn conversation_lines(
         state.compact,
         state.pretty,
         usize::from(width.saturating_sub(2)),
+        if state.reduced_motion {
+            0
+        } else {
+            state.animation_frame
+        },
     );
     if let Some(raw_partial) = state.streaming_text.as_deref() {
         let visible = streaming_message_text(raw_partial);
@@ -1190,6 +1207,7 @@ fn conversation_lines(
             content.extend(markdown::code(code));
         }
     }
+    push_recap(&mut content, state.recap.as_ref());
     let mut active = false;
     for line in &mut content {
         let mut cell_header = false;
@@ -1306,6 +1324,212 @@ fn turn_header(lines: &mut Vec<Line<'static>>, label: String, color: Color) {
     ));
 }
 
+/// The helper lane's four frames: a line reaching out, and the dot coming
+/// back on the fourth.
+///
+/// **One frame set for every helper.** The record's `verb` and `asked` carry
+/// the difference, so a new `HelperSpec` renders here with no change to this
+/// module.
+const HELPER_FRAMES: [&str; 4] = ["-.  ", "--. ", "---.", ".---"];
+
+/// A call this short gets no lane of its own: it would appear and vanish
+/// before it could be read, and a lane nobody can read is a lane nobody
+/// reads. A **failed** call is exempt -- see [`helper_shows_a_lane`].
+const HELPER_LANE_MIN_MS: u64 = 300;
+
+/// Past this many lanes the cell itself would be pushed off screen, so the
+/// lane collapses to a count. Helpers run in parallel; the cell is what the
+/// user came to read.
+const HELPER_LANE_MAX: usize = 3;
+
+/// The name column, wide enough for the roster's names and fixed so the
+/// glyphs line up down the lane.
+const HELPER_NAME_WIDTH: usize = 9;
+
+/// Whether a call came back with a failure sentence instead of an answer.
+fn helper_failed(record: &HelperRecord) -> bool {
+    !record.outcome.ok && !record.outcome.text.is_empty()
+}
+
+/// Whether a call has neither answered nor failed: the state the lane's
+/// moving frames are for, and the one the seconds are counted for.
+///
+/// It is [`HelperOutcome::default()`] -- what `begin_helper` keeps until
+/// `finish_helper` fills it in.
+///
+/// [`HelperOutcome::default()`]: crate::helpers::HelperOutcome
+pub(crate) fn helper_in_flight(record: &HelperRecord) -> bool {
+    !record.outcome.ok && record.outcome.text.is_empty()
+}
+
+/// Whether one call is worth a lane of its own.
+///
+/// **A failure always is, however short.** `supervisor.rs` shipped for weeks
+/// rendering a permanently failing look as a healthy one; a helper that is
+/// not working must never be quieter than one that is.
+///
+/// **A call still in flight always is too.** The floor is measured on a
+/// duration a running call does not have yet, and what it forbids is a lane
+/// that *vanishes*: an in-flight lane resolves into its own answer instead.
+fn helper_shows_a_lane(record: &HelperRecord) -> bool {
+    helper_in_flight(record)
+        || helper_failed(record)
+        || record.outcome.elapsed_ms >= HELPER_LANE_MIN_MS
+}
+
+/// Elapsed as text rather than as animation: under `/motion off` the glyph
+/// freezes and this keeps counting, because *is it alive* is the question
+/// the lane answers.
+fn helper_seconds(elapsed_ms: u64) -> String {
+    format!("{:.1}s", elapsed_ms as f64 / 1000.0)
+}
+
+fn helper_count(calls: usize) -> String {
+    if calls == 1 {
+        "1 helper".to_string()
+    } else {
+        format!("{calls} helpers")
+    }
+}
+
+/// The cell header's own summary of its helpers -- one line, and it persists
+/// in scrollback after the lane is gone.
+///
+/// **Only calls that have resolved are counted.** The header is what the
+/// cell has already got back; counting a call still in flight folds it
+/// before its lane has said anything, which is the reverse of
+/// `little-helpers.md`'s order -- run, resolve, then fold.
+fn helper_fold(view: Option<&CellView>) -> String {
+    match view.map_or(0, |view| {
+        view.helpers
+            .iter()
+            .filter(|record| !helper_in_flight(record))
+            .count()
+    }) {
+        0 => String::new(),
+        calls => format!(" · {}", helper_count(calls)),
+    }
+}
+
+/// One lane line: the helper, its state, what it is doing or what came back,
+/// and its elapsed at the right of the column.
+fn helper_lane(record: &HelperRecord, tick: usize, width: usize) -> Line<'static> {
+    let (glyph, body) = if record.outcome.ok {
+        (
+            Activity::Complete.indicator(tick),
+            record
+                .outcome
+                .text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        )
+    } else if helper_failed(record) {
+        (Activity::Failed.indicator(tick), record.lane_result())
+    } else {
+        (
+            HELPER_FRAMES[tick % HELPER_FRAMES.len()],
+            format!("{} {}", record.verb, record.asked)
+                .trim()
+                .to_string(),
+        )
+    };
+    let head = format!(
+        "  {:<name$} {glyph}  ",
+        abbreviate(&record.helper, HELPER_NAME_WIDTH),
+        name = HELPER_NAME_WIDTH
+    );
+    let seconds = helper_seconds(record.outcome.elapsed_ms);
+    let room = width.saturating_sub(head.chars().count() + seconds.chars().count() + 2);
+    let body = abbreviate(&body, room);
+    let gap = width
+        .saturating_sub(head.chars().count() + body.chars().count() + seconds.chars().count())
+        .max(1);
+    Line::styled(
+        format!("{head}{body}{}{seconds}", " ".repeat(gap)),
+        Style::default().fg(if helper_failed(record) {
+            Color::Red
+        } else {
+            MUTED
+        }),
+    )
+}
+
+/// The lane under a cell's header: one line per helper call the cell made.
+///
+/// Past [`HELPER_LANE_MAX`] lines it collapses to a count and a total -- but
+/// a failed call keeps its own line through the collapse, because a helper
+/// that is not working must not be summarised into one that is.
+fn push_helper_lane(
+    lines: &mut Vec<Line<'static>>,
+    view: Option<&CellView>,
+    tick: usize,
+    width: usize,
+) {
+    let Some(helpers) = view.map(|view| view.helpers.as_slice()) else {
+        return;
+    };
+    let shown: Vec<&HelperRecord> = helpers
+        .iter()
+        .filter(|record| helper_shows_a_lane(record))
+        .collect();
+    if shown.len() > HELPER_LANE_MAX {
+        let total: u64 = helpers.iter().map(|record| record.outcome.elapsed_ms).sum();
+        lines.push(Line::styled(
+            format!(
+                "  {} · {}",
+                helper_count(helpers.len()),
+                helper_seconds(total)
+            ),
+            Style::default().fg(MUTED),
+        ));
+        for record in shown.into_iter().filter(|record| helper_failed(record)) {
+            lines.push(helper_lane(record, tick, width));
+        }
+        return;
+    }
+    for record in shown {
+        lines.push(helper_lane(record, tick, width));
+    }
+}
+
+/// The recap's own header. It names the author and denies the mistake,
+/// because a recap read as the assistant's answer is worse than no recap:
+/// the answer is the model's, this is a cheap helper's summary of it.
+const RECAP_LABEL: &str = "RECAP · a helper's summary, not the assistant";
+
+/// The session's closing output when `[helpers] completion = "recap"` asked
+/// for one: what the session did, then the `Next:` line the preamble asks
+/// for, under the transcript they summarise.
+///
+/// **Nothing at all unless a recap was asked for and came back.** A missing
+/// or failed record renders no header, no reason and no blank frame -- the
+/// screen is the one the silent default already draws, because a recap must
+/// never replace or delay the answer above it.
+///
+/// It is drawn in [`MUTED`] with the helper lane's indent rather than in the
+/// model's own prose style, and nothing here adds a tick, a colour or a word
+/// that would claim more than the sentences themselves do.
+fn push_recap(lines: &mut Vec<Line<'static>>, recap: Option<&HelperRecord>) {
+    let Some(record) = recap.filter(|record| record.outcome.ok) else {
+        return;
+    };
+    let text = record.outcome.text.trim();
+    if text.is_empty() {
+        return;
+    }
+    turn_header(lines, RECAP_LABEL.to_string(), MUTED);
+    for line in text.lines() {
+        lines.push(Line::styled(
+            format!("  {}", line.trim_end()),
+            Style::default().fg(MUTED),
+        ));
+    }
+    lines.push(Line::styled("╰─", Style::default().fg(MUTED)));
+}
+
 /// A cell's regions, in the order `runtime-contract.md` §1 and §5 put them:
 /// an input region carrying the **program** the message contained (its prose
 /// when it contained none), an output region carrying the handle table as
@@ -1327,6 +1551,7 @@ fn notebook_lines(
     compact: bool,
     pretty: bool,
     width: usize,
+    tick: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut messages = conversation.messages.iter();
@@ -1411,9 +1636,10 @@ fn notebook_lines(
                                 };
                                 turn_header(
                                     &mut lines,
-                                    format!("{label}  · {cell}"),
+                                    format!("{label}  · {cell}{}", helper_fold(view)),
                                     if failed { Color::Red } else { ACCENT },
                                 );
+                                push_helper_lane(&mut lines, view, tick, width);
                                 let none_ran = view
                                     .and_then(|v| v.execution.as_deref())
                                     .is_some_and(|calls| calls.starts_with("No tool"));
@@ -1561,9 +1787,10 @@ fn notebook_lines(
                 };
                 turn_header(
                     &mut lines,
-                    format!("{role}  [{cell}] in{execution}"),
+                    format!("{role}  [{cell}] in{execution}{}", helper_fold(view)),
                     ACCENT,
                 );
+                push_helper_lane(&mut lines, view, tick, width);
                 if let Some(target) = view.and_then(|v| v.repaired_from) {
                     lines.push(Line::styled(
                         format!("Amends syntax-failed cell {target}"),

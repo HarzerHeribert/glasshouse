@@ -34,6 +34,21 @@ pub const ENTRIES: &[Entry] = &[
         summary: "Search the project for a regular expression.",
     },
     Entry {
+        name: "rg",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "Search the project with ripgrep: `file:line:text` on stdout, one match per line. Faster than `grep` and it skips ignored files. `exit_code` is 1 when nothing matched, which is not a failure.",
+    },
+    Entry {
+        name: "fd",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "List paths beneath `path` whose name matches a regular expression, one per line on stdout. Prefer it to `glob` when you are matching a name rather than a shape.",
+    },
+    Entry {
+        name: "jq",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
+        summary: "Apply one jq filter to one JSON file and read the result on stdout. `path` is a file, never a directory.",
+    },
+    Entry {
         name: "write",
         return_type: "string",
         summary: "Replace one whole file, creating parents. Pass exactly one of `content` or `lines`. For scripts, prefer `lines`: each item is one logical line, Pane adds the separators/final newline, and a trailing newline on an item is harmless. Use double-quoted JS strings, never template literals: `await write({path: \"run.sh\", lines: [\"#!/bin/bash\", \"src=\\\"${BASH_SOURCE[0]}\\\"\", \"echo \\\"caller's $WORKTREE\\\"\"]})`. Prefer `edit` for an existing region.",
@@ -86,6 +101,115 @@ pub struct Binding {
     /// The declaration block, rendered into the system prompt verbatim.
     pub declaration: &'static str,
 }
+
+/// Whether a cell may invoke `spec` — `little-helpers.md`'s `call_sites`,
+/// consulted rather than described.
+///
+/// The invariant: **the `helper` global and this declaration carry the same
+/// set, and it is the set `call_sites` allows.** `runtime::bindings::install`
+/// binds on this predicate and [`HELPER_DECLARATION`] is generated through it,
+/// so a spec that may only run at preflight is neither installed nor
+/// mentioned — the model is never told about a helper it cannot call, and no
+/// helper is reachable from a call site its spec excludes.
+pub const fn callable_from_a_cell(spec: &crate::helpers::HelperSpec) -> bool {
+    let mut i = 0;
+    while i < spec.call_sites.len() {
+        if matches!(spec.call_sites[i], crate::helpers::CallSite::Cell) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The `helper` binding, **generated from [`crate::helpers::HELPERS`]**, so
+/// appending a `HelperSpec` is the whole of declaring a helper to the model
+/// and there is no second place that can fall behind the roster.
+///
+/// It is assembled at compile time into a fixed buffer because
+/// [`Binding::declaration`] is a `&'static str`: a `LazyLock` would make
+/// [`RUNTIME`] something its callers cannot iterate.
+const HELPER_HEAD: &str = "declare const helper: {\n";
+const HELPER_SIGNATURE: &str = "(text: string): Promise<string>;\n";
+const HELPER_CLOSE: &str = "};\n\
+    // Ask a cheap model one narrow question from inside the cell. It costs no turn,\n\
+    // returns a value, and leaves nothing behind: it holds no tools, writes nothing,\n\
+    // and reports evidence rather than conclusions. It throws ToolError when helpers\n\
+    // are not configured, when this cell has used its call ceiling, or when the call\n\
+    // itself failed — so attempt the work first and pay for a helper only in the\n\
+    // branch that needs one. What it returns is yours to keep or drop.\n";
+const HELPER_INDENT: &str = "  ";
+const HELPER_BULLET: &str = "// ";
+const HELPER_GAP: &str = ": ";
+const HELPER_NEWLINE: &str = "\n";
+
+const fn copy(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+    let mut i = 0;
+    while i < bytes.len() {
+        out[at + i] = bytes[i];
+        i += 1;
+    }
+    at + bytes.len()
+}
+
+const fn helper_declaration_len() -> usize {
+    let mut len = HELPER_HEAD.len() + HELPER_CLOSE.len();
+    let mut i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        let spec = &crate::helpers::HELPERS[i];
+        if callable_from_a_cell(spec) {
+            len += HELPER_INDENT.len() + spec.name.len() + HELPER_SIGNATURE.len();
+            len += HELPER_BULLET.len()
+                + spec.name.len()
+                + HELPER_GAP.len()
+                + spec.summary.len()
+                + HELPER_NEWLINE.len();
+        }
+        i += 1;
+    }
+    len
+}
+
+const HELPER_DECLARATION_LEN: usize = helper_declaration_len();
+
+const fn helper_declaration_bytes() -> [u8; HELPER_DECLARATION_LEN] {
+    let mut out = [0u8; HELPER_DECLARATION_LEN];
+    let mut at = copy(&mut out, 0, HELPER_HEAD.as_bytes());
+    let mut i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        if callable_from_a_cell(&crate::helpers::HELPERS[i]) {
+            at = copy(&mut out, at, HELPER_INDENT.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+            at = copy(&mut out, at, HELPER_SIGNATURE.as_bytes());
+        }
+        i += 1;
+    }
+    at = copy(&mut out, at, HELPER_CLOSE.as_bytes());
+    i = 0;
+    while i < crate::helpers::HELPERS.len() {
+        if callable_from_a_cell(&crate::helpers::HELPERS[i]) {
+            at = copy(&mut out, at, HELPER_BULLET.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].name.as_bytes());
+            at = copy(&mut out, at, HELPER_GAP.as_bytes());
+            at = copy(&mut out, at, crate::helpers::HELPERS[i].summary.as_bytes());
+            at = copy(&mut out, at, HELPER_NEWLINE.as_bytes());
+        }
+        i += 1;
+    }
+    assert!(
+        at == HELPER_DECLARATION_LEN,
+        "the generated helper declaration must fill its buffer exactly"
+    );
+    out
+}
+
+const HELPER_DECLARATION_BYTES: [u8; HELPER_DECLARATION_LEN] = helper_declaration_bytes();
+
+/// The generated `helper` declaration, as [`RUNTIME`] carries it.
+pub const HELPER_DECLARATION: &str = match std::str::from_utf8(&HELPER_DECLARATION_BYTES) {
+    Ok(text) => text,
+    Err(_) => panic!("a roster name or summary is not UTF-8"),
+};
 
 /// Every host global that is not a registered tool.
 pub const RUNTIME: &[Binding] = &[
@@ -177,6 +301,10 @@ pub const RUNTIME: &[Binding] = &[
                       // grant, spends this task's budget, and cannot start a subagent of its\n\
                       // own. Use it only when the question is separable and its working would\n\
                       // otherwise fill your context. `bg.cancel` stops one.",
+    },
+    Binding {
+        global: "helper",
+        declaration: HELPER_DECLARATION,
     },
     Binding {
         global: "todo",
