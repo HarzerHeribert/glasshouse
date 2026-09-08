@@ -104,7 +104,7 @@ pub fn apply(
     if !before_hash.eq_ignore_ascii_case(expected_sha256) {
         return Err(EditError::new(
             "stale_hash",
-            format!("stale file hash: current SHA-256 is {before_hash}"),
+            "The source version changed; refresh context before editing.",
         ));
     }
     let mut matches = before.match_indices(expected);

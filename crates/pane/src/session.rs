@@ -1451,8 +1451,13 @@ fn run_task_inner(
                     nudge_reason = Some(decision.reason.clone());
                     transcript.notebook.supervisor =
                         Some(SupervisorStatus::Nudged(decision.reason));
-                } else {
+                } else if decision.ok {
                     transcript.notebook.supervisor = Some(SupervisorStatus::LookedNoNudge);
+                } else {
+                    // §3: an unanswered look is *not intervene* and is
+                    // recorded as such -- never as a healthy look.
+                    transcript.notebook.supervisor =
+                        Some(SupervisorStatus::LookFailed(decision.reason));
                 }
             }
         }

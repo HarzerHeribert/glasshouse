@@ -837,6 +837,49 @@ fn a_nudge_shows_under_the_spend_line() {
     );
 }
 
+/// §3: a look that produced no answer is recorded **as such**, so the sidebar
+/// must not show it as the healthy "looked, no nudge" -- otherwise a
+/// supervisor whose model id or endpoint is wrong reads exactly like one that
+/// is watching, while spending a request every `every` cells.
+#[test]
+fn a_failed_look_shows_as_failed_and_names_its_cause() {
+    let notebook = Notebook {
+        tokens: Some(TaskTokens {
+            used: 100,
+            counted: Counted::Estimated,
+        }),
+        supervisor: Some(SupervisorStatus::LookFailed("unparseable".to_string())),
+        ..Notebook::default()
+    };
+
+    let conversation = conversation(vec![Message::text(Role::User, "hi")]);
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        20,
+    );
+    let text = buffer_text(&buffer);
+
+    let spend_at = text.find("Σ 100 tokens").expect("the spend line renders");
+    let supervisor_at = text
+        .find("supervisor: FAILED")
+        .expect("a failed look must say so, under the spend line");
+    assert!(
+        spend_at < supervisor_at,
+        "the supervisor line must sit under the spend line:\n{text}"
+    );
+    assert!(
+        text.contains("unparseable"),
+        "the failed look must name its cause:\n{text}"
+    );
+    assert!(
+        !text.contains("looked, no nudge"),
+        "a failed look must never render as a healthy look:\n{text}"
+    );
+}
+
 #[test]
 fn sidebar_shows_real_inbox_and_batch_counts_without_changing_narrow_layout() {
     let notebook = Notebook {

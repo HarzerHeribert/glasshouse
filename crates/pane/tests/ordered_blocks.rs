@@ -143,7 +143,7 @@ fn preflight_return_and_throw_prevent_later_admitted_writes() {
 
     let mut runtime = Runtime::new(&profile, &glasshouse, &session);
     let Extracted::Program(source) = extract_program(
-        "```pane\nconst write = await bash({command: \"echo bad > syntax-marker\"});\n```\n```pane\nconst = ;\n```",
+        "```pane\nconst later = await bash({command: \"echo bad > syntax-marker\"});\n```\n```pane\nconst = ;\n```",
     ) else {
         panic!("expected one combined program");
     };
@@ -154,7 +154,7 @@ fn preflight_return_and_throw_prevent_later_admitted_writes() {
 
     let mut runtime = Runtime::new(&profile, &glasshouse, &session);
     let Extracted::Program(source) = extract_program(
-        "```pane\nreturn 7;\n```\n```pane\nconst write = await bash({command: \"echo bad > return-marker\"});\n```",
+        "```pane\nreturn 7;\n```\n```pane\nconst later = await bash({command: \"echo bad > return-marker\"});\n```",
     ) else {
         panic!("expected one combined program");
     };
@@ -165,7 +165,7 @@ fn preflight_return_and_throw_prevent_later_admitted_writes() {
 
     let mut runtime = Runtime::new(&profile, &glasshouse, &session);
     let Extracted::Program(source) = extract_program(
-        "```pane\nthrow new Error('stop');\n```\n```pane\nconst write = await bash({command: \"echo bad > throw-marker\"});\n```",
+        "```pane\nthrow new Error('stop');\n```\n```pane\nconst later = await bash({command: \"echo bad > throw-marker\"});\n```",
     ) else {
         panic!("expected one combined program");
     };

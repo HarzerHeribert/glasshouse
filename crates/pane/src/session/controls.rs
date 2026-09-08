@@ -231,6 +231,7 @@ pub(super) fn command(
             let latest = match transcript.notebook.supervisor.as_ref() {
                 Some(SupervisorStatus::Nudged(reason)) => format!("nudged: {reason}"),
                 Some(SupervisorStatus::LookedNoNudge) => "looked; no nudge".into(),
+                Some(SupervisorStatus::LookFailed(reason)) => format!("look failed: {reason}"),
                 Some(SupervisorStatus::Off) | None => "no look in this session".into(),
             };
             show(

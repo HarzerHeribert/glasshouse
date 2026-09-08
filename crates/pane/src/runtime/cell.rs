@@ -32,6 +32,7 @@
 //! reassigning a top-level `class` or `function` name inside the cell that
 //! declared it does not persist; every other binding is read again.
 
+use crate::tools::registry;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
     AccessorProperty, AssignmentTarget, BindingIdentifier, BindingPattern, Class, Expression,
@@ -60,18 +61,28 @@ pub const RESERVED_PREFIX: &str = "__pane_";
 /// a scan that only knows declarations and globals.
 const IMPLICIT_FUNCTION_BINDINGS: [&str; 1] = ["arguments"];
 
-/// The names the isolate puts on the persistent scope: the registered tools, the
-/// three handle functions and `yieldNow`. A top-level binding may not take
-/// one, because the capture that makes a handle persist would overwrite it
-/// for the whole task.
+/// The names the isolate puts on the persistent scope that are not tools: the
+/// three handle functions, `yieldNow`, and the MCP and message doors.
 ///
 /// `console` is deliberately absent: it is not a capability, shadowing it
 /// costs the model only its own logging, and a program that assigns to it is
 /// doing something it can undo.
-pub const HOST_FUNCTIONS: [&str; 12] = [
-    "read", "glob", "grep", "bash", "keep", "free", "handles", "yieldNow", "mcp", "on", "off",
-    "send",
+const NON_TOOL_HOST_FUNCTIONS: [&str; 8] = [
+    "keep", "free", "handles", "yieldNow", "mcp", "on", "off", "send",
 ];
+
+/// Whether `name` is one the isolate puts on the persistent scope. A
+/// top-level binding may not take one, because the capture that makes a
+/// handle persist would overwrite it for the whole task.
+///
+/// **The tool half is asked of the registry rather than repeated here**, so a
+/// tool the registry gains is protected by that alone. While this was one
+/// hand-written list it named four tools of seven, and `const write = 1;`
+/// compiled, ran the whole cell, and told the model afterwards that its
+/// `globalThis` was frozen.
+pub fn is_host_function(name: &str) -> bool {
+    registry::lookup(name).is_some() || NON_TOOL_HOST_FUNCTIONS.contains(&name)
+}
 
 /// The one runtime binding a generated cell carries: the host object whose
 /// `s` captures a completed binding and whose `e` marks that the body ran
@@ -282,10 +293,7 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
             column,
         });
     }
-    if let Some(name) = declared
-        .iter()
-        .find(|n| HOST_FUNCTIONS.contains(&n.as_str()))
-    {
+    if let Some(name) = declared.iter().find(|n| is_host_function(n)) {
         let (line, column) = find_declaration(source, &scan, name);
         return Err(CellError::ShadowsHostFunction {
             name: name.clone(),
@@ -1144,8 +1152,9 @@ mod tests {
             ),
             "{error:?}"
         );
-        // Every declared host function is guarded, and `console` is not.
-        for name in HOST_FUNCTIONS {
+        // Every host name is guarded — every registered tool and every
+        // non-tool door — and `console` is not.
+        for name in registry::names().into_iter().chain(NON_TOOL_HOST_FUNCTIONS) {
             assert!(
                 compile(&format!("const {name} = 1;\n"), 1).is_err(),
                 "`{name}` may be shadowed"

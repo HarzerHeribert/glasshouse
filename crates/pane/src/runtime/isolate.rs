@@ -1069,7 +1069,13 @@ impl Runtime {
         source: &str,
         saved: Option<v8::Global<v8::Function>>,
     ) -> CellOutcome {
-        self.syntax_failure = None;
+        // Only a cell the model sent consumes the repair offer. A standing
+        // handler arrives here too (`saved`), between the failed cell and the
+        // model's `pane-edit`, and revoking the offer would answer the repair
+        // pane itself asked for with "no syntax-failed cell is available".
+        if saved.is_none() {
+            self.syntax_failure = None;
+        }
         let started = Instant::now();
         let cell = self.state.begin_cell();
         self.trace().begin_cell();

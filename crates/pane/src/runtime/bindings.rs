@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::bg::{self, RunOptions, WatchOptions};
 use crate::events::batch::Batch;
 use crate::events::{BatchStore, Event, EventId};
-use crate::runtime::cell::{HOST_FUNCTIONS, RESERVED_PREFIX};
+use crate::runtime::cell::{RESERVED_PREFIX, is_host_function};
 use crate::runtime::excerpt::{self, SampledLine};
 use crate::runtime::handles::HandleMeta;
 use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
@@ -485,12 +485,12 @@ fn tool_callback(
         return;
     };
 
-    let Ok(mut call_args) = read_arguments(scope, args.get(0)) else {
-        throw_tool_error(
-            scope,
-            "tool arguments must be strings, except declared line arguments which must be arrays of strings",
-        );
-        return;
+    let mut call_args = match read_arguments(scope, args.get(0)) {
+        Ok(call_args) => call_args,
+        Err(refusal) => {
+            throw_tool_error(scope, &refusal);
+            return;
+        }
     };
     let state = state(scope);
     let tool = if requested_tool.name() == "read" {
@@ -644,13 +644,21 @@ fn tool_callback(
     }
 }
 
-/// Reads the call's single object argument into [`Args`].
+/// Reads the call's single object argument into [`Args`], or the message the
+/// refusal throws.
 ///
 /// Every own property is passed through, including one the tool does not
 /// declare: [`invoke::run`] refuses an undeclared argument, and dropping it
 /// here would make a call that named the wrong argument look like it had
 /// honoured it.
-fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Args, ()> {
+///
+/// **An argument is a string or an array of strings, and anything else is
+/// refused rather than stringified.** Every declared `ArgKind` is one of
+/// those two, so a lossy `to_rust_string_lossy` on the rest could only ever
+/// spell a JavaScript value the tool cannot use: a handle passed as `content`
+/// wrote the nine characters `[object Object]` into a real file, with no
+/// error anywhere.
+fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Args, String> {
     let mut args = Args::new();
     if !value.is_object() {
         return Ok(args);
@@ -674,21 +682,62 @@ fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Resu
         }
         let key = key.to_rust_string_lossy(scope);
         if given.is_array() {
-            let array = v8::Local::<v8::Array>::try_from(given).map_err(|_| ())?;
+            let Ok(array) = v8::Local::<v8::Array>::try_from(given) else {
+                return Err(format!(
+                    "`{key}` accepts an array of strings; it could not be read"
+                ));
+            };
             let mut lines = Vec::with_capacity(array.length() as usize);
             for index in 0..array.length() {
-                let line = array.get_index(scope, index).ok_or(())?;
+                let line = array.get_index(scope, index).ok_or_else(|| {
+                    format!("`{key}` accepts an array of strings; item {index} could not be read")
+                })?;
                 if !line.is_string() {
-                    return Err(());
+                    return Err(format!(
+                        "`{key}` accepts an array of strings; item {index} is {}",
+                        js_type_of(line)
+                    ));
                 }
                 lines.push(line.to_rust_string_lossy(scope));
             }
             args = args.with_lines(key, lines);
-        } else {
+        } else if given.is_string() {
             args = args.with(key, given.to_rust_string_lossy(scope));
+        } else {
+            return Err(argument_refusal(&key, given));
         }
     }
     Ok(args)
+}
+
+/// What the model is told about one argument it cannot pass.
+///
+/// It states the rule, never the argument's own contract, because an
+/// *undeclared* argument reaches here too: telling the model that `offset`
+/// "accepts a string" would imply quoting the value makes an argument exist
+/// that the tool does not have. Naming the argument by name is enough.
+fn argument_refusal(key: &str, given: v8::Local<v8::Value>) -> String {
+    format!(
+        "`{key}` was passed {}; a tool argument must be a string, or an array of strings",
+        js_type_of(given)
+    )
+}
+
+/// A rejected value named the way the model's own `typeof` would name it.
+fn js_type_of(value: v8::Local<v8::Value>) -> &'static str {
+    if value.is_array() {
+        "an array"
+    } else if value.is_function() {
+        "a function"
+    } else if value.is_number() {
+        "a number"
+    } else if value.is_boolean() {
+        "a boolean"
+    } else if value.is_object() {
+        "an object"
+    } else {
+        "a value of another type"
+    }
 }
 
 /// Builds the tool's declared result type, records the call, and tags the
@@ -848,11 +897,20 @@ fn json_to_v8<'s>(
 /// **`grep` and `glob` keep exit 1**, which is "no matches" and is an empty
 /// array rather than a failure; exit 2 and above is a bad pattern or an
 /// unreadable root and throws like everything else. **`bash` is never refused
-/// here**: its exit code is part of its declared result and the program reads
-/// it. A child killed by a signal has no exit status (`None`) and is left to
-/// the builders, which is the behaviour that was there before.
+/// for its exit code**: that code is part of its declared result and the
+/// program reads it.
+///
+/// **An absent exit code is a failure for every tool, `bash` included.** It
+/// means the child died of a signal, which is not an exit status and is not a
+/// success; the early return that used to be here made a SIGKILLed call a
+/// typed result built from partial output and recorded it `Ended::Ok`.
 fn call_failure(tool: &str, result: &ToolResult) -> Option<String> {
-    let code = result.exit_code?;
+    let Some(code) = result.exit_code else {
+        return Some(format!(
+            "`{tool}` was killed by a signal and never exited, so any output it produced is \
+             partial"
+        ));
+    };
     let tolerated = match tool {
         "bash" => return None,
         "grep" | "glob" => code <= 1,
@@ -2462,14 +2520,14 @@ fn throw_denied(scope: &mut v8::PinScope, denied: &PermissionDenied) {
     }
 }
 
-/// Refuses a write or a free that names one of the eight host functions or
-/// the runtime's own `__pane_` prefix, and answers whether it did.
+/// Refuses a write or a free that names a host function or the runtime's own
+/// `__pane_` prefix, and answers whether it did.
 ///
 /// A `ToolError` throw rather than a silent no-op: a model that lost `grep`
 /// silently would have no way to learn it, and `runtime-contract.md` §5 makes
 /// a throw the shape a refusal already has.
 fn refuse_host_name(scope: &mut v8::PinScope, name: &str, verb: &str) -> bool {
-    if HOST_FUNCTIONS.contains(&name) {
+    if is_host_function(name) {
         throw_tool_error(
             scope,
             &format!(

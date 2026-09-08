@@ -2323,6 +2323,70 @@ fn an_unparseable_supervisor_answer_is_not_a_nudge() {
     assert_eq!(cells.len(), 2, "{cells:?}");
 }
 
+/// `supervisor.md` §3: "Anything unparseable is *not intervene* and is
+/// recorded **as such**." A look that never produced an answer -- a transport
+/// error, or a reply that does not parse -- used to be recorded as the healthy
+/// `looked, no nudge`, so a supervisor whose model id or endpoint is wrong
+/// spent a metered request every `every` cells and read as working. The
+/// recorded status now names the failure; it still never nudges.
+#[test]
+fn a_failed_supervisor_look_is_recorded_as_failed_not_as_no_nudge() {
+    let root = scratch_dir("supervisor-failed-look-root");
+    write_supervisor_pane_toml(&root, 1, "");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let task_count = Mutex::new(0usize);
+    let (base_url, bodies) = start_answering_provider(3, move |body| {
+        if is_supervisor_request(body) {
+            return assistant_reply("not json at all");
+        }
+        let mut count = task_count.lock().unwrap();
+        *count += 1;
+        if *count == 1 {
+            looping_cell_reply()
+        } else {
+            ending_reply()
+        }
+    });
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-supervisor-failed-look",
+        &["keep going", "/supervisor"],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("Latest: look failed: unparseable"),
+        "a failed look must be recorded as failed, and name its cause:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Latest: looked; no nudge"),
+        "a failed look must not be recorded as a healthy look:\n{stdout}"
+    );
+
+    // The safety half of §3, unchanged: a look that produced no answer never
+    // becomes a nudge.
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3, "task turn, look, task turn: {bodies:?}");
+    assert!(is_supervisor_request(&bodies[1]), "{bodies:?}");
+    assert!(
+        !last_user_text(&bodies[2]).starts_with("supervisor:"),
+        "a failed look must never become a nudge: {}",
+        last_user_text(&bodies[2])
+    );
+}
+
 /// §3: the look's request carries `x-glasshouse-purpose: supervisor`, so the
 /// ledger can tell it apart from a task turn before the gateway reads the
 /// header itself.

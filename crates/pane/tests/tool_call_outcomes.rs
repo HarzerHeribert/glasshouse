@@ -42,3 +42,37 @@ fn typed_tool_failures_and_bash_exit_codes_have_truthful_call_outcomes() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// **A child killed by a signal did not succeed**, `bash` included.
+///
+/// A signal death is not an exit status, so `exit_code` is `None`; the
+/// failure check early-returned on that and the call was recorded `Ended::Ok`
+/// with a typed result built from whatever partial output the child had
+/// managed.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_signal_killed_child_is_not_a_successful_call() {
+    let root = std::env::temp_dir().join(format!("pane-signal-outcome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let profile = Profile::compile(&root, Some(r#"{"permissions":{"allow":["Bash"]}}"#));
+    let mut runtime = Runtime::new(
+        &profile,
+        &Glasshouse::None,
+        &SessionId::new("signal-outcome"),
+    );
+
+    let killed = runtime.run_cell(r#"try { await bash({command:"kill -9 $$"}); } catch (_) {}"#);
+    let calls = &killed.turn().record.calls;
+    assert_eq!(calls.len(), 1, "{killed:?}");
+    assert_eq!(calls[0].tool, "bash");
+    assert_eq!(
+        calls[0].ended,
+        Ended::Threw {
+            class: "ToolError".into()
+        },
+        "a signal-killed child was recorded as a successful call: {killed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

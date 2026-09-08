@@ -483,14 +483,20 @@ pub struct ContextTokens {
 }
 
 /// The supervisor's own sidebar line -- `docs/product/pane/supervisor.md` §4
-/// and §5: a nudge's own reason, a look that did not intervene (which also
-/// covers an unparseable or failed look -- both answer `not_intervene` and so
-/// render identically, correctly as "not a nudge"), or off because no model
-/// is configured or the switch is off.
+/// and §5: a nudge's own reason, a look that ran and did not intervene, a look
+/// that produced no answer at all, or off because no model is configured or
+/// the switch is off.
+///
+/// [`SupervisorStatus::LookFailed`] is its own state because §3 records an
+/// unanswered look **as such**: it answers *not intervene* like a healthy
+/// look, so folding the two together makes a supervisor that fails every
+/// request -- and spends one every `every` cells -- indistinguishable from one
+/// that is watching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorStatus {
     Nudged(String),
     LookedNoNudge,
+    LookFailed(String),
     Off,
 }
 
@@ -2006,12 +2012,13 @@ fn known_sidebar_lines(served_by: &ServedBy) -> Vec<Line<'static>> {
     lines
 }
 
-/// §4 and §5's three fixed lines, and nothing else -- the sidebar shows this
-/// one line under the task-spend line, whatever `served_by` says.
+/// §4 and §5's fixed lines, and nothing else -- the sidebar shows this one
+/// line under the task-spend line, whatever `served_by` says.
 fn supervisor_line(status: &SupervisorStatus) -> String {
     match status {
         SupervisorStatus::Nudged(reason) => format!("supervisor: {reason}"),
         SupervisorStatus::LookedNoNudge => "supervisor: looked, no nudge".to_string(),
+        SupervisorStatus::LookFailed(reason) => format!("supervisor: FAILED {reason}"),
         SupervisorStatus::Off => "supervisor: off (no model)".to_string(),
     }
 }

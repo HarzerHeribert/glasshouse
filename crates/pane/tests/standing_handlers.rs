@@ -592,3 +592,22 @@ fn later_handlers_see_the_filtered_batch_count() {
     assert_eq!(r.batch_remaining(), 0);
     assert_eq!(r.cell(), 1);
 }
+
+#[test]
+fn a_standing_handler_run_does_not_revoke_the_repair_offer() {
+    let mut r = runtime(Duration::from_secs(2));
+    register(&mut r, "{}", "globalThis.ran = (globalThis.ran ?? 0) + 1;");
+    let outcome = r.run_cell("const = ;");
+    assert!(matches!(&outcome, CellOutcome::Threw { .. }), "{outcome:?}");
+    let offered = r
+        .syntax_failure()
+        .expect("a parse failure offers a repair")
+        .cell;
+    batch(&mut r);
+    assert_eq!(r.run_handlers().len(), 1);
+    assert_eq!(
+        r.syntax_failure().map(|failure| failure.cell),
+        Some(offered),
+        "a standing handler run revoked the repair offer"
+    );
+}

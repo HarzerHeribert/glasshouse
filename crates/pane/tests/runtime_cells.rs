@@ -2160,6 +2160,38 @@ fn a_compile_time_refusal_carries_the_span_of_the_declaration() {
     assert_eq!((error.line, error.column), (Some(3), Some(2)), "{error:?}");
 }
 
+/// **Every registered tool's name is protected, not a hand-copied four of
+/// them.** `write`, `context` and `edit` were missing from the guard's list,
+/// so `const write = 1;` compiled, the whole cell ran, and the model was told
+/// afterwards that its `globalThis` was frozen — the wrong cause, a turn late.
+#[test]
+fn a_binding_may_not_take_any_registered_tools_name() {
+    let fixture = Fixture::new("shadow-registry");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("shadow-registry");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // The marker is declared *first*, so a cell that ran before being refused
+    // leaves it live and a cell refused at compile time cannot.
+    let outcome = runtime.run_cell("const marker = 2;\nconst write = 1;\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "ShadowsHostFunction", "{error:?}");
+    assert_eq!((error.line, error.column), (Some(2), Some(0)), "{error:?}");
+    assert!(
+        !runtime.is_live("marker"),
+        "the cell ran before it was refused"
+    );
+
+    for name in pane::tools::registry::names() {
+        let refused = runtime.run_cell(&format!("const {name} = 1;\n"));
+        assert_eq!(
+            threw(&refused).class,
+            "ShadowsHostFunction",
+            "`{name}` may be shadowed: {refused:?}"
+        );
+    }
+}
+
 /// `runtime-contract.md` §9.1: a failed call cannot itself become an answer.
 ///
 /// Every builder in `bindings.rs` reads the child's `stdout` and none of them

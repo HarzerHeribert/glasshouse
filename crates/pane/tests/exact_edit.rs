@@ -46,8 +46,16 @@ fn stale_missing_ambiguous_and_noop_edits_do_not_write() {
     let path = root.join("file.txt");
     std::fs::write(&path, "same same\n").unwrap();
     let profile = Profile::compile(&root, None);
+    // The stale case matches the whole file exactly once, so the version check
+    // is the only thing that can refuse it: without it the edit would land.
+    let stale = exact_edit::apply(&profile, &path, &hash("old"), "same same\n", "new").unwrap_err();
+    assert_eq!(stale.kind, "stale_hash");
+    assert_eq!(
+        stale.message,
+        "The source version changed; refresh context before editing."
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "same same\n");
     for result in [
-        exact_edit::apply(&profile, &path, &hash("old"), "same", "new"),
         exact_edit::apply(&profile, &path, &hash("same same\n"), "missing", "new"),
         exact_edit::apply(&profile, &path, &hash("same same\n"), "same", "new"),
         exact_edit::apply(&profile, &path, &hash("same same\n"), "same", "same"),

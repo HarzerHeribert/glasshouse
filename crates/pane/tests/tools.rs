@@ -17,6 +17,8 @@
 
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
+use pane::runtime::isolate::Runtime;
+use pane::runtime::outcome::CellOutcome;
 // `Access` is only asked for by the resolved-path test, which needs a real
 // applier; gating the test without gating its import is a build failure
 // under `warnings = "deny"`.
@@ -1567,4 +1569,43 @@ fn a_confined_child_cannot_read_the_sessions_provider_key() {
         "an ordinary variable was withheld too, which breaks every build:\n{out}"
     );
     assert!(out.contains("PATH="), "PATH did not survive:\n{out}");
+}
+
+/// **An argument that is neither a string nor an array of strings is
+/// refused, and nothing is written.**
+///
+/// Every non-array value was stringified lossily, so a handle passed as
+/// `content` put the nine characters `[object Object]` into a real file —
+/// silent corruption, with no error and no diagnostic anywhere.
+#[test]
+fn an_object_passed_as_content_is_refused_and_writes_no_file() {
+    let fixture = Fixture::new("object-content");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#),
+    );
+    let mut runtime = Runtime::new(
+        &profile,
+        &Glasshouse::None,
+        &SessionId::new("object-content"),
+    );
+
+    let target = fixture.root.join("report.txt");
+    let source = format!(
+        "const handle = {{ path: \"a.txt\", bytes: 3 }};\nawait write({{path: {target:?}, \
+         content: handle}});\n"
+    );
+    let outcome = runtime.run_cell(&source);
+    match &outcome {
+        CellOutcome::Threw { error, .. } => {
+            assert_eq!(error.class, "ToolError", "{outcome:?}");
+            assert!(error.message.contains("content"), "{outcome:?}");
+        }
+        other => panic!("expected a throw, got {other:?}"),
+    }
+    assert!(
+        !target.exists(),
+        "a stringified object was written to {}",
+        target.display()
+    );
 }

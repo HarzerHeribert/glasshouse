@@ -27,17 +27,27 @@ const LOOK_MAX_TOKENS: u32 = 200;
 const PURPOSE_HEADER: (&str, &str) = ("x-glasshouse-purpose", "supervisor");
 
 /// One decision from one look: intervene, or not, and why.
+///
+/// `ok` separates the two answers that are both *not intervene*: a look that
+/// ran and said no (`true`), and a look that produced no answer at all
+/// (`false`). §3 records the second **as such**, so a permanently broken
+/// supervisor cannot read as a healthy one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub intervene: bool,
     pub reason: String,
+    pub ok: bool,
 }
 
 impl Decision {
+    /// The failed look: no answer arrived, so `ok` is false -- and it never
+    /// intervenes, because a supervisor that could not be asked has said
+    /// nothing. Both call sites are failure paths.
     fn not_intervene(reason: impl Into<String>) -> Self {
         Self {
             intervene: false,
             reason: reason.into(),
+            ok: false,
         }
     }
 }
@@ -93,6 +103,7 @@ fn parse_decision(message: &Message) -> Decision {
         Ok(raw) => Decision {
             intervene: raw.intervene,
             reason: raw.reason,
+            ok: true,
         },
         Err(_) => Decision::not_intervene("unparseable"),
     }
@@ -187,7 +198,8 @@ mod tests {
             parse_decision(&message),
             Decision {
                 intervene: true,
-                reason: "looping".to_string()
+                reason: "looping".to_string(),
+                ok: true
             }
         );
     }
