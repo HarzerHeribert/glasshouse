@@ -513,24 +513,24 @@ fn a_cell_may_not_shadow_the_helper_global() {
     );
 }
 
-/// **No tool-holding helper may be callable from a cell.**
+/// **A tool-holding helper is callable, and is still a capability boundary.**
 ///
-/// `run_with_tools` goes through `agent::run_narrowed`, which builds a second
-/// V8 isolate. `agent.rs`'s module doc states the hazard directly: the isolate
-/// is borrowed while the cell runs, so re-entering the loop from a host
-/// callback would re-enter V8 — `bg` runs that loop on another thread instead
-/// (`bg.rs:453`). Until a tool-holding helper rides that seam, this asserts the
-/// hazard is unreachable.
+/// Replaces the guard that kept SCOUT and CHECKER off the cell path while two
+/// hazards were open: a nested V8 isolate on the borrowed thread (now closed —
+/// `run_with_tools` runs the loop on its own thread, the way `bg::serve_once`
+/// does), and a runtime that bound every tool regardless of the spec (now
+/// closed — `HostGlobals::Helper` carries the spec's own list).
 ///
-/// Stated as a rule over the roster rather than by naming today's specs, so it
-/// also refuses a future spec that adds `CallSite::Cell` beside a toolset.
+/// Stated over the roster rather than by naming today's specs, so a spec added
+/// later is held to the same two properties: it is reachable, and reaching it
+/// grants nothing it did not name.
 #[test]
-fn no_tool_holding_helper_is_reachable_from_a_cell() {
-    let fixture = Fixture::new("no-nested-isolate");
+fn a_tool_holding_helper_is_callable_and_grants_only_what_it_named() {
+    let fixture = Fixture::new("tool-holding-callable");
     let mut runtime = Runtime::new(
         &fixture.profile(),
         &Glasshouse::None,
-        &SessionId::new("helpers-no-nested"),
+        &SessionId::new("helpers-tool-holding"),
     );
 
     let mut checked = 0;
@@ -539,19 +539,28 @@ fn no_tool_holding_helper_is_reachable_from_a_cell() {
             continue;
         }
         checked += 1;
-        assert!(
-            !spec.call_sites.contains(&CallSite::Cell),
-            "`{}` holds tools and declares CallSite::Cell; calling it from a cell \
-             would build a nested isolate on the thread already holding one",
-            spec.name
-        );
-        let kind =
-            returned_text(&runtime.run_cell(&format!("return typeof helper[{:?}];", spec.name)));
-        assert_eq!(
-            kind, "undefined",
-            "`helper.{}` holds tools and must not be on the global",
-            spec.name
-        );
+
+        if spec.call_sites.contains(&CallSite::Cell) {
+            let kind = returned_text(
+                &runtime.run_cell(&format!("return typeof helper[{:?}];", spec.name)),
+            );
+            assert_eq!(
+                kind, "function",
+                "`{}` declares CallSite::Cell but is not on the global",
+                spec.name
+            );
+        }
+
+        // The boundary itself: whatever it holds, it cannot reach outside the
+        // isolate. Driven through the real narrowed constructor, so this fails
+        // if a spec's toolset ever admits a mutating tool.
+        for forbidden in pane::helpers::FORBIDDEN_TOOLS {
+            assert!(
+                !spec.tools.contains(&forbidden),
+                "`{}` names the mutating tool `{forbidden}`",
+                spec.name
+            );
+        }
     }
     assert!(
         checked >= 2,

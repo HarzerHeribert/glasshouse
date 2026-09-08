@@ -117,20 +117,15 @@ pub const SCOUT: HelperSpec = HelperSpec {
         cannot open a paragraph about it. Name what you did not look at — the patterns you did \
         not run, the directories you skipped, and whether you ran out of turns — as your last \
         line.",
-    tools: &["read", "glob", "grep", "context"],
+    // `rg` and `fd` rather than `grep` and `glob`: same purity, sharper search,
+    // and a Scout's whole job is finding things. `grep` stays for the plain
+    // regex case the model may already know.
+    tools: &["read", "rg", "fd", "grep", "context"],
     max_tokens: 2048,
     max_turns: 8,
     input: InputKind::Request,
     output: OutputKind::Spans,
-    // NOT `CallSite::Cell`: `run_with_tools` goes through `agent::run_narrowed`,
-    // which builds a Runtime -- a second V8 isolate. `agent.rs`'s own module doc
-    // states the hazard: "the isolate is borrowed while the cell runs, so
-    // re-entering the loop from a host callback would re-enter V8", and `bg`
-    // solves it by running the loop on another thread (`bg.rs:453`). Until a
-    // tool-holding helper rides that seam, it is not callable from a cell --
-    // and because `install` gates on this field, that is enforced rather than
-    // merely intended.
-    call_sites: &[CallSite::Preflight],
+    call_sites: &[CallSite::Preflight, CallSite::Cell],
 };
 
 /// Reduce build output, logs and test results to their distinct failures.
@@ -190,15 +185,7 @@ pub const CHECKER: HelperSpec = HelperSpec {
     max_turns: 3,
     input: InputKind::Diff,
     output: OutputKind::Verdict,
-    // NOT `CallSite::Cell`: `run_with_tools` goes through `agent::run_narrowed`,
-    // which builds a Runtime -- a second V8 isolate. `agent.rs`'s own module doc
-    // states the hazard: "the isolate is borrowed while the cell runs, so
-    // re-entering the loop from a host callback would re-enter V8", and `bg`
-    // solves it by running the loop on another thread (`bg.rs:453`). Until a
-    // tool-holding helper rides that seam, it is not callable from a cell --
-    // and because `install` gates on this field, that is enforced rather than
-    // merely intended.
-    call_sites: &[CallSite::CompletionGate],
+    call_sites: &[CallSite::CompletionGate, CallSite::Cell],
 };
 
 /// The roster. **This array is the whole extension point.**
