@@ -2127,6 +2127,7 @@ fn helper_callback(
         asked: asked.clone(),
         outcome: call.outcome,
         turns: call.turns,
+        looked: call.looked,
     });
     // The trajectory says a helper ran and how big the question was, never
     // the payload: §9.4 explains the cell, and a build log is not an

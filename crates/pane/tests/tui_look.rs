@@ -1217,6 +1217,7 @@ fn helper_record(gave: &str, ok: bool, elapsed_ms: u64) -> HelperRecord {
             elapsed_ms,
         },
         turns: 1,
+        looked: Vec::new(),
     }
 }
 

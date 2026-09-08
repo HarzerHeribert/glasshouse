@@ -130,6 +130,29 @@ fn helpers_block(view: &CellView) -> Option<String> {
             if record.turns == 1 { "" } else { "s" },
         ));
         push_labelled(&mut block, "asked", &record.asked);
+        // `looked` is what earns this section: a helper reports numbers it
+        // says it computed, and this is the only place that claim can be
+        // checked. Counted rather than listed, so a long trajectory stays one
+        // line -- the shape §9.4 already uses.
+        if !record.looked.is_empty() {
+            let mut counts: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for tool in &record.looked {
+                *counts.entry(tool.as_str()).or_default() += 1;
+            }
+            let summary = counts
+                .iter()
+                .map(|(tool, n)| {
+                    if *n == 1 {
+                        (*tool).to_string()
+                    } else {
+                        format!("{tool} x{n}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            push_labelled(&mut block, "looked", &summary);
+        }
         let (label, text) = if record.outcome.ok {
             ("gave", record.outcome.text.as_str())
         } else if record.outcome.text.is_empty() {

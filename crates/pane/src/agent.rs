@@ -50,6 +50,13 @@ pub struct AgentResult {
     pub turns: u64,
     /// Provider-reported tokens, summed over the turns that reported any.
     pub tokens: u64,
+    /// What the loop actually did, one entry per tool call in order.
+    ///
+    /// A helper reports numbers it claims to have computed. Without this the
+    /// claim is unfalsifiable: the caller sees an answer and no trace of the
+    /// work. Tool names only -- never an argument, never a payload, so this
+    /// stays the same shape §9.4's trajectory already is.
+    pub trajectory: Vec<String>,
 }
 
 /// How a subagent is asked for.
@@ -149,17 +156,18 @@ pub fn run_narrowed(
         runtime = runtime.with_helpers(helpers);
     }
     let mut tokens = 0u64;
+    let mut trajectory: Vec<String> = Vec::new();
     let turns_allowed = options.turns.clamp(1, MAX_TURNS);
 
     for turn in 1..=turns_allowed {
         if token.is_cancelled() {
-            return finish("", "cancelled", turn - 1, tokens);
+            return finish("", "cancelled", turn - 1, tokens, trajectory);
         }
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
         let sent = match wire::send_turn_configured(&request, &options.model, options.effort) {
             Ok(sent) => sent,
-            Err(error) => return finish(&error.to_string(), "failed", turn, tokens),
+            Err(error) => return finish(&error.to_string(), "failed", turn, tokens, trajectory),
         };
         if let Some(usage) = &sent.usage {
             tokens = tokens.saturating_add(usage.total_tokens());
@@ -177,7 +185,13 @@ pub fn run_narrowed(
             })
             .collect();
         if text.trim().is_empty() && calls.is_empty() {
-            return finish("the model returned an empty reply", "failed", turn, tokens);
+            return finish(
+                "the model returned an empty reply",
+                "failed",
+                turn,
+                tokens,
+                trajectory,
+            );
         }
         conversation.messages.push(sent.message);
 
@@ -247,7 +261,7 @@ pub fn run_narrowed(
                 Extracted::Prose => {
                     if let Some(answer) = prompt::completion_text(&text) {
                         runtime.end_task();
-                        return finish(&answer, "returned", turn, tokens);
+                        return finish(&answer, "returned", turn, tokens, trajectory);
                     }
                     conversation
                         .messages
@@ -270,6 +284,15 @@ pub fn run_narrowed(
         };
 
         let outcome = runtime.run_cell(&program);
+        // What this turn actually reached for, in order. Tool names only.
+        trajectory.extend(
+            outcome
+                .turn()
+                .record
+                .calls
+                .iter()
+                .map(|call| call.tool.clone()),
+        );
         let instruction_boundary = runtime.pending_instructions();
         if let Some(pending) = &instruction_boundary {
             conversation.system.push_str("\n\n");
@@ -291,7 +314,7 @@ pub fn run_narrowed(
                     .push(Message::tool_result(id.clone(), feedback, false));
             }
             runtime.end_task();
-            return finish(&answer, "returned", turn, tokens);
+            return finish(&answer, "returned", turn, tokens, trajectory);
         }
         let result = result_message(&outcome, turn);
         let mut full = prompt::render_result(&result);
@@ -318,7 +341,7 @@ pub fn run_narrowed(
         if let Some(pending) = instruction_boundary {
             if pending.fatal {
                 runtime.end_task();
-                return finish(&pending.text, "failed", turn, tokens);
+                return finish(&pending.text, "failed", turn, tokens, trajectory);
             }
             runtime.acknowledge_instructions();
         }
@@ -330,6 +353,7 @@ pub fn run_narrowed(
         "turns",
         turns_allowed,
         tokens,
+        trajectory,
     )
 }
 
@@ -349,12 +373,19 @@ fn toolset(narrowed: Option<&Narrowed>) -> Vec<&'static registry::Tool> {
     }
 }
 
-fn finish(answer: &str, status: &str, turns: u64, tokens: u64) -> AgentResult {
+fn finish(
+    answer: &str,
+    status: &str,
+    turns: u64,
+    tokens: u64,
+    trajectory: Vec<String>,
+) -> AgentResult {
     AgentResult {
         answer: answer.to_string(),
         status: status.to_string(),
         turns,
         tokens,
+        trajectory,
     }
 }
 

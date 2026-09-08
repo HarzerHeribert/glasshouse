@@ -393,6 +393,7 @@ impl RuntimeState {
         let call = HelperCall {
             outcome: record.outcome.clone(),
             turns: record.turns,
+            looked: record.looked.clone(),
         };
         let slot = self.begin_helper(HelperRecord {
             outcome: HelperOutcome::default(),
@@ -657,6 +658,7 @@ mod tests {
                     elapsed_ms: 1_100,
                 },
                 turns: 1,
+                looked: Vec::new(),
             },
         );
         install_helper_progress(previous);
@@ -692,6 +694,7 @@ mod tests {
                     elapsed_ms: 40,
                 },
                 turns: 1,
+                looked: Vec::new(),
             },
         );
         install_helper_progress(previous);

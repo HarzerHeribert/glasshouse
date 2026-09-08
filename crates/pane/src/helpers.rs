@@ -103,7 +103,11 @@ pub const SCOUT: HelperSpec = HelperSpec {
     name: "find",
     summary: "Find where something lives in this project and answer with file:line spans, never a diagnosis.",
     verb: "scanning",
-    preamble: "You find where something lives in this project. You can read, glob, grep and \
+    preamble: "Never state a number you did not compute. You have a runtime: count and total in a \
+        cell and report what it returned. A computed number is evidence; an estimated one \
+        is a conclusion, and conclusions are not yours to draw.\n\
+        \n\
+        You find where something lives in this project. You can read, glob, grep and \
         fetch context, and you can change nothing.\n\
         \n\
         Answer with spans only. For each: the path and the line as `path/to/file.rs:120`, a line \
@@ -167,7 +171,11 @@ pub const CHECKER: HelperSpec = HelperSpec {
     name: "check",
     summary: "Check a claim against a diff and answer with a verdict plus the file:line evidence for it.",
     verb: "checking",
-    preamble: "You check whether a claim holds for a diff you are given. You can read and grep, \
+    preamble: "Never state a number you did not compute. You have a runtime: count and total in a \
+        cell and report what it returned. A computed number is evidence; an estimated one \
+        is a conclusion, and conclusions are not yours to draw.\n\
+        \n\
+        You check whether a claim holds for a diff you are given. You can read and grep, \
         and you can change nothing.\n\
         \n\
         Open with the verdict alone on the first line: `holds`, `does not hold`, or `cannot \
@@ -311,6 +319,13 @@ pub struct HelperRecord {
     pub outcome: HelperOutcome,
     /// Turns actually taken; `1` for a one-shot helper.
     pub turns: u32,
+    /// What the helper actually reached for, tool names in order.
+    ///
+    /// A helper reports numbers it says it computed. Without this the claim
+    /// cannot be checked: the caller sees an answer and no trace of the work.
+    /// Empty for a toolless helper, which reaches for nothing by construction.
+    #[serde(default)]
+    pub looked: Vec<String>,
 }
 
 impl HelperRecord {
@@ -335,6 +350,8 @@ impl HelperRecord {
 pub struct HelperCall {
     pub outcome: HelperOutcome,
     pub turns: u32,
+    /// Tool names the loop reached for, in order; empty for `run_once`.
+    pub looked: Vec<String>,
 }
 
 /// Run any helper in the roster: the one entry point a caller uses.
@@ -355,6 +372,7 @@ pub fn run(
         HelperCall {
             outcome: run_once(spec, model, input),
             turns: 1,
+            looked: Vec::new(),
         }
     } else {
         run_with_tools(spec, model, input, profile, glasshouse, session)
@@ -459,6 +477,7 @@ pub fn run_with_tools(
                     started,
                 ),
                 turns: 0,
+                looked: Vec::new(),
             };
         }
     };
@@ -489,6 +508,7 @@ pub fn run_with_tools(
     HelperCall {
         outcome,
         turns: u32::try_from(result.turns).unwrap_or(u32::MAX),
+        looked: result.trajectory,
     }
 }
 

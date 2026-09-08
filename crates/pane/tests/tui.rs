@@ -930,6 +930,7 @@ fn resolved_helper(asked: &str, gave: &str, elapsed_ms: u64) -> HelperRecord {
             elapsed_ms,
         },
         turns: 1,
+        looked: Vec::new(),
     }
 }
 
