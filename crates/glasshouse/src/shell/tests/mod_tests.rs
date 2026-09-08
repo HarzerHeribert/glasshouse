@@ -795,6 +795,48 @@ mod settings_persistence_tests {
     /// makes the tests above fast is also a parameter someone could quietly
     /// widen at the one call site that matters, and that call site is not
     /// otherwise reachable from a test without a real terminal.
+    /// A key's handler may never `continue` past the end of its own arm.
+    ///
+    /// The redraw and `sync_focus` sit at the BOTTOM of `Event::Key`, so a
+    /// `continue` above them leaves the state changed and the screen on its
+    /// last frame. That is not a missed frame: `advance_artwork` returns false
+    /// while an overlay is open, so no later tick repaints it either, and the
+    /// shell is frozen until some key happens to redraw.
+    ///
+    /// Shipped 2026-09-08 as a shell that froze on `n` — the harness picker
+    /// opened invisibly, and Enter then chose the first harness with nothing
+    /// on screen having asked. Found by measuring the terminal, not by a test.
+    #[test]
+    fn no_key_handler_skips_the_redraw_at_the_end_of_its_arm() {
+        let source = include_str!("../mod.rs").replace("\r\n", "\n");
+        let start = source
+            .find("Event::Key(key) => {")
+            .expect("the run loop still has an Event::Key arm");
+        let end = source[start..]
+            .find("Event::Resize(")
+            .expect("Event::Resize still follows Event::Key")
+            + start;
+        let arm = &source[start..end];
+        assert!(
+            arm.contains("screen.draw("),
+            "the Event::Key arm must still end in a redraw, or this scan watches nothing"
+        );
+        let offenders: Vec<usize> = arm
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let code = line.split("//").next().unwrap_or("").trim();
+                code == "continue;"
+            })
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "`continue` in the Event::Key arm skips the redraw at its end and freezes the \
+             shell; use `if let`/`else` instead. Offending line(s) within the arm: {offenders:?}"
+        );
+    }
+
     #[test]
     fn the_run_loop_probes_with_the_default_timeouts() {
         assert!(

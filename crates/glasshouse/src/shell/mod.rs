@@ -14,6 +14,8 @@
 //! and emulator the viewport's own size, not the terminal's outer one — see
 //! [`view::viewport_slot`].
 
+mod start;
+use start::start_session;
 mod appearance;
 pub mod state;
 pub mod view;
@@ -34,8 +36,8 @@ use crate::pty::TerminalSize;
 use crate::secret;
 use crate::secret::SecretStore as _;
 use crate::session::{
-    self, NewSession, ProjectSessions, RuntimeError, SessionId, SessionLifecycle,
-    SessionPresentation, SessionRuntime,
+    self, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionPresentation,
+    SessionRuntime,
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
@@ -123,37 +125,43 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     Action::StartSession
                     | Action::StartHeadlessSession
                     | Action::StartSessionWith { .. } => {
-                        let Some((presentation, harness)) = action.start_request() else {
-                            continue;
-                        };
-                        match start_session(
-                            runtime,
-                            &mut live,
-                            &sessions,
-                            presentation,
-                            harness,
-                            view::terminal_size_for(&screen, &state),
-                            &mut index_snapshots,
-                        ) {
-                            Ok(()) => {
-                                if let Ok(records) = sessions.store().list() {
-                                    state.refresh(records);
+                        // NEVER `continue` here: the redraw is at the END of
+                        // this arm, and an open overlay stops `advance_artwork`
+                        // too, so nothing repaints. Shipped once as a freeze.
+                        if let Some((presentation, harness)) = action.start_request() {
+                            match start_session(
+                                runtime,
+                                &mut live,
+                                &sessions,
+                                presentation,
+                                harness,
+                                view::terminal_size_for(&screen, &state),
+                                &mut index_snapshots,
+                            ) {
+                                Ok(()) => {
+                                    if let Ok(records) = sessions.store().list() {
+                                        state.refresh(records);
+                                    }
+                                    if presentation == SessionPresentation::Headless {
+                                        // No viewport, so `N` would look like a
+                                        // no-op — `render_viewport`'s placeholder
+                                        // says so on every frame.
+                                        state.set_status(
+                                            "started a headless session — `o` lists it",
+                                        );
+                                    }
                                 }
-                                if presentation == SessionPresentation::Headless {
-                                    // No viewport, so `N` would look like a
-                                    // no-op — `render_viewport`'s placeholder
-                                    // says so on every frame.
-                                    state.set_status("started a headless session — `o` lists it");
+                                // Refusing to guess is right; sending the user away to answer is not.
+                                Err(err) => {
+                                    if let Some(ids) = session::select::ambiguous_harnesses(&err) {
+                                        state.open_harness_choice(ids.to_vec(), presentation);
+                                    } else {
+                                        tracing::warn!(error = %err, "could not start a session");
+                                        state.set_status(format!(
+                                            "could not start a session: {err:#}"
+                                        ));
+                                    }
                                 }
-                            }
-                            // Refusing to guess is right; sending the user away to answer is not.
-                            Err(err) => {
-                                if let Some(ids) = session::select::ambiguous_harnesses(&err) {
-                                    state.open_harness_choice(ids.to_vec(), presentation);
-                                    continue;
-                                }
-                                tracing::warn!(error = %err, "could not start a session");
-                                state.set_status(format!("could not start a session: {err:#}"));
                             }
                         }
                     }
@@ -863,177 +871,6 @@ fn build_viewport_grid(screen: &vt100::Screen) -> ViewportGrid {
     // in for it.
     let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
     ViewportGrid::new(rows, cols, cells, cursor)
-}
-
-/// Resolve a harness, record a new session, and start it — the same
-/// selection seam `main.rs: launch_session` uses, minus attaching to this
-/// process's own terminal: the shell gives the session the viewport once its
-/// output arrives instead. `presentation` is the only difference between `n`
-/// and `N` — everything else is shared, so a headless session is an ordinary
-/// one not shown. `size` is the viewport's own inner size at the moment `n`
-/// was pressed, not the terminal's outer size — see `view::viewport_slot`
-/// and `HarnessLaunch::size`: a harness TUI lays itself out from the size it
-/// sees at startup, so the wrong geometry draws its first frame short.
-fn start_session(
-    app_runtime: &Runtime,
-    live: &mut SessionRuntime,
-    sessions: &ProjectSessions,
-    presentation: SessionPresentation,
-    harness: Option<IntegrationId>,
-    size: TerminalSize,
-    index_snapshots: &mut HashMap<SessionId, session::native_id::IndexSnapshot>,
-) -> anyhow::Result<()> {
-    let user = UserConfig::load(app_runtime.paths())?;
-    let project_config = config::load_project_config(app_runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
-    let selection = session::select::select(harness.map(IntegrationId::slug), effective)?;
-
-    let store = sessions.store();
-    let native = selection
-        .assigns_native_session_id()
-        .then(|| store.new_native_session_id())
-        .transpose()?;
-
-    // Phase 9A line 368. The shell's quick-open resolves no launch profile or
-    // response request of its own, so both take the implied defaults: the
-    // `Native` profile and the `Interactive` role — the same kind of answer
-    // `glasshouse launch <harness>` records unadorned, not `-` for every
-    // column `main.rs::launch_session` fills in.
-    let launch_profile = crate::profile::LaunchProfile::native(selection.id());
-    let pairing = {
-        use crate::harness::Declared;
-        use crate::harness::pairing::{PairingQuery, ServingRoute, classify};
-        use crate::routing::AssignedModel;
-
-        // The same fallback `main.rs::session_pairing` builds for `Native`:
-        // `pairing_queries` never lists it, so a lookup here would always
-        // miss anyway.
-        let query = PairingQuery {
-            harness: launch_profile.harness,
-            model: AssignedModel::HarnessDefault,
-            route: ServingRoute {
-                provider: None,
-                gateway: None,
-                protocol: None,
-            },
-            tool_calls: Declared::Unverified,
-            provider_protocols: Vec::new(),
-        };
-        classify(&query, &effective.pairing_overrides())
-    };
-    let response_profile =
-        effective.response_profile(&config::response::ResponseRequest::default());
-    for problem in response_profile.problems() {
-        // `eprintln!` would corrupt the alternate-screen viewport this
-        // process owns — the diagnostic channel every shell warning uses.
-        tracing::warn!(problem, "could not read part of the response profile");
-    }
-    let response_application =
-        crate::harness::response::apply(selection.adapter(), response_profile.resolved());
-
-    // Recorded before the process exists and is the single source of truth:
-    // `live.start` below gets `record.presentation`, so it cannot disagree.
-    let record = store.create(
-        NewSession::embedded(selection.id().slug())
-            .with_presentation(presentation)
-            .with_native_session_id(native.clone())
-            .with_launch_profile(Some(launch_profile.name.clone()))
-            .with_backend_resource(Some(launch_profile.backend.slug()))
-            .with_model(Some(pairing.model().clone()))
-            .with_pairing_class(Some(session::session_pairing_class(pairing.class())))
-            .with_protocol(Some(session::session_protocol(pairing.route().protocol)))
-            .with_response_profile(Some(response_profile.resolved().profile()))
-            .with_response_mechanism(Some(session::session_response_mechanism(
-                response_application.mechanism(),
-            ))),
-    )?;
-
-    // Before the harness runs — see `index_snapshots` in `run`.
-    index_snapshots.insert(
-        record.id.clone(),
-        session::native_id::snapshot(&record.harness, app_runtime.project().root()),
-    );
-
-    tracing::info!(
-        session = %record.id,
-        harness = selection.id().slug(),
-        executable = %selection.executable().path().display(),
-        source = %selection.source(),
-        "starting a session from the shell"
-    );
-
-    // No user arguments here: the shell's `n` opens a session, and anything
-    // extra would be a Glasshouse invention rather than something asked for.
-    let mut args = selection.start_args(native.as_deref(), Vec::<String>::new());
-    // Best effort: a session that reports nothing is still a session, and is
-    // a far smaller loss than refusing to start one the user asked for.
-    let project_hooks_consent = effective.project_hooks(selection.id()).value;
-    // `install_session_document` rather than `install_hooks`: hooks and the
-    // response profile now share one document, exactly as
-    // `main.rs::launch_session`'s already does.
-    let document_args = std::env::current_exe()
-        .map_err(anyhow::Error::from)
-        .and_then(|program| {
-            let report = crate::harness::HookCommand::new(
-                program,
-                record.id.as_str(),
-                app_runtime.session_dir(record.id.as_str()),
-                app_runtime.project().root(),
-                app_runtime.paths().data_dir(),
-                app_runtime.paths().config_dir(),
-            );
-            selection.install_session_document(
-                &report,
-                project_hooks_consent,
-                &response_application,
-            )
-        });
-    match document_args {
-        Ok(document) => {
-            args.splice(0..0, document.args);
-        }
-        Err(err) => {
-            tracing::warn!(session = %record.id, error = %err, "could not install lifecycle hooks");
-        }
-    }
-    let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
-        .args(args)
-        .size(size)
-        .without_provider_credentials(&effective);
-    // Map lines 1973 and 488: the scrubs `launch_session` applies — the child
-    // inherits neither another entitlement's credential variable from this
-    // process's environment nor any configured provider's.
-    let entitlement =
-        match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
-            Ok(entitlement) => entitlement,
-            Err(err) => {
-                tracing::warn!(
-                    session = %record.id,
-                    error = %err,
-                    "could not resolve the serving entitlement for the credential scrub"
-                );
-                None
-            }
-        };
-    for var in effective.foreign_entitlement_credential_vars(entitlement.as_ref().map(|e| e.name()))
-    {
-        launch = launch.env_remove(var);
-    }
-    let launch = launch;
-    if let Err(err) = live.start(record.id.clone(), record.presentation, &launch) {
-        // Never polled for its exit, so its snapshot has nothing to pair with.
-        index_snapshots.remove(&record.id);
-        if let Err(store_err) = store.set_lifecycle(&record.id, SessionLifecycle::Failed) {
-            tracing::warn!(
-                session = %record.id,
-                error = %store_err,
-                "could not record a failed session start"
-            );
-        }
-        return Err(err);
-    }
-
-    Ok(())
 }
 
 /// Reopen a recorded session, embedded in this shell — Phase 11 line 688,

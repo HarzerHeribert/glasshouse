@@ -355,11 +355,14 @@ mod tests {
         let writers = [
             ("main.rs", main_and_commands.as_str()),
             ("shell/mod.rs", include_str!("../shell/mod.rs")),
+            ("shell/start.rs", include_str!("../shell/start.rs")),
             ("session/runtime.rs", include_str!("runtime.rs")),
             ("session/attach.rs", include_str!("attach.rs")),
             ("session/select/mod.rs", include_str!("select/mod.rs")),
         ];
-        let allowed = ["main.rs", "shell/mod.rs"];
+        // `shell/start.rs` is the shell path, not a new one: `start_session`
+        // moved there from `shell/mod.rs` on 2026-09-08 unchanged.
+        let allowed = ["main.rs", "shell/mod.rs", "shell/start.rs"];
         for (name, source) in writers {
             let code = production_code(source);
             let writes = code.contains("set_lifecycle(");

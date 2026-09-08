@@ -671,6 +671,10 @@ mod tests {
             ("commands/launch.rs", include_str!("commands/launch.rs")),
             ("commands/resume.rs", include_str!("commands/resume.rs")),
             ("shell/mod.rs", include_str!("shell/mod.rs")),
+            // `start_session` moved out of shell/mod.rs on 2026-09-08; the
+            // site it carries is one of the five below and is scanned here,
+            // not in the file it used to live in.
+            ("shell/start.rs", include_str!("shell/start.rs")),
             ("api/unix/sessions.rs", include_str!("api/unix/sessions.rs")),
         ];
         const WINDOW: usize = 20;

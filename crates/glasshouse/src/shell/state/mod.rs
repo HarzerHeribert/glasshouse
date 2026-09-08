@@ -605,6 +605,8 @@ impl Action {
     /// It lives here rather than in the run loop because `shell/mod.rs` is a
     /// `mod.rs` — dispatch and composition — and this is a property of the
     /// action itself. `None` for every action that starts nothing.
+    /// A caller that already matched a start action can unwrap this to
+    /// `Embedded` — the branch it would otherwise write is unreachable.
     pub fn start_request(&self) -> Option<(SessionPresentation, Option<IntegrationId>)> {
         match self {
             Action::StartSession => Some((SessionPresentation::Embedded, None)),
