@@ -300,51 +300,79 @@ const RESIZE_TO_KEYSTROKE: [Duration; 2] = [Duration::from_millis(4), Duration::
 /// coming anywhere close.
 const MAX_STALLS: [usize; 2] = [3, 3];
 
-/// How many resize-then-type trials `a_resize_does_not_swallow_the_keystroke_
-/// that_follows_it` runs.
+/// How many *judged* resize-then-type trials `a_resize_does_not_swallow_the_
+/// keystroke_that_follows_it` wants, split evenly between
+/// [`RESIZE_TO_KEYSTROKE`]'s two gaps.
 ///
 /// **The number is the proof, not the loop.** The defect is a race and a
 /// single trial cannot tell "fixed" from "fixed most of the time" (practice
 /// §60). It fired in 27 of 60 trials on the unfixed tree at the first of
-/// [`RESIZE_TO_KEYSTROKE`]'s gaps, so the eight trials that use that gap catch
-/// a reverted fix about **94%** of the time on their own — `1 - 0.55^8 -
-/// 8 * 0.45 * 0.55^7` — before the eight at the shorter gap add anything, and
-/// the gate runs the suite four times. Even, so each gap gets half.
+/// [`RESIZE_TO_KEYSTROKE`]'s gaps, so `p = 0.45` and the eight trials that use
+/// that gap catch a reverted fix `1 - P(X <= 3 | n = 8, p = 0.45)` of the
+/// time: **52%**, and 95% over the four runs a gate makes.
 ///
-/// The by-hand rate, too many trials to afford here, is in this file's own
-/// documentation above.
+/// **That figure read 94% here until this edit, and it was the rate for a
+/// tolerance of one.** `1 - 0.55^8 - 8 * 0.45 * 0.55^7` subtracts two terms
+/// and so answers `P(X >= 2)`; [`MAX_STALLS`] has been three since `982a6f2`,
+/// which needs four. Raising 52% means judging more trials or tolerating
+/// fewer stalls, and both are decisions with comments of their own — not a
+/// restatement of this one.
+///
+/// **52% is the floor, and the measured rate is better than that.** With
+/// `EventSource::next`'s look-again-after-a-signal reverted, this test went
+/// red in **8 runs of 8** here, 45 of its 64 judged 4ms trials swallowed:
+/// `p = 0.70`, which is `1 - P(X <= 3 | n = 8, p = 0.70)` = **94%** per run.
+/// The two figures differ because 0.45 was recorded against a gap built with
+/// `std::thread::sleep`, and on macOS that gap was really six milliseconds —
+/// see [`GAP_OVERRUN_ALLOWANCE`]. Quote 52% when the question is what this
+/// test guarantees, and 94% when it is what it did.
+///
+/// It is a want, not a count: a trial that did not get the gap it asked for is
+/// not judged ([`GAP_OVERRUN_ALLOWANCE`]), so the loop attempts up to
+/// [`ATTEMPTS_PER_WANTED_TRIAL`] times as many and reports a shortfall rather
+/// than concluding from fewer.
 const RESIZE_TRIALS: usize = 16;
 
-/// How many samples [`measure_scheduling_slop`] takes.
+/// How far past the gap it asked for a trial may land and still be judged.
 ///
-/// Same as each gap's share of [`RESIZE_TRIALS`] — enough to catch this
-/// host's worst scheduling hiccup without spending more wall clock deciding
-/// whether to run the trials than the trials themselves cost.
-const CALIBRATION_SAMPLES: usize = 8;
+/// **A trial that did not get the gap it asked for is not evidence about that
+/// gap, in either direction.** A keystroke that landed 12ms behind its resize
+/// is a trial of a 12ms gap — where [`RESIZE_TO_KEYSTROKE`] records the
+/// unfixed tree stalling 8 in 20 at 8ms and 0 in 20 at 16ms — and counting one
+/// says as little about a fixed tree as about an unfixed one. GitHub run
+/// 34349336475 is the case: 347.807µs of scheduling slop, under the 500µs the
+/// calibration gate compares against, and then 6 of 8 swallowed at a 4ms gap
+/// on a tree with the fix in it. Nobody measured what those eight trials
+/// actually built, which is the hole this closes.
+///
+/// **250µs, and absolute, because [`one_resize_then_keystroke`] spins the gap
+/// instead of sleeping it.** A spin lands within a microsecond of where it was
+/// aimed unless this thread is taken off the processor, so the overrun is a
+/// report of contention and nothing else, and it does not scale with the gap.
+/// A slept gap could not be banded at all: measured while writing this, macOS
+/// grants a timer up to 50% leeway, and `sleep(500µs)` returned at 765–815µs
+/// and `sleep(4ms)` at 6.01–6.06ms on this machine — quiet and under sixteen
+/// CPU-bound spinners alike, the same 1.50× at 0.5, 2, 4, 8 and 16ms. A band
+/// wide enough to admit that is wide enough to admit a runner in trouble, and
+/// a band tight enough to exclude the runner excludes every macOS trial there
+/// has ever been.
+const GAP_OVERRUN_ALLOWANCE: Duration = Duration::from_micros(250);
 
-/// Which of [`RESIZE_TO_KEYSTROKE`]'s gaps this host cannot build, given the
-/// worst `sleep` overrun [`measure_scheduling_slop`] saw.
+/// How many attempts each gap gets per trial it wants judged.
 ///
-/// **A gap narrower than the host's own scheduling slop is not a gap**: a
-/// keystroke `sleep`d "`gap` after" a resize does not land in a window that
-/// narrow, it lands wherever the scheduler next resumes the thread. Counting
-/// what such a "gap" swallowed measures the runner, not the tree.
+/// A busy host should cost wall clock, not certainty: an attempt that missed
+/// the band is retried rather than counted. Two, because a host that cannot
+/// place half its keystrokes is one whose remaining half is not worth the
+/// minutes — it gets the announced shortfall instead.
+const ATTEMPTS_PER_WANTED_TRIAL: usize = 2;
+
+/// Whether a trial that asked for `intended` and realised `realised` is a
+/// trial of `intended`.
 ///
-/// **Each gap is compared against its own width**, and that is the whole of
-/// what changed here. The skip used to be one boolean, pinned to the shorter
-/// gap and applied only to the shorter gap's trials — correct on every host
-/// measured at the time, because the slop seen then (210µs here under eight
-/// spinners) sat *between* the two gaps, so pinning and per-gap agreed.
-/// GitHub run 34340063488 measured the hosted macOS runners at **4.223667ms,
-/// 7.43825ms and 7.766375ms**, every one of them larger than the 4ms gap
-/// itself. There the old rule skipped the 500µs proof and then went on to
-/// judge a 4ms gap the host could not build either, which is how
-/// `macos-latest, msrv` reported "5 of 8 swallowed" against a tolerance of 3.
-///
-/// This gates whether a gap exists, never what it tolerates — [`MAX_STALLS`]
-/// stays unconditional for the reason its own comment gives.
-fn unmeasurable_gaps(slop: Duration) -> [bool; RESIZE_TO_KEYSTROKE.len()] {
-    RESIZE_TO_KEYSTROKE.map(|gap| slop >= gap)
+/// `sleep` cannot return early, so the lower bound records that rather than
+/// filtering on it; the upper one is [`GAP_OVERRUN_ALLOWANCE`].
+fn gap_was_built(intended: Duration, realised: Duration) -> bool {
+    realised >= intended && realised <= intended + GAP_OVERRUN_ALLOWANCE
 }
 
 /// The size the terminal is changed to in the resize test, chosen only to be
@@ -877,52 +905,66 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
 ///
 /// # On a loaded host
 ///
-/// This test decides whether **each** gap can be judged here at all from a
-/// measurement taken every run, never from where it runs.
-/// [`measure_scheduling_slop`] takes it and [`unmeasurable_gaps`] applies it,
-/// gap by gap against that gap's own width; when it says no, the run
-/// prints why and the other gap is unaffected. A run where both are skipped
-/// says so in as many words.
+/// One gate, and it is per trial. There used to be a second, taken up front
+/// from a `sleep`-based calibration, and it had to go: the trial now **spins**
+/// its gap, so the two measured quantities differ by two orders of magnitude
+/// under load. Measured — `measure_scheduling_slop` returned 2.36ms in a
+/// process whose spun 500µs gaps were landing 28 times out of 28 within 12µs.
+/// Fed the 4.22ms that GitHub run 34340063488 recorded for `macos-latest,
+/// msrv`, that pre-filter skipped **both** gaps and the test passed in 0.00s
+/// having run no trials at all — vacuous on precisely the cell profile it was
+/// added to fix. So **each trial measures the gap it actually built**,
+/// `Instant` around the two writes, and only trials within
+/// [`GAP_OVERRUN_ALLOWANCE`] of what they asked for are judged. A miss is retried rather than counted, up to
+/// [`ATTEMPTS_PER_WANTED_TRIAL`] attempts per wanted trial, so a busy host
+/// pays in minutes.
+///
+/// A gap that still cannot fill [`RESIZE_TRIALS`]'s share prints how far short
+/// it fell and asserts nothing, because [`MAX_STALLS`] is stated against the
+/// full share: at six judged trials the same tolerance catches a reverted fix
+/// 26% of the time rather than 52%, so concluding from what arrived would be
+/// quieter than saying nothing and worth less. Every run prints judged against
+/// attempted for both gaps, pass or fail.
 #[test]
 fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
-    let scheduling_slop = measure_scheduling_slop();
-    let unmeasurable = unmeasurable_gaps(scheduling_slop);
-    for (which, gap) in RESIZE_TO_KEYSTROKE.iter().enumerate() {
-        if unmeasurable[which] {
-            println!(
-                "{gap:?} gap's proof skipped: this host's std::thread::sleep({:?}) overran by \
-                 {scheduling_slop:?} in the worst of {CALIBRATION_SAMPLES} samples, which is at \
-                 or past the {gap:?} gap itself — a keystroke sent that long after a resize is \
-                 not landing in a window that narrow here, so counting what it swallowed would \
-                 measure this host and not this tree.",
-                RESIZE_TO_KEYSTROKE[1]
-            );
-        }
-    }
-    // Loud, because a run where neither gap can be built asserts nothing and
-    // must not be mistaken for a proof that passed. It is still not a failure:
-    // a host that cannot hold a 4ms gap cannot answer the question this test
-    // asks, and reporting that as a red buries the reds that mean something.
-    if unmeasurable.iter().all(|skipped| *skipped) {
-        println!(
-            "NOTE: every gap was skipped, so this run proves nothing about resize-swallowed \
-             keystrokes — this host's scheduling slop ({scheduling_slop:?}) is at or past even \
-             the widest gap ({:?}). The quiet hosts and the other CI cells are where this test \
-             is a proof.",
-            RESIZE_TO_KEYSTROKE[0]
-        );
-    }
-
-    let mut stalls: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+    let wanted = RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len();
+    let ceiling = wanted * ATTEMPTS_PER_WANTED_TRIAL;
+    let mut stalls: [Vec<usize>; RESIZE_TO_KEYSTROKE.len()] = [Vec::new(), Vec::new()];
+    let mut judged = [0_usize; RESIZE_TO_KEYSTROKE.len()];
+    let mut attempted = [0_usize; RESIZE_TO_KEYSTROKE.len()];
+    let mut worst_overrun = [Duration::ZERO; RESIZE_TO_KEYSTROKE.len()];
     let mut last_screen = String::new();
-    for trial in 1..=RESIZE_TRIALS {
-        let which = trial % RESIZE_TO_KEYSTROKE.len();
-        if unmeasurable[which] {
-            continue;
+    let mut trial = 0_usize;
+    // Interleaved rather than one gap and then the other, so both sample the
+    // same stretch of this host's afternoon; a gap that has what it needs, or
+    // has spent its attempts, drops out and the other carries on.
+    loop {
+        let mut still_trying = false;
+        for (which, gap) in RESIZE_TO_KEYSTROKE.iter().enumerate() {
+            if judged[which] >= wanted || attempted[which] >= ceiling {
+                continue;
+            }
+            still_trying = true;
+            attempted[which] += 1;
+            trial += 1;
+            let (realised, drawn) = one_resize_then_keystroke(trial, *gap);
+            if !gap_was_built(*gap, realised) {
+                println!(
+                    "trial {trial}: asked for a {gap:?} gap and built {realised:?}, further off \
+                     than the {GAP_OVERRUN_ALLOWANCE:?} allowance — not a trial of this gap, so \
+                     not judged. Retrying."
+                );
+                continue;
+            }
+            judged[which] += 1;
+            worst_overrun[which] = worst_overrun[which].max(realised.saturating_sub(*gap));
+            if let Some(drawn) = drawn {
+                stalls[which].push(trial);
+                last_screen = drawn;
+            }
         }
-        if let Some(drawn) = one_resize_then_keystroke(trial, RESIZE_TO_KEYSTROKE[which]) {
-            stalls[which].push(trial);
-            last_screen = drawn;
+        if !still_trying {
+            break;
         }
     }
     // Judged gap by gap rather than pooled: see `MAX_STALLS` for why one of
@@ -930,79 +972,130 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
     // unconditionally (practice §60: a rate, not a pass) so a `--nocapture`
     // run reports the counts without needing a failure to see them.
     for (which, swallowed) in stalls.iter().enumerate() {
-        if unmeasurable[which] {
-            println!("{:?} gap: skipped", RESIZE_TO_KEYSTROKE[which]);
+        let gap = RESIZE_TO_KEYSTROKE[which];
+        // The worst overrun is printed whether or not anything failed: it is how
+        // far this host sat from the band, and a run that judged everything at
+        // 240µs is one bad afternoon away from judging nothing at all.
+        println!(
+            "{gap:?} gap: {} of {} judged swallowed ({} of {} attempts built the gap, {wanted} \
+             wanted; worst judged overrun {:?} of {GAP_OVERRUN_ALLOWANCE:?} allowed)",
+            swallowed.len(),
+            judged[which],
+            judged[which],
+            attempted[which],
+            worst_overrun[which],
+        );
+        // Loud, and not a failure: a gap that could not be built enough times
+        // to reach the count `MAX_STALLS` is stated against has measured this
+        // host rather than this tree, and reporting that as a red buries the
+        // reds that mean something. See this test's own doc for the rate that
+        // makes the short count worthless.
+        if judged[which] < wanted {
+            println!(
+                "NOTE: the {gap:?} gap proves nothing in this run. Only {} of {} attempts put \
+                 the keystroke within {GAP_OVERRUN_ALLOWANCE:?} of {gap:?} after the resize, \
+                 short of the {wanted} that the tolerance of {} is stated against — this host \
+                 could not build the gap often enough to be asked the question. {} of the {} \
+                 trials that were judged were swallowed.",
+                judged[which],
+                attempted[which],
+                MAX_STALLS[which],
+                swallowed.len(),
+                judged[which],
+            );
             continue;
         }
-        println!(
-            "{:?} gap: {} of {} swallowed",
-            RESIZE_TO_KEYSTROKE[which],
-            swallowed.len(),
-            RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len(),
-        );
         assert!(
             swallowed.len() <= MAX_STALLS[which],
-            "{} of the {} keystrokes sent {:?} after a resize were swallowed by it, which is \
-             more than the {} that gap tolerates — trials {swallowed:?}. A keystroke that \
-             reaches nothing is a command the user typed and lost.\n--- what the last \
-             swallowed trial had drawn since its resize ---\n{last_screen}\n--- end ---",
+            "{} of the {} keystrokes sent {gap:?} after a resize — every one of them measured, \
+             at the write, to have landed within {GAP_OVERRUN_ALLOWANCE:?} of that gap — were \
+             swallowed by it, which is more than the {} that gap tolerates. Trials \
+             {swallowed:?}, out of {} attempts. A keystroke that reaches nothing is a command \
+             the user typed and lost.\n--- what the last swallowed trial had drawn since its \
+             resize ---\n{last_screen}\n--- end ---",
             swallowed.len(),
-            RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len(),
-            RESIZE_TO_KEYSTROKE[which],
+            judged[which],
             MAX_STALLS[which],
+            attempted[which],
         );
     }
 }
 
-/// Every gap this host cannot build is skipped, and no gap it can build is.
+/// A trial counts only if it built the gap it asked for.
 ///
-/// The unit test for [`unmeasurable_gaps`], and the regression test for the
-/// hole that made `macos-latest, msrv` red in GitHub run 34340063488. The
-/// middle case is the one that discriminates: at 1ms the two rules agree that
-/// the 500µs gap is gone and the 4ms gap is fine, which is why the pinned
-/// rule looked right for as long as it did. The runner numbers are the ones
-/// that tell them apart — the old rule answers `[false, true]` there and the
-/// 4ms trials get judged on a host that cannot place them.
-///
-/// It runs in microseconds and touches no pty, so it is the cheap half of a
-/// proof whose expensive half cannot be made to fail on demand.
+/// The unit test for [`gap_was_built`], and the cheap half of a proof whose
+/// expensive half is a rate. Its cases are hosts that have actually been
+/// measured: this machine quiet, the `ubuntu-latest, nightly` cell of GitHub
+/// run 34349336475, and the hosted macOS runners of run 34340063488. The
+/// nightly one is the case that discriminates — the calibration gate passes
+/// it, and it is the run that reported 6 of 8 swallowed on a tree with the
+/// fix in it.
 #[test]
-fn a_gap_narrower_than_the_hosts_scheduling_slop_is_not_judged() {
-    // This development machine under eight spinners: both gaps stand.
-    assert_eq!(
-        unmeasurable_gaps(Duration::from_micros(210)),
-        [false, false],
-        "a host whose worst sleep overran by 210µs can build both gaps, and skipping either \
-         there would throw away the proof this file exists for"
+fn a_trial_is_judged_only_when_it_built_the_gap_it_asked_for() {
+    let four = RESIZE_TO_KEYSTROKE[0];
+    let short = RESIZE_TO_KEYSTROKE[1];
+
+    // A spun gap lands where it was aimed: the worst overrun a judged trial
+    // recorded here was single-digit microseconds quiet and tens of them under
+    // sixteen spinners. Both of these are hosts that must still be judged.
+    for overrun in [Duration::from_micros(1), Duration::from_micros(142)] {
+        assert!(
+            gap_was_built(four, four + overrun) && gap_was_built(short, short + overrun),
+            "an overrun of {overrun:?} is a host that placed the keystroke where it was told \
+             to, and refusing to judge it would throw away the proof this file exists for"
+        );
+    }
+
+    // Run 34349336475's nightly cell measured 347.807us of scheduling slop,
+    // under the 500us the calibration gate compares against, and then judged
+    // 4ms trials nobody had measured.
+    assert!(
+        !gap_was_built(four, four + Duration::from_nanos(347_807)),
+        "a keystroke asked for 4ms after a resize and landing 4.347807ms after it is not a 4ms \
+         trial. Judging one is how a tree with the fix in it reported 6 of 8 swallowed."
     );
 
-    // Between the two gaps: exactly where the pinned rule and this one agree.
-    assert_eq!(
-        unmeasurable_gaps(Duration::from_millis(1)),
-        [false, true],
-        "1ms of slop swallows the 500µs gap and leaves the 4ms one, which is the case the \
-         old pinned rule got right and the reason it survived this long"
-    );
-
-    // Run 34340063488, the three macOS cells: 4.223667ms (msrv, the cell that
-    // failed), 7.43825ms and 7.766375ms. Every gap is gone on all three.
-    for slop in [
+    // Run 34340063488's macOS runners: 4.223667ms and 7.766375ms. Both gaps
+    // are far outside, which the calibration gate also catches - belt and
+    // braces, on purpose, since it is the only one of the two that can spare
+    // the host sixteen pointless trials.
+    for overrun in [
         Duration::from_nanos(4_223_667),
-        Duration::from_nanos(7_438_250),
         Duration::from_nanos(7_766_375),
     ] {
-        assert_eq!(
-            unmeasurable_gaps(slop),
-            [true, true],
-            "a host whose worst sleep overran by {slop:?} cannot place a keystroke 4ms after a \
-             resize either, so the 4ms gap must be skipped too. Judging it is what reported \
-             '5 of 8 swallowed' against a tolerance of 3 — a red about the runner's scheduler."
-        );
+        assert!(!gap_was_built(four, four + overrun));
+        assert!(!gap_was_built(short, short + overrun));
     }
+
+    // `sleep` cannot return early, so this is a clock anomaly rather than a
+    // trial, and it is not judged either.
+    assert!(!gap_was_built(four, four - Duration::from_micros(1)));
 }
 
-/// The worst of [`CALIBRATION_SAMPLES`] overruns of the exact call
-/// [`one_resize_then_keystroke`] uses to build its gap: `std::thread::sleep`.
+/// How many samples [`measure_scheduling_slop`] takes.
+///
+/// Same as each gap's share of [`RESIZE_TRIALS`] — enough to catch this
+/// host's worst scheduling hiccup without spending more wall clock deciding
+/// whether to run the trials than the trials themselves cost.
+const CALIBRATION_SAMPLES: usize = 8;
+
+/// The worst of [`CALIBRATION_SAMPLES`] `std::thread::sleep` overruns, kept
+/// as a cheap early-out rather than as the judge.
+///
+/// # It no longer measures the call the trial makes
+///
+/// [`one_resize_then_keystroke`] spins its gap now, and every trial reports
+/// the gap it actually built; [`GAP_OVERRUN_ALLOWANCE`] is what decides
+/// whether a trial counts. This probe survives only as the hangup test's
+/// printed context: it no longer gates anything, because a `sleep` measurement
+/// cannot gate a spun gap without vetoing gaps the trial builds perfectly.
+///
+/// **It is not a measure of load, which is the other reason it cannot be the
+/// judge.** macOS coalesces timers: a slept 500µs gap came out at 765–815µs on
+/// this machine at load 4 and at 767–786µs at load 77, the same number from a
+/// machine in two entirely different states. The range this comment used to
+/// record — 46–142µs quiet, 60µs–20.3ms under eight spinners — is not what it
+/// measures here today.
 ///
 /// # Why this probe, not one through the child
 ///
@@ -1011,11 +1104,6 @@ fn a_gap_narrower_than_the_hosts_scheduling_slop_is_not_judged() {
 /// sample — the cost of a full re-render through a real pty, not the
 /// scheduling residual [`RESIZE_TO_KEYSTROKE`]'s doc describes. Comparing
 /// that to 500µs would call every host loaded, this one included.
-///
-/// `sleep`'s own overrun is the same quantity the trial's gap depends on,
-/// without the render cost riding along. Measured by hand, eight samples
-/// each, `sleep(500µs)`: 46–142µs quiet, 60µs–20.3ms with eight CPU-bound
-/// threads spinning alongside it.
 fn measure_scheduling_slop() -> Duration {
     let mut worst = Duration::ZERO;
     for _ in 0..CALIBRATION_SAMPLES {
@@ -1027,9 +1115,24 @@ fn measure_scheduling_slop() -> Duration {
     worst
 }
 
-/// One trial. `None` when the keystroke arrived; the screen drawn since the
-/// resize when it did not.
-fn one_resize_then_keystroke(trial: usize, gap: Duration) -> Option<String> {
+/// One trial: the gap it actually built, and `None` when the keystroke
+/// arrived or the screen drawn since the resize when it did not.
+///
+/// **The gap is spun rather than slept, and measured around the two writes.**
+/// A `sleep` does not produce the gap it is handed: macOS grants a timer up to
+/// 50% leeway, so `sleep(4ms)` returns 6ms later here whether the machine is
+/// quiet or under sixteen spinners ([`GAP_OVERRUN_ALLOWANCE`] has the
+/// measurements). A slept gap is therefore neither the gap that was asked for
+/// nor a signal about the host, which is both halves of what a trial needs. A
+/// spin lands where it was aimed unless this thread is taken off the
+/// processor — and being taken off the processor is exactly the thing worth
+/// throwing a trial away for. It costs one core for the width of the gap:
+/// 36ms per run, all of it before the keystroke that is being timed.
+///
+/// The clock starts once the resize has been made and stops once the keystroke
+/// has been written, which is the interval the interface is being asked
+/// about.
+fn one_resize_then_keystroke(trial: usize, gap: Duration) -> (Duration, Option<String>) {
     let fixture = Fixture::new();
     let mut child = fixture.start_shell();
     child.wait_for_first_frame();
@@ -1044,14 +1147,18 @@ fn one_resize_then_keystroke(trial: usize, gap: Duration) -> Option<String> {
     // Exactly what a window manager dragging a corner does, and then exactly
     // what a person does next.
     child.resize(RESIZED_ROWS, RESIZED_COLS);
-    std::thread::sleep(gap);
+    let resized_at = Instant::now();
+    while resized_at.elapsed() < gap {
+        std::hint::spin_loop();
+    }
     child.type_key(b"o");
+    let realised = resized_at.elapsed();
 
     let deadline = Instant::now() + KEYSTROKE_DEADLINE;
     while Instant::now() < deadline {
         child.drain();
         if child.drawn_since(drawn_before).contains(OVERVIEW_HEADER) {
-            return None;
+            return (realised, None);
         }
         assert!(
             child.try_wait().is_none(),
@@ -1062,7 +1169,7 @@ fn one_resize_then_keystroke(trial: usize, gap: Duration) -> Option<String> {
         );
         std::thread::sleep(READ_POLL);
     }
-    Some(child.drawn_since(drawn_before))
+    (realised, Some(child.drawn_since(drawn_before)))
 }
 
 /// A project, a state directory and a user configuration, all thrown away
