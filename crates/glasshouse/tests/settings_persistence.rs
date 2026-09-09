@@ -7,11 +7,30 @@
 //! invariants in `docs/product/design-decisions.md`'s "Settings" section.
 
 use clap::Parser;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use glasshouse::config;
 use glasshouse::integrations::IntegrationId;
-use glasshouse::shell::{self, MemorySettingsEdit, RoutingSettingsEdit, SettingsEdit};
+use glasshouse::shell::{
+    self, MemorySettingsEdit, RoutingSettingsEdit, SettingsEdit, SettingsSection, ShellState,
+};
 use glasshouse::{Cli, Runtime, bootstrap};
+
+/// Tab until `target` has the cursor, rather than a fixed count.
+///
+/// A count is a hidden dependency on how many sections precede the one a test
+/// is about: adding `Subscriptions` in the middle of `SettingsSection::ORDER`
+/// silently re-pointed four of these tests at the neighbouring tab, where they
+/// went on asserting and passing about the wrong screen in one case.
+fn tab_to(state: &mut ShellState, target: SettingsSection) {
+    for _ in 0..SettingsSection::ORDER.len() {
+        if state.settings().unwrap().section() == target {
+            return;
+        }
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    panic!("Tab never reached {target:?}");
+}
 
 fn runtime_for(workspace: &std::path::Path, data: &std::path::Path) -> Runtime {
     let cli = Cli::try_parse_from([
@@ -42,7 +61,6 @@ fn new_workspace() -> tempfile::TempDir {
 /// green.
 #[test]
 fn cancelling_a_project_level_save_creates_no_file_and_no_directory() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use glasshouse::shell::{Action, HarnessRow, ShellState};
 
     for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
@@ -574,7 +592,6 @@ fn free_resource_order_disabled_and_pin_round_trip_and_a_stale_pin_degrades_visi
 /// tell "shows disabled" from "shows nothing after the approval column".
 #[test]
 fn a_disabled_launch_profile_is_still_listed_in_settings_so_it_can_be_re_enabled() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use glasshouse::config::{Layer, ProfileConfig};
     use glasshouse::integrations::IntegrationId;
     use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
@@ -602,10 +619,7 @@ fn a_disabled_launch_profile_is_still_listed_in_settings_so_it_can_be_re_enabled
             },
         ],
     );
-    // Harnesses, Integrations, Providers, Launch Profiles.
-    for _ in 0..3 {
-        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    }
+    tab_to(&mut state, SettingsSection::LaunchProfiles);
 
     for width in [100, 200] {
         let text = rendered_settings(&state, width, 30);
@@ -656,7 +670,6 @@ fn rendered_settings(state: &glasshouse::shell::ShellState, width: u16, height: 
 /// and it is `UseReason::Display`'s.
 #[test]
 fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use glasshouse::routing::disposable::{DisposableCandidate, DisposableRouting, JobKind};
     use glasshouse::routing::free::{FreePool, FreePreferences, FreeResource, WorkloadOutcome};
     use glasshouse::routing::{Cost, CredentialId, UseReason};
@@ -748,10 +761,7 @@ fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words()
             Vec::<ProfileRow>::new(),
         );
         state.record_disposable_choice(choice);
-        // Harnesses, Integrations, Providers, Launch Profiles, Routing.
-        for _ in 0..4 {
-            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        }
+        tab_to(&mut state, SettingsSection::Routing);
 
         let text = rendered_settings(&state, 100, 30);
         assert!(
@@ -769,7 +779,6 @@ fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words()
 /// leaves behind must be gone.
 #[test]
 fn the_memory_extraction_setting_renders_its_value_and_layer_and_an_edit_changes_both() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
 
     let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
@@ -779,10 +788,7 @@ fn the_memory_extraction_setting_renders_its_value_and_layer_and_an_edit_changes
         Vec::<ProviderRow>::new(),
         Vec::<ProfileRow>::new(),
     );
-    // Harnesses -> Integrations -> Providers -> Launch Profiles -> Routing -> Memory.
-    for _ in 0..5 {
-        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    }
+    tab_to(&mut state, SettingsSection::Memory);
 
     // Premise, per §17: the row starts enabled at `Layer::Default` — or a
     // later assertion that a toggle changed it to "no"/`(user)` proves
@@ -807,7 +813,6 @@ fn the_memory_extraction_setting_renders_its_value_and_layer_and_an_edit_changes
 /// preferences.
 #[test]
 fn no_credential_value_leaks_through_the_free_resource_editors() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use glasshouse::config::Layer;
     use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
 
@@ -843,8 +848,7 @@ fn no_credential_value_leaks_through_the_free_resource_editors() {
     let mut screens = Vec::new();
 
     // Providers: the free-model editor open on the planted provider.
-    press(&mut state, KeyCode::Tab);
-    press(&mut state, KeyCode::Tab);
+    tab_to(&mut state, SettingsSection::Providers);
     screens.push(rendered_settings(&state, 100, 30));
     screens.push(rendered_settings(&state, 400, 60));
     press(&mut state, KeyCode::Char('f'));
@@ -858,8 +862,7 @@ fn no_credential_value_leaks_through_the_free_resource_editors() {
     screens.push(rendered_settings(&state, 400, 60));
 
     // Routing: the order, disabled and pin editors, each typed and confirmed.
-    press(&mut state, KeyCode::Tab);
-    press(&mut state, KeyCode::Tab);
+    tab_to(&mut state, SettingsSection::Routing);
     for (key, typed) in [
         (
             KeyCode::Char('o'),

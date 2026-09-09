@@ -376,7 +376,7 @@ impl ShellState {
         Action::Redraw
     }
 
-    /// The session under the cursor, if it may be resumed — and a spoken
+    /// `id`, if a session in this `disposition` may be resumed — and a spoken
     /// refusal naming the session and its actual state if not. The resume
     /// half of Phase 11 line 688.
     ///
@@ -386,6 +386,48 @@ impl ShellState {
     /// point of this key is the session that is *not* running. Gated on
     /// [`SessionRecord::disposition`] instead, so the session this key acts
     /// on is exactly the one the STATE column already labels `resumable`.
+    ///
+    /// Takes the disposition rather than reading it, so the overview's `R`
+    /// and the session bar's `Enter` refuse in exactly the same words — one
+    /// sentence per state, in one place. **Every refusal here names why it is
+    /// impossible rather than only that it is**: `Closed` is the "no native
+    /// session id captured" case, and it is the only shape of stopped session
+    /// this still turns away. The other impossible case — a harness with no
+    /// verified resume mechanism, `pane` today — is not knowable from a
+    /// record, and is refused by name where the adapter is in hand
+    /// (`shell::resume_session`).
+    fn resume_target(
+        &mut self,
+        id: SessionId,
+        disposition: SessionDisposition,
+    ) -> Option<SessionId> {
+        match disposition {
+            SessionDisposition::Resumable => Some(id),
+            SessionDisposition::Active => {
+                self.set_status(format!(
+                    "cannot resume `{}`: it is still running",
+                    short_session_id(&id)
+                ));
+                None
+            }
+            SessionDisposition::Failed => {
+                self.set_status(format!(
+                    "cannot resume `{}`: it failed with no session to reopen",
+                    short_session_id(&id)
+                ));
+                None
+            }
+            SessionDisposition::Closed => {
+                self.set_status(format!(
+                    "cannot resume `{}`: no native session id was recorded",
+                    short_session_id(&id)
+                ));
+                None
+            }
+        }
+    }
+
+    /// The session under the overview's cursor, if it may be resumed.
     fn resumable_overview_target(&mut self) -> Option<SessionId> {
         let target = self
             .overview_target()
@@ -395,33 +437,15 @@ impl ShellState {
                 self.set_status("nothing to resume: this project has no sessions");
                 None
             }
-            Some((id, SessionDisposition::Resumable)) => Some(id),
-            Some((id, SessionDisposition::Active)) => {
-                self.set_status(format!(
-                    "cannot resume session `{}`: it is still running",
-                    short_session_id(&id)
-                ));
-                None
-            }
-            Some((id, SessionDisposition::Failed)) => {
-                self.set_status(format!(
-                    "cannot resume session `{}`: it failed, with no session to reopen",
-                    short_session_id(&id)
-                ));
-                None
-            }
-            Some((id, SessionDisposition::Closed)) => {
-                self.set_status(format!(
-                    "cannot resume session `{}`: it is closed, with no native session id \
-                     recorded to resume to",
-                    short_session_id(&id)
-                ));
-                None
-            }
+            Some((id, disposition)) => self.resume_target(id, disposition),
         }
     }
 
-    /// Resume the session under the cursor.
+    /// Resume the session under the cursor, leaving the overview open around
+    /// it — the user is reading a list, not asking to be inside one row of it.
+    ///
+    /// `resume_entry` is deliberately left unset, which is the whole
+    /// difference between this and `Enter`: see [`Action::ResumeSession`].
     fn resume_overview_target(&mut self) -> Action {
         match self.resumable_overview_target() {
             Some(id) => Action::ResumeSession(id),
@@ -498,13 +522,19 @@ impl ShellState {
     /// whichever session held focus before — the user would be typing into a
     /// session the bar is not showing. Saying no is the only honest answer.
     ///
-    /// Refused for a session whose **process is gone**, for the third time the
-    /// same reason. The footer advertises Enter as "enter session" whatever
-    /// the presented session's state is, and a stopped one has no PTY left to
-    /// receive anything, so entering hands the keyboard to a dead process and
-    /// every keystroke after it vanishes with nothing on screen saying why.
-    /// [`Self::actionable_overview_target`] already refuses the overview's own
-    /// keys on exactly this test; this is the viewport's half of it.
+    /// **A session whose process is gone is resumed, not refused** — user
+    /// ruling 2026-09-09: *"stopped session dont reopen on entering them while
+    /// that would be easily doable by codex --resume id, claude --resume id …
+    /// so just not entering because you exited kinda dumb"*. Entering used to
+    /// be turned away here, on the true observation that a stopped session has
+    /// no pseudo-terminal left and a keystroke sent to one vanishes. The
+    /// observation stands and the conclusion did not: the answer is to give
+    /// the session a process again, through the same
+    /// [`Action::ResumeSession`] the overview's `R` produces and the same
+    /// `shell::resume_session` that answers it — which is `Enter`'s whole
+    /// job, since a user pressing it is asking to be *in* that session.
+    /// [`Self::resume_target`] is where the two paths' refusals live, so what
+    /// is genuinely unresumable is turned away in one voice.
     pub(super) fn enter_session_mode(&mut self) -> Action {
         let Some(record) = self.active_session() else {
             self.set_status("no session to enter — start one with `n`");
@@ -515,7 +545,10 @@ impl ShellState {
         // record cannot outlive the first note.
         let id = record.id.clone();
         let presentation = record.presentation;
-        let lifecycle = record.lifecycle;
+        // `disposition` and not `lifecycle.is_live()`: they classify the same
+        // set — `Active` is exactly the live states — and asking one question
+        // means the refusal below cannot disagree with the resume above it.
+        let disposition = record.disposition();
         if presentation == SessionPresentation::Headless {
             // Short on purpose: a status note shares its row with the key
             // bindings, which are written first, so a long refusal is a
@@ -527,27 +560,91 @@ impl ShellState {
             ));
             return Action::Redraw;
         }
-        if !lifecycle.is_live() {
-            // The same sentence `actionable_overview_target` speaks, so a
-            // refusal reads identically wherever the user met it.
-            self.set_status(format!(
-                "cannot enter session `{}`: it is {lifecycle}, not running",
-                short_session_id(&id)
-            ));
-            return Action::Redraw;
+        if disposition != SessionDisposition::Active {
+            return match self.resume_target(id, disposition) {
+                Some(id) => {
+                    // The note the run loop replaces the moment the harness is
+                    // up. Set here rather than there because starting a
+                    // harness is not instant and this is the only frame drawn
+                    // in between — without it `Enter` on a stopped session
+                    // looks like a key that did nothing.
+                    self.set_status(format!("resuming `{}` …", short_session_id(&id)));
+                    // What makes this `Enter`'s resume and not the overview's:
+                    // the request to be put *inside* what is being reopened.
+                    self.resume_entry = Some(id.clone());
+                    Action::ResumeSession(id)
+                }
+                None => Action::Redraw,
+            };
         }
         self.overlay = None;
+        self.session_view = true;
         self.mode = Mode::Session;
         Action::Redraw
+    }
+
+    /// The layout a resume of `id` ends in, asked before the harness starts.
+    ///
+    /// The run loop has to size a pseudo-terminal for a frame that has not
+    /// been drawn yet, and the answer depends on the request the key recorded:
+    /// a resume the user asked to be put inside ends in [`Chrome::Header`],
+    /// and one from the overview ends wherever the shell already was. Here
+    /// rather than as a branch in the run loop, for the reason
+    /// [`Action::ResumeSession`] gives.
+    pub fn chrome_after_resume(&self, id: &SessionId) -> Chrome {
+        if self.resume_entry.as_ref() == Some(id) {
+            Chrome::Header
+        } else {
+            self.chrome()
+        }
+    }
+
+    /// The run loop's report that a resumed session's harness is running.
+    ///
+    /// **Answers the request the key made, rather than a decision the run loop
+    /// takes.** `Enter` on a stopped session is a request to be *in* it, and
+    /// the process only exists once the run loop has started it, so the focus
+    /// cannot be taken at the moment the key is answered — it is recorded in
+    /// `resume_entry` and honoured here. The overview's `R` records nothing,
+    /// so the same call leaves the user in the list they were reading.
+    /// Compared by identifier, so a report about one session can never focus
+    /// another.
+    ///
+    /// Selects before entering — `refresh` reconciles onto whatever was
+    /// presented before the key, exactly as it does after `StartSession`, so
+    /// without this the resumed session could be focused while the bar
+    /// presents another.
+    pub fn session_resumed(&mut self, id: &SessionId) -> Action {
+        if self.resume_entry.take().as_ref() != Some(id) {
+            return Action::Redraw;
+        }
+        self.select_session(id);
+        self.enter_session_mode()
     }
 
     /// Answer one key while a session owns the keyboard.
     ///
     /// Everything is forwarded to the focused PTY untouched — including `q`,
-    /// Tab, and Ctrl-C — except the one reserved escape chord, which is
-    /// intercepted here and never forwarded.
+    /// Tab, and Ctrl-C — except the two reserved chords, which are intercepted
+    /// here and never forwarded.
+    ///
+    /// **They are different acts and both are kept.** The escape chord leaves
+    /// the session: the fleet view comes back with all five of its bands, and
+    /// that is what it has always done. [`FOCUS_CHORD`] leaves the session's
+    /// *keyboard* and nothing else — the header and the viewport stay exactly
+    /// where they are and Glasshouse's own bindings answer instead, which is
+    /// the *"key to change focus"* of the 2026-09-09 ruling. Neither reaches
+    /// the harness: a chord Glasshouse answers is a key the harness never
+    /// sees, which is the half of the contract
+    /// `state_tests::the_focus_chord_moves_the_keyboard_and_nothing_else`
+    /// asserts in both directions.
     pub(super) fn handle_session_key(&mut self, key: KeyEvent) -> Action {
         if is_session_escape(&key) {
+            self.mode = Mode::Control;
+            self.session_view = false;
+            return Action::Redraw;
+        }
+        if is_focus_chord(&key) {
             self.mode = Mode::Control;
             return Action::Redraw;
         }
@@ -563,8 +660,13 @@ impl ShellState {
     /// keypress going nowhere with no visible way out, so an exit always
     /// drops back to control mode — see invariant 6 in the design note.
     pub fn session_exited(&mut self) -> Action {
-        if self.mode == Mode::Session {
+        if self.mode == Mode::Session || self.session_view {
             self.mode = Mode::Control;
+            // The layout goes with the keyboard. A header focused over a
+            // viewport whose process has ended would leave the user reading a
+            // frozen screen with the fleet view — and the `n` that starts
+            // another session — off screen.
+            self.session_view = false;
             Action::Redraw
         } else {
             Action::None
@@ -622,6 +724,29 @@ pub(super) fn is_session_escape(key: &KeyEvent) -> bool {
         return true;
     }
     matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+}
+
+/// [`FOCUS_CHORD`] — `Ctrl-6`, the chord that moves the keyboard between
+/// Glasshouse's own header and the session drawn under it.
+///
+/// Both spellings of the same byte, for the reason
+/// [`is_session_escape`] states at length: the chord is `0x1E`, and
+/// Crossterm's Unix parser decodes `0x1C..=0x1F` arithmetically, so a real
+/// terminal delivers `Ctrl` + `'6'`. A terminal that names the shifted
+/// character instead delivers `Ctrl` + `'^'`, and both are accepted so that
+/// matching too narrowly cannot cost the user the key.
+///
+/// `'6'` is a digit, which is the whole point: `FOCUS_CHORD` documents why a
+/// `Ctrl`+letter chord was not available, and every Latin layout — the German
+/// Mac one this project is developed on included — puts the digits where a US
+/// layout does. On Windows [`is_session_escape`]'s shape test claims every
+/// non-alphanumeric character with `Control`, so `Ctrl-^` escapes there
+/// rather than moving focus; `Ctrl-6` is alphanumeric and reaches this
+/// function on every platform, which is why it is the chord that is
+/// advertised.
+pub(super) fn is_focus_chord(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('6') | KeyCode::Char('^'))
 }
 
 /// Turn one key event into the bytes a PTY expects.

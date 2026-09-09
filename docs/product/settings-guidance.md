@@ -1,6 +1,16 @@
 # Settings guidance — the gateway, the subscriptions, and the save key
 
-Status: **plan only.** Nothing implemented. Written 2026-09-09 from a reading of
+Status: **partly built, 2026-09-09.** §3's journey landed as a Subscriptions
+section in the Settings overlay (`shell/state/settings/accounts.rs`,
+`shell/view/settings_actions.rs`, `crate::subscription`): the accounts are
+listed, presence is reported in the words this document fixes — never `valid` —
+and connect/disconnect are `Action` rows that **print the exact command** for
+the account under the cursor, because `login` blocks on a browser flow a
+raw-mode TUI cannot host. §5's contextual "why" line landed with it, as one
+sentence per section that changes with the state the section is in. Everything
+else below — the picker itself, the `Choice` backend editor of §2 step 3, the
+entitlement writer of §2 step 1, the `check` action, and all of §4 — is still
+**plan only**. Written 2026-09-09 from a reading of
 `crates/glasshouse/src/shell/state/settings/{mod.rs,keys.rs}`,
 `crates/glasshouse/src/shell/mod.rs`,
 `crates/glasshouse/src/commands/subscriptions.rs`,

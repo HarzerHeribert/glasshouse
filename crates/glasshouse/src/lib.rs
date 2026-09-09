@@ -33,6 +33,7 @@ pub mod session;
 pub mod shell;
 pub mod shim;
 pub mod shutdown;
+pub mod subscription;
 pub mod tui;
 
 use std::path::{Path, PathBuf};

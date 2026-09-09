@@ -134,8 +134,13 @@ mod settings_persistence_tests {
 
         // Reload from disk — a fresh read, not the in-memory value just
         // written — to prove this is a persistence test and not a tautology.
-        let (harnesses, integrations, providers, profiles, _, _) =
-            build_settings(&runtime).expect("settings must rebuild after the save");
+        let rebuilt = build_settings(&runtime).expect("settings must rebuild after the save");
+        let (harnesses, integrations, providers, profiles) = (
+            rebuilt.harnesses,
+            rebuilt.integrations,
+            rebuilt.providers,
+            rebuilt.profiles,
+        );
         let _ = (harnesses, integrations, profiles);
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].name, "my-router");
@@ -558,8 +563,13 @@ mod settings_persistence_tests {
             ))
             .expect("the cache is written");
 
-        let (harnesses, integrations, providers, profiles, _, _) =
-            build_settings(&runtime).expect("settings open");
+        let built = build_settings(&runtime).expect("settings open");
+        let (harnesses, integrations, providers, profiles) = (
+            built.harnesses,
+            built.integrations,
+            built.providers,
+            built.profiles,
+        );
 
         assert_eq!(
             fixture.connections(),
@@ -620,7 +630,7 @@ mod settings_persistence_tests {
         )
         .expect("configured");
 
-        let (_, _, providers, _, _, _) = build_settings(&runtime).expect("settings open");
+        let providers = build_settings(&runtime).expect("settings open").providers;
         assert_eq!(fixture.connections(), 0);
         assert!(
             providers[0].models.is_none(),
@@ -672,8 +682,13 @@ mod settings_persistence_tests {
             ))
             .expect("stale cache written");
 
-        let (harnesses, integrations, providers, profiles, _, _) =
-            build_settings(&runtime).expect("settings open");
+        let built = build_settings(&runtime).expect("settings open");
+        let (harnesses, integrations, providers, profiles) = (
+            built.harnesses,
+            built.integrations,
+            built.providers,
+            built.profiles,
+        );
         let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
         state.open_settings(harnesses, integrations, providers, profiles);
         state.handle_key(press(KeyCode::Tab));
@@ -717,7 +732,7 @@ mod settings_persistence_tests {
 
         // On disk, and found by a completely fresh read — the thing that
         // makes the next start silent.
-        let (_, _, reopened, _, _, _) = build_settings(&runtime).expect("settings reopen");
+        let reopened = build_settings(&runtime).expect("settings reopen").providers;
         let models = reopened[0].models.as_ref().expect("a cached catalogue");
         assert_eq!(models.len(), 3);
         assert_eq!(models.fetched_at(), fetched_at);
@@ -1087,7 +1102,8 @@ mod settings_persistence_tests {
         )
         .unwrap();
 
-        let (_, _, providers, profiles, _, _) = build_settings(&runtime).unwrap();
+        let built = build_settings(&runtime).unwrap();
+        let (providers, profiles) = (built.providers, built.profiles);
         assert!(!providers[0].config.enabled());
         assert!(!profiles[0].config.enabled());
     }
@@ -3702,17 +3718,17 @@ mod session_mode_geometry_tests {
         );
     }
 
-    /// Fullscreen's own claim, on the emulator rather than on the frame: the
-    /// harness is *told* it has the terminal itself.
+    /// Entering a session reaches the emulator, not only the frame.
     ///
     /// This is the failure that would be invisible on screen and ruinous
-    /// inside the harness — a paint with no chrome over a pseudo-terminal
-    /// still sized for one draws its last row into nothing — so it is
-    /// asserted where the harness would notice. It is also the honest
-    /// measure of what fullscreen buys once the header has collapsed: one
-    /// row, 23 to 24, and the deliverable is the frame-free render.
+    /// inside the harness — a paint over a pseudo-terminal still sized for
+    /// another layout draws its last rows into nothing — so it is asserted
+    /// where the harness would notice. **And the focus chord must not move
+    /// it**: moving the keyboard to the header changes who answers a key and
+    /// nothing about the geometry, so a harness that redrew on every focus
+    /// change would be a bug the frame could not show.
     #[test]
-    fn fullscreen_hands_the_focused_harness_the_terminal_itself() {
+    fn entering_a_session_resizes_the_focused_harness_and_focus_does_not() {
         let (_data, _workspace, runtime) =
             native_session_facts_tests::runtime_with_fake_claude_code();
         let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
@@ -3740,22 +3756,58 @@ mod session_mode_geometry_tests {
         );
 
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records);
-        state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
-        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(state.chrome(), state::Chrome::None);
-        sync_focus(&mut live, &state, outer, true);
+        // The run loop's own trigger, spelled here the way `run` spells it:
+        // the harness is resized when the CHROME moved, not when the mode
+        // did. The focus chord below is exactly the case where the two
+        // disagree, so a test that passed `true` unconditionally could not
+        // tell a needless resize from a missing one.
+        let press = |state: &mut ShellState, live: &mut SessionRuntime, key: KeyEvent| {
+            let chrome_before = state.chrome();
+            state.handle_key(key);
+            sync_focus(live, state, outer, state.chrome() != chrome_before);
+        };
+
+        press(
+            &mut state,
+            &mut live,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(state.chrome(), state::Chrome::Header);
+        let entered = view::viewport_terminal_size(outer, state::Chrome::Header).rows;
         assert_eq!(
             emulator_rows(&live, &id),
-            outer.rows,
-            "fullscreen must reach the pseudo-terminal, not only the paint"
+            entered,
+            "entering must reach the pseudo-terminal, not only the paint"
         );
 
-        state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
-        sync_focus(&mut live, &state, outer, true);
+        press(
+            &mut state,
+            &mut live,
+            KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            state.mode(),
+            state::Mode::Control,
+            "the header has the keyboard"
+        );
+        assert_eq!(
+            emulator_rows(&live, &id),
+            entered,
+            "moving the keyboard to the header must not resize the harness"
+        );
+
+        // And the escape chord from a focused header changes the layout
+        // without changing the mode — the direction the old trigger missed.
+        press(
+            &mut state,
+            &mut live,
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.chrome(), state::Chrome::Full);
         assert_eq!(
             emulator_rows(&live, &id),
             view::viewport_terminal_size(outer, state::Chrome::Full).rows,
-            "leaving gives control mode's bands back"
+            "leaving gives the fleet view's bands back, and the harness must be told"
         );
     }
 }
@@ -4452,5 +4504,206 @@ mod restart_is_spoken_once_tests {
         );
 
         live.close(&id).expect("close the session");
+    }
+}
+
+/// **`Enter` on a stopped session reopens it through the harness's own
+/// `--resume`** — user ruling 2026-09-09: *"stopped session dont reopen on
+/// entering them while that would be easily doable by codex --resume id,
+/// claude --resume id … so just not entering because you exited kinda dumb"*.
+///
+/// Asserted on the argv the harness is actually spawned with, not on the
+/// status note: a note saying "resumed" over a process started with no
+/// `--resume` at all would be the exact failure this exists to prevent, and it
+/// is invisible from inside the shell. The fake harness records its own
+/// arguments and exits.
+#[cfg(all(test, unix))]
+mod shell_resume_tests {
+    use super::*;
+    use crate::session::{NewSession, SessionLifecycle, SessionRecord, SessionRole};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+
+    /// A harness that writes its arguments where the test can read them.
+    fn install_recording_harness(bin_dir: &std::path::Path, log: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = bin_dir.join("fake-claude");
+        std::fs::create_dir_all(bin_dir).expect("create bin dir");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .expect("write fake harness");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    fn runtime_with_recording_harness(
+        log: &std::path::Path,
+    ) -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git");
+        let workspace_root =
+            std::fs::canonicalize(workspace.path()).expect("canonicalize workspace root");
+
+        let harness = install_recording_harness(&data.path().join("bin"), log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            data.path().join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &workspace_root).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// Wait for the harness to have written its arguments — it is a real
+    /// process, so the write lands after `live.start` returns.
+    fn recorded_args(log: &std::path::Path) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(log)
+                && !text.is_empty()
+            {
+                return text.lines().map(str::to_owned).collect();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness never recorded its arguments at {}",
+                log.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn entering_a_stopped_session_spawns_the_harnesss_own_resume() {
+        let log_dir = tempfile::tempdir().expect("tempdir");
+        let log = log_dir.path().join("argv");
+        let (_data, _workspace, runtime) = runtime_with_recording_harness(&log);
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let store = sessions.store();
+        let record = store
+            .create(
+                NewSession::embedded("claude-code")
+                    .with_native_session_id(Some("native-42".to_owned())),
+            )
+            .expect("create a session record");
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .expect("stop it");
+
+        // The key, through the same public door a keystroke arrives at.
+        let mut state = ShellState::new(
+            "glasshouse",
+            "/work",
+            "0.1.0",
+            store.list().expect("list sessions"),
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Action::ResumeSession(id) = action else {
+            panic!("Enter on a stopped session must resume it, got {action:?}");
+        };
+        assert!(
+            state.status().is_some_and(|note| note.contains("resuming")),
+            "the frame drawn while the harness starts must say what is happening: {:?}",
+            state.status()
+        );
+
+        let mut live = SessionRuntime::new();
+        resume_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            &id,
+            TerminalSize::new(24, 80),
+        )
+        .expect("resuming must reach the harness");
+
+        let args = recorded_args(&log);
+        let resume = args
+            .iter()
+            .position(|arg| arg == "--resume")
+            .unwrap_or_else(|| panic!("no `--resume` in the harness's argv: {args:?}"));
+        assert_eq!(
+            args.get(resume + 1).map(String::as_str),
+            Some("native-42"),
+            "and it must carry the identifier this session recorded: {args:?}"
+        );
+
+        let _ = live.close(&id);
+    }
+
+    /// The refusal that stays: a stopped session with **no native identifier**
+    /// is `closed`, not `resumable` — there is nothing to hand `--resume` —
+    /// and the note says which of the two it is rather than only that the key
+    /// did nothing.
+    #[test]
+    fn entering_a_session_with_no_native_id_refuses_and_names_why() {
+        let mut state = ShellState::new(
+            "glasshouse",
+            "/work",
+            "0.1.0",
+            vec![SessionRecord {
+                id: SessionId::new("finished"),
+                project_id: "project".to_owned(),
+                harness: "claude-code".to_owned(),
+                // The whole of the refusal: nothing to hand `--resume`.
+                native_session_id: None,
+                role: SessionRole::Normal,
+                lifecycle: SessionLifecycle::Stopped,
+                presentation: SessionPresentation::Embedded,
+                created_at: 1_000,
+                last_activity_at: 1_000,
+                launch_profile: None,
+                backend_resource: None,
+                model: None,
+                pairing_class: None,
+                protocol: None,
+                response_profile: None,
+                response_mechanism: None,
+                display_name: None,
+                purpose: None,
+                source_session_id: None,
+                observed_compactions: None,
+                presentation_ref: None,
+                last_seen_commit: None,
+                entitlement: None,
+            }],
+        );
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            action,
+            Action::Redraw,
+            "there is nothing to resume to, so nothing is started"
+        );
+        let note = state.status().expect("a refusal must be spoken");
+        assert!(
+            note.contains("no native session id"),
+            "the note must name why it is impossible, not only that it is: `{note}`"
+        );
     }
 }

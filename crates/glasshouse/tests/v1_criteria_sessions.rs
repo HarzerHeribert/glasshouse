@@ -100,7 +100,7 @@ impl Session {
 
     /// Like [`Session::expect`], but only looks at bytes captured *after*
     /// `since` (a length previously returned by [`Session::output`]). A
-    /// marker like `"ctrl-]"` that this session's status line prints every
+    /// marker like `"ctrl-5"` that this session's header prints every
     /// time session mode is entered would otherwise be found instantly on a
     /// second entry — matching leftover text from the *first* one — which is
     /// exactly the shape practice's own §68/§54 family warns about: a stale
@@ -579,7 +579,7 @@ fn v1_1920_switching_between_two_live_sessions_and_back_does_not_respawn_either(
     shell.expect_since(mark, "sessions");
     shell.send("\x1b[B");
     shell.send("\r");
-    shell.expect_since(mark, "ctrl-]");
+    shell.expect_since(mark, "ctrl-5");
     shell.send("still-there\r");
     shell.expect(&format!("GOT:{target}:still-there"));
 
@@ -590,7 +590,7 @@ fn v1_1920_switching_between_two_live_sessions_and_back_does_not_respawn_either(
     shell.expect_since(mark, "sessions");
     shell.send("\x1b[A");
     shell.send("\r");
-    shell.expect_since(mark, "ctrl-]");
+    shell.expect_since(mark, "ctrl-5");
     shell.send("back-again\r");
     shell.expect(&format!("GOT:{presented}:back-again"));
 

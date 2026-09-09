@@ -50,10 +50,11 @@ const CAP_RIGHT: &str = "]";
 const MARK_FOCUSED: &str = "▸";
 const MARK_RESTING: &str = " ";
 
-/// Widest value in the `on`/`off` domain. A toggle's value slot is padded to
-/// the widest value its domain holds, so changing the value never resizes the
-/// pill and never moves the pills to its right out from under the pointer.
-const FLAG_SLOT: usize = 3;
+/// Widest value in the palette-name domain — `violet` and `cobalt`, six
+/// cells. A toggle's value slot is padded to the widest value its domain
+/// holds, so changing the value never resizes the pill and never moves the
+/// pills to its right out from under the pointer.
+const THEME_SLOT: usize = 6;
 
 /// What a bar leaves where pills it could not draw would have been.
 ///
@@ -86,6 +87,10 @@ pub(super) struct Pill {
     label: String,
     value: Option<String>,
     focused: bool,
+    /// Whether this pill is drawn as a *subordinate* one: the same width, the
+    /// same hotspot, the same key — one shade quieter. See
+    /// [`Pill::subordinate`].
+    subordinate: bool,
     keys: Vec<KeyEvent>,
 }
 
@@ -97,6 +102,7 @@ impl Pill {
             label: label.to_owned(),
             value: None,
             focused: false,
+            subordinate: false,
             keys: vec![KeyEvent::new(code, KeyModifiers::NONE)],
         }
     }
@@ -118,6 +124,7 @@ impl Pill {
             label: label.to_owned(),
             value: None,
             focused: false,
+            subordinate: false,
             keys,
         }
     }
@@ -125,6 +132,20 @@ impl Pill {
     /// Mark this pill as the focused one — the selected tab, the cursor's row.
     pub(super) fn focused(mut self, yes: bool) -> Self {
         self.focused = yes;
+        self
+    }
+
+    /// Draw this pill one shade quieter than its neighbours.
+    ///
+    /// **Hierarchy, not removal.** A subordinate pill keeps its width, its
+    /// key, its hotspot and its place in the wrap — only its colour changes,
+    /// so nothing it could do before becomes unreachable. That is the whole
+    /// difference between demoting an action and deleting one, and it is the
+    /// distinction [`control_pills`] rests on: fifteen equally-loud buttons
+    /// and four quiet ones behind three loud ones contain the same fifteen
+    /// actions.
+    pub(super) fn subordinate(mut self, yes: bool) -> Self {
+        self.subordinate = yes;
         self
     }
 
@@ -161,6 +182,20 @@ impl Pill {
         pieces
     }
 
+    /// The pill's mnemonic and label, spelled as they are drawn — `n new`.
+    ///
+    /// Test-only: production never needs a pill's text apart from the spans it
+    /// paints, and an accessor a caller could lay out from would be a second
+    /// place the bar's contents lived.
+    #[cfg(test)]
+    pub(super) fn text(&self) -> String {
+        if self.mnemonic.is_empty() {
+            self.label.clone()
+        } else {
+            format!("{} {}", self.mnemonic, self.label)
+        }
+    }
+
     /// Display columns, measured the way ratatui positions spans.
     ///
     /// `Line::width`, never `chars().count()`: a pill's label can carry a
@@ -174,7 +209,9 @@ impl Pill {
     fn spans(&self, theme: Theme) -> Vec<Span<'static>> {
         self.pieces()
             .into_iter()
-            .map(|(text, role)| Span::styled(text, style_for(role, self.focused, theme)))
+            .map(|(text, role)| {
+                Span::styled(text, style_for(role, self.focused, self.subordinate, theme))
+            })
             .collect()
     }
 }
@@ -184,7 +221,7 @@ impl Pill {
 /// Resting is not bare prose: the caps carry the accent's quiet neighbour and
 /// the mnemonic keeps the accent, so an unpressed button still looks like one
 /// — the resting affordance `tui-actionables.md` found missing everywhere.
-fn style_for(role: Role, focused: bool, theme: Theme) -> Style {
+fn style_for(role: Role, focused: bool, subordinate: bool, theme: Theme) -> Style {
     if focused {
         return match role {
             Role::Cap => Style::default().fg(theme.accent()),
@@ -193,6 +230,13 @@ fn style_for(role: Role, focused: bool, theme: Theme) -> Style {
                 .bg(theme.accent())
                 .add_modifier(Modifier::BOLD),
         };
+    }
+    // A subordinate pill drops the accent and the bold and keeps everything
+    // else. Colour is the only thing that changes, so the pill's width — and
+    // therefore the hotspot the click lands in — is identical to a primary
+    // one's; see `Pill::subordinate`.
+    if subordinate {
+        return Style::default().fg(theme.quiet());
     }
     match role {
         Role::Cap => Style::default().fg(theme.quiet()),
@@ -453,7 +497,7 @@ fn fits(pills: &[Pill], width: u16) -> bool {
 /// The same greedy walk `render_bar` makes, so the band reserved and the band
 /// painted are the same height — see [`control_bar_rows`], which is what
 /// `view::regions` asks before it splits the screen.
-fn rows_for(pills: &[Pill], width: u16) -> u16 {
+pub(super) fn rows_for(pills: &[Pill], width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
@@ -473,8 +517,38 @@ fn rows_for(pills: &[Pill], width: u16) -> u16 {
     rows
 }
 
-/// Control mode's action bar: the fifteen actions the footer used to list as
-/// one 168-column string, in the same order it listed them.
+/// How many of [`control_pills`]'s entries are **primary** — drawn loud, on a
+/// row of their own, before anything else.
+///
+/// Three, and they are the three acts a person who has just installed
+/// Glasshouse has to perform: start a session, connect an account, open
+/// settings. Everything else is something you do once you are already
+/// running.
+pub(super) const CONTROL_PRIMARY: usize = 3;
+
+/// Control mode's action bar: every action the shell offers, **ranked**.
+///
+/// The user, on the fifteen-pill version of this bar: *"there are like 5
+/// million buttons and i still dont see a way to actually add providers or
+/// subscriptions"*. Both halves matter. The bar was not too long — every entry
+/// is a real key and dropping one would put it back where the clipped
+/// 168-column footer had it, on no screen and in no hotspot — it was **flat**.
+/// Fifteen equally-weighted buttons say that fifteen things are equally worth
+/// doing, so the one thing a new user must do first was rendered exactly as
+/// loudly as `d decisions`.
+///
+/// **The rule this list applies: the first [`CONTROL_PRIMARY`] entries are the
+/// acts a person who has nothing running needs, and they get their own row and
+/// the accent; everything after them keeps its key, its click target and its
+/// place, one shade quieter.** Demotion, never deletion — see
+/// [`Pill::subordinate`], which changes colour and nothing else, and the
+/// footer tests, which still assert every action is both drawn and clickable
+/// at eighty columns.
+///
+/// Below the fold the order is `tui-actionables.md`'s measured priority — quit,
+/// overview, project, events, theme, health, routes, decisions, knowledge,
+/// memory, headless — with `tab`/`enter` last because they are motion rather
+/// than actions and both are discoverable by pressing an arrow.
 ///
 /// One table, read both by the footer that draws it and by the geometry that
 /// reserves room for it, so an action cannot be added in one place and go
@@ -482,34 +556,109 @@ fn rows_for(pills: &[Pill], width: u16) -> u16 {
 /// `state::ShellState::handle_control_key`; clicking one replays that arm's
 /// key, which is what makes the two structurally incapable of disagreeing.
 ///
-/// `f fullscreen` carries its value because arming fullscreen from control
-/// mode changes nothing a control-mode user can see — `ShellState::chrome`
-/// keeps every band — so the flag was previously readable only from a status
-/// note the next keystroke erased.
-pub(super) fn control_pills(fullscreen: bool) -> Vec<Pill> {
-    vec![
+/// **`f fullscreen` is not here, and it is not hidden — it is gone.** User
+/// ruling 2026-09-09: a session on screen keeps Glasshouse's header whoever
+/// holds the keyboard, and with the header staying, the mode `f` armed bought
+/// exactly one row and cost the only visible way out. A key that toggles
+/// nothing is worse than a missing one in a bar this user has already read as
+/// *"5 million buttons"*.
+///
+/// `t theme` takes the slot it leaves, at the same count and for the reason
+/// the fullscreen pill was given a value in the first place: `t` is an arm of
+/// `handle_control_key` that this table did not mirror, and the palette it
+/// selects was readable only from a status note the next keystroke erased.
+pub(super) fn control_pills(theme: Theme) -> Vec<Pill> {
+    let mut pills = vec![
+        // Primary. Three, and in the order a first run needs them.
+        Pill::key("n", "new", KeyCode::Char('n')),
+        Pill::key("c", "connect", KeyCode::Char('c')),
+        Pill::key("s", "settings", KeyCode::Char('s')),
+    ];
+    for pill in [
+        Pill::key("q", "quit", KeyCode::Char('q')),
+        Pill::key("o", "overview", KeyCode::Char('o')),
+        Pill::key("p", "project", KeyCode::Char('p')),
+        Pill::key("e", "events", KeyCode::Char('e')),
+        Pill::toggle("t", "theme:", theme.name(), THEME_SLOT, KeyCode::Char('t')),
+        Pill::key("h", "health", KeyCode::Char('h')),
+        Pill::key("r", "routes", KeyCode::Char('r')),
+        Pill::key("d", "decisions", KeyCode::Char('d')),
+        Pill::key("k", "knowledge", KeyCode::Char('k')),
+        Pill::key("M", "memory", KeyCode::Char('M')),
+        Pill::key("N", "headless", KeyCode::Char('N')),
         Pill::key("tab", "session", KeyCode::Tab),
         Pill::key("enter", "session", KeyCode::Enter),
-        Pill::toggle(
-            "f",
-            "fullscreen:",
-            if fullscreen { "on" } else { "off" },
-            FLAG_SLOT,
-            KeyCode::Char('f'),
-        ),
-        Pill::key("n", "new", KeyCode::Char('n')),
-        Pill::key("N", "headless", KeyCode::Char('N')),
-        Pill::key("o", "overview", KeyCode::Char('o')),
-        Pill::key("q", "quit", KeyCode::Char('q')),
-        Pill::key("s", "settings", KeyCode::Char('s')),
-        Pill::key("M", "memory", KeyCode::Char('M')),
-        Pill::key("p", "project", KeyCode::Char('p')),
-        Pill::key("k", "knowledge", KeyCode::Char('k')),
-        Pill::key("e", "events", KeyCode::Char('e')),
-        Pill::key("r", "routes", KeyCode::Char('r')),
-        Pill::key("h", "health", KeyCode::Char('h')),
-        Pill::key("d", "decisions", KeyCode::Char('d')),
-    ]
+    ] {
+        pills.push(pill.subordinate(true));
+    }
+    pills
+}
+
+/// The rows a tiered bar needs: the primary run on its own rows, then the rest
+/// wrapped under it.
+///
+/// The same greedy walk [`rows_for`] makes, applied twice, so the band
+/// reserved and the band painted are the same height for the tiered bar
+/// exactly as they were for the flat one.
+fn tiered_rows(pills: &[Pill], primary: usize, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let split = primary.min(pills.len());
+    let head = rows_for(&pills[..split], width);
+    if split == pills.len() {
+        return head;
+    }
+    head.saturating_add(rows_for(&pills[split..], width))
+}
+
+/// Draw a tiered bar: the first `primary` pills on the band's own first rows,
+/// the rest wrapped beneath them.
+///
+/// **The break is what makes the ranking readable.** Left to the greedy wrap,
+/// the primary row would fill up with whatever subordinate pills happened to
+/// fit beside it, and a hierarchy that only holds at some widths is not one.
+/// Both halves are drawn by [`render_bar`], so a pill in either tier lands
+/// where it looks and records the hotspot that says so.
+pub(super) fn render_tiered_bar(
+    frame: &mut Frame,
+    area: Rect,
+    pills: &[Pill],
+    primary: usize,
+    theme: Theme,
+    sink: &mut Vec<Hotspot>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let split = primary.min(pills.len());
+    let head_rows = rows_for(&pills[..split], area.width);
+    // **A band too short for two tiers gets one.** Reserving the whole of a
+    // one-row band for the primary run would drop every other action off the
+    // screen and out of the hotspot sink together — the 168-column clip, in a
+    // new place. The ranking still holds where it can be seen at all: the
+    // primary pills lead the walk and keep the accent, and only the row break
+    // is given up.
+    if split == pills.len() || head_rows >= area.height {
+        render_bar(frame, area, pills, theme, sink);
+        return;
+    }
+    let head = Rect {
+        height: head_rows,
+        ..area
+    };
+    render_bar(frame, head, &pills[..split], theme, sink);
+    let tail = Rect {
+        y: area.y.saturating_add(head_rows),
+        // Saturating, though the guard above already makes it non-zero: this
+        // module's own doc says nothing here computes a size by subtraction,
+        // because that is how a "must not panic on a tiny terminal" promise
+        // gets broken. Measured: mutating the guard away panicked here rather
+        // than degrading.
+        height: area.height.saturating_sub(head_rows),
+        ..area
+    };
+    render_bar(frame, tail, &pills[split..], theme, sink);
 }
 
 /// Rows control mode's footer needs at this terminal's shape.
@@ -521,10 +670,11 @@ pub(super) fn control_pills(fullscreen: bool) -> Vec<Pill> {
 /// terminal; the width is what decides everything else.
 pub(super) fn control_bar_rows(area: Rect) -> u16 {
     // Every toggle pads its value slot to the widest value in its domain, so
-    // one call answers for every state the bar can be in.
-    let pills = control_pills(false);
+    // one call answers for every state the bar can be in — including the
+    // palette, which is why this may pass any theme at all.
+    let pills = control_pills(Theme::default());
     let ceiling = (area.height / 4).max(1);
-    rows_for(&pills, area.width).min(ceiling)
+    tiered_rows(&pills, CONTROL_PRIMARY, area.width).min(ceiling)
 }
 
 /// Rows control mode's whole footer band needs: [`control_bar_rows`] for the

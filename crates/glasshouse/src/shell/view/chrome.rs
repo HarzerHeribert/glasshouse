@@ -146,7 +146,20 @@ enum HeaderField {
     Tabs,
     Root,
     Model,
+    /// The chord that moves the keyboard between this header and the session
+    /// under it, named for the direction it would move it *now*.
+    Focus,
     Exit,
+    /// `ctrl-]`, the other spelling of the byte [`ESCAPE_CHORD`] names.
+    ///
+    /// Its own field, and the first one dropped, because it is the only
+    /// entry on this row that adds no capability: it is the same `0x1D`
+    /// [`HeaderField::Exit`] already names, and on the German Mac layout this
+    /// is developed on it is the spelling the keyboard cannot produce. With a
+    /// second chord on the row the header can no longer afford to spell one
+    /// of them twice at every width — and a narrow terminal that kept the
+    /// alias would be spending columns on nothing.
+    ExitAlias,
 }
 
 /// The order the header sheds fields as the terminal narrows — first here is
@@ -158,16 +171,33 @@ enum HeaderField {
 /// model rather than competing with them for room. Move the wordmark past
 /// them and a narrow terminal keeps the logo while losing the way back, which
 /// is the failure [`render_footer`]'s design note exists to prevent.
-const DROP_ORDER: [HeaderField; 5] = [
+///
+/// [`HeaderField::Focus`] goes before the tab strip and the way out, and
+/// after the branding: it is the only field here that is a convenience rather
+/// than an escape — `Enter` moves the keyboard back into the session from a
+/// focused header, and the escape chord leaves entirely, so a terminal too
+/// narrow to name the focus chord has lost a label and not a capability.
+/// [`HeaderField::ExitAlias`] goes before even the branding, because it is
+/// the one field that names nothing the row does not already name.
+const DROP_ORDER: [HeaderField; 7] = [
+    HeaderField::ExitAlias,
     HeaderField::Wordmark,
     HeaderField::Root,
     HeaderField::Model,
+    HeaderField::Focus,
     HeaderField::Tabs,
     HeaderField::Exit,
 ];
 
 /// The gap between header fields, and the width every field reserves for it.
 const GAP: &str = "   ";
+
+/// The ground the header is painted on while it holds the keyboard.
+///
+/// Dark and neutral on purpose — see [`render_header`]: it has to sit under
+/// spans that already carry accent, white and quiet foregrounds, so it lifts
+/// the row without taking a colour away from anything on it.
+const FOCUS_FILL: Color = Color::Rgb(30, 40, 46);
 
 /// Session mode's single line of chrome: the wordmark, the tab strip, what
 /// survived from the title and root bands, and the way out.
@@ -196,6 +226,19 @@ pub(super) fn render_header(
     };
 
     let theme = state.theme();
+    let focused = state.header_focused();
+    // **The band itself says who has the keyboard.** Painted before anything
+    // else and across the whole row, so it reads as one lit strip rather than
+    // as a highlight on some word — the user's requirement was that the state
+    // be unmistakable. A dark fill rather than the accent: every span in this
+    // row carries a foreground colour of its own and an accent ground would
+    // have made the accent-coloured ones vanish into it.
+    if focused {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(FOCUS_FILL)),
+            area,
+        );
+    }
     let mut accessory: Vec<Span> = Vec::new();
     for text in [value(HeaderField::Root), value(HeaderField::Model)]
         .into_iter()
@@ -205,6 +248,22 @@ pub(super) fn render_header(
             accessory.push(Span::raw(GAP));
         }
         accessory.push(Span::styled(text, Style::default().fg(Color::White)));
+    }
+    if let Some(focus) = value(HeaderField::Focus) {
+        if !accessory.is_empty() {
+            accessory.push(Span::raw(GAP));
+        }
+        let (chord, target) = focus.split_once(' ').unwrap_or((focus.as_str(), ""));
+        accessory.push(Span::styled(
+            chord.to_owned(),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+        accessory.push(Span::styled(
+            format!(" {target}"),
+            Style::default().fg(theme.quiet()),
+        ));
     }
     if let Some(exit) = value(HeaderField::Exit) {
         if !accessory.is_empty() {
@@ -222,6 +281,12 @@ pub(super) fn render_header(
             Style::default().fg(theme.quiet()),
         ));
     }
+    if let Some(alias) = value(HeaderField::ExitAlias) {
+        accessory.push(Span::styled(
+            format!(" {alias}"),
+            Style::default().fg(theme.quiet()),
+        ));
+    }
     let accessory = Line::from(accessory);
 
     let [wordmark_area, tabs_area, accessory_area] = Layout::horizontal([
@@ -232,15 +297,22 @@ pub(super) fn render_header(
     .areas(area);
 
     if let Some(wordmark) = value(HeaderField::Wordmark) {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                wordmark,
-                Style::default()
-                    .fg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            wordmark_area,
-        );
+        // The second half of the focus signal, and the one that survives a
+        // terminal too narrow to fill much: the wordmark becomes a solid
+        // chip. Kept to the wordmark rather than applied to the whole line,
+        // because the tab strip beside it draws its own selected-tab
+        // affordance and two competing inversions read as neither.
+        let style = if focused {
+            Style::default()
+                .bg(theme.accent())
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(wordmark, style)), wordmark_area);
     }
     if value(HeaderField::Tabs).is_some() {
         render_session_bar(state, frame, tabs_area, sink);
@@ -287,7 +359,22 @@ fn header_fields(state: &ShellState) -> Vec<(HeaderField, String)> {
     // its media keys and F12 is Volume-Up. It reaches the application only
     // with Fn held. `ctrl-5` is the chord that works there, and it is the
     // byte the pty tests send.
-    fields.push((HeaderField::Exit, format!("{ESCAPE_CHORD} · ctrl-] back")));
+    // Named for what pressing it would do *from here*, not for what it is:
+    // a chord labelled "focus" tells the user nothing about which of the two
+    // things on screen would end up with the keyboard.
+    fields.push((
+        HeaderField::Focus,
+        format!(
+            "{FOCUS_CHORD} {}",
+            if state.header_focused() {
+                "session"
+            } else {
+                "header"
+            }
+        ),
+    ));
+    fields.push((HeaderField::Exit, format!("{ESCAPE_CHORD} back")));
+    fields.push((HeaderField::ExitAlias, "· ctrl-] back".to_owned()));
     fields
 }
 
@@ -305,44 +392,38 @@ fn field_cells(text: &str) -> u16 {
     u16::try_from(text.chars().count() + GAP.len()).unwrap_or(u16::MAX)
 }
 
-/// The whole of fullscreen's chrome: a small badge naming the way out,
-/// painted over the harness's own top row.
+/// The status note, painted over the session viewport's own top row.
 ///
-/// **Persistent, not a note, and that is a correction.**
-/// `docs/product/fullscreen-mode.md:376-379` accepted a one-shot status line
-/// on entry and explicitly refused to keep a line of chrome. A user then
-/// entered fullscreen, typed, and could not get out: `handle_key` clears the
-/// status on the very next keystroke, so the only chord left on screen was
-/// the embedded harness's own `ctrl+j for newline`, and it was read as the
-/// way out. The badge costs no row — `super::viewport_slot` has already given
-/// the session every one, and these cells are repainted from the emulator on
-/// the next frame — so the refusal it overrides was about rows and this
-/// spends none. Right-aligned because a harness draws its own title on the
-/// left. See `design-decisions.md`, "The fullscreen escape chord is chrome".
-pub(super) fn render_fullscreen_hint(state: &ShellState, frame: &mut Frame, area: Rect) {
+/// The session layout has one line of chrome and it is spoken for, so a note
+/// set while a session is on screen has nowhere of its own to go — and
+/// `Enter` on a stopped session sets exactly such a note (*"resuming `abc123`
+/// …"*, then the run loop's answer). Without this the key that resumes a
+/// session would say nothing at all about what it did.
+///
+/// It costs no row: `super::viewport_slot` has already handed the session
+/// every line below the header, and these cells are repainted from the
+/// emulator on the next frame. Right-aligned because a harness draws its own
+/// title on the left.
+///
+/// **What it no longer carries is the way out.** This began as fullscreen's
+/// entire chrome — a persistent `ctrl-5 back` badge, added after a user
+/// entered a frame-free session, typed, and could not leave. The header is
+/// now on screen in every session layout with that chord on it, so the badge
+/// would be a second copy of a fact that no longer disappears. See
+/// `design-decisions.md`, "The fullscreen escape chord is chrome", which this
+/// supersedes rather than contradicts: the chord is chrome, and it is chrome
+/// that is always drawn.
+pub(super) fn render_status_badge(state: &ShellState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    // The note keeps its place beside the badge rather than instead of it:
-    // being told why a key did nothing and being able to leave are not
-    // mutually exclusive, which is the same reasoning `render_footer` splits
-    // its own row by.
-    let badge = format!(" {ESCAPE_CHORD} back ");
-    let mut spans = Vec::new();
-    if let Some(note) = state.status() {
-        spans.push(Span::styled(
-            format!(" {note} "),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
-        ));
-    }
-    spans.push(Span::styled(
-        badge,
-        Style::default()
-            .fg(Color::Black)
-            .bg(state.theme().accent())
-            .add_modifier(Modifier::BOLD),
+    let Some(note) = state.status() else {
+        return;
+    };
+    let line = Line::from(Span::styled(
+        format!(" {note} "),
+        Style::default().fg(Color::Black).bg(Color::Yellow),
     ));
-    let line = Line::from(spans);
     let width = u16::try_from(line.width())
         .unwrap_or(u16::MAX)
         .min(area.width);
@@ -403,8 +484,15 @@ pub(super) fn render_footer(
         hotspot::split_band(area, state.overlay().is_some() && state.status().is_some());
 
     if state.mode() == Mode::Control && state.overlay().is_none() {
-        let pills = hotspot::control_pills(state.fullscreen());
-        hotspot::render_bar(frame, keys_area, &pills, state.theme(), sink);
+        let pills = hotspot::control_pills(state.theme());
+        hotspot::render_tiered_bar(
+            frame,
+            keys_area,
+            &pills,
+            hotspot::CONTROL_PRIMARY,
+            state.theme(),
+            sink,
+        );
     } else {
         render_hint(state, frame, keys_area);
     }
@@ -605,13 +693,29 @@ pub(super) fn render_landing(state: &ShellState, frame: &mut Frame, area: Rect) 
             Style::default().fg(theme.quiet()),
         )));
         lines.push(Line::default());
+        // **The next step is named before the menu of things one could do.**
+        // A first-time user cannot get a session to run until an account or a
+        // provider pays for it, and the panel that told them "n start a
+        // session" first was sending them at the second step. Only shown when
+        // the run loop actually read the accounts and found none connected —
+        // `Summary::unknown` says nothing, because an unread summary is not
+        // evidence of an empty one.
+        if let Some(next) = super::settings_actions::first_run_next_step(state) {
+            lines.push(Line::from(Span::styled(
+                next,
+                Style::default()
+                    .fg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::default());
+        }
         lines.push(Line::from(Span::styled(
             "n  start a session",
             Style::default()
                 .fg(theme.accent())
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from("s  configure providers, accounts and defaults"));
+        lines.push(Line::from("s  settings — providers, accounts and defaults"));
         lines.push(Line::from("o  inspect recorded sessions"));
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -627,9 +731,14 @@ pub(super) fn render_landing(state: &ShellState, frame: &mut Frame, area: Rect) 
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("p project   e events   h health   d decisions   r routes"),
-        Line::from(format!(
-            "tab session   enter focus   {ESCAPE_CHORD} back here"
-        )),
+        // **The two session chords are not named here.** They belong to a
+        // session and a session always draws them: `render_header` puts
+        // `FOCUS_CHORD` and `ESCAPE_CHORD` on screen for as long as one is on
+        // screen, so repeating them in the fleet view spends two of this
+        // panel's lines on keys that do nothing yet — and makes the words
+        // that mean *"you are inside a session"* mean nothing, which is what
+        // three pty tests were reading them as.
+        Line::from("tab session   enter focus"),
         Line::default(),
         Line::from(Span::styled(
             format!(

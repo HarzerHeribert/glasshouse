@@ -22,7 +22,7 @@ use glasshouse::config::{self, EffectiveConfig, Layer, Layered, RoutingModelChoi
 use glasshouse::onboarding::WizardState;
 use glasshouse::shell::{
     self, HarnessRow, IntegrationRow, MemoryRow, ProfileRow, ProviderRow, RoutingRow,
-    RoutingSettingsEdit, ShellState,
+    RoutingSettingsEdit, SettingsSection, ShellState,
 };
 use glasshouse::{Cli, Runtime, bootstrap};
 
@@ -250,10 +250,21 @@ fn the_settings_screen_shows_the_currently_selected_routing_model() {
         MemoryRow::defaults(),
     );
 
-    // Harnesses -> Integrations -> Providers -> Launch Profiles -> Routing.
-    for _ in 0..4 {
+    // Tab until Routing has the cursor, rather than a fixed count: a count is
+    // a hidden dependency on how many sections precede this one, and inserting
+    // Subscriptions into `SettingsSection::ORDER` re-pointed this test at
+    // Launch Profiles while it went on asserting about Routing.
+    for _ in 0..SettingsSection::ORDER.len() {
+        if state.settings().unwrap().section() == SettingsSection::Routing {
+            break;
+        }
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     }
+    assert_eq!(
+        state.settings().unwrap().section(),
+        SettingsSection::Routing,
+        "Tab never reached the Routing section"
+    );
 
     let text = rendered_settings(&state, 100, 30);
     assert!(

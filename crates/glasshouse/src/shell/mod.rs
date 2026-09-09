@@ -51,7 +51,8 @@ pub use state::{
     MemorySettingsEdit, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind, ProfileRow,
     ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
     ProviderSettingsEdit, ReachabilityCheck, RouteDecisionRow, RouteEvidenceRow, RouteHealthRow,
-    RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
+    RoutingRow, RoutingSettingsEdit, SettingsEdit, SettingsRows, SettingsSection, ShellState,
+    SubscriptionRow, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves. Session *records* are
@@ -71,6 +72,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         crate::VERSION,
         records,
     );
+    // What this user has connected, read once so the landing panel can name a
+    // next step instead of a menu. Cheap — a TOML load and one `read_dir` per
+    // configured account — and deliberately not on the `Discovery` path that
+    // `settings_open` exists to keep off this thread. A failed read leaves the
+    // summary unread, and an unread summary says nothing.
+    state.set_accounts(account_summary(runtime));
+
     // The one normalized lifecycle stream, shared with the session runtime
     // and, through the sink below, the project's durable log.
     let events = EventBus::new();
@@ -138,7 +146,16 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         };
         match event {
             Event::Key(key) => {
-                let mode_before = state.mode();
+                // **The chrome, not the mode.** What a session's
+                // pseudo-terminal is sized to is a pure function of
+                // `ShellState::chrome`, and since the focus chord landed the
+                // two facts move independently: `ctrl-6` changes the mode and
+                // not the layout, while `ctrl-5` from a focused header
+                // changes the layout without changing the mode. Asking about
+                // the mode answered wrongly in both directions — a pointless
+                // resize on every focus change, and none at all on the one
+                // that took three rows back from the harness.
+                let chrome_before = state.chrome();
                 let action = state.handle_key(key);
                 match &action {
                     Action::None | Action::Redraw => {}
@@ -221,12 +238,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             &mut live,
                             &sessions,
                             id,
-                            view::terminal_size_for(&screen, &state),
+                            // The size the session is about to be drawn at,
+                            // not the one it is drawn at now: a resume the
+                            // user asked to be put inside moves the frame to
+                            // the header layout, and a harness lays its first
+                            // frame out from the size it is handed at startup.
+                            view::viewport_terminal_size(
+                                screen.size().unwrap_or_default(),
+                                state.chrome_after_resume(id),
+                            ),
                         ) {
                             Ok(()) => {
                                 if let Ok(records) = sessions.store().list() {
                                     state.refresh(records);
                                 }
+                                state.session_resumed(id);
                                 state.set_status(format!("resumed session `{name}`"));
                             }
                             Err(err) => {
@@ -243,6 +269,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             &settings_results,
                             &events.sender(),
                             settings_open::Purpose::Open,
+                            None,
+                        );
+                    }
+                    Action::OpenAccounts => {
+                        settings_open::request_settings(
+                            runtime,
+                            &mut state,
+                            &mut settings_pending,
+                            &settings_results,
+                            &events.sender(),
+                            settings_open::Purpose::Open,
+                            Some(SettingsSection::Subscriptions),
                         );
                     }
                     Action::OpenProjectOverview => {
@@ -381,6 +419,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 &settings_results,
                                 &events.sender(),
                                 settings_open::Purpose::Refresh,
+                                None,
                             );
                         }
                     }
@@ -415,6 +454,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                         &settings_results,
                                         &events.sender(),
                                         settings_open::Purpose::Refresh,
+                                        None,
                                     );
                                 }
                                 Err(err) => {
@@ -468,7 +508,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     }
                 }
                 let outer = screen.size().unwrap_or_default();
-                sync_focus(&mut live, &state, outer, state.mode() != mode_before);
+                sync_focus(&mut live, &state, outer, state.chrome() != chrome_before);
                 if !matches!(action, Action::None) {
                     draw(&mut screen, &state, &mut hotspots)?;
                 }
@@ -1008,9 +1048,13 @@ fn resume_session(
 
     let Some(mut args) = selection.resume_args(&resumable.native_session_id, Vec::<String>::new())
     else {
+        // Short on purpose: this reaches the user through the run loop's
+        // `could not resume \`{id}\`: {err}`, and a status note shares its
+        // eighty columns with that prefix — a longer sentence is a clipped
+        // one. It names the harness because *which* harness cannot reopen a
+        // session is the whole of the answer: `pane` is the one today.
         anyhow::bail!(
-            "{} has no resume mechanism Glasshouse has verified, so this session cannot be \
-             reopened",
+            "{} has no resume flag Glasshouse has verified",
             selection.id().display_name()
         );
     };
@@ -1103,8 +1147,22 @@ fn resume_session(
         return Err(err);
     }
 
-    if let Err(err) = store.set_lifecycle(&resumable.id, SessionLifecycle::Running) {
-        tracing::warn!(session = %resumable.id, %err, "could not record a session resume");
+    // **`begin_resume`, not `set_lifecycle`** — the same distinction
+    // `commands::resume::note_resume` documents, and for the same reason it
+    // was written down: `set_lifecycle` carries `Revival::Forbidden`, so
+    // `write_lifecycle_locked` silently declines any finished-to-live move and
+    // returns `Ok(())` without writing. A session Glasshouse had just reopened
+    // kept reading `stopped`, the fleet view never entered it, and every
+    // further Enter respawned the harness over the conversation the last
+    // resume had reloaded. `begin_resume` re-checks the disposition under the
+    // write lock, so a record another process closed in between is refused
+    // rather than revived.
+    if let Err(err) = store.begin_resume(&resumable) {
+        tracing::warn!(
+            session = %resumable.id,
+            %err,
+            "could not record a session resume; the session will keep reading as finished"
+        );
     }
 
     Ok(())
@@ -1121,17 +1179,6 @@ fn reopen_onboarding(runtime: &Runtime) -> anyhow::Result<onboarding::Outcome> {
     let discovery = Discovery::run(runtime.project());
     onboarding::run(runtime, &discovery, config)
 }
-
-/// Every row every Settings section shows, in the order
-/// [`build_settings`] returns them.
-type SettingsRows = (
-    Vec<HarnessRow>,
-    Vec<IntegrationRow>,
-    Vec<ProviderRow>,
-    Vec<ProfileRow>,
-    RoutingRow,
-    MemoryRow,
-);
 
 /// Current binding memory (decisions and constraints) and unresolved todos,
 /// summarized into display lines for [`state::ShellState::open_project_overview`].
@@ -1861,6 +1908,25 @@ fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
     rows
 }
 
+/// How many subscription accounts this user has configured and connected.
+///
+/// Every failure — an unreadable user configuration, a project file that does
+/// not parse, an entitlement table that does not resolve — collapses to
+/// [`crate::subscription::Summary::unknown`], which every surface renders as
+/// *nothing claimed*. A start-up read has no user to report an error to, and
+/// guessing "no accounts" from a failed read would put a wrong next step in
+/// front of the one person least able to tell it is wrong.
+fn account_summary(runtime: &Runtime) -> crate::subscription::Summary {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return crate::subscription::Summary::unknown();
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return crate::subscription::Summary::unknown();
+    };
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    crate::subscription::summarise(runtime.paths(), &effective)
+}
+
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
 /// pass and the configuration currently on disk.
 /// This is the only place that combines them: [`state::ShellState`] and its
@@ -1977,14 +2043,30 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     .with_free_preferences(free_order, free_disabled, free_pin);
     let memory = MemoryRow::new(effective.memory_extraction_enabled());
 
-    Ok((
+    // The accounts a user connects an existing plan through. Read here rather
+    // than in `shell/state` for the reason this whole function exists: the
+    // state module runs no discovery and reads no file. One `read_dir` per
+    // configured entitlement, and never the contents of what it finds — see
+    // `crate::subscription`.
+    let subscriptions = crate::subscription::accounts(runtime.paths(), &effective)
+        .unwrap_or_default()
+        .iter()
+        .map(SubscriptionRow::from_account)
+        .collect();
+    let broker = state::BrokerState {
+        adopted: crate::subscription::broker_adopted(runtime.paths()),
+    };
+
+    Ok(SettingsRows {
         harnesses,
         integrations,
         providers,
         profiles,
         routing,
         memory,
-    ))
+        subscriptions,
+        broker,
+    })
 }
 
 /// Write the credential the user just typed into the OS's own secure store.

@@ -21,7 +21,7 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use super::{Mode, Overlay, SettingsRows, ShellState};
+use super::{Mode, Overlay, SettingsRows, SettingsSection, ShellState};
 use crate::Runtime;
 use crate::tui::AppEvent;
 
@@ -48,14 +48,25 @@ pub(super) struct Placement {
     mode: Mode,
     overlay: Option<Overlay>,
     purpose: Purpose,
+    /// Which section the rows should land on, when the request named one.
+    ///
+    /// Carried across the wait rather than applied on arrival by a synthetic
+    /// keypress: the rows are not there yet when the request is made, so a Tab
+    /// sent now would move a cursor over an overlay that does not exist.
+    section: Option<SettingsSection>,
 }
 
 impl Placement {
-    pub(super) fn of(state: &ShellState, purpose: Purpose) -> Self {
+    pub(super) fn of(
+        state: &ShellState,
+        purpose: Purpose,
+        section: Option<SettingsSection>,
+    ) -> Self {
         Self {
             mode: state.mode(),
             overlay: state.overlay(),
             purpose,
+            section,
         }
     }
 
@@ -78,9 +89,10 @@ pub(super) fn request_settings(
     results: &Sender<anyhow::Result<SettingsRows>>,
     wake: &Sender<AppEvent>,
     purpose: Purpose,
+    section: Option<SettingsSection>,
 ) {
     if pending.is_some() {
-        *pending = Some(Placement::of(state, purpose));
+        *pending = Some(Placement::of(state, purpose, section));
         state.set_status("settings: still checking harness versions…");
         return;
     }
@@ -104,7 +116,7 @@ pub(super) fn request_settings(
 
     match started {
         Ok(_handle) => {
-            *pending = Some(Placement::of(state, purpose));
+            *pending = Some(Placement::of(state, purpose, section));
             state.set_status("settings: checking harness versions…");
         }
         Err(err) => {
@@ -130,33 +142,22 @@ pub(super) fn drain_settings(
     while let Ok(rows) = inbox.try_recv() {
         let asked_from = pending.take();
         match rows {
-            Ok((harnesses, integrations, providers, profiles, routing, memory)) => {
+            Ok(rows) => {
                 let Some(asked_from) = asked_from.filter(|p| p.matches_screen(state)) else {
                     tracing::debug!("settings finished building after the user moved on");
                     continue;
                 };
                 match asked_from.purpose {
                     Purpose::Open => {
-                        state.open_settings_with_routing(
-                            harnesses,
-                            integrations,
-                            providers,
-                            profiles,
-                            routing,
-                            memory,
-                        );
+                        match asked_from.section {
+                            Some(section) => state.open_settings_rows_at(rows, section),
+                            None => state.open_settings_rows(rows),
+                        };
                         // Replaces the "checking…" note, which is no longer true.
                         state.set_status("settings ready");
                     }
                     Purpose::Refresh => {
-                        state.refresh_settings_with_routing(
-                            harnesses,
-                            integrations,
-                            providers,
-                            profiles,
-                            routing,
-                            memory,
-                        );
+                        state.refresh_settings_rows(rows);
                     }
                 }
                 redraw = true;
@@ -174,21 +175,13 @@ pub(super) fn drain_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{MemoryRow, RoutingRow};
 
     fn shell_state() -> ShellState {
         ShellState::new("demo", "/tmp/demo", "0.0.0", Vec::new())
     }
 
     fn rows() -> SettingsRows {
-        (
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            RoutingRow::defaults(Vec::new()),
-            MemoryRow::defaults(),
-        )
+        SettingsRows::default()
     }
 
     /// The defect this module exists for: `s` must not build Settings on the
@@ -219,7 +212,7 @@ mod tests {
     #[test]
     fn rows_that_arrive_where_they_were_asked_for_open_settings() {
         let mut state = shell_state();
-        let mut pending = Some(Placement::of(&state, Purpose::Open));
+        let mut pending = Some(Placement::of(&state, Purpose::Open, None));
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Ok(rows())).unwrap();
 
@@ -238,6 +231,7 @@ mod tests {
             mode: state.mode(),
             overlay: Some(Overlay::Overview),
             purpose: Purpose::Open,
+            section: None,
         });
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Ok(rows())).unwrap();
@@ -278,7 +272,7 @@ mod tests {
     fn a_second_press_while_a_build_is_running_starts_no_second_build() {
         let (_data, _workspace, runtime) = isolated_runtime();
         let mut state = shell_state();
-        let already = Placement::of(&state, Purpose::Open);
+        let already = Placement::of(&state, Purpose::Open, None);
         let mut pending = Some(already);
         let (results, _inbox) = std::sync::mpsc::channel();
         let (wake, wake_inbox) = std::sync::mpsc::channel();
@@ -290,6 +284,7 @@ mod tests {
             &results,
             &wake,
             Purpose::Open,
+            None,
         );
 
         assert_eq!(

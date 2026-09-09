@@ -179,19 +179,14 @@ fn validate_kind_vendor(
     Ok(())
 }
 
+/// Delegates to `glasshouse::subscription`, which is where the table lives so
+/// the Settings overlay in the library crate cannot offer to connect a row
+/// this command would refuse.
 fn provider_for_entitlement(
     kind: Option<EntitlementKind>,
     vendor: Option<EntitlementVendor>,
 ) -> Option<SubscriptionProvider> {
-    match (kind, vendor) {
-        (Some(EntitlementKind::Claude), None | Some(EntitlementVendor::Claude))
-        | (None, Some(EntitlementVendor::Claude)) => Some(SubscriptionProvider::Anthropic),
-        (Some(EntitlementKind::ChatGpt), None | Some(EntitlementVendor::OpenAi))
-        | (None, Some(EntitlementVendor::OpenAi)) => Some(SubscriptionProvider::Openai),
-        (Some(EntitlementKind::Gemini), None | Some(EntitlementVendor::Google))
-        | (None, Some(EntitlementVendor::Google)) => Some(SubscriptionProvider::Google),
-        _ => None,
-    }
+    glasshouse::subscription::provider_for_entitlement(kind, vendor)
 }
 
 struct AccountPaths {
@@ -211,22 +206,13 @@ fn prepare_account(paths: &RuntimePaths, entitlement: &str) -> Result<AccountPat
     Ok(AccountPaths { root, config })
 }
 
+/// Delegates to `glasshouse::subscription::credential_present` for the same
+/// reason [`provider_for_entitlement`] does: `glasshouse subscriptions status`
+/// and the Settings overlay must not be able to disagree about what `present`
+/// means. The measurement — a directory entry, never the token's contents —
+/// is unchanged and is documented there.
 fn auth_present(dir: &Path) -> Result<bool> {
-    let metadata = match fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err).with_context(|| format!("could not inspect `{dir:?}`")),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        bail!("subscription auth location `{dir:?}` is not a private directory");
-    }
-    for entry in fs::read_dir(dir).with_context(|| format!("could not inspect `{dir:?}`"))? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    glasshouse::subscription::credential_present(dir)
 }
 
 fn validate_account_ancestors(paths: &RuntimePaths, entitlement: &str) -> Result<()> {

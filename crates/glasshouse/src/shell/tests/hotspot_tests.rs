@@ -23,27 +23,33 @@ fn a_pill_is_the_same_width_focused_and_resting() {
 /// The other constant-width promise: a toggle pads its value slot to the
 /// widest value its domain holds, so changing the value never moves the pills
 /// to its right — which is what would make a click land on the wrong one.
+///
+/// Proven over the whole palette rather than over one pair, because the bar's
+/// only toggle now carries the palette name and `violet`/`cobalt` are two
+/// cells wider than `neon`: an unpadded slot would move every pill after
+/// `t theme:` by two columns on a keystroke.
 #[test]
 fn a_toggle_pill_is_the_same_width_in_every_value_it_can_show() {
-    let on: u16 = control_pills(true).iter().map(Pill::width).sum();
-    let off: u16 = control_pills(false).iter().map(Pill::width).sum();
-    assert_eq!(on, off, "`f fullscreen: on` and `: off` must be one width");
-
-    // The other domain a toggle could carry, proven on the rule rather than
-    // on a pill the footer draws: eight theme names, longest six cells.
-    const THEME_SLOT: usize = 6;
-    let themes = [
-        "neon", "amber", "ice", "violet", "cobalt", "mint", "rose", "mono",
-    ];
-    assert_eq!(themes.iter().map(|n| n.len()).max(), Some(THEME_SLOT));
-    let widths: Vec<u16> = themes
-        .iter()
-        .map(|name| Pill::toggle("t", "theme:", name, THEME_SLOT, KeyCode::Char('t')).width())
-        .collect();
+    let mut theme = Theme::default();
+    let mut widths = Vec::new();
+    let mut names = Vec::new();
+    for _ in 0..8 {
+        names.push(theme.name());
+        widths.push(control_pills(theme).iter().map(Pill::width).sum::<u16>());
+        theme = theme.next();
+    }
+    assert_eq!(
+        theme.name(),
+        Theme::default().name(),
+        "eight palettes and back to the first: {names:?}"
+    );
     assert!(
         widths.windows(2).all(|pair| pair[0] == pair[1]),
-        "every theme name must fit the same slot: {themes:?} -> {widths:?}"
+        "every palette name must fit one slot: {names:?} -> {widths:?}"
     );
+    // The slot the bar reserves, stated where a new palette name would break
+    // it: `Pill::toggle` pads, it does not clip.
+    assert_eq!(names.iter().map(|name| name.len()).max(), Some(6));
 }
 
 /// `width()` is what `render_bar` positions by and what `hit` is measured
@@ -83,16 +89,64 @@ fn a_pill_measures_the_columns_it_draws() {
 /// The bar wraps rather than clipping, and the reservation `view::regions`
 /// makes from [`control_bar_rows`] has to be the height that walk needs — a
 /// band one row short is the 168-column clip again, in a different place.
+///
+/// **Two walks, not one, since the bar became tiered**: the primary run gets
+/// its own rows and the subordinate run wraps beneath it, so the reservation
+/// has to be the sum. Computed here from `rows_for` over each half rather than
+/// from `tiered_rows`, so the test is not the production arithmetic restated.
 #[test]
 fn the_reserved_height_is_the_height_the_bar_wraps_to() {
     for width in [40u16, 60, 80, 100, 120, 160, 240] {
-        let pills = control_pills(false);
-        let needed = rows_for(&pills, width);
+        let pills = control_pills(Theme::default());
+        let needed =
+            rows_for(&pills[..CONTROL_PRIMARY], width) + rows_for(&pills[CONTROL_PRIMARY..], width);
         let area = Rect::new(0, 0, width, 40);
         assert_eq!(
             control_bar_rows(area),
             needed,
             "at {width} columns the bar wraps to {needed} rows and must be given them"
+        );
+    }
+}
+
+/// The ranking is real on screen and costs no action.
+///
+/// The user's complaint was hierarchy, not count — *"5 million buttons"* over
+/// a bar where the one act a new install needs looked exactly like `d
+/// decisions`. Both halves are asserted here because fixing the first by
+/// deleting actions would be the 168-column clip returning: the primary run
+/// leads, every primary pill is drawn plainly rather than subordinate, and the
+/// list still holds every action.
+#[test]
+fn the_primary_actions_lead_the_bar_and_nothing_is_dropped_to_make_room() {
+    let pills = control_pills(Theme::default());
+    assert_eq!(
+        CONTROL_PRIMARY, 3,
+        "the primary run is the acts a first run needs, and there are three"
+    );
+    let labels: Vec<String> = pills.iter().map(Pill::text).collect();
+    assert_eq!(
+        &labels[..CONTROL_PRIMARY],
+        &["n new", "c connect", "s settings"],
+        "start a session, connect an account, settings — in that order"
+    );
+    for action in [
+        "q quit",
+        "o overview",
+        "p project",
+        "e events",
+        "h health",
+        "r routes",
+        "d decisions",
+        "k knowledge",
+        "M memory",
+        "N headless",
+        "tab session",
+        "enter session",
+    ] {
+        assert!(
+            labels.iter().any(|label| label == action),
+            "`{action}` was demoted, not deleted: it must still be in the bar"
         );
     }
 }
@@ -133,7 +187,7 @@ fn walking_to_a_row_is_the_arrow_presses_a_user_would_have_made() {
 /// four of those cells exist and none of them belongs to another pill.
 #[test]
 fn a_click_inside_a_pill_answers_with_that_pills_keys() {
-    let pills = control_pills(false);
+    let pills = control_pills(Theme::default());
     let one_row: u16 = pills.iter().map(Pill::width).sum::<u16>()
         + u16::try_from(pills.len() - 1).expect("one blank between neighbours");
     let area = Rect::new(2, 3, one_row, 1);

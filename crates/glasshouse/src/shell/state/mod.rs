@@ -49,11 +49,12 @@ pub use route::{
     RouteHealthState,
 };
 pub use settings::{
-    HarnessRow, IntegrationRow, MemoryRow, MemorySettingsEdit, ModelRefresh, ProbeKind,
-    ProfileInputView, ProfileRow, ProfileSettingsEdit, ProviderInputView, ProviderNotice,
-    ProviderProbeIntent, ProviderProbeResult, ProviderRow, ProviderSettingsEdit, ReachabilityCheck,
-    RoutingInputView, RoutingRow, RoutingSettingsEdit, SettingsEdit, SettingsPathInputView,
-    SettingsSection, SettingsState, format_usd,
+    AccountCommand, BrokerState, HarnessRow, IntegrationRow, MemoryRow, MemorySettingsEdit,
+    ModelRefresh, ProbeKind, ProfileInputView, ProfileRow, ProfileSettingsEdit, ProviderInputView,
+    ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow, ProviderSettingsEdit,
+    ReachabilityCheck, RoutingInputView, RoutingRow, RoutingSettingsEdit, SettingsEdit,
+    SettingsPathInputView, SettingsRows, SettingsSection, SettingsState, SubscriptionRow,
+    format_usd, subscription_tip,
 };
 
 // Brought into `state`'s own namespace, unexported, purely so `state::tests`'s
@@ -62,8 +63,9 @@ pub use settings::{
 // to every descendant module, but only if the parent actually names it.
 // `#[cfg(test)]`, matching `mod tests` itself, so a non-test build does not
 // see these as unused.
+use overview::is_session_escape;
 #[cfg(test)]
-use overview::{encode, is_session_escape};
+use overview::{encode, is_focus_chord};
 #[cfg(test)]
 use settings::probe_endpoint;
 
@@ -189,21 +191,27 @@ pub enum Mode {
 /// How much of Glasshouse's own furniture is on screen, which is the only
 /// thing the vertical split is a function of.
 ///
+/// **Two answers, and the header is in both.** There was a third,
+/// `Chrome::None`, that drew nothing at all; it is gone — user ruling
+/// 2026-09-09: *"being in glasshouse or being inside a session are two
+/// different stories. while in fullscreen for claude code or pane — session
+/// header up top should still be there. There just needs to be a key to
+/// change focus."* A session on screen always has Glasshouse's own row above
+/// it, so the way back is never something the user has to remember.
+///
 /// Separate from [`Mode`] because who owns the keyboard and how much chrome
-/// is drawn are two facts, and fullscreen changes only the second: it is a
-/// third answer here rather than a third `Mode`, so every binding, every
-/// escape chord and every "is a session focused" test keeps its two-valued
-/// question. [`ShellState::chrome`] is where the two facts combine, and
+/// is drawn are two facts: with a session's own layout on screen the keyboard
+/// may be the harness's ([`Mode::Session`]) or the header's
+/// ([`Mode::Control`]), and neither changes the bands.
+/// [`ShellState::chrome`] is where the two facts combine, and
 /// `super::view::viewport_slot` is the only reader that matters — it is what
 /// tells the harness's pseudo-terminal how large its screen is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
     /// Control mode's five bands: title, root, session bar, viewport, footer.
     Full,
-    /// Session mode's single header line, then the viewport.
+    /// A session's own layout: one header line, then the viewport.
     Header,
-    /// Nothing at all — the focused session has the terminal itself.
-    None,
 }
 
 /// What the run loop should do after a key.
@@ -230,6 +238,14 @@ pub enum Action {
     /// reporting failure back with `set_status` exactly like
     /// [`Action::StartSession`].
     OpenSettings,
+    /// Open Settings with the cursor already on `Subscriptions` — the door a
+    /// *connect an account* affordance uses.
+    ///
+    /// A distinct action rather than `OpenSettings` plus a Tab, because the
+    /// rows arrive on a thread and the section has to be remembered across
+    /// that wait: pressing Tab here would move a cursor over rows that are not
+    /// there yet.
+    OpenAccounts,
     /// Persist every pending Settings edit to the user-level configuration
     /// file. The run loop performs the write and refreshes the rows shown.
     SaveUserSettings,
@@ -308,8 +324,10 @@ pub enum Action {
     /// holds — both are the run loop's job, exactly like
     /// [`Action::OpenSettings`].
     ReopenOnboarding,
-    /// Reopen the overview's cursor session where it left off — Phase 11's
-    /// "resume any compatible stopped session from the overview".
+    /// Reopen a stopped session where it left off, through the harness's own
+    /// `--resume` — Phase 11's "resume any compatible stopped session from
+    /// the overview", and since 2026-09-09 what `Enter` on a stopped session
+    /// does too.
     ///
     /// Carries its target for the same reason [`Action::InterruptSession`]
     /// does: the session acted on is the one under the cursor, not whichever
@@ -317,6 +335,20 @@ pub enum Action {
     /// its resume arguments, and starting the process are all I/O this
     /// module deliberately does not hold — see `shell::resume_session`, the
     /// run loop's counterpart to `shell::start_session`.
+    ///
+    /// **Where the keyboard lands afterwards is not carried here.** The two
+    /// producers differ in exactly that — the overview's `R` reopens a session
+    /// the user is looking at in a list and leaves them in the list, while
+    /// `Enter` on the session bar is a request to be *in* that session — and
+    /// the request is recorded on the state (`resume_entry`) rather than on
+    /// the action, because who owns the keyboard is this module's decision and
+    /// the run loop is a dispatch layer: it answers by calling
+    /// [`ShellState::session_resumed`] once the harness is running, with no
+    /// branch of its own to get wrong. The precedent is `HarnessChoice`, which
+    /// carries the presentation an interrupted `n`/`N` asked for across the
+    /// same kind of wait. User ruling 2026-09-09: *"stopped session dont
+    /// reopen on entering them … so just not entering because you exited kinda
+    /// dumb"*.
     ResumeSession(SessionId),
     /// Open the project overview. Reading current binding memory and
     /// unresolved todos is file I/O this module deliberately does not hold —
@@ -470,14 +502,33 @@ pub(super) fn escape_chord_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)
 }
 
-/// The note a fullscreen session shows on entry, beside the badge that stays.
+/// The chord that moves the keyboard between Glasshouse's own header and the
+/// session drawn under it, without either one leaving the screen.
 ///
-/// [`Chrome::None`] draws no band, so `view::chrome::render_fullscreen_hint`
-/// paints a persistent badge over the harness's top row; this note explains
-/// what just happened once, and is cleared by the next keystroke like any
-/// other. The badge is what survives, because a one-shot note is exactly the
-/// defect that left a user unable to find the way out.
-pub(super) const FULLSCREEN_HINT: &str = "fullscreen · ctrl-5 back to glasshouse";
+/// **`ctrl-6`, chosen from the same family as [`ESCAPE_CHORD`] and for the
+/// same reason.** A terminal sends `0x1E` for it and Crossterm's Unix parser
+/// decodes the control range `0x1C..=0x1F` arithmetically, so the chord
+/// arrives as `Ctrl` + `'6'` — a *digit*, which every Latin layout puts on
+/// the same key. That is the property `ctrl-5` was picked for after `ctrl-]`
+/// stranded a user on a German Mac, where `]` is Right-Option-6; a
+/// `Ctrl`+letter chord would have been layout-safe too, but every letter this
+/// could have used is already spoken for inside the harnesses Glasshouse
+/// embeds — `docs/product/tui-actionables.md` measured pane's own inventory
+/// as `Ctrl-B`, `Ctrl-O`, `Ctrl-T`, `Ctrl-F`, `Ctrl-U`, `Ctrl-C` and
+/// `Ctrl-D`. `0x1E` is claimed by no harness and by no terminal special
+/// character (`stty` claims `C-c C-\ C-z C-q C-s C-v C-w`), and `ctrl-q`
+/// specifically is XON. See `overview::is_focus_chord` for the spellings the
+/// handler accepts.
+pub(super) const FOCUS_CHORD: &str = "ctrl-6";
+
+/// The key event [`FOCUS_CHORD`] names, spelled the way a terminal delivers
+/// it — the other half of the link
+/// `state_tests::the_advertised_focus_chord_is_one_the_handler_accepts`
+/// asserts.
+#[cfg(test)]
+pub(super) fn focus_chord_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL)
+}
 
 /// One line for the activity view, naming exactly what happened.
 ///
@@ -576,11 +627,27 @@ pub struct ShellState {
     status: Option<String>,
     /// Who currently owns the keyboard. See [`Mode`].
     mode: Mode,
-    /// Whether a focused session is drawn frame-free. Armed and disarmed in
-    /// control mode only, because [`Mode::Session`] forwards every key to the
-    /// harness; it takes effect the moment a session is focused. See
-    /// [`ShellState::chrome`].
-    fullscreen: bool,
+    /// The session a resume was asked for *from inside*, waiting for the run
+    /// loop to report that its harness is running.
+    ///
+    /// `Enter` on a stopped session and the overview's `R` both produce
+    /// [`Action::ResumeSession`]; only the first is a request to be put in the
+    /// session, and only a request that survives to
+    /// [`ShellState::session_resumed`] is honoured. Cleared at the top of
+    /// every [`ShellState::handle_key`], so it lives exactly from the key that
+    /// made it until the run loop answers it and never a keystroke longer — a
+    /// resume that failed to start leaves nothing behind to fire on the next
+    /// one.
+    resume_entry: Option<SessionId>,
+    /// Whether a session's own layout — header, then viewport — is what this
+    /// frame draws, rather than the fleet view's five bands.
+    ///
+    /// Set by entering a session and cleared by [`ESCAPE_CHORD`], so it
+    /// outlives the [`Mode`] change the focus chord makes: that is exactly
+    /// the state the user asked for, *"session header up top"* with the
+    /// keyboard on the header rather than the harness. See
+    /// [`ShellState::chrome`], which is where the two facts combine.
+    session_view: bool,
     /// The screen shown in the session viewport — the focused session's
     /// `vt100` screen, converted by the run loop and set via
     /// [`ShellState::set_viewport_grid`]. Not the runtime itself: see the
@@ -590,6 +657,18 @@ pub struct ShellState {
     /// separate from `overlay` because it carries real data (rows, pending
     /// edits, sub-mode) that a plain `Copy` marker cannot.
     settings: Option<SettingsState>,
+    /// How many subscription accounts are configured and how many carry a
+    /// credential, as the run loop read them at start-up.
+    ///
+    /// **Four states, not three**, which is the whole reason this is a struct
+    /// and not a `usize`: unread is distinct from zero. A landing panel that
+    /// rendered an unread summary as "no account is connected" would be
+    /// stating a fact it does not have, and this is precisely the surface a
+    /// first-time user reads first. Defaults to
+    /// [`crate::subscription::Summary::unknown`] and stays there for every
+    /// test fixture that never sets it, so nothing claims anything by
+    /// accident.
+    accounts: crate::subscription::Summary,
     /// The Overview overlay's own data, or `None` when it is not open — the
     /// same split as `settings`, and for the same reason. See
     /// [`OverviewState`] for why its cursor is not `selected`.
@@ -660,9 +739,11 @@ impl ShellState {
             harness_choice: None,
             status: None,
             mode: Mode::Control,
-            fullscreen: false,
+            session_view: false,
+            resume_entry: None,
             viewport_grid: ViewportGrid::default(),
             settings: None,
+            accounts: crate::subscription::Summary::unknown(),
             overview: None,
             project_overview: None,
             project_knowledge: None,
@@ -810,25 +891,35 @@ impl ShellState {
         self.mode
     }
 
-    /// Whether fullscreen is armed. Armed is not the same as drawn — see
+    /// Whether a session's own layout is on screen. See
     /// [`ShellState::chrome`], which is what the view and the run loop ask.
-    pub fn fullscreen(&self) -> bool {
-        self.fullscreen
+    pub fn session_view(&self) -> bool {
+        self.session_view
+    }
+
+    /// Whether Glasshouse's own header holds the keyboard while a session is
+    /// drawn under it — the state the focus chord reaches (`FOCUS_CHORD`),
+    /// and the one the header paints itself differently for.
+    ///
+    /// False in the fleet view: there is no session layout there for the
+    /// header to be focused *against*, and every band on screen is
+    /// Glasshouse's already.
+    pub fn header_focused(&self) -> bool {
+        self.session_view && self.mode == Mode::Control
     }
 
     /// How much chrome this frame draws, and so how large the focused
     /// session's screen is.
     ///
-    /// Control mode keeps its five bands whatever fullscreen says: this is
-    /// the way out. A focused session is left by `Ctrl-]`, which lands the
-    /// user here, and if arming fullscreen also stripped control mode the
-    /// user would be returned to a blank terminal with nothing on it naming
-    /// a key — including the key that disarms it.
+    /// **A session on screen always keeps the header**, whichever of the two
+    /// owns the keyboard — user ruling 2026-09-09. The band it costs is the
+    /// one that names the way back, and the mode that saved it (`Chrome::None`,
+    /// armed by an `f` this ruling also removed) bought exactly one row and
+    /// left a user typing into a harness with no visible way out.
     pub fn chrome(&self) -> Chrome {
-        match (self.mode, self.fullscreen) {
-            (Mode::Control, _) => Chrome::Full,
-            (Mode::Session, false) => Chrome::Header,
-            (Mode::Session, true) => Chrome::None,
+        match (self.mode, self.session_view) {
+            (Mode::Session, _) | (Mode::Control, true) => Chrome::Header,
+            (Mode::Control, false) => Chrome::Full,
         }
     }
 
@@ -844,6 +935,20 @@ impl ShellState {
     /// changes.
     pub fn set_viewport_grid(&mut self, grid: ViewportGrid) {
         self.viewport_grid = grid;
+    }
+
+    /// What the run loop read about this user's subscription accounts.
+    pub fn accounts(&self) -> crate::subscription::Summary {
+        self.accounts
+    }
+
+    /// Record what the run loop read about this user's subscription accounts.
+    ///
+    /// Set once, at start-up, from `shell::run` — the read is a small TOML
+    /// load and a `read_dir` per account, not the multi-second harness
+    /// `Discovery` pass that `settings_open` exists to keep off this thread.
+    pub fn set_accounts(&mut self, accounts: crate::subscription::Summary) {
+        self.accounts = accounts;
     }
 
     /// Present the next session, wrapping at the end.
@@ -986,6 +1091,10 @@ impl ShellState {
         // A note explains the key that was just pressed, so the next key
         // clears it rather than leaving stale text under a new action.
         let had_status = self.status.take().is_some();
+        // And so does a pending resume request: see `resume_entry`. The run
+        // loop answers one between two keys, so anything still here is a
+        // request whose resume never started.
+        self.resume_entry = None;
 
         if self.mode == Mode::Session {
             return self.handle_session_key(key);
@@ -1061,6 +1170,29 @@ impl ShellState {
     /// Glasshouse's own bindings, with no overlay claiming the key first.
     fn handle_control_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // The other half of [`FOCUS_CHORD`]: `handle_session_key` hands the
+        // keyboard to the header, and this hands it back. Answered before the
+        // table rather than inside it because the table matches on `key.code`
+        // alone and this chord is a code *and* a modifier — the same reason
+        // `is_session_escape` is a function and not an arm. Bound in both
+        // directions, so the one chord the user has to learn is the whole of
+        // *"a key to change focus"*; in the fleet view it is the act `Enter`
+        // performs, and it reads the same refusals.
+        if overview::is_focus_chord(&key) {
+            return self.enter_session_mode();
+        }
+        // And the escape chord means one thing everywhere it is bound: *leave
+        // the session*. Reachable here only with the header focused — the
+        // fleet view has no session layout to leave — so in the fleet view the
+        // chord stays unbound and nothing about it changed. Without this the
+        // focus chord would be a one-way door: the header holds the keyboard,
+        // the session is still drawn under it, and the fleet view (with `n`,
+        // `s` and the rest of the bar on it) is off screen with no key to
+        // bring it back.
+        if self.session_view && is_session_escape(&key) {
+            self.session_view = false;
+            return Action::Redraw;
+        }
         match key.code {
             KeyCode::Char('c' | 'C') if ctrl => Action::Quit,
             KeyCode::Char('q') => Action::Quit,
@@ -1069,6 +1201,15 @@ impl ShellState {
             KeyCode::BackTab | KeyCode::Left => self.previous_session(),
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('s') => Action::OpenSettings,
+            // `c` for connect, and it was free: the only other `Char('c')` in
+            // this table is `Ctrl-C`, which this arm's `!ctrl` guard excludes,
+            // and the Settings overlay's own `c` runs instead of this table
+            // rather than after it — the arrangement `M` and `f` below
+            // describe. It exists because *connecting an account is the first
+            // thing a new user must do and there was no key for it at all*:
+            // subscriptions had a CLI command, an entitlement table, and no
+            // surface in the interface.
+            KeyCode::Char('c') if !ctrl => Action::OpenAccounts,
             KeyCode::Char('t') if !ctrl => {
                 self.theme = self.theme.next();
                 self.set_status(format!(
@@ -1107,35 +1248,7 @@ impl ShellState {
             // context-dependent meaning would be confusing even though the
             // two never overlap at runtime.
             KeyCode::Char('M') => Action::OpenProjectMemory,
-            // `f` for fullscreen: free in this table, and safe despite the
-            // Settings overlay binding `f` twice of its own
-            // (`settings/keys.rs`, the Providers and Routing sections).
-            // An overlay handler runs INSTEAD of this table rather than
-            // after it, so the two never contend — the letter is reused, not
-            // shared, which is the same arrangement `M` above describes.
-            KeyCode::Char('f') if !ctrl => {
-                self.fullscreen = !self.fullscreen;
-                self.set_status(if self.fullscreen {
-                    "fullscreen on · enter focuses a session with no chrome at all"
-                } else {
-                    "fullscreen off · a focused session keeps its header"
-                });
-                Action::Redraw
-            }
-            KeyCode::Enter | KeyCode::Char('i') => {
-                let action = self.enter_session_mode();
-                // The way out of a screen that has nothing on it to read it
-                // from. Set here, after the transition, because only a
-                // transition that actually reached [`Chrome::None`] owes it:
-                // `enter_session_mode` refuses a headless session and a
-                // project with none at all, and both of those already have
-                // their own note. The view paints it over the harness's top
-                // row and the next keystroke clears it like any other note.
-                if self.chrome() == Chrome::None {
-                    self.set_status(FULLSCREEN_HINT);
-                }
-                action
-            }
+            KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
             // Phase 4's headless presentation mode. Deliberately next to `n`

@@ -1,7 +1,20 @@
 # Fullscreen and mouse — plan
 
-Status: **partly shipped.** Fullscreen itself landed in `be50c50` (2026-09-08) for
-both TUIs; the mouse and clickable-chrome steps were still unbuilt as of 2026-09-09,
+Status: **the fullscreen half is REMOVED; the mouse half stands.**
+
+Glasshouse's frame-free mode (`Chrome::None`, armed by `f`) landed in `be50c50`
+(2026-09-08) and was taken out again on 2026-09-09 by user ruling — see
+`design-decisions.md`, *"A session you can leave, and one you can come back
+to"*. A session on screen now always keeps Glasshouse's header, and `ctrl-6`
+moves the keyboard between the header and the harness. Everything below about
+Glasshouse's own fullscreen — the row it buys, the badge, the one-shot note,
+the `f` binding — is **history, not the design**; pane's own `/fullscreen`
+(`Ctrl-F`, `crates/pane/src/session/ui.rs`) is a separate thing and is
+unaffected. The mouse and clickable-chrome sections are still the plan of
+record, and the text-recovery prerequisite they name is still the gate on
+session-mode clicks.
+
+The mouse and clickable-chrome steps were still unbuilt as of 2026-09-09,
 when a user report reopened them. Originally written 2026-09-08 from five verified
 investigations of `crates/pane/src/tui.rs`, `crates/pane/src/session/ui.rs`,
 `crates/glasshouse/src/shell/`, `crates/glasshouse/src/session/runtime.rs`, and the

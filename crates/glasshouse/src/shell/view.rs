@@ -10,8 +10,9 @@
 //! the bottom render at 1x1 to keep it honest.
 
 mod chrome;
+mod settings_actions;
 use chrome::{
-    render_footer, render_fullscreen_hint, render_header, render_root, render_session_bar,
+    render_footer, render_header, render_root, render_session_bar, render_status_badge,
     render_title,
 };
 
@@ -35,9 +36,9 @@ use crate::session::{
 };
 
 use super::state::{
-    Chrome, ESCAPE_CHORD, KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind,
-    ProviderRow, SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid,
-    format_usd,
+    Chrome, ESCAPE_CHORD, FOCUS_CHORD, KnowledgeSection, MemoryDetail, Mode, Overlay,
+    OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection, SettingsState,
+    ShellState, ViewportGrid, format_usd,
 };
 
 /// Control mode's fixed vertical chrome: title, root, session bar, viewport,
@@ -91,25 +92,19 @@ fn session_regions(area: Rect) -> [Rect; 2] {
 /// session's pseudo-terminal and its `vt100` emulator how large a screen
 /// they actually have: whichever chrome surrounds the viewport must be
 /// excluded first, or the harness draws for space it does not have. The
-/// [`Chrome`] is an argument because the bands are not the same in all
-/// three: a focused session is worth three more rows than the fleet view
-/// around it, and a fullscreen one is worth the header too.
+/// [`Chrome`] is an argument because the bands are not the same in both: a
+/// session's own layout is worth several more rows than the fleet view around
+/// it. It is never worth *every* row — the header stays, so the way back is on
+/// screen whoever holds the keyboard.
 pub fn viewport_slot(area: Rect, chrome: Chrome) -> Rect {
     match chrome {
         Chrome::Full => regions(area)[3],
         Chrome::Header => session_regions(area)[1],
-        // No bands to compute, which is the whole point: nothing is
-        // reserved, so the harness is handed the terminal itself and lays
-        // itself out for it. Going through this function rather than around
-        // it is what makes that true of the pseudo-terminal and not only of
-        // the paint.
-        Chrome::None => area,
     }
 }
 
 /// The size a session's pseudo-terminal and `vt100` emulator are given for an
-/// `outer` terminal under `chrome` — never the outer size itself, except in
-/// [`Chrome::None`], where they are the same thing.
+/// `outer` terminal under `chrome` — never the outer size itself.
 ///
 /// Here rather than in the run loop so that the chrome's height and the
 /// harness's idea of its own screen are computed by the same function.
@@ -159,12 +154,14 @@ pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut
             let [header_area, viewport_area] = session_regions(area);
             render_header(state, frame, header_area, sink);
             render_viewport(state, frame, viewport_area);
-        }
-        // Frame-free: the viewport is the whole terminal, and the only mark
-        // Glasshouse leaves is the badge naming the way out.
-        Chrome::None => {
-            render_viewport(state, frame, area);
-            render_fullscreen_hint(state, frame, area);
+            // This layout has no footer, so a note has nowhere of its own to
+            // go — and the note this exists for is the one `Enter` on a
+            // stopped session sets before its harness has finished starting.
+            // Painted over the viewport's own top row rather than given a
+            // band: `viewport_slot` has already handed the session every row
+            // below the header, and those cells are repainted from the
+            // emulator on the next frame.
+            render_status_badge(state, frame, viewport_area);
         }
     }
 
@@ -177,7 +174,7 @@ pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut
     match state.overlay() {
         Some(Overlay::HarnessChoice) => render_harness_choice(state, frame, area, sink),
         Some(Overlay::Overview) => render_overview(state, frame, area),
-        Some(Overlay::Settings) => render_settings(state, frame, area),
+        Some(Overlay::Settings) => render_settings(state, frame, area, sink),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
@@ -1519,7 +1516,7 @@ fn short_id(session: &SessionRecord) -> String {
 /// `ShellState::handle_settings_key`), so nothing underneath it is reachable
 /// while it is shown — there is no passthrough navigation to account for
 /// here.
-fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
+fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect, sink: &mut Vec<Hotspot>) {
     let Some(settings) = state.settings() else {
         return;
     };
@@ -1560,6 +1557,8 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
         provider_test_result_lines(name, outcome)
     } else if let Some((name, refresh)) = settings.provider_models_result() {
         provider_models_result_lines(name, refresh)
+    } else if let Some(command) = settings.account_notice() {
+        settings_actions::account_command_lines(command)
     } else {
         Vec::new()
     };
@@ -1588,11 +1587,15 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     let list_area = regions[1];
     let bottom_area = regions[2];
 
-    render_settings_tabs(settings, frame, tabs_area);
+    render_settings_tabs(settings, frame, tabs_area, state.theme(), sink);
+    let list_area = settings_actions::render_band(settings, frame, list_area, state.theme(), sink);
     match settings.section() {
         SettingsSection::Harnesses => render_harness_rows(settings, frame, list_area),
         SettingsSection::Integrations => render_integration_rows(settings, frame, list_area),
         SettingsSection::Providers => render_provider_rows(settings, frame, list_area),
+        SettingsSection::Subscriptions => {
+            settings_actions::render_subscription_rows(settings, frame, list_area, state.theme());
+        }
         SettingsSection::LaunchProfiles => render_profile_rows(settings, frame, list_area),
         SettingsSection::Routing => render_routing(settings, frame, list_area),
         SettingsSection::Memory => render_memory(settings, frame, list_area),
@@ -1606,49 +1609,71 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_settings_tabs(settings: &SettingsState, frame: &mut Frame, area: Rect) {
-    let profiles_label = if area.width >= 75 {
-        "Launch Profiles"
-    } else {
-        "Profiles"
-    };
-    let tab = |label: &str, active: bool| {
-        let style = if active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+/// The section strip, walked from [`SettingsSection::ORDER`] and drawn as
+/// pills that **pan** rather than clip.
+///
+/// **One array decides the strip, the tab order and the label**, so a section
+/// added to `ORDER` is on screen with no second edit. Before this the strip
+/// was six hand-written `tab(...)` calls and the order was a separate array —
+/// exactly the shape that lets a section exist in the state and nowhere on the
+/// screen.
+///
+/// **It pans for the reason the session bar does** ([`hotspot::render_panned_bar`]):
+/// the strip has one row, and seven sections do not fit an eighty-column
+/// terminal at any spelling. Measured with the plain `Paragraph` this replaced:
+/// at 80 columns the popup's inner width is 70 and the seven short labels need
+/// 79, so `Memory` was drawn nowhere, with no marker and nothing saying it
+/// existed — the 168-column footer clip, in a new place. Panning keeps the
+/// focused tab on screen and spends a cell on `‹`/`›` to say what it moved
+/// past.
+///
+/// Each tab records a hotspot carrying the Tab presses that reach it, so a
+/// click is exactly the keyboard path rather than a second way to move the
+/// cursor — the invariant `hotspot`'s module doc states.
+///
+/// The labels shorten together rather than one at a time: `Launch Profiles`
+/// alone used to shrink at 75 columns, but with seven sections it is the
+/// *strip* that overflows, and a strip mixing long and short labels reads as
+/// two rows of different things.
+fn render_settings_tabs(
+    settings: &SettingsState,
+    frame: &mut Frame,
+    area: Rect,
+    theme: super::appearance::Theme,
+    sink: &mut Vec<Hotspot>,
+) {
+    let cursor = SettingsSection::ORDER
+        .iter()
+        .position(|section| *section == settings.section())
+        .unwrap_or(0);
+    let label = |section: SettingsSection, long: bool| {
+        if long {
+            section.label()
         } else {
-            Style::default().fg(Color::Gray)
-        };
-        Span::styled(format!(" {label} "), style)
+            section.short_label()
+        }
     };
-    let spans = vec![
-        tab(
-            "Harnesses",
-            settings.section() == SettingsSection::Harnesses,
-        ),
-        Span::raw(" "),
-        tab(
-            "Integrations",
-            settings.section() == SettingsSection::Integrations,
-        ),
-        Span::raw(" "),
-        tab(
-            "Providers",
-            settings.section() == SettingsSection::Providers,
-        ),
-        Span::raw(" "),
-        tab(
-            profiles_label,
-            settings.section() == SettingsSection::LaunchProfiles,
-        ),
-        Span::raw(" "),
-        tab("Routing", settings.section() == SettingsSection::Routing),
-        Span::raw(" "),
-        tab("Memory", settings.section() == SettingsSection::Memory),
-    ];
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let build = |long: bool| -> Vec<Pill> {
+        SettingsSection::ORDER
+            .iter()
+            .enumerate()
+            .map(|(index, section)| {
+                Pill::run(
+                    "",
+                    label(*section, long),
+                    hotspot::walk_to(cursor, index, KeyCode::BackTab, KeyCode::Tab),
+                )
+                .focused(index == cursor)
+            })
+            .collect()
+    };
+    let long = build(true);
+    let pills = if hotspot::rows_for(&long, area.width) == 1 {
+        long
+    } else {
+        build(false)
+    };
+    hotspot::render_panned_bar(frame, area, &pills, cursor, theme, sink);
 }
 
 /// Text for a value's provenance — the design decision's "provenance is

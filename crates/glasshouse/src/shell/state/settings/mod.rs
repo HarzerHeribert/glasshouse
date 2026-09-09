@@ -2,6 +2,10 @@ use super::*;
 
 mod keys;
 
+pub mod accounts;
+
+pub use accounts::{AccountCommand, BrokerState, SubscriptionRow, subscription_tip};
+
 impl ShellState {
     /// Every row and pending edit currently shown in the Settings overlay, or
     /// `None` when Settings is not open.
@@ -35,6 +39,11 @@ impl ShellState {
     /// row supplied by the run loop. Kept separate from
     /// [`ShellState::open_settings`] so older in-module callers can construct
     /// unrelated settings fixtures without repeating routing/memory defaults.
+    ///
+    /// A thin wrapper over [`ShellState::open_settings_rows`], which is what
+    /// production calls: every row every section shows travels as one value,
+    /// so adding a section is a field rather than a seventh positional
+    /// argument at four call sites.
     pub fn open_settings_with_routing(
         &mut self,
         harnesses: Vec<HarnessRow>,
@@ -44,16 +53,39 @@ impl ShellState {
         routing: RoutingRow,
         memory: MemoryRow,
     ) -> Action {
-        self.overlay = Some(Overlay::Settings);
-        self.settings = Some(SettingsState::new(
+        self.open_settings_rows(SettingsRows {
             harnesses,
             integrations,
             providers,
             profiles,
             routing,
             memory,
-        ));
+            ..SettingsRows::default()
+        })
+    }
+
+    /// Open Settings with every section's rows at once.
+    pub fn open_settings_rows(&mut self, rows: SettingsRows) -> Action {
+        self.overlay = Some(Overlay::Settings);
+        self.settings = Some(SettingsState::new(rows));
         Action::Redraw
+    }
+
+    /// Open Settings with the cursor already on `section`.
+    ///
+    /// The one door a "connect an account" affordance can use: a user who
+    /// pressed a button labelled *connect* must arrive at the accounts, not at
+    /// the first tab with six others to guess between.
+    pub fn open_settings_rows_at(
+        &mut self,
+        rows: SettingsRows,
+        section: SettingsSection,
+    ) -> Action {
+        let action = self.open_settings_rows(rows);
+        if let Some(settings) = self.settings.as_mut() {
+            settings.focus_section(section);
+        }
+        action
     }
 
     /// Replace the Settings rows after a successful save, clearing every
@@ -78,7 +110,8 @@ impl ShellState {
     }
 
     /// Refresh Settings with a freshly resolved routing-policy row and memory
-    /// row.
+    /// row. A thin wrapper over [`ShellState::refresh_settings_rows`], for the
+    /// reason [`ShellState::open_settings_with_routing`] gives.
     pub fn refresh_settings_with_routing(
         &mut self,
         harnesses: Vec<HarnessRow>,
@@ -88,15 +121,21 @@ impl ShellState {
         routing: RoutingRow,
         memory: MemoryRow,
     ) {
+        self.refresh_settings_rows(SettingsRows {
+            harnesses,
+            integrations,
+            providers,
+            profiles,
+            routing,
+            memory,
+            ..SettingsRows::default()
+        });
+    }
+
+    /// Replace every section's rows under an open Settings overlay.
+    pub fn refresh_settings_rows(&mut self, rows: SettingsRows) {
         if let Some(settings) = self.settings.as_mut() {
-            settings.replace_rows(
-                harnesses,
-                integrations,
-                providers,
-                profiles,
-                routing,
-                memory,
-            );
+            settings.replace_rows(rows);
         }
     }
 
@@ -254,6 +293,12 @@ impl ShellState {
             .unwrap_or_default()
     }
 
+    /// The subscription command the user asked to see, if any — the string
+    /// the bottom panel spells out for them to run in another terminal.
+    pub fn account_notice(&self) -> Option<&str> {
+        self.settings.as_ref()?.account_notice()
+    }
+
     /// The independently staged routing fields, if this Settings session
     /// changed at least one of them.
     pub fn settings_routing_edit(&self) -> Option<RoutingSettingsEdit> {
@@ -297,6 +342,41 @@ impl ShellState {
 // the invariants this data model exists to hold to.
 // -----------------------------------------------------------------------
 
+/// Every row every Settings section shows, as one value.
+///
+/// **One carrier, so a new section is a field and not a seventh positional
+/// argument.** `build_settings` returns this, `drain_settings` hands it
+/// straight to [`ShellState::open_settings_rows`], and nothing in between has
+/// to name the sections it is not about — which is what let Subscriptions be
+/// added without touching the fifty test fixtures that construct Settings
+/// through the older four-argument door.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsRows {
+    pub harnesses: Vec<HarnessRow>,
+    pub integrations: Vec<IntegrationRow>,
+    pub providers: Vec<ProviderRow>,
+    pub profiles: Vec<ProfileRow>,
+    pub routing: RoutingRow,
+    pub memory: MemoryRow,
+    pub subscriptions: Vec<SubscriptionRow>,
+    pub broker: BrokerState,
+}
+
+impl Default for SettingsRows {
+    fn default() -> Self {
+        Self {
+            harnesses: Vec::new(),
+            integrations: Vec::new(),
+            providers: Vec::new(),
+            profiles: Vec::new(),
+            routing: RoutingRow::defaults(Vec::new()),
+            memory: MemoryRow::defaults(),
+            subscriptions: Vec::new(),
+            broker: BrokerState::default(),
+        }
+    }
+}
+
 /// Which section of the Settings overlay has the cursor.
 ///
 /// Harnesses and Integrations shipped first. Providers and Launch Profiles
@@ -309,6 +389,7 @@ pub enum SettingsSection {
     Harnesses,
     Integrations,
     Providers,
+    Subscriptions,
     LaunchProfiles,
     Routing,
     Memory,
@@ -317,14 +398,40 @@ pub enum SettingsSection {
 impl SettingsSection {
     /// Tab order. `next`/`previous` cycle through this, so adding a section
     /// only ever means inserting it here.
-    const ORDER: [SettingsSection; 6] = [
+    pub const ORDER: [SettingsSection; 7] = [
         SettingsSection::Harnesses,
         SettingsSection::Integrations,
         SettingsSection::Providers,
+        SettingsSection::Subscriptions,
         SettingsSection::LaunchProfiles,
         SettingsSection::Routing,
         SettingsSection::Memory,
     ];
+
+    /// The tab's label, and the only place one is spelled. `render_settings_tabs`
+    /// walks [`Self::ORDER`] and reads this, so a section added to the order is
+    /// on screen without a second edit — the gap that let Subscriptions exist as
+    /// a CLI command with no tab for as long as it did.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Harnesses => "Harnesses",
+            Self::Integrations => "Integrations",
+            Self::Providers => "Providers",
+            Self::Subscriptions => "Subscriptions",
+            Self::LaunchProfiles => "Launch Profiles",
+            Self::Routing => "Routing",
+            Self::Memory => "Memory",
+        }
+    }
+
+    /// The same label for a terminal too narrow to spell it out.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::LaunchProfiles => "Profiles",
+            Self::Subscriptions => "Accounts",
+            other => other.label(),
+        }
+    }
 
     fn index(self) -> usize {
         Self::ORDER
@@ -1159,10 +1266,16 @@ pub struct SettingsState {
     profiles: Vec<ProfileRow>,
     routing: RoutingRow,
     memory: MemoryRow,
+    /// The subscription accounts this project can connect, and whether a
+    /// broker binary exists to connect them with. Read once, off the run
+    /// loop's thread, exactly like every other row here.
+    subscriptions: Vec<SubscriptionRow>,
+    broker: BrokerState,
     selected_harness: usize,
     selected_integration: usize,
     selected_provider: usize,
     selected_profile: usize,
+    selected_subscription: usize,
     edits: HashMap<IntegrationId, PendingEdit>,
     /// Staged provider edits this session, keyed by name — `Some(config)` to
     /// add/replace, `None` to remove. See [`ProviderSettingsEdit`].
@@ -1197,6 +1310,13 @@ pub struct SettingsState {
     /// Clearing this does **not** cancel a request; an in-flight probe lives
     /// on [`ProviderRow::activity`], which no keystroke touches.
     provider_notice: Option<(String, ProviderNotice)>,
+    /// The subscription command the user just asked to be shown, if any.
+    ///
+    /// A *string to type*, never a running process: the section's module doc
+    /// records why the login cannot happen inside this overlay. Cleared by any
+    /// key the general dispatcher handles, exactly like `provider_notice`
+    /// beside it, so it cannot shadow a field editor opened afterwards.
+    account_notice: Option<String>,
     /// A probe the run loop has not collected yet — see
     /// [`ShellState::take_provider_probe_intent`], which is the only way one
     /// leaves this overlay.

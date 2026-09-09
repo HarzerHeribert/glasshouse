@@ -20177,3 +20177,82 @@ Session-mode clicks are **not** captured: a click in the session viewport does
 nothing, and no mouse report is forwarded to the harness PTY. That is the next
 package, and it needs the text-recovery prerequisite `fullscreen-mode.md`
 names before it can be worth having.
+
+## A session you can leave, and one you can come back to — the user, 2026-09-09
+
+Two reports, one day, and they turn out to be the same complaint from two
+directions: *"being in glasshouse or being inside a session are two different
+stories. while in fullscreen for claude code or pane — session header up top
+should still be there. There just needs to be a key to change focus."* and
+*"stopped session dont reopen on entering them while that would be easily
+doable by codex --resume id, claude --resume id and should be for pane --resume
+id. so just not entering because you exited kinda dumb."* In both, `Enter` on a
+session either took the user somewhere they could not get out of, or refused to
+take them anywhere at all.
+
+**`Enter` on a stopped session resumes it.** The refusal it replaces was
+added two days earlier and its observation was correct — a stopped session has
+no pseudo-terminal, so a keystroke sent to one vanishes with nothing on screen
+saying why. The conclusion was not: the answer is to give the session a process
+again. It reuses the resume that already existed, `Action::ResumeSession`
+(the overview's `R` produces the same one) into `shell::resume_session`, which
+is the shell's counterpart to `commands::resume::resume_session` and shares the
+lib-side seams that matter — `SessionStore::open_for_resume` for the project
+isolation and disposition gate, and `Selection::resume_args` for the harness's
+own `--resume` spelling. The variant carries `enter`, because the two producers
+differ in exactly one thing: the overview's `R` reopens a session the user is
+reading about in a list and leaves them in the list; `Enter` is a request to be
+*in* it, so the run loop focuses it once the process exists.
+
+Two refusals stay, and both now name why rather than only that:
+`SessionDisposition::Closed` is the "no native identifier was ever captured"
+case, spoken from `resume_target` — one sentence per state, shared by both
+producers — and a harness with no verified resume mechanism is refused by name
+where the adapter is in hand. **That second one is `pane` today**:
+`harness/pane.rs`'s `resume` returns `None` because `SessionArgs` parses
+`--root`, `--task`, `--rollout`, `--session` and `--glasshouse`, and none of
+them reopens a *prior* session by identifier. The user's *"and should be for
+pane --resume id"* is a request to pane, not to Glasshouse: the adapter is
+honest and the successor is a pane change, after which this path needs nothing.
+
+**A session on screen always keeps Glasshouse's header.** `Chrome::None` is
+gone, and with it the `f` that armed it. It bought exactly one row — the
+collapsed header's — and spent it on the only thing on screen that named the
+way back; the badge added on 2026-09-09 (*"The fullscreen escape chord is
+chrome"*, above) was the first repair of that and this is the second and last.
+The refusal that entry overrode was about *rows*, and it still stands: one row
+is what a way out costs, and no session layout now spends fewer or more.
+
+**The key that changes focus is `ctrl-6`, and it is a different act from the
+escape.** `ctrl-5` leaves the session — the fleet view returns with all five
+bands, exactly as it always has. `ctrl-6` leaves the session's *keyboard*: the
+header and the viewport stay where they are, Glasshouse's own bindings answer
+instead, and `Tab` moves between sessions without the harness ever seeing a
+key. It is bound in both directions and in both tables, so one chord is the
+whole of it; `ctrl-5` is now answered in control mode too, when a session
+layout is on screen, or the focus chord would have been a one-way door.
+
+The chord was chosen for the property `ctrl-5` was chosen for and pane's own
+inventory rules out the alternatives. A terminal sends `0x1E` and Crossterm
+decodes `0x1C..=0x1F` arithmetically, so it arrives as `Ctrl` + `'6'` — a
+*digit*, in the same place on every Latin layout, which is what `ctrl-]`
+(Right-Option-6 on the German Mac this is developed on) was not. A
+`Ctrl`+letter chord would have been layout-safe too, and there is no letter
+free: `tui-actionables.md` measured pane's own bindings as `Ctrl-B`, `Ctrl-O`,
+`Ctrl-T`, `Ctrl-F`, `Ctrl-U`, `Ctrl-C`, `Ctrl-D`, and the terminal driver
+claims `C-c C-\ C-z C-q C-s C-v C-w`. F-keys are media keys on this machine by
+default and are named only as an alias.
+
+Focus is visible in two ways at once, because one of them collapses: the whole
+header row is painted on a dark fill while it holds the keyboard, and the
+wordmark becomes a solid accent chip. The row's own label says which direction
+the chord would move the keyboard — `ctrl-6 header` from the session,
+`ctrl-6 session` from the header — rather than the word *focus*, which names
+neither of the two things on screen.
+
+**And the bar lost a button.** `f fullscreen: on/off` was the footer's only
+toggle and it toggled a mode that no longer exists. `t theme:` takes the slot,
+at the same count: `t` was an arm of `handle_control_key` the bar did not
+mirror, and the palette it selects was readable only from a status note the
+next keystroke erased — the same defect the fullscreen toggle's value was added
+to fix.

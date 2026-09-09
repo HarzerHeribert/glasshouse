@@ -1,26 +1,22 @@
 use super::*;
 
 impl SettingsState {
-    pub(super) fn new(
-        harnesses: Vec<HarnessRow>,
-        integrations: Vec<IntegrationRow>,
-        providers: Vec<ProviderRow>,
-        profiles: Vec<ProfileRow>,
-        routing: RoutingRow,
-        memory: MemoryRow,
-    ) -> Self {
+    pub(super) fn new(rows: SettingsRows) -> Self {
         Self {
             section: SettingsSection::Harnesses,
-            harnesses,
-            integrations,
-            providers,
-            profiles,
-            routing,
-            memory,
+            harnesses: rows.harnesses,
+            integrations: rows.integrations,
+            providers: rows.providers,
+            profiles: rows.profiles,
+            routing: rows.routing,
+            memory: rows.memory,
+            subscriptions: rows.subscriptions,
+            broker: rows.broker,
             selected_harness: 0,
             selected_integration: 0,
             selected_provider: 0,
             selected_profile: 0,
+            selected_subscription: 0,
             edits: HashMap::new(),
             provider_edits: HashMap::new(),
             profile_edits: HashMap::new(),
@@ -33,6 +29,7 @@ impl SettingsState {
             profile_input: None,
             routing_input: None,
             provider_notice: None,
+            account_notice: None,
             pending_probe: None,
             last_disposable_choice: None,
         }
@@ -40,6 +37,37 @@ impl SettingsState {
 
     pub fn section(&self) -> SettingsSection {
         self.section
+    }
+
+    /// Put the cursor on `section` — the door
+    /// [`ShellState::open_settings_rows_at`] opens for an affordance that
+    /// names a section by its own label.
+    pub(super) fn focus_section(&mut self, section: SettingsSection) {
+        self.section = section;
+    }
+
+    pub fn subscriptions(&self) -> &[SubscriptionRow] {
+        &self.subscriptions
+    }
+
+    pub fn selected_subscription(&self) -> usize {
+        self.selected_subscription
+    }
+
+    /// The account the cursor is on, if the section has any rows.
+    pub fn selected_subscription_row(&self) -> Option<&SubscriptionRow> {
+        self.subscriptions.get(self.selected_subscription)
+    }
+
+    /// Whether a CLIProxyAPI binary is adopted — the first of the three steps
+    /// connecting an account takes.
+    pub fn broker(&self) -> BrokerState {
+        self.broker
+    }
+
+    /// The subscription command currently spelled out in the bottom panel.
+    pub fn account_notice(&self) -> Option<&str> {
+        self.account_notice.as_deref()
     }
 
     pub fn harnesses(&self) -> &[HarnessRow] {
@@ -268,29 +296,30 @@ impl SettingsState {
     /// and clear every pending edit. The catalog is fixed-size, so the
     /// cursor is only ever clamped, never reset, and always stays on a real
     /// row.
-    pub(super) fn replace_rows(
-        &mut self,
-        harnesses: Vec<HarnessRow>,
-        integrations: Vec<IntegrationRow>,
-        providers: Vec<ProviderRow>,
-        profiles: Vec<ProfileRow>,
-        routing: RoutingRow,
-        memory: MemoryRow,
-    ) {
-        self.selected_harness = self.selected_harness.min(harnesses.len().saturating_sub(1));
+    pub(super) fn replace_rows(&mut self, rows: SettingsRows) {
+        self.selected_harness = self
+            .selected_harness
+            .min(rows.harnesses.len().saturating_sub(1));
         self.selected_integration = self
             .selected_integration
-            .min(integrations.len().saturating_sub(1));
+            .min(rows.integrations.len().saturating_sub(1));
         self.selected_provider = self
             .selected_provider
-            .min(providers.len().saturating_sub(1));
-        self.selected_profile = self.selected_profile.min(profiles.len().saturating_sub(1));
-        self.harnesses = harnesses;
-        self.integrations = integrations;
-        self.providers = providers;
-        self.profiles = profiles;
-        self.routing = routing;
-        self.memory = memory;
+            .min(rows.providers.len().saturating_sub(1));
+        self.selected_profile = self
+            .selected_profile
+            .min(rows.profiles.len().saturating_sub(1));
+        self.selected_subscription = self
+            .selected_subscription
+            .min(rows.subscriptions.len().saturating_sub(1));
+        self.harnesses = rows.harnesses;
+        self.integrations = rows.integrations;
+        self.providers = rows.providers;
+        self.profiles = rows.profiles;
+        self.routing = rows.routing;
+        self.memory = rows.memory;
+        self.subscriptions = rows.subscriptions;
+        self.broker = rows.broker;
         self.edits.clear();
         self.provider_edits.clear();
         self.profile_edits.clear();
@@ -367,6 +396,7 @@ impl SettingsState {
         // `ProviderRow::activity` precisely so that pressing an arrow key
         // cannot make a running request invisible.
         self.provider_notice = None;
+        self.account_notice = None;
 
         match key.code {
             KeyCode::Esc => SettingsAction::Close,
@@ -521,6 +551,28 @@ impl SettingsState {
                 self.start_routing_input(RoutingInputPurpose::FreePin);
                 SettingsAction::Redraw
             }
+            // -------------------------------------------------------------
+            // Subscriptions. Every arm here produces a **command to type**,
+            // never a process: `glasshouse subscriptions login` inherits stdio
+            // and blocks on a browser flow for up to fifteen minutes, and this
+            // overlay is drawn on an alternate screen with the terminal in raw
+            // mode. See `settings::accounts`' module documentation.
+            KeyCode::Enter if self.section == SettingsSection::Subscriptions => {
+                self.show_account_command(AccountCommand::Primary);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('c') if self.section == SettingsSection::Subscriptions => {
+                self.show_account_command(AccountCommand::Connect);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('x') if self.section == SettingsSection::Subscriptions => {
+                self.show_account_command(AccountCommand::Disconnect);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('b') if self.section == SettingsSection::Subscriptions => {
+                self.show_account_command(AccountCommand::AdoptBroker);
+                SettingsAction::Redraw
+            }
             KeyCode::Char(' ') if self.section == SettingsSection::Memory => {
                 self.memory.memory_extraction = !self.memory.memory_extraction;
                 self.memory.memory_extraction_layer = Layer::User;
@@ -565,8 +617,43 @@ impl SettingsState {
                 self.selected_profile =
                     (self.selected_profile as i32 + delta).clamp(0, last) as usize;
             }
+            SettingsSection::Subscriptions => {
+                if self.subscriptions.is_empty() {
+                    return;
+                }
+                let last = self.subscriptions.len() as i32 - 1;
+                self.selected_subscription =
+                    (self.selected_subscription as i32 + delta).clamp(0, last) as usize;
+            }
             SettingsSection::Routing | SettingsSection::Memory => {}
         }
+    }
+
+    /// Put one subscription command in the bottom panel, spelled exactly as it
+    /// must be typed.
+    ///
+    /// `Primary` is what the row's own state asks for — `connect` while no
+    /// credential is present, `disconnect` once one is — so pressing Enter on
+    /// a row never offers the act that has already happened.
+    fn show_account_command(&mut self, which: AccountCommand) {
+        let command = match which {
+            AccountCommand::AdoptBroker => {
+                Some(crate::subscription::ADOPT_BINARY_COMMAND.to_owned())
+            }
+            AccountCommand::Primary => self
+                .subscriptions
+                .get(self.selected_subscription)
+                .map(|row| row.primary_command().to_owned()),
+            AccountCommand::Connect => self
+                .subscriptions
+                .get(self.selected_subscription)
+                .map(|row| row.connect_command.clone()),
+            AccountCommand::Disconnect => self
+                .subscriptions
+                .get(self.selected_subscription)
+                .map(|row| row.disconnect_command.clone()),
+        };
+        self.account_notice = command;
     }
 
     fn toggle_selected_harness(&mut self) {

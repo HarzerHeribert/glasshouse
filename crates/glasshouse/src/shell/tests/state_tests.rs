@@ -440,12 +440,6 @@ fn entering_session_mode_closes_any_open_overlay() {
     );
 }
 
-/// `f` arms fullscreen; it does not enter it.
-///
-/// The two are deliberately separate. Arming is a control-mode decision the
-/// user makes with the session bar and the footer still on screen, and the
-/// chrome only goes when a session actually takes the keyboard — so the same
-/// key that armed it is still readable, and still pressable, until then.
 /// Refusing to guess between enabled harnesses is right; sending the user to
 /// the CLI to answer is not. The refusal already names the enabled set, so the
 /// shell asks with it rather than converting it to an error string.
@@ -502,45 +496,92 @@ fn cancelling_the_harness_choice_starts_no_session() {
     assert!(state.harness_choice().is_none());
 }
 
+/// **A session on screen keeps Glasshouse's header, whoever holds the
+/// keyboard** — user ruling 2026-09-09. There is no longer a state in which
+/// the shell draws nothing: the chrome the focus chord moves the keyboard
+/// between is the chrome that proves there is somewhere to move it to.
 #[test]
-fn f_arms_fullscreen_without_taking_the_chrome_away() {
+fn a_session_keeps_the_header_whoever_holds_the_keyboard() {
     let mut state = state_with(2);
-    assert!(!state.fullscreen());
-    assert_eq!(state.chrome(), Chrome::Full);
-
-    assert_eq!(state.handle_key(press(KeyCode::Char('f'))), Action::Redraw);
-    assert!(state.fullscreen());
-    assert_eq!(state.mode(), Mode::Control, "arming owns no keyboard");
     assert_eq!(
         state.chrome(),
         Chrome::Full,
-        "control mode keeps its bands however fullscreen is armed"
+        "the fleet view, before any of it"
     );
-    assert!(
-        state
-            .status()
-            .is_some_and(|note| note.contains("fullscreen")),
-        "a key that changes nothing visible yet must say what it did"
-    );
+    assert!(!state.session_view());
+    assert!(!state.header_focused());
 
     state.handle_key(press(KeyCode::Enter));
-    assert_eq!(state.chrome(), Chrome::None);
+    assert_eq!(state.mode(), Mode::Session);
+    assert_eq!(state.chrome(), Chrome::Header);
+    assert!(!state.header_focused(), "the harness has the keyboard");
+
+    state.handle_key(focus_chord_key());
     assert_eq!(
-        state.status(),
-        Some(FULLSCREEN_HINT),
-        "the way out is the one thing a frame-free screen still says"
+        state.chrome(),
+        Chrome::Header,
+        "moving the keyboard must not move the layout: the session stays on screen"
+    );
+    assert!(state.header_focused());
+
+    state.handle_key(escape_chord_key());
+    assert_eq!(
+        state.chrome(),
+        Chrome::Full,
+        "the escape chord still leaves the session entirely, as it always has"
+    );
+    assert!(!state.session_view());
+}
+
+/// **The focus chord moves the keyboard and nothing else, in both
+/// directions** — and a key pressed on one side of it must not reach the
+/// other. That is the whole contract: *"There just needs to be a key to change
+/// focus."*
+#[test]
+fn the_focus_chord_moves_the_keyboard_and_nothing_else() {
+    let mut state = state_with(2);
+    state.handle_key(press(KeyCode::Enter));
+    assert_eq!(state.mode(), Mode::Session);
+
+    // With the session focused, an ordinary key is the harness's.
+    assert!(
+        matches!(
+            state.handle_key(press(KeyCode::Char('q'))),
+            Action::Forward(_)
+        ),
+        "in session mode every key belongs to the harness, `q` included"
     );
 
-    state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
-    assert_eq!(state.chrome(), Chrome::Full);
-    state.handle_key(press(KeyCode::Char('f')));
-    assert!(!state.fullscreen());
-    assert_eq!(
-        state.handle_key(press(KeyCode::Enter)),
-        Action::Redraw,
-        "and a focused session is back to the collapsed header"
+    // The chord itself is never forwarded — it is answered here.
+    assert_eq!(state.handle_key(focus_chord_key()), Action::Redraw);
+    assert_eq!(state.mode(), Mode::Control);
+    assert!(state.header_focused());
+
+    // With the header focused, the same key is Glasshouse's, and no byte
+    // reaches the harness.
+    let selected = state.selected_index();
+    let action = state.handle_key(press(KeyCode::Tab));
+    assert!(
+        !matches!(action, Action::Forward(_)),
+        "a key pressed with the header focused must not reach the harness, got {action:?}"
     );
-    assert_eq!(state.chrome(), Chrome::Header);
+    assert_ne!(
+        state.selected_index(),
+        selected,
+        "it must reach Glasshouse instead: Tab moves the session bar"
+    );
+
+    // And back, with the same chord.
+    assert_eq!(state.handle_key(focus_chord_key()), Action::Redraw);
+    assert_eq!(state.mode(), Mode::Session);
+    assert!(!state.header_focused());
+    assert!(
+        matches!(
+            state.handle_key(press(KeyCode::Char('q'))),
+            Action::Forward(_)
+        ),
+        "the harness has the keyboard again"
+    );
 }
 
 #[test]
@@ -703,10 +744,6 @@ mod escape_chord_tests {
             is_session_escape(&escape_chord_key()),
             "the shell advertises `{ESCAPE_CHORD}`, so the handler must accept it"
         );
-        assert!(
-            FULLSCREEN_HINT.contains(ESCAPE_CHORD),
-            "the fullscreen note must name the chord that works: `{FULLSCREEN_HINT}`"
-        );
 
         // And it must actually leave session mode, through the same public
         // door a keystroke arrives at.
@@ -718,6 +755,28 @@ mod escape_chord_tests {
             state.mode(),
             Mode::Control,
             "the advertised chord must be the chord that works"
+        );
+    }
+
+    /// The same link, for the chord that changes focus.
+    ///
+    /// The header names [`FOCUS_CHORD`] on every frame a session is drawn on,
+    /// so a spelling the handler does not accept would be an instruction the
+    /// user follows and nothing happens — which is exactly how `ctrl-]`
+    /// stranded them once already.
+    #[test]
+    fn the_advertised_focus_chord_is_one_the_handler_accepts() {
+        assert!(
+            is_focus_chord(&focus_chord_key()),
+            "the shell advertises `{FOCUS_CHORD}`, so the handler must accept it"
+        );
+        assert!(
+            !is_session_escape(&focus_chord_key()),
+            "the two chords are different acts and must not collide"
+        );
+        assert!(
+            !is_focus_chord(&escape_chord_key()),
+            "and the collision must not hold the other way either"
         );
     }
 
@@ -1353,24 +1412,34 @@ mod settings_tests {
     // Phase 2D: Providers and Launch Profiles.
     // -----------------------------------------------------------------
 
-    fn to_providers(mut state: ShellState) -> ShellState {
-        state.handle_key(press(KeyCode::Tab));
-        state.handle_key(press(KeyCode::Tab));
+    /// Tab until `target` has the cursor, rather than a fixed count.
+    ///
+    /// A count is a hidden dependency on how many sections precede the one the
+    /// test is about: adding Subscriptions in the middle of `ORDER` silently
+    /// re-pointed six of these tests at the wrong tab. Bounded by the number of
+    /// sections so a target that can never be reached fails loudly instead of
+    /// hanging.
+    fn tab_to(state: &mut ShellState, target: SettingsSection) {
+        for _ in 0..SettingsSection::ORDER.len() {
+            if state.settings().unwrap().section() == target {
+                return;
+            }
+            state.handle_key(press(KeyCode::Tab));
+        }
         assert_eq!(
             state.settings().unwrap().section(),
-            SettingsSection::Providers
+            target,
+            "Tab never reached the section this test is about"
         );
+    }
+
+    fn to_providers(mut state: ShellState) -> ShellState {
+        tab_to(&mut state, SettingsSection::Providers);
         state
     }
 
     fn to_launch_profiles(mut state: ShellState) -> ShellState {
-        state.handle_key(press(KeyCode::Tab));
-        state.handle_key(press(KeyCode::Tab));
-        state.handle_key(press(KeyCode::Tab));
-        assert_eq!(
-            state.settings().unwrap().section(),
-            SettingsSection::LaunchProfiles
-        );
+        tab_to(&mut state, SettingsSection::LaunchProfiles);
         state
     }
 
@@ -2164,10 +2233,7 @@ mod settings_tests {
 
         // Move to Launch Profiles and open the "add" wizard.
         state.handle_key(press(KeyCode::Tab));
-        assert_eq!(
-            state.settings().unwrap().section(),
-            SettingsSection::LaunchProfiles
-        );
+        tab_to(&mut state, SettingsSection::LaunchProfiles);
         assert!(
             state.settings().unwrap().provider_test_result().is_none(),
             "switching sections must clear the stale banner"
@@ -2462,13 +2528,7 @@ mod settings_tests {
             routing,
             MemoryRow::defaults(),
         );
-        for _ in 0..4 {
-            state.handle_key(press(KeyCode::Tab));
-        }
-        assert_eq!(
-            state.settings().unwrap().section(),
-            SettingsSection::Routing
-        );
+        tab_to(&mut state, SettingsSection::Routing);
 
         state.handle_key(press(KeyCode::Char('m')));
         replace_input(&mut state, "missing:model");
@@ -2900,36 +2960,65 @@ mod overview_tests {
         }
     }
 
-    /// A session whose process is gone must not be entered.
+    /// A session whose process is gone is never *entered* — but what happens
+    /// instead depends on whether it can be reopened, and that is the whole
+    /// 2026-09-09 ruling.
     ///
-    /// The footer advertises Enter as "enter session" whatever state the
-    /// presented session is in, so before this refusal existed pressing it
-    /// after a harness exited handed the keyboard to a dead process: every
-    /// keystroke went nowhere, with nothing on screen saying why. Each
-    /// not-live lifecycle is checked, because `is_live` is what decides and a
-    /// new variant defaults to neither answer.
+    /// The keyboard must not be handed to a dead process on any of these
+    /// lifecycles: before the refusal existed, `Enter` after a harness exited
+    /// sent every keystroke nowhere with nothing on screen saying why. What
+    /// changed is the answer for the one that *can* come back: a stopped
+    /// session with a native identifier is resumed rather than turned away.
+    /// Each not-live lifecycle is checked, because `disposition` is what
+    /// decides and a new variant defaults to neither answer.
     #[test]
-    fn a_session_whose_process_is_gone_cannot_be_entered() {
-        for lifecycle in [
-            SessionLifecycle::Stopped,
-            SessionLifecycle::Failed,
-            SessionLifecycle::Closed,
+    fn a_session_whose_process_is_gone_is_resumed_or_refused_but_never_entered() {
+        for (lifecycle, native, resumable) in [
+            (SessionLifecycle::Stopped, Some("native-42"), true),
+            (SessionLifecycle::Stopped, None, false),
+            (SessionLifecycle::Failed, Some("native-42"), false),
+            (SessionLifecycle::Closed, Some("native-42"), false),
         ] {
-            let mut state =
-                ShellState::new("p", "/p", "0.1.0", vec![record("finished", lifecycle)]);
+            let mut state = ShellState::new(
+                "p",
+                "/p",
+                "0.1.0",
+                vec![SessionRecord {
+                    native_session_id: native.map(str::to_owned),
+                    ..record("finished", lifecycle)
+                }],
+            );
 
             for key in [press(KeyCode::Enter), press(KeyCode::Char('i'))] {
-                assert_eq!(state.handle_key(key), Action::Redraw);
+                let action = state.handle_key(key);
                 assert_eq!(
                     state.mode(),
                     Mode::Control,
                     "a {lifecycle} session must never take the keyboard"
                 );
                 let status = state.status().unwrap_or_default().to_owned();
-                assert!(
-                    status.contains("finished") && status.contains(&lifecycle.to_string()),
-                    "the refusal must name the session and its state; got {status:?}"
-                );
+                if resumable {
+                    assert_eq!(
+                        action,
+                        Action::ResumeSession(SessionId::new("finished")),
+                        "a {lifecycle} session with an identifier must be reopened, not refused"
+                    );
+                    assert!(
+                        status.contains("resuming") && status.contains("finished"),
+                        "and it must say so while the harness starts; got {status:?}"
+                    );
+                } else {
+                    assert_eq!(action, Action::Redraw);
+                    assert!(
+                        status.contains("finished"),
+                        "the refusal must name the session; got {status:?}"
+                    );
+                    assert!(
+                        status.contains("no native session id")
+                            || status.contains("with no session to reopen"),
+                        "and why it cannot be reopened, not only that it was not; got {status:?}"
+                    );
+                }
             }
         }
     }
@@ -3101,6 +3190,95 @@ mod overview_tests {
         assert_eq!(action, Action::ResumeSession(SessionId::new("finished")));
     }
 
+    /// **Where the keyboard lands when a resume finishes, in both
+    /// directions** — the one thing that separates `Enter`'s resume from the
+    /// overview's, and the decision `ShellState::session_resumed` answers so
+    /// that the run loop has no branch of its own to get wrong.
+    ///
+    /// The run loop's sequence is what is replayed here: the key, then the
+    /// harness starts, then the refreshed records, then the report. Both
+    /// halves are asserted, because either alone passes on a shell that always
+    /// enters or never does.
+    #[test]
+    fn a_finished_resume_enters_only_when_the_key_asked_to_be_inside() {
+        let stopped = || SessionRecord {
+            native_session_id: Some("native-42".to_owned()),
+            ..record("finished", SessionLifecycle::Stopped)
+        };
+        let running = || SessionRecord {
+            native_session_id: Some("native-42".to_owned()),
+            ..record("finished", SessionLifecycle::Running)
+        };
+        let id = SessionId::new("finished");
+
+        // `Enter` on the session bar: a request to be inside it.
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![stopped()]);
+        assert_eq!(
+            state.handle_key(press(KeyCode::Enter)),
+            Action::ResumeSession(id.clone())
+        );
+        state.refresh(vec![running()]);
+        state.session_resumed(&id);
+        assert_eq!(
+            state.mode(),
+            Mode::Session,
+            "the key asked to be inside the session it reopened"
+        );
+        assert_eq!(state.chrome(), Chrome::Header);
+
+        // The overview's `r`: the user is reading a list.
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![stopped()]);
+        state.handle_key(press(KeyCode::Char('o')));
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('r'))),
+            Action::ResumeSession(id.clone())
+        );
+        state.refresh(vec![running()]);
+        state.session_resumed(&id);
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "resuming from a list must leave the reader in the list"
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+    }
+
+    /// A resume that never started leaves no request behind for the next key
+    /// to trip over — `resume_entry` is cleared by every `handle_key`.
+    #[test]
+    fn a_resume_that_failed_does_not_enter_a_later_one() {
+        let id = SessionId::new("finished");
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![SessionRecord {
+                native_session_id: Some("native-42".to_owned()),
+                ..record("finished", SessionLifecycle::Stopped)
+            }],
+        );
+        // The key asks to be put inside — and the run loop's resume fails, so
+        // `session_resumed` is never called.
+        assert_eq!(
+            state.handle_key(press(KeyCode::Enter)),
+            Action::ResumeSession(id.clone())
+        );
+        // Any later key at all clears the request.
+        state.handle_key(press(KeyCode::Char('o')));
+        state.refresh(vec![SessionRecord {
+            native_session_id: Some("native-42".to_owned()),
+            ..record("finished", SessionLifecycle::Running)
+        }]);
+
+        state.session_resumed(&id);
+
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "a stale request must not put the keyboard anywhere"
+        );
+    }
+
     /// A stopped session with no native identifier is `closed`, not
     /// `resumable` — `SessionRecord::disposition`'s own rule, so `r` must
     /// refuse it exactly as the STATE column already reports it.
@@ -3119,8 +3297,8 @@ mod overview_tests {
         assert_eq!(action, Action::Redraw);
         let status = state.status().unwrap_or_default().to_owned();
         assert!(
-            status.contains("finished") && status.contains("closed"),
-            "got {status:?}"
+            status.contains("finished") && status.contains("no native session id"),
+            "the refusal names the session and why it cannot be reopened; got {status:?}"
         );
     }
 

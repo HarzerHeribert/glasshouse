@@ -2941,7 +2941,7 @@ fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
     // wrong it would quit Glasshouse instead and the expect below would time
     // out on a dead process.
     shell.send("\r");
-    shell.expect("ctrl-]");
+    shell.expect("ctrl-5");
     shell.send("quiet\r");
 
     shell.expect("GOT:quiet");
@@ -3008,7 +3008,7 @@ fn the_shell_enters_and_leaves_session_mode_in_a_real_terminal() {
     shell.send("n");
     shell.expect("claude-code");
     shell.send("\r");
-    shell.expect("ctrl-]");
+    shell.expect("ctrl-5");
 
     // Back to control mode, then quit. `q` only quits if the escape landed.
     shell.send("\x1d");
@@ -3083,7 +3083,7 @@ fn f12_leaves_session_mode_in_a_real_terminal() {
     shell.send("n");
     shell.expect("claude-code");
     shell.send("\r");
-    shell.expect("ctrl-]");
+    shell.expect("ctrl-5");
 
     // `F12` as xterm spells it, not as a `KeyEvent` names it.
     shell.send("\x1b[24~");
@@ -3152,7 +3152,7 @@ fn resizing_the_shell_reaches_the_harness_terminal() {
     shell.send("n");
     shell.expect("codex");
     shell.send("\r");
-    shell.expect("ctrl-]");
+    shell.expect("ctrl-5");
 
     // The harness's view of its own terminal, before anything moves. It is
     // smaller than Glasshouse's, because the viewport is inset by the top bar,
@@ -4514,7 +4514,7 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
     shell.expect("sessions");
     shell.send("\x1b[B");
     shell.send("\r");
-    shell.expect("ctrl-]");
+    shell.expect("ctrl-5");
 
     shell.send("quiet\r");
     shell.expect(&format!("GOT:{target}:quiet"));
@@ -6253,7 +6253,7 @@ fn a_session_started_headless_runs_and_is_listed_but_never_reaches_the_viewport(
     // a positive claim fails when the shell leaves control mode, which is the
     // regression this test exists to catch.
     assert!(
-        screen.contains("f fullscreen"),
+        screen.contains("t theme:"),
         "the shell left control mode for a headless session:\n--- output ---\n{screen}\n--- end ---"
     );
 }
