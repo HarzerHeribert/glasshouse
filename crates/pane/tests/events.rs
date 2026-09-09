@@ -990,19 +990,24 @@ fn shutdown_leaves_no_job_of_this_session_running() {
     );
 }
 
-/// `sandbox-grants.md` §3 and this crate's cross-platform rule: where no
-/// applier has ever executed, `tools::invoke::confine` refuses before
-/// spawning — so a background job refuses there too, **by the same call**,
-/// rather than the feature being compiled away.
+/// `sandbox-grants.md` §3, from the other side now that Windows has an
+/// applier: a background job on a platform pane can confine **runs**, and its
+/// refusal — if any — is never the confinement's.
 ///
-/// The refusal reaches the model as the job's own `bg.done`, because it
-/// happens where the child would have been spawned rather than at the call:
-/// the *grant* is checked at the call on every platform (the test above),
-/// and the *confinement* is checked where `invoke` checks it.
+/// This case used to assert the opposite, because `tools::invoke::confine`
+/// refused every spawning tool on Windows and a background job refused with
+/// it. The AppContainer applier landed on 2026-09-09 and that refusal is
+/// gone, so what is worth guarding is that it does not come back: `bg` has no
+/// spawn path of its own, so a regression in the one confined spawn would
+/// surface here as this exact string.
+///
+/// It asserts the absence rather than a success on purpose. Whether `bash` is
+/// on a given Windows runner's `PATH` is a property of the machine, and a
+/// test that required it would be asserting the runner rather than the cage.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
-fn a_background_job_refuses_where_nothing_can_confine_it() {
-    let fixture = JobFixture::new("unconfinable");
+fn a_background_job_is_never_refused_for_want_of_a_confinement() {
+    let fixture = JobFixture::new("confinable");
     bg::run(
         &fixture.profile(),
         &Glasshouse::None,
@@ -1010,7 +1015,7 @@ fn a_background_job_refuses_where_nothing_can_confine_it() {
         "echo hello",
         &RunOptions::default(),
     )
-    .expect("the grant admits this command; the platform is what cannot confine it");
+    .expect("the grant admits this command");
     assert!(
         settles(Duration::from_secs(20), || bg::live(&fixture.session) == 0),
         "the job never finished"
@@ -1019,14 +1024,15 @@ fn a_background_job_refuses_where_nothing_can_confine_it() {
     let done = events
         .iter()
         .find(|event| event.kind.as_str() == "bg.done")
-        .expect("a refused job still emits bg.done");
+        .expect("a finished job emits bg.done");
     let payload = bg::payload(&fixture.session, done.payload.as_str()).unwrap();
-    assert_eq!(payload.status, "failed");
-    assert!(
-        payload.stderr.contains("unconfined"),
-        "the refusal did not name the confinement: {}",
-        payload.stderr
-    );
+    for absent in ["unconfined", "no sandbox applier"] {
+        assert!(
+            !payload.stderr.contains(absent),
+            "the job was refused for want of a confinement: {}",
+            payload.stderr
+        );
+    }
 }
 
 /// Finding 2 of the lifecycle verifier's report: **an exit must not be

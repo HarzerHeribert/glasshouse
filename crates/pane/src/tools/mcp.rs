@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -242,7 +242,7 @@ struct Request {
     reply: bool,
 }
 struct Client {
-    child: Option<Child>,
+    child: Option<invoke::ConfinedChild>,
     tx: Sender<Request>,
     rx: Receiver<Result<Value, &'static str>>,
     next_id: u64,
@@ -278,12 +278,7 @@ impl Client {
             fell_back_to_roots: false,
         };
         let mut command = Command::new(&grant.binary);
-        command
-            .args(&server.args)
-            .current_dir(profile.root())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        command.args(&server.args).current_dir(profile.root());
         for (name, _) in std::env::vars_os() {
             if invoke::is_credential_variable(&name.to_string_lossy()) {
                 command.env_remove(name);
@@ -296,16 +291,31 @@ impl Client {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let confinement =
-            invoke::confine(profile, &grant.binary, "mcp", &mut command).map_err(|_| denied())?;
         if token.is_cancelled() {
             return Err(ToolError::Cancelled { tool: "mcp".into() });
         }
-        let mut child = command
-            .spawn()
-            .map_err(|_| failure("MCP server could not start"))?;
-        let input = child.stdin.take();
-        let output = child.stdout.take();
+        // One call, because on Windows the confinement *is* the spawn: the
+        // AppContainer is an argument to `CreateProcessW` and there is no
+        // earlier moment at which a `Command` could carry it. The two
+        // outcomes stay distinguishable — a sandbox refusal is `denied`, the
+        // operating system declining to start an admitted program is not.
+        let (mut child, confinement) = invoke::confined_spawn(
+            profile,
+            &grant.binary,
+            "mcp",
+            command,
+            invoke::Pipes {
+                stdin: true,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .map_err(|refusal| match refusal {
+            invoke::SpawnRefusal::Denied(_) => denied(),
+            invoke::SpawnRefusal::Failed(_) => failure("MCP server could not start"),
+        })?;
+        let input = child.take_stdin();
+        let output = child.take_stdout();
         let (tx, requests) = mpsc::channel::<Request>();
         let (responses, rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {

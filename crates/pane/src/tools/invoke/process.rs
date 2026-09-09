@@ -1,9 +1,11 @@
 //! Observe exit without reaping, so the owned process-group id cannot be
 //! recycled before remaining descendants are killed.
 use std::io;
-use std::process::{Child, ExitStatus};
+use std::process::ExitStatus;
 
-pub(super) fn try_complete(child: &mut Child) -> io::Result<Option<ExitStatus>> {
+use super::ConfinedChild;
+
+pub(super) fn try_complete(child: &mut ConfinedChild) -> io::Result<Option<ExitStatus>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if !exited(child.id())? {
@@ -14,8 +16,32 @@ pub(super) fn try_complete(child: &mut Child) -> io::Result<Option<ExitStatus>> 
         super::kill_group(child.id());
         child.wait().map(Some)
     }
+    // Windows reaches here, and needs no part of the ordering above: a
+    // `ContainedChild` holds an open handle to the process, so the kernel
+    // keeps the object alive and the id cannot be recycled while pane can
+    // still name it. What it does need is the *other* half — the descendants
+    // have to be stopped **here**, at the moment the leader is seen to have
+    // exited, and not at `Drop`.
+    //
+    // Without it the completion loop can spin for ever on a child that has
+    // already exited. The job's stdout write end is inherited by everything
+    // the child started, so a surviving grandchild holds the pipe open, the
+    // drain thread never sees EOF, and nothing between here and cancellation
+    // terminates the job — `ContainedChild::drop` does, but the drop is
+    // *after* the loop this function is called from. Unix has always killed
+    // the group at exactly this point, and this is the same act with this
+    // platform's primitive.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    child.try_wait()
+    {
+        let Some(status) = child.try_wait()? else {
+            return Ok(None);
+        };
+        // Discarded for the reason `kill_and_reap` discards its own: a job
+        // whose last member has already exited is not an error, it is the
+        // race this call exists to be indifferent to.
+        let _ = child.kill();
+        Ok(Some(status))
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

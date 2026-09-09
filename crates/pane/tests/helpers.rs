@@ -695,9 +695,11 @@ fn the_narrowed_loop_is_what_asks_for_a_narrowed_runtime() {
 //
 // The pushed half nothing asks for: an oversized command result is reduced
 // by the host, without the model spending a turn to request it. Every test
-// below spawns, so each is gated to the platforms with a sandbox applier —
-// on Windows `tools::invoke` refuses rather than spawning unconfined, and a
-// "the tool ran" assertion would fail there for an unrelated reason.
+// below spawns a `bash`, and each is gated to macOS and Linux because those
+// are the hosts where `bash` and its brace expansion are certainly present.
+// Windows has had an applier since 2026-09-09 and no longer refuses, so the
+// gate is now about the runner's own tools rather than about confinement;
+// widening it is a named successor in `sandbox-grants.md` §7.
 
 /// The whole grant these tests need. `printf` and brace expansion are both
 /// bash builtins, so `bash` is the only binary that is ever exec'd.

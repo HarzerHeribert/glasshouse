@@ -688,11 +688,40 @@ fn the_reported_regime_matches_what_was_applied() {
         "Landlock's missing glob must be stated"
     );
 
-    // Windows. Only the AppContainer removes the network; the restricted
-    // token has no bearing on sockets.
-    assert!(windows::Regime::RestrictedTokenAndAppContainer.removes_network());
-    assert!(!windows::Regime::RestrictedTokenOnly.removes_network());
-    assert!(!windows::Regime::Unconfined.removes_network());
+    // Windows. There are two regimes and no third: the AppContainer, or a
+    // refusal. A `WRITE_RESTRICTED`-token-only regime used to be a variant
+    // here, reported `removes_network() == false`, and isolated nothing --
+    // it cannot reach a spawn now because it does not exist.
+    // Said as a property of the source rather than of an array this test
+    // wrote: nothing named `RestrictedToken` exists, so no half-confinement
+    // can be constructed, reported, or reached from a spawn.
+    assert!(
+        !WINDOWS_SOURCE.contains("RestrictedToken"),
+        "a restricted-token regime removes write reach without isolating \
+         anything and reports a confinement it cannot back; it must not be \
+         reachable"
+    );
+    for regime in [windows::Regime::AppContainer, windows::Regime::Unconfined] {
+        assert!(!regime.describe().is_empty(), "{regime:?}");
+    }
+    let cage = windows::Regime::AppContainer.describe();
+    // §4.1's network claim is not a claim the access check can back, so the
+    // sentence names the service that does back it rather than staying silent.
+    assert!(cage.contains("Windows Firewall service"), "{cage}");
+    // Invariant 3 says there is one writable root. On this platform there
+    // are two by construction, and the sentence says so rather than
+    // pretending otherwise.
+    assert!(cage.contains("two writable roots"), "{cage}");
+    assert!(cage.contains("%LOCALAPPDATA%\\Packages"), "{cage}");
+    // The container SID is per user as well as per project -- the security
+    // property `container_name` exists for.
+    assert!(cage.contains("this user's own SID"), "{cage}");
+    assert!(
+        windows::Regime::Unconfined
+            .describe()
+            .contains("refusal, not a degraded mode"),
+        "an unconfinable host must say it spawned nothing"
+    );
 
     #[cfg(target_os = "linux")]
     {
@@ -1041,6 +1070,46 @@ fn the_windows_acl_admits_the_capability_sid_to_the_project_and_nothing_else() {
     assert_eq!(windows::READ_WRITE_RIGHTS & windows::FILE_EXECUTE, 0);
     assert_ne!(windows::READ_RIGHTS & 0x0010_0000, 0, "SYNCHRONIZE");
     assert_ne!(windows::READ_RIGHTS & 0x0000_0001, 0, "FILE_READ_DATA");
+
+    // **The whole mask, bit by bit, because `FILE_ALL_ACCESS` minus one bit
+    // is not a decision — it is the absence of one, and it cost three
+    // escapes.** `FILE_DELETE_CHILD` is the right to delete or rename a child
+    // *whose own DACL grants nothing*, which is exactly the `.claude`
+    // carve-out; `WRITE_DAC` and `WRITE_OWNER` are the right to rewrite any
+    // object's security, inheritable across the entire project. All three
+    // were in `0x001F_01FF`.
+    assert_eq!(
+        windows::READ_WRITE_RIGHTS & windows::WITHHELD_RIGHTS,
+        0,
+        "the project grant carries a right nothing justified"
+    );
+    assert_eq!(windows::READ_RIGHTS & windows::WITHHELD_RIGHTS, 0);
+    assert_eq!(
+        windows::WITHHELD_RIGHTS,
+        windows::FILE_EXECUTE
+            | windows::FILE_DELETE_CHILD
+            | windows::WRITE_DAC
+            | windows::WRITE_OWNER
+    );
+    // And the exact values, so a widening is a diff rather than a
+    // re-derivation.
+    assert_eq!(windows::READ_RIGHTS, 0x0012_0089, "read");
+    assert_eq!(windows::READ_WRITE_RIGHTS, 0x0013_019F, "read+write");
+    // The falsifying half: a narrower mask that broke ordinary work would
+    // pass every assertion above. Deleting a file inside the project is
+    // `DELETE` **on the file**, which is what makes dropping
+    // `FILE_DELETE_CHILD` from the parent free.
+    assert_ne!(windows::READ_WRITE_RIGHTS & windows::DELETE, 0, "DELETE");
+    for (bit, name) in [
+        (windows::FILE_WRITE_DATA, "FILE_WRITE_DATA"),
+        (windows::FILE_APPEND_DATA, "FILE_APPEND_DATA"),
+        (windows::FILE_WRITE_ATTRIBUTES, "FILE_WRITE_ATTRIBUTES"),
+        (windows::FILE_READ_DATA, "FILE_READ_DATA"),
+        (windows::FILE_READ_ATTRIBUTES, "FILE_READ_ATTRIBUTES"),
+        (windows::SYNCHRONIZE, "SYNCHRONIZE"),
+    ] {
+        assert_ne!(windows::READ_WRITE_RIGHTS & bit, 0, "{name}");
+    }
     // And the binary is recorded rather than acted on — the one platform
     // where the 61D narrow grant is not enforced, said out loud.
     assert_eq!(grants.executable, PathBuf::from(RESOLVED), "{grants:?}");
@@ -1048,15 +1117,34 @@ fn the_windows_acl_admits_the_capability_sid_to_the_project_and_nothing_else() {
     // document can add the capability because no pattern names one.
     assert!(!grants.internet_client);
 
-    // The container name is derived from the root alone, is stable across
-    // calls, and fits `CreateAppContainerProfile`'s 64 UTF-16 limit however
-    // long the project path is.
-    let name = windows::container_name(&profile);
-    assert_eq!(name, windows::container_name(&profile));
+    // The container name is derived from the root **and the user**, is
+    // stable across calls, and fits `CreateAppContainerProfile`'s 64 UTF-16
+    // limit however long the project path is.
+    //
+    // The user half is the security property, not decoration: an
+    // AppContainer SID is a pure function of the profile name, so a name
+    // derived from the path alone lets any local process -- including one
+    // running as another account -- derive the SID, create the same
+    // container and inherit whatever the project ACL grants it.
+    const ALICE: &str = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+    const BOB: &str = "S-1-5-21-1111111111-2222222222-3333333333-1002";
+    let name = windows::container_name(&profile, ALICE);
+    assert_eq!(name, windows::container_name(&profile, ALICE));
     assert!(name.len() <= 64, "{name}");
     assert!(name.starts_with("Glasshouse.Pane."), "{name}");
     let other = Profile::compile(root.join("elsewhere"), None);
-    assert_ne!(name, windows::container_name(&other));
+    assert_ne!(name, windows::container_name(&other, ALICE));
+    assert_ne!(
+        name,
+        windows::container_name(&profile, BOB),
+        "two users on one project root must not share a container SID"
+    );
+    // And the fold is length-prefixed, so a root that ends in one user's SID
+    // cannot collide with a shorter root under another.
+    assert_ne!(
+        windows::container_name(&Profile::compile(root.join("ab"), None), "c"),
+        windows::container_name(&Profile::compile(root.join("a"), None), "bc"),
+    );
 
     #[cfg(not(target_os = "windows"))]
     eprintln!(
@@ -1085,44 +1173,98 @@ fn the_windows_job_object_is_documented_as_a_lifetime_primitive_and_not_a_sandbo
 }
 
 #[test]
-fn the_project_acl_grant_is_documented_as_unverified_and_stays_uncalled() {
-    // The one function in this crate that modifies a user's filesystem, on
-    // the one platform no host here can execute. A previous revision built
-    // the ACL from its own entry alone and wrote it protected, which takes
-    // a developer's project directory away from them on the first call; the
-    // repair is reasoning, so what guards it is that nothing calls it and
-    // that its documentation says why.
-    let lines: Vec<&str> = WINDOWS_SOURCE.lines().collect();
-    let at = lines
-        .iter()
-        .position(|line| line.contains("pub fn grant_project_acl"))
-        .expect("the function is gone; so is this test's subject");
-    let preamble: Vec<&str> = lines[..at]
-        .iter()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with("///"))
-        .copied()
-        .collect();
-    let first = preamble.last().expect("the function carries a doc comment");
-    assert!(
-        first.contains("Unverified") && first.contains("unwired"),
-        "the first sentence must say it is unverified and unwired: {first}"
-    );
-    assert!(
-        preamble.iter().any(|line| line.contains("Windows cell")),
-        "the doc comment must name what would change that: {preamble:?}"
-    );
-
-    // And it is uncalled: the `pub use` re-export and the definition are the
-    // only mentions, and no call expression exists anywhere in the crate.
-    let called: Vec<&str> = WINDOWS_SOURCE
+fn the_project_acl_grant_is_reached_only_through_the_spawn_that_confines() {
+    // This function modifies a user's filesystem, so what guards it is no
+    // longer that nothing calls it -- something does now -- but *where* it
+    // is called from. The only call site is `sandbox::windows::spawn`, and
+    // the ordering inside that function is the contract: the user's SID, the
+    // container, the refusal for an image the container cannot load, then
+    // this, and only then `CreateProcessW`. Every one is a `?`, so no child
+    // is created unless all of them succeeded.
+    let calls: Vec<&str> = WINDOWS_SOURCE
         .lines()
         .filter(|line| line.contains("grant_project_acl("))
         .filter(|line| !line.contains("pub fn "))
+        .map(|line| line.trim())
         .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the project ACL must have exactly one caller: {calls:?}"
+    );
     assert!(
-        called.is_empty(),
-        "grant_project_acl has a caller: {called:?}"
+        calls[0].starts_with("grant_project_acl(profile, binary, &container)")
+            && calls[0].ends_with("?;"),
+        "the one caller must pass the container it just made and propagate the failure: {calls:?}"
+    );
+
+    // And the caller is the spawn, with the ACL grant above the process
+    // creation rather than beside it. The order is the contract: refuse an
+    // image the container cannot load, grant the project, and only then
+    // create a process — each one a `?`, so nothing is started unless every
+    // one of them succeeded.
+    let spawn = WINDOWS_SOURCE
+        .find("    pub fn spawn(")
+        .expect("the confined spawn is gone; so is this test's subject");
+    let body = &WINDOWS_SOURCE[spawn..];
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("the spawn no longer contains `{needle}`"))
+    };
+    let refusal = at("return Err(NotConfinable(cannot_load(binary)));");
+    let acl = at("grant_project_acl(profile, binary, &container)");
+    let create = at("CreateProcessW(");
+    assert!(
+        refusal < acl && acl < create,
+        "the order must be refuse, grant, create: {refusal} {acl} {create}"
+    );
+
+    // The idempotence guard, which is not tidiness: this runs on every
+    // spawn, and re-writing an ACE that is already present would both grow
+    // the DACL of a person's project directory and re-walk their whole tree
+    // -- measured at 1.01s for 10,000 files against a 47ms skip.
+    let grant = WINDOWS_SOURCE
+        .find("    pub fn grant_project_acl(")
+        .expect("the grant is gone; so is this test's subject");
+    let grant_body = &WINDOWS_SOURCE[grant..];
+    let grant_body = &grant_body[..grant_body
+        .find("\n    /// ")
+        .expect("the grant is the last item in its module")];
+    assert!(
+        grant_body.contains("masks_for(path, container.sid())?")
+            && grant_body.contains("return Ok(());"),
+        "the grant must read the current masks and return having written nothing when they \
+         already carry the intended rights"
+    );
+
+    // **And the skip has to be safe, which is what the three phases below it
+    // are for.** `SetNamedSecurityInfoW` writes the named object's DACL and
+    // then walks the tree, so an interrupted call leaves the root looking
+    // finished over descendants that are not. The carve-out is therefore
+    // written closed first, the roots second, and the carve-out's read grant
+    // last -- so the carve-out holding exactly `READ_RIGHTS` is proof that
+    // the walk before it ran to the end, and any other state re-runs the
+    // whole sequence. Reordering these three collapses that proof, which no
+    // mask assertion would notice.
+    let phase = |needle: &str| {
+        grant_body
+            .find(needle)
+            .unwrap_or_else(|| panic!("the grant no longer contains `{needle}`"))
+    };
+    let closed = phase("write_acl(path, container, None, true)?;");
+    let roots = phase("write_acl(path, container, Some(*rights), false)?;");
+    let granted = phase("write_acl(path, container, Some(*rights), true)?;");
+    assert!(
+        closed < roots && roots < granted,
+        "the carve-out must be closed before the roots propagate and granted only after \
+         they return: {closed} {roots} {granted}"
+    );
+    // And the carve-out is created rather than skipped when it is missing: a
+    // project with no `.claude/` yet is one where a program could make it and
+    // write the settings document its next session compiles from.
+    assert!(
+        grant_body.contains("std::fs::create_dir_all(path)?;"),
+        "a missing carve-out must be created, not passed over"
     );
 }
 

@@ -1858,10 +1858,23 @@ fn a_verbatim_and_a_plain_spelling_of_one_path_decide_identically() {
         Access::Read,
         Path::new("//?/pane-fixture/proj/notes/one.md"),
     ));
+    // Refused for being outside, rather than reduced to `proj` and let in.
+    // **Which** refusal is the host's, and both are correct: Rust's Windows
+    // path parser reads `//?/` as a prefix, so there this candidate is a
+    // device-namespace path that reduces to nothing and `check` refuses it as
+    // one, before any pattern is consulted; on Unix the doubled slash has
+    // already collapsed by the time `spelling` sees it, so it is an ordinary
+    // absolute path no grant covers. Naming only the second sentence made
+    // this red on the Windows ARM64 leg for giving the stronger answer —
+    // `crates/pane/tests/sandbox_path_spellings.rs` is where that answer is
+    // asserted in its own right.
     assert!(
         unix_shaped
             .rule
-            .contains("the project root is the only readable root"),
+            .contains("the project root is the only readable root")
+            || unix_shaped
+                .rule
+                .contains("device-namespace path is refused"),
         "`//?/…` is not a verbatim prefix and must not reach inside the root: {:?}",
         unix_shaped.rule
     );

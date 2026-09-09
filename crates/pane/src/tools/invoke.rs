@@ -2,10 +2,13 @@
 //! 2463's per-call half.
 //!
 //! The invariant: **there is no path through this module that spawns a child
-//! outside the sandbox.** Confinement is installed on the `Command` before
-//! `output()` is ever reached, and a platform that cannot install one
-//! returns a refusal instead of a process — so "unconfined" is not a
-//! degraded mode here, it is a refusal like any other.
+//! outside the sandbox**, and since the AppContainer landed it is structural
+//! rather than positional. [`confined_spawn`] takes the `Command` by value,
+//! applies the platform's confinement and creates the process, all in one
+//! call — so there is no intermediate value a caller could hold and spawn
+//! without checking a result, and a platform that cannot confine returns a
+//! refusal instead of a process. "Unconfined" is not a degraded mode here, it
+//! is a refusal like any other.
 //!
 //! The second invariant is `sandbox-grants.md` §1.4: **a refusal is a
 //! value.** Every refusal below is a returned [`PermissionDenied`]; nothing
@@ -24,7 +27,7 @@
 //! immediately before the spawn and then at a bounded interval while the
 //! child runs. It sits **below** the confinement rather than beside it, so
 //! the first invariant is untouched — the only expression that starts a
-//! child is still one that a `?` on [`confine`] has already passed.
+//! child is [`confined_spawn`] itself, and it confines before it spawns.
 //!
 //! **Nothing model-authored runs here.** The only programs this module can
 //! spawn are the spawning entries in [`registry::ALL`], each resolved from a name fixed
@@ -37,7 +40,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -181,6 +184,19 @@ impl Args {
 /// instead. The fallback is logged when it happens **and** recorded here,
 /// because a log line is not observable to the caller that has to decide
 /// what to say about it.
+///
+/// **`fell_back_to_roots` is never honoured on Windows, and the reason is
+/// that there is nothing there for it to mean.** The fallback works on unix
+/// because `execvp` searches `PATH` and the applier's executable roots bound
+/// where that search may land. `sandbox::windows::spawn` hands
+/// `CreateProcessW` an `lpApplicationName`, so no search happens at all; a
+/// partial name there is completed from **pane's own current directory**,
+/// which is the project root and is writable by invariant 3. A program that
+/// wrote `<project>\grep` and then called a tool whose program was not
+/// installed had pane execute it — measured on the Windows ARM64 VM,
+/// 2026-09-09. `spawn_confined` refuses the fallback on that platform and
+/// `windows::spawn` refuses a non-absolute program independently, so neither
+/// is the only thing standing between the model and its own binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecGrant {
     pub binary: PathBuf,
@@ -240,6 +256,10 @@ pub enum Confinement {
     Seatbelt,
     /// Linux Landlock, installed on the forked child before `exec`.
     Landlock,
+    /// A Windows AppContainer, entered at `CreateProcessW` itself. There is
+    /// no earlier moment to enter it: the container is an argument to the
+    /// call that creates the process.
+    AppContainer,
     /// No child was created. The call ran inside pane, and its path was
     /// checked by `Profile::check` before it did.
     InProcess,
@@ -250,6 +270,7 @@ impl Confinement {
         match self {
             Confinement::Seatbelt => "seatbelt",
             Confinement::Landlock => "landlock",
+            Confinement::AppContainer => "appcontainer",
             Confinement::InProcess => "in-process (no child; the path was checked)",
         }
     }
@@ -1361,13 +1382,55 @@ pub fn exec_grant(program: &str) -> ExecGrant {
 pub(crate) fn resolve_program(program: &str) -> Option<PathBuf> {
     let candidate = Path::new(program);
     if candidate.components().count() > 1 {
-        return runnable(candidate).then(|| std::fs::canonicalize(candidate).ok())?;
+        return resolved(candidate);
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .filter(|candidate| runnable(candidate))
-        .find_map(|candidate| std::fs::canonicalize(candidate).ok())
+    std::env::split_paths(&path).find_map(|dir| resolved(&dir.join(program)))
+}
+
+/// The canonical path `candidate` names, if it names a runnable file.
+#[cfg(not(windows))]
+fn resolved(candidate: &Path) -> Option<PathBuf> {
+    if !runnable(candidate) {
+        return None;
+    }
+    std::fs::canonicalize(candidate).ok()
+}
+
+/// The canonical path `candidate` names **once Windows has had its say about
+/// the extension**.
+///
+/// Without this, nothing resolves on Windows at all. `PATH` holds directories
+/// and a tool is named `rg`, so the join is `…\rg` — a file that does not
+/// exist, because the file is `…\rg.exe`. Every spawning tool then fell back
+/// to the unresolved branch of [`exec_grant`], which is the wider grant, on
+/// the one platform whose applier cannot narrow an exec grant at all.
+///
+/// The bare spelling is tried first so a name that already carries its
+/// extension resolves to itself rather than to `rg.exe.com`, and `PATHEXT` is
+/// read from the environment because it is the list the shell itself uses;
+/// the default is the one `cmd.exe` ships with, for a session started without
+/// it.
+#[cfg(windows)]
+fn resolved(candidate: &Path) -> Option<PathBuf> {
+    if runnable(candidate)
+        && let Ok(path) = std::fs::canonicalize(candidate)
+    {
+        return Some(path);
+    }
+    let name = candidate.file_name()?.to_os_string();
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    for extension in extensions.split(';').filter(|part| !part.is_empty()) {
+        let mut spelling = name.clone();
+        spelling.push(extension);
+        let with = candidate.with_file_name(spelling);
+        if runnable(&with)
+            && let Ok(path) = std::fs::canonicalize(&with)
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -1387,13 +1450,14 @@ fn runnable(path: &Path) -> bool {
 
 /// Confines the child and spawns it, in that order and in no other.
 ///
-/// The `Command` is built, [`confine`] installs the platform's mechanism on
-/// it, and the spawn comes after. A `?` on the confinement is what makes "no
-/// unconfined path" mechanical rather than promised: the only expression that
-/// runs the child is below a confinement that returned `Ok`.
+/// The `Command` is built and handed to [`confined_spawn`], which confines
+/// and spawns as one act. That is what makes "no unconfined path" mechanical
+/// rather than promised: this function never holds a `Command` and a spawn
+/// result at the same time, because the call that would produce the second
+/// consumes the first.
 ///
 /// The child is spawned rather than run to completion because a cancellation
-/// needs a [`Child`] to kill; the two drain threads are what `output()` did
+/// needs a [`ConfinedChild`] to kill; the two drain threads are what `output()` did
 /// internally, and the poll loop is where `token` is asked. Three outcomes:
 ///
 /// - set before the spawn: no child is ever created, and the check is the
@@ -1421,6 +1485,24 @@ fn spawn_confined(
         });
     };
     let grant = exec_grant(executable);
+    // The unresolved branch is a refusal on Windows rather than a wider
+    // grant, because that platform has no wider grant to fall back *to*: see
+    // [`ExecGrant`]. Refused here as well as in `windows::spawn` so the
+    // model is told which tool is missing, rather than being told a path it
+    // never chose was not absolute.
+    #[cfg(windows)]
+    if grant.fell_back_to_roots {
+        return Err(ToolError::Denied(PermissionDenied {
+            tool: tool.name().to_string(),
+            path: grant.binary.display().to_string(),
+            rule: format!(
+                "`{executable}` is not installed on this machine, and on Windows an unresolved \
+                 program name would be completed from pane's own current directory -- the \
+                 project root, which the model can write. The tool is refused rather than \
+                 resolved there (sandbox-grants.md §3)"
+            ),
+        }));
+    }
     let mut command = Command::new(&grant.binary);
     command.args(argv);
     command.current_dir(profile.root());
@@ -1444,23 +1526,15 @@ fn spawn_confined(
         command.env_remove(name);
     }
 
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
     // The child leads a process group of its own, so a cancellation can name
     // everything the call started and not only the handle it holds. See
     // [`kill_and_reap`] for why that is the difference between stopping a
-    // call and stopping a process.
+    // call and stopping a process. Windows has no process group and gets the
+    // same guarantee from a job object, which `confined_spawn` creates.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-    }
-
-    let confinement = confine(profile, &grant.binary, tool.name(), &mut command)?;
-
-    if stopped() {
-        return Err(cancelled());
     }
 
     let spawn_failed = |error: std::io::Error| ToolError::Spawn {
@@ -1468,7 +1542,30 @@ fn spawn_confined(
         program: grant.binary.clone(),
         error: error.to_string(),
     };
-    let mut child = command.spawn().map_err(spawn_failed)?;
+
+    // The last statement before the spawn, and it is the last statement
+    // before the *confinement* too, because they are now one call. A
+    // cancellation that landed before this line leaves no child anywhere,
+    // which is a property of the control flow and not of a race.
+    if stopped() {
+        return Err(cancelled());
+    }
+
+    let (mut child, confinement) = confined_spawn(
+        profile,
+        &grant.binary,
+        tool.name(),
+        command,
+        Pipes {
+            stdin: false,
+            stdout: true,
+            stderr: true,
+        },
+    )
+    .map_err(|refusal| match refusal {
+        SpawnRefusal::Denied(denied) => ToolError::Denied(denied),
+        SpawnRefusal::Failed(error) => spawn_failed(error),
+    })?;
 
     // A cancellation that landed in the window between the check above and
     // this line now has something to stop, and the poll loop below would not
@@ -1481,8 +1578,8 @@ fn spawn_confined(
         return Err(cancelled());
     }
 
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let stdout = drain(child.take_stdout());
+    let stderr = drain(child.take_stderr());
 
     let status = loop {
         if stopped() {
@@ -1549,7 +1646,7 @@ fn collect(handle: JoinHandle<Vec<u8>>) -> String {
 /// Kills everything the call started and reaps the child, in that order, so
 /// nothing is left for `init`.
 ///
-/// **The group is killed first, and the group is the point.** A [`Child`]
+/// **The group is killed first, and the group is the point.** A child
 /// handle names the process pane spawned and nothing that process started,
 /// so killing the handle alone stops the shell and leaves its background
 /// jobs running — a `bash` call that started a server, cancelled, leaves the
@@ -1559,7 +1656,9 @@ fn collect(handle: JoinHandle<Vec<u8>>) -> String {
 /// Killing a group is safe here only because [`spawn_confined`] *created*
 /// this one: `process_group(0)` makes the child a group leader whose group
 /// id is its own pid, so the members are exactly the processes this call
-/// started. Killing a group pane did not create is how a cancellation
+/// started. Windows has no process group; `ConfinedChild::kill` terminates
+/// the job object the same spawn created, which has the same membership for
+/// the same reason. Killing a group pane did not create is how a cancellation
 /// becomes an outage, which is why the group is established at the spawn
 /// rather than guessed at the kill. The order matters for the same reason:
 /// once `wait` has reaped the child, its pid — and therefore the group id —
@@ -1575,7 +1674,7 @@ fn collect(handle: JoinHandle<Vec<u8>>) -> String {
 /// a cancelled call, and joining them would make cancellation wait on a
 /// grandchild that inherited the pipe — the one thing a bounded cancellation
 /// must not do.
-pub(crate) fn kill_and_reap(child: &mut Child) {
+pub(crate) fn kill_and_reap(child: &mut ConfinedChild) {
     #[cfg(unix)]
     kill_group(child.id());
     let _ = child.kill();
@@ -1608,73 +1707,238 @@ fn kill_group(pid: u32) {
     }
 }
 
-/// Installs this platform's confinement on `command`, or refuses.
+/// Which of a confined child's three standard streams is a pipe.
 ///
-/// A platform with no applier that has ever executed refuses rather than
-/// spawning: `sandbox-grants.md` §3 gives Windows a restricted token and an
-/// AppContainer, and `sandbox/windows.rs` says in its own documentation that
-/// nothing there has been run. Spawning there "for now" would be the one
+/// `stdout` is a pipe for every caller here; the other two differ, and a
+/// spawn that took three `Stdio` values could not describe the Windows path
+/// at all — that one creates its own handles, because it creates its own
+/// process.
+pub(crate) use crate::sandbox::windows::Pipes;
+
+/// A child that exists **only** because a confinement was applied first.
+///
+/// The type has no constructor other than [`confined_spawn`], and
+/// [`confined_spawn`] applies the platform's confinement in the same call
+/// that creates the process. That is this module's first invariant expressed
+/// as a type: there is no longer an intermediate value — a `Command` a
+/// confinement decorated — that a caller could hold and spawn without
+/// checking a result. Before this, the guarantee was "the `?` is above the
+/// `spawn()`", which is a property of a line's position; now the two are one
+/// expression.
+///
+/// It also had to become a type rather than a `std::process::Child`. Stable
+/// `std` cannot attach an AppContainer to a `Command` (`raw_attribute` is
+/// nightly, rust-lang/rust#114854) and cannot build a `Child` from a handle,
+/// so the Windows applier owns its own `CreateProcessW` and hands back its
+/// own child.
+pub(crate) struct ConfinedChild {
+    inner: PlatformChild,
+}
+
+#[cfg(target_os = "windows")]
+type PlatformChild = crate::sandbox::windows::ContainedChild;
+#[cfg(not(target_os = "windows"))]
+type PlatformChild = std::process::Child;
+
+/// The reader on the child's standard output. A `File` on Windows because the
+/// pipe is this crate's own; `Read + Send + 'static` either way, which is all
+/// [`drain`] asks for.
+#[cfg(target_os = "windows")]
+pub(crate) type StdoutPipe = std::fs::File;
+#[cfg(not(target_os = "windows"))]
+pub(crate) type StdoutPipe = std::process::ChildStdout;
+#[cfg(target_os = "windows")]
+pub(crate) type StderrPipe = std::fs::File;
+#[cfg(not(target_os = "windows"))]
+pub(crate) type StderrPipe = std::process::ChildStderr;
+#[cfg(target_os = "windows")]
+pub(crate) type StdinPipe = std::fs::File;
+#[cfg(not(target_os = "windows"))]
+pub(crate) type StdinPipe = std::process::ChildStdin;
+
+impl ConfinedChild {
+    /// The child's own pid, which is also its process-group id — the unix
+    /// appliers make the child a group leader and then name that group when
+    /// they kill or wait. Windows names a job object instead and never needs
+    /// the pid, so the accessor does not exist there rather than sitting
+    /// unread.
+    #[cfg(unix)]
+    pub(crate) fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<StdinPipe> {
+        self.inner.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<StdoutPipe> {
+        self.inner.stdout.take()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<StderrPipe> {
+        self.inner.stderr.take()
+    }
+
+    /// Kills the child and everything it started — the process group on unix,
+    /// the job object on Windows.
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        self.inner.kill()
+    }
+
+    pub(crate) fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.inner.wait()
+    }
+
+    /// Only the platforms without the `waitid(WNOWAIT)` dance ask this: on
+    /// macOS and Linux the exit has to be observed *without* reaping, so the
+    /// group id is still reserved when the descendants are signalled, and
+    /// `process::try_complete` does that by hand.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.inner.try_wait()
+    }
+}
+
+/// Why no child was created.
+///
+/// The two are different in kind and the callers report them differently:
+/// [`SpawnRefusal::Denied`] is the sandbox's own answer and is a
+/// `PermissionDenied` a program can catch (§1.4); [`SpawnRefusal::Failed`] is
+/// the operating system declining to start a program the sandbox had already
+/// admitted.
+pub(crate) enum SpawnRefusal {
+    Denied(PermissionDenied),
+    Failed(std::io::Error),
+}
+
+/// Confines and spawns, in that order and as one act.
+///
+/// `command` is taken **by value**, which is the structural half of the
+/// invariant: after this call the caller no longer holds a `Command` and
+/// cannot spawn one. A platform with no applier that has ever executed
+/// refuses rather than spawning — spawning there "for now" would be the one
 /// unconfined path this module exists to not have.
 #[cfg(target_os = "macos")]
-pub(crate) fn confine(
+pub(crate) fn confined_spawn(
     profile: &Profile,
     binary: &Path,
     tool: &str,
-    command: &mut Command,
-) -> Result<Confinement, PermissionDenied> {
-    crate::sandbox::macos::confine(profile, binary, command)
-        .map(|()| Confinement::Seatbelt)
-        .map_err(|error| PermissionDenied {
+    mut command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    apply_pipes(&mut command, pipes);
+    crate::sandbox::macos::confine(profile, binary, &mut command).map_err(|error| {
+        SpawnRefusal::Denied(PermissionDenied {
             tool: tool.to_string(),
             path: String::new(),
             rule: format!(
                 "the seatbelt profile could not be applied, so nothing was spawned: {error}"
             ),
         })
+    })?;
+    let child = command.spawn().map_err(SpawnRefusal::Failed)?;
+    Ok((ConfinedChild { inner: child }, Confinement::Seatbelt))
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn confine(
+pub(crate) fn confined_spawn(
     profile: &Profile,
     binary: &Path,
     tool: &str,
-    command: &mut Command,
-) -> Result<Confinement, PermissionDenied> {
-    let refused = |rule: String| PermissionDenied {
-        tool: tool.to_string(),
-        path: String::new(),
-        rule,
+    mut command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    let refused = |rule: String| {
+        SpawnRefusal::Denied(PermissionDenied {
+            tool: tool.to_string(),
+            path: String::new(),
+            rule,
+        })
     };
-    match crate::sandbox::linux::confine(profile, binary, command) {
-        Ok(true) => Ok(Confinement::Landlock),
+    apply_pipes(&mut command, pipes);
+    match crate::sandbox::linux::confine(profile, binary, &mut command) {
+        Ok(true) => {}
         // `linux::confine` returns `Ok(false)` below Landlock ABI 3 and
         // installs nothing. That is a refusal here rather than a warning.
-        Ok(false) => Err(refused(
-            "this kernel's Landlock ABI is below 3, so no ruleset could be installed and pane \
-             does not spawn a tool unconfined (sandbox-grants.md §3)"
-                .to_string(),
-        )),
-        Err(error) => Err(refused(format!(
-            "the Landlock ruleset could not be installed, so nothing was spawned: {error}"
-        ))),
+        Ok(false) => {
+            return Err(refused(
+                "this kernel's Landlock ABI is below 3, so no ruleset could be installed and \
+                 pane does not spawn a tool unconfined (sandbox-grants.md §3)"
+                    .to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(refused(format!(
+                "the Landlock ruleset could not be installed, so nothing was spawned: {error}"
+            )));
+        }
+    }
+    let child = command.spawn().map_err(SpawnRefusal::Failed)?;
+    Ok((ConfinedChild { inner: child }, Confinement::Landlock))
+}
+
+/// The AppContainer path, where the confinement and the spawn were never
+/// separable.
+///
+/// `windows::spawn` is one call because `CreateProcessW` takes the container
+/// as an argument: there is no earlier moment at which a `Command` could
+/// carry it. Every failure inside it — no user SID, no container, an image
+/// the container cannot load, an ACL that would not take the grant — comes
+/// back as a refusal here and nothing is started.
+#[cfg(target_os = "windows")]
+pub(crate) fn confined_spawn(
+    profile: &Profile,
+    binary: &Path,
+    tool: &str,
+    command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    use crate::sandbox::windows::SpawnError;
+    match crate::sandbox::windows::spawn(profile, binary, &command, pipes) {
+        Ok(child) => Ok((ConfinedChild { inner: child }, Confinement::AppContainer)),
+        Err(refusal @ SpawnError::NotConfinable(_)) => {
+            Err(SpawnRefusal::Denied(PermissionDenied {
+                tool: tool.to_string(),
+                path: binary.display().to_string(),
+                rule: refusal.to_string(),
+            }))
+        }
+        Err(SpawnError::NotStarted(error)) => Err(SpawnRefusal::Failed(error)),
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn confine(
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub(crate) fn confined_spawn(
     profile: &Profile,
     binary: &Path,
     tool: &str,
-    command: &mut Command,
-) -> Result<Confinement, PermissionDenied> {
-    let _ = (profile, binary, command);
-    Err(PermissionDenied {
+    command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    let _ = (profile, binary, command, pipes);
+    Err(SpawnRefusal::Denied(PermissionDenied {
         tool: tool.to_string(),
         path: String::new(),
         rule: "pane has no sandbox applier that has ever executed on this platform, and does not \
                spawn a tool unconfined (sandbox-grants.md §3)"
             .to_string(),
-    })
+    }))
+}
+
+/// Hands `pipes` to the `Command` the unix appliers spawn from.
+///
+/// Windows has no equivalent here on purpose: its handles are created by the
+/// same call that creates the process, so there is nothing to install on a
+/// `Command` that `CreateProcessW` would then read.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn apply_pipes(command: &mut Command, pipes: Pipes) {
+    use std::process::Stdio;
+    let stream = |piped: bool| {
+        if piped { Stdio::piped() } else { Stdio::null() }
+    };
+    command.stdin(stream(pipes.stdin));
+    command.stdout(stream(pipes.stdout));
+    command.stderr(stream(pipes.stderr));
 }
 
 /// Truncates on a character boundary, marking that it did.

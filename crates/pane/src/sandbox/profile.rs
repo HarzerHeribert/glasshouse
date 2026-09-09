@@ -700,15 +700,35 @@ impl Profile {
         if let Some(reason) = &self.invalid_root {
             return denied(reason.clone());
         }
+        // Before anything is compared, and not after: a path this module
+        // cannot place inside or outside a grant is refused rather than
+        // matched (§1.4).
+        if let Some(rule) = device_refusal(&resolved) {
+            return denied(rule);
+        }
+        // Every spelling a refusing rule must survive, and only the refusing
+        // rules see them: one file may be written with an alternate data
+        // stream and without it, and §4.5 has to hold for both. An `allow`
+        // still decides on the one spelling that was asked for.
+        let stripped = stream_stripped(&candidate);
+        let refusable: Vec<&[String]> = std::iter::once(&candidate[..])
+            .chain(stripped.as_deref())
+            .collect();
         for never in &self.never {
             if never.write_only && access != Access::Write {
                 continue;
             }
-            if !contains(&never.prefix, &candidate) {
+            if !refusable
+                .iter()
+                .any(|form| contains_refusing(&never.prefix, form))
+            {
                 continue;
             }
             // The project's own subtree, and only it, is exempt — and only
-            // from a rule whose subtree contains the root.
+            // from a rule whose subtree contains the root. Compared exactly
+            // while the rule above compares loosely, because this half is a
+            // grant: a candidate whose spelling the exemption cannot confirm
+            // keeps the refusal.
             if let Some(except) = &never.except_spelling
                 && contains(except, &candidate)
             {
@@ -717,7 +737,7 @@ impl Profile {
             return denied(never.rule.clone());
         }
         for rule in &self.deny {
-            if covers(&rule.glob, &candidate, true) {
+            if refusable.iter().any(|form| covers(&rule.glob, form, true)) {
                 return denied(format!("`{}` in permissions.deny", rule.written));
             }
         }
@@ -1179,18 +1199,18 @@ fn display(path: &Path) -> String {
 /// returns the *verbatim* `\\?\C:\…`, an environment variable or a settings
 /// pattern returns the ordinary `C:\…`, and either may carry an 8.3 short
 /// name such as `RUNNER~1`. This function decides the first two — `\` folded
-/// to `/`, a verbatim prefix reduced to the ordinary spelling it stands for,
-/// the drive letter upper-cased — and [`canonical_prefix`] decides the third,
-/// because only the filesystem that issued a short name can say what it is
-/// short for.
+/// to `/`, a device-namespace prefix reduced to the ordinary spelling it
+/// stands for, the drive letter upper-cased — and [`canonical_prefix`]
+/// decides the third, because only the filesystem that issued a short name
+/// can say what it is short for.
 ///
 /// The fold is unconditional and always was: `\` is a separator here on every
 /// host, which is what lets one matcher serve all three. The *reduction* is
 /// not, and that condition is a containment rule rather than tidiness — see
-/// [`reduced_verbatim`].
+/// [`reduced_device`].
 fn spelling(path: &Path) -> Vec<String> {
     let folded = display(path).replace('\\', "/");
-    let text = reduced_verbatim(&folded).unwrap_or(folded);
+    let text = reduced_device(&folded).unwrap_or(folded);
     let mut parts: Vec<String> = text
         .split('/')
         .filter(|part| !part.is_empty())
@@ -1211,14 +1231,25 @@ fn spelling(path: &Path) -> Vec<String> {
     parts
 }
 
-/// `folded` without its Windows verbatim prefix, or `None` when it carries
-/// none — where "carries one" means `//?/` followed by something only Windows
-/// produces.
+/// `folded` without its Windows device-namespace prefix, or `None` when it
+/// carries none this module can reduce — where "can reduce" means `//?/` or
+/// `//./` followed by a **rooted drive** (`C:/…`) or the `UNC/` marker.
 ///
-/// That condition is the isolation half of the reduction. `//?/` is an
+/// Both prefixes reach the same object manager and name the same file:
+/// `\\.\C:\proj\a.rs`, `\\?\C:\proj\a.rs` and `C:\proj\a.rs` are one path
+/// spelled three ways, and reducing only the second made `\\.\C:\Windows\
+/// System32\config\SAM` a component list no never-rule could meet — a §4
+/// escape rather than a cosmetic gap.
+///
+/// **The drive must be followed by a separator**, and that is why this is not
+/// `is_drive_prefixed` alone: `\\.\C:\` is the volume's root *directory*
+/// while `\\.\C:` is the volume itself, opened for raw sector reads.
+/// [`device_refusal`] refuses the second rather than reducing it to `C:`.
+///
+/// The condition is also the isolation half of the reduction. `//?/` is an
 /// unusual but perfectly legal absolute path on Unix, so an unconditional
 /// strip would reduce `//?/proj/a.rs` to the *relative* `proj/a.rs`, which
-/// [`resolve`] then anchors inside the project root. Requiring a drive letter
+/// [`resolve`] then anchors inside the project root. Requiring a rooted drive
 /// or the `UNC/` marker is what keeps the Windows repair from widening
 /// containment on every other platform — the same test, for the same reason,
 /// as `crates/glasshouse/src/commands/context_firewall.rs`.
@@ -1230,9 +1261,11 @@ fn spelling(path: &Path) -> Vec<String> {
 /// `a_verbatim_and_a_plain_spelling_of_one_path_decide_identically`
 /// exercises the `\\?\` arm on this host and never the `//?/` one. It is
 /// not cross-platform cover for that arm.
-fn reduced_verbatim(folded: &str) -> Option<String> {
-    let rest = folded.strip_prefix("//?/")?;
-    if is_drive_prefixed(rest) {
+fn reduced_device(folded: &str) -> Option<String> {
+    let rest = folded
+        .strip_prefix("//?/")
+        .or_else(|| folded.strip_prefix("//./"))?;
+    if is_drive_prefixed(rest) && rest.as_bytes().get(2) == Some(&b'/') {
         return Some(rest.to_string());
     }
     // `\\?\UNC\srv\share` is the verbatim way of writing `\\srv\share`: the
@@ -1241,6 +1274,85 @@ fn reduced_verbatim(folded: &str) -> Option<String> {
     marker
         .eq_ignore_ascii_case("unc/")
         .then(|| format!("//{}", &rest[4..]))
+}
+
+/// The refusal a Windows device-namespace path earns when [`reduced_device`]
+/// cannot reduce it to an ordinary rooted spelling, and `None` for every
+/// other path.
+///
+/// **This is the fail-closed half of §1.4, and it is a refusal rather than a
+/// repair because no lexical rule can turn one of these into a drive path.**
+/// `\\?\GLOBALROOT\Device\HarddiskVolume3\Windows\…`,
+/// `\\.\PhysicalDrive0` and `\\?\Volume{…}\…` all name real objects that a
+/// grant was never written about; compared as ordinary components they meet
+/// no never-rule and no `deny`, and a broad `allow` then covered them. A cage
+/// that cannot prove a path is inside it denies.
+///
+/// Reachable on Unix only from a backslash-spelled argument, for the reason
+/// [`reduced_device`] gives: after [`resolve`] a `/`-spelled path begins with
+/// the project root, and a relative one has been joined to it.
+fn device_refusal(path: &Path) -> Option<String> {
+    let folded = display(path).replace('\\', "/");
+    let device = folded.starts_with("//?/") || folded.starts_with("//./");
+    (device && reduced_device(&folded).is_none()).then(|| {
+        "a Windows device-namespace path is refused rather than compared: it names no \
+         ordinary file this profile can place inside or outside a grant \
+         (sandbox-grants.md §1.4)"
+            .to_string()
+    })
+}
+
+/// One path component as a **refusing** rule reads it: without the trailing
+/// dots and spaces Win32 discards before it opens anything.
+///
+/// `C:\proj\secrets.\token` and `C:\proj\secrets \token` open
+/// `C:\proj\secrets\token`, so a `deny` on `secrets/**` that compared the
+/// written component let both past — measured, and the same trick worked on
+/// `%SystemRoot%\System32\config` and on Glasshouse's own state directory.
+/// [`canonical_prefix`] repairs this for a component that already exists,
+/// which is why it was invisible until a **write** to a path that does not
+/// exist yet asked the question.
+///
+/// Applied on every host and to both sides of a refusing comparison, which is
+/// this module's standing rule for a spelling difference: `/etc/sudoers.` is
+/// a different file on Unix and is refused there too, because over-refusing
+/// is the direction a never-grantable set errs in. An `allow` never sees
+/// this, for the reason [`match_segment`] gives.
+fn refusing_form(component: &str) -> &str {
+    let trimmed = component.trim_end_matches(['.', ' ']);
+    // `..` and `.` trim to nothing. They are not names, and a rule that
+    // matched every one of them would be looser rather than tighter.
+    if trimmed.is_empty() {
+        component
+    } else {
+        trimmed
+    }
+}
+
+/// `candidate` with the alternate-data-stream suffix cut off its last
+/// component, or `None` when it carries none.
+///
+/// **An extra form to test, never a replacement for the written one.**
+/// `token.env:hidden` and `token.env::$DATA` read the same file object as
+/// `token.env`, so a `deny` naming the file must refuse them; but a Unix
+/// filename may legally contain a colon, and cutting `2026-09-09T12:00.log`
+/// to `2026-09-09T12` would stop a `deny` on `*.log` from matching it. Both
+/// spellings are therefore offered to every refusing rule and either one
+/// matching refuses.
+///
+/// The last component only, because that is the only one Windows reads a
+/// stream from, and never a lone one, because the first component may be the
+/// drive (`C:`).
+fn stream_stripped(candidate: &[String]) -> Option<Vec<String>> {
+    let (last, head) = candidate
+        .split_last()
+        .filter(|(_, head)| !head.is_empty())?;
+    let base = last.split(':').next().filter(|base| !base.is_empty())?;
+    (base.len() != last.len()).then(|| {
+        let mut out = head.to_vec();
+        out.push(base.to_string());
+        out
+    })
 }
 
 /// Whether `text` begins with a drive letter and a colon.
@@ -1322,12 +1434,37 @@ fn invalid_root_sentinel() -> PathBuf {
 /// included.
 fn shown(path: &Path) -> String {
     let text = display(path);
-    reduced_verbatim(&text.replace('\\', "/")).unwrap_or(text)
+    reduced_device(&text.replace('\\', "/")).unwrap_or(text)
 }
 
 /// Whether `candidate` is `prefix` or lies beneath it, in [`spelling`].
 fn contains(prefix: &[String], candidate: &[String]) -> bool {
     prefix.len() <= candidate.len() && prefix.iter().zip(candidate).all(|(a, b)| a == b)
+}
+
+/// [`contains`], asked the way §4's never-grantable set has to ask it: case
+/// is folded and [`refusing_form`] is applied, on every host.
+///
+/// The reason is [`match_segment`]'s, one layer up. A never-rule is a
+/// refusal, and a refusal that a differing case walks past is not one:
+/// `%LOCALAPPDATA%\GLASSHOUSE\state.db` reached Glasshouse's own state
+/// directory on Windows while `…\glasshouse\state.db` was refused, because
+/// only the second spelling of a directory that does not exist yet survives
+/// [`canonical_prefix`]. Erring towards refusing more is the direction §4
+/// errs in; `contains` itself stays exact, because the two places that call
+/// it — the implicit root grant and a never-rule's exemption — are grants.
+fn contains_refusing(prefix: &[String], candidate: &[String]) -> bool {
+    prefix.len() <= candidate.len()
+        && prefix
+            .iter()
+            .zip(candidate)
+            .all(|(a, b)| same_component(refusing_form(a), refusing_form(b)))
+}
+
+/// Two components, compared the way a refusing rule compares them: without
+/// regard to case, on every host, for [`match_segment`]'s reason.
+fn same_component(expected: &str, actual: &str) -> bool {
+    expected.eq_ignore_ascii_case(actual) || expected.to_lowercase() == actual.to_lowercase()
 }
 
 /// Whether a written pattern names an absolute path, a `~`-rooted one, or a
@@ -1386,9 +1523,11 @@ fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<Strin
     out
 }
 
-/// `folded` with a Windows verbatim prefix reduced, and unchanged otherwise.
+/// `folded` with a Windows device-namespace prefix reduced, and unchanged
+/// otherwise — including when it carries one this module refuses to reduce,
+/// which [`Profile::check`] then refuses outright.
 fn ordinary(folded: &str) -> String {
-    reduced_verbatim(folded).unwrap_or_else(|| folded.to_string())
+    reduced_device(folded).unwrap_or_else(|| folded.to_string())
 }
 
 /// Splits `Name(argument)` into its parts; a bare `Name` has no argument.
@@ -1430,15 +1569,22 @@ fn match_components(glob: &[String], candidate: &[String], fold: bool) -> bool {
 
 /// Matches one component, where `*` and `?` do not cross a separator.
 ///
-/// `fold` is the case-sensitivity decision, and it is deliberate rather than
-/// the host's: **a `deny` pattern matches case-insensitively on every
-/// platform and an `allow` pattern matches case-sensitively on every
-/// platform.** A case-insensitive filesystem would otherwise let
-/// `SECRET.ENV` walk past a `deny` written as `secret.env`, and folding
-/// `allow` instead would let the same trick reach a path its author never
-/// spelled. Both errors are made in the refusing direction, and the answer is
-/// the same on macOS, Linux and Windows rather than three answers.
+/// `fold` says the caller is a **refusing** rule, and what that buys is
+/// deliberate rather than the host's: **a `deny` pattern matches
+/// case-insensitively and ignores the trailing dots and spaces Win32
+/// discards, on every platform; an `allow` pattern matches exactly, on every
+/// platform.** A case-insensitive filesystem would otherwise let `SECRET.ENV`
+/// walk past a `deny` written as `secret.env`, and `secrets.\token` would
+/// open `secrets\token` past a `deny` on `secrets/**`; folding `allow`
+/// instead would let either trick reach a path its author never spelled.
+/// Both errors are made in the refusing direction, and the answer is the same
+/// on macOS, Linux and Windows rather than three answers.
 fn match_segment(pattern: &str, text: &str, fold: bool) -> bool {
+    let (pattern, text) = if fold {
+        (refusing_form(pattern), refusing_form(text))
+    } else {
+        (pattern, text)
+    };
     let pattern: Vec<char> = pattern.chars().collect();
     let text: Vec<char> = text.chars().collect();
     match_chars(&pattern, &text, fold)
