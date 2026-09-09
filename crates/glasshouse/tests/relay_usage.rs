@@ -386,7 +386,7 @@ fn wait_for_row(ledger: &EvidenceLedger, protocol: &str) -> Vec<RoutingObservati
             .recent(
                 ObservationQuery {
                     provider: "fixture",
-                    model: MODEL,
+                    model: "claude-x",
                     route: Some(protocol),
                     harness: Some("claude-code"),
                 },

@@ -189,12 +189,15 @@ pub const HARNESS_TURN_PURPOSE: &str = "harness-turn";
 /// it is watching — pane's `supervisor.md` §3.
 pub const SUPERVISOR_PURPOSE: &str = "supervisor";
 
+/// A bounded side request made by Pane's configured helper tier.
+pub const HELPER_PURPOSE: &str = "helper";
+
 /// A client may name a purpose only from this list; everything else is
 /// [`HARNESS_TURN_PURPOSE`]. The gateway strips the `x-glasshouse-purpose`
 /// request header before forwarding regardless of whether its value
 /// appears here, so an unrecognised name never reaches a provider and
 /// never reaches the ledger either.
-pub const CLIENT_NAMEABLE_PURPOSES: &[&str] = &[SUPERVISOR_PURPOSE];
+pub const CLIENT_NAMEABLE_PURPOSES: &[&str] = &[SUPERVISOR_PURPOSE, HELPER_PURPOSE];
 
 /// How far apart two exchanges' windows may sit and still be *the same
 /// moment* for [`correlate_routes`] — capability map line 1370's

@@ -29,14 +29,18 @@ struct App {
 }
 impl App {
     fn start(base: &str) -> Self {
-        Self::start_with(base, false)
+        Self::start_with(base, false, None)
     }
 
     fn start_bare(base: &str) -> Self {
-        Self::start_with(base, true)
+        Self::start_with(base, true, None)
     }
 
-    fn start_with(base: &str, bare: bool) -> Self {
+    fn start_with_helpers(base: &str, model: &str) -> Self {
+        Self::start_with(base, false, Some(model))
+    }
+
+    fn start_with(base: &str, bare: bool, helper_model: Option<&str>) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-live-{}-{}",
@@ -44,6 +48,14 @@ impl App {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&root).unwrap();
+        if let Some(model) = helper_model {
+            std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+            std::fs::write(
+                root.join(".glasshouse/pane.toml"),
+                format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
+            )
+            .unwrap();
+        }
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 30,
@@ -289,6 +301,183 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
         }
     });
     (base, requests)
+}
+
+/// Accept one request and hold its response until the test releases it. The
+/// request notification is sent only after the complete headers and body have
+/// arrived, so a screen assertion made after it observes the actual interval
+/// in which preflight is blocked on the provider.
+fn held_provider() -> (String, mpsc::Receiver<serde_json::Value>, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (request_sender, requests) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                len = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        request_sender
+            .send(serde_json::from_slice(&body).unwrap())
+            .unwrap();
+        if held.recv().is_err() {
+            return;
+        }
+        let body = serde_json::json!({
+            "role":"assistant",
+            "content":[{"type":"text","text":"```pane\nreturn \"released\";\n```"}],
+        })
+        .to_string();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    (base, requests, release)
+}
+
+/// Answer the task turn with an explicit Scout call, then hold that Scout's
+/// own request so the real PTY can prove the in-flight lane is wired through.
+fn held_cell_helper_provider() -> (String, mpsc::Receiver<serde_json::Value>, mpsc::Sender<()>) {
+    fn read_request(stream: &mut std::net::TcpStream) -> serde_json::Value {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                len = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn answer_task(stream: &mut std::net::TcpStream, request: &serde_json::Value) {
+        let program =
+            "```pane\nconst found = await helper.find(\"find the needle\");\nreturn found;\n```";
+        if request["stream"] == true {
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":12}}}),
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":program}}),
+                serde_json::json!({"type":"message_delta","usage":{"output_tokens":8}}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            let body = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        } else {
+            let body = serde_json::json!({
+                "role":"assistant",
+                "content":[{"type":"text","text":program}],
+            })
+            .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (request_sender, requests) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut task, _) = listener.accept().unwrap();
+        let request = read_request(&mut task);
+        answer_task(&mut task, &request);
+
+        let (mut helper, _) = listener.accept().unwrap();
+        let request = read_request(&mut helper);
+        request_sender.send(request).unwrap();
+        let _ = held.recv();
+    });
+    (base, requests, release)
+}
+
+#[test]
+fn live_preflight_shows_the_request_scout_and_actual_effort_before_network_returns() {
+    let (base, requests, _release) = held_provider();
+    let mut app = App::start_with_helpers(&base, "helper-tier");
+    app.contains("fixture-model");
+    app.send(b"/effort medium\r");
+    app.contains("Effort: medium");
+    let task = "find where helper cancellation is implemented";
+    app.send(format!("{task}\r").as_bytes());
+
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request["model"], "helper-tier");
+    app.wait(
+        "submitted request and Scout visible during preflight",
+        |screen| {
+            let text = screen.contents();
+            text.contains(task)
+                && text.contains("PREFLIGHT · SCOUT")
+                && text.contains("scanning")
+                && text.contains("searching")
+                && text.contains("effort medium")
+        },
+    );
+
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+    assert!(!app.screen.screen().alternate_screen());
+}
+
+#[test]
+fn live_cell_helper_shows_its_lane_before_its_provider_returns() {
+    let (base, requests, _release) = held_cell_helper_provider();
+    let mut app = App::start_with_helpers(&base, "helper-tier");
+    app.contains("fixture-model");
+    app.send(b"find this\r");
+
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request["model"], "helper-tier");
+    app.wait("in-flight cell helper lane", |screen| {
+        let text = screen.contents();
+        text.contains("find")
+            && text.contains("scanning")
+            && text.contains("1 lines")
+            && text.contains("executing")
+    });
+
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+    assert!(!app.screen.screen().alternate_screen());
 }
 
 #[test]

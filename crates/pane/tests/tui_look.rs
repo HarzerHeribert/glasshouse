@@ -1214,6 +1214,7 @@ fn helper_record(gave: &str, ok: bool, elapsed_ms: u64) -> HelperRecord {
         outcome: HelperOutcome {
             text: gave.to_string(),
             ok,
+            cancelled: false,
             elapsed_ms,
         },
         turns: 1,

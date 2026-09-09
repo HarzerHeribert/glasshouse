@@ -637,6 +637,7 @@ pub(super) fn serve(
     serving: &UpstreamBackend,
     agent: &Agent,
     pair: &'static Pair,
+    purpose: Option<String>,
 ) -> (Exchange, RateLimitHeaders) {
     let from = codec_for(pair.from).expect("a supported pair has a codec on its harness side");
     let to = codec_for(pair.to).expect("a supported pair has a codec on its provider side");
@@ -744,6 +745,7 @@ pub(super) fn serve(
     // regardless of where in the conversation they sit. `Some` the moment
     // the request has decoded, same as `effort` and `turn_shape` above.
     let repairs = Some(request.error_tool_results());
+    let requested_model = super::request_model::bounded(request.model.clone());
     // Every `Exchange` this function returns from here on carries them —
     // the refusals below included, because a request that decoded and was
     // then refused downstream is still a request whose effort and shape were
@@ -753,6 +755,8 @@ pub(super) fn serve(
         effort,
         turn_shape,
         repairs,
+        purpose: purpose.clone(),
+        requested_model: requested_model.clone(),
         ..exchange(outcome, status, upstream, pair, route)
     };
 
@@ -1541,9 +1545,10 @@ fn exchange(
         provider: upstream.provider().to_owned(),
         protocol: Some(pair.slug()),
         // The translated path never reads `ingress::PURPOSE_HEADER` — only
-        // `ingress::forward`'s relay loop does — so a translated exchange
-        // never carries a client-named purpose.
+        // `ingress::forward`'s relay loop does. Decoded requests override
+        // this with the already allowlisted client purpose.
         purpose: None,
+        requested_model: None,
         host: route.host(),
         first_byte_at: None,
         // Line 1331/1332's pair: `None` for the same reason as `first_byte_at`

@@ -520,7 +520,7 @@ fn a_translated_streamed_exchange_notes_first_token_and_first_tool_call_in_order
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -589,7 +589,7 @@ fn a_translated_stream_with_text_and_no_tool_use_records_no_first_tool_call() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -667,7 +667,7 @@ fn a_relayed_document_records_its_usage_and_no_first_token_or_first_tool_call() 
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages"),
             harness: Some("claude-code"),
         },
@@ -743,7 +743,7 @@ fn a_translated_document_with_text_and_a_tool_call_records_both_as_first_byte_at
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -794,7 +794,7 @@ fn a_translated_stream_whose_only_text_is_whitespace_records_no_first_token() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },

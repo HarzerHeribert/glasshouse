@@ -614,6 +614,7 @@ fn test_finish(
             provider: String::new(),
             protocol: None,
             purpose: None,
+            requested_model: None,
             host: String::new(),
             first_byte_at: None,
             first_token_at: first.first_token_at,

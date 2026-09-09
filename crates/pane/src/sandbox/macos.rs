@@ -26,7 +26,7 @@
 
 use super::profile::{Access, Profile};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The **fallback** exec grant: where a tool may be executed from when pane
 /// could not resolve its name to a path and `execvp` has to search.
@@ -65,6 +65,39 @@ const EXECUTABLE_ROOTS: [&str; 6] = [
 /// here, so a binary under `~/.local/bin` stays unrunnable (§4.3 rule 3, and
 /// the session says so).
 const PACKAGE_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
+
+/// The exact executable behind Homebrew's macOS Python launcher. Homebrew's
+/// `bin/python3` is a Mach-O stub which starts the framework app executable;
+/// Seatbelt therefore needs both literals. This is deliberately one known
+/// layout, not executable-prefix discovery.
+#[cfg(target_os = "macos")]
+pub fn python_framework_companion(binary: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let bin = binary.parent()?;
+    let version = bin.parent()?;
+    let versions = version.parent()?;
+    let framework = versions.parent()?;
+    let frameworks = framework.parent()?;
+    let keg = frameworks.parent()?;
+    let cellar = keg.parent()?.parent()?;
+    let formula = keg.parent()?.file_name()?.to_str()?;
+    if cellar != Path::new("/opt/homebrew/Cellar")
+        || !(formula == "python" || formula.starts_with("python@"))
+        || !binary.file_name()?.to_str()?.starts_with("python3")
+        || versions.file_name()? != "Versions"
+        || framework.file_name()? != "Python.framework"
+        || frameworks.file_name()? != "Frameworks"
+    {
+        return None;
+    }
+    let binary_uid = std::fs::metadata(binary).ok()?.uid();
+    let companion =
+        std::fs::canonicalize(version.join("Resources/Python.app/Contents/MacOS/Python")).ok()?;
+    let metadata = std::fs::metadata(&companion).ok()?;
+    (companion.starts_with(version) && metadata.is_file() && metadata.uid() == binary_uid)
+        .then_some(companion)
+}
 
 /// The loader's own reach. Read-only, and system-owned on every macOS
 /// install: dyld resolves the shared cache and the executable's libraries
@@ -254,6 +287,17 @@ pub fn regime(profile: &Profile, binary: &Path) -> Regime {
 /// invariant §1.1 survives contact with the process-spawning half of the
 /// sandbox now that a caller hands something in.
 pub fn profile_text(profile: &Profile, binary: &Path) -> String {
+    profile_text_with_descendants(profile, binary, &[])
+}
+
+/// Renders the profile with exact binaries named by command segments that
+/// already passed the profile's Bash admission. Each descendant remains a
+/// literal; admitting Python does not grant its directory or a sibling.
+pub fn profile_text_with_descendants(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
+) -> String {
     let root = display(profile.root());
     let mut out = String::new();
     out.push_str("(version 1)\n");
@@ -300,6 +344,11 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
             out.push_str(&format!(" (subpath {})", quote(&root)));
         }
     }
+    for descendant in descendants {
+        if descendant != binary {
+            out.push_str(&format!(" (literal {})", quote(&display(descendant))));
+        }
+    }
     out.push_str(")\n");
 
     // A process may read the one file it is about to become, and nothing
@@ -316,6 +365,14 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
             "(allow file-read* (literal {}))\n",
             quote(&display(binary))
         ));
+    }
+    for descendant in descendants {
+        if descendant != binary {
+            out.push_str(&format!(
+                "(allow file-read* (literal {}))\n",
+                quote(&display(descendant))
+            ));
+        }
     }
     out.push_str("(allow process-fork)\n");
     out.push_str("(allow signal (target self))\n");
@@ -434,10 +491,20 @@ pub fn confine(
     binary: &Path,
     command: &mut std::process::Command,
 ) -> std::io::Result<()> {
+    confine_with_descendants(profile, binary, &[], command)
+}
+
+#[cfg(target_os = "macos")]
+pub fn confine_with_descendants(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
+    command: &mut std::process::Command,
+) -> std::io::Result<()> {
     use std::ffi::{CString, c_char};
     use std::os::unix::process::CommandExt;
 
-    let text = CString::new(profile_text(profile, binary))
+    let text = CString::new(profile_text_with_descendants(profile, binary, descendants))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     // SAFETY: `pre_exec` runs in the forked child before `exec`. The only
     // call it makes is `sandbox_init` on a `CString` allocated in the parent,

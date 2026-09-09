@@ -927,7 +927,7 @@ fn a_claude_code_request_is_translated_to_generate_content_and_the_answer_back_w
         &ledger.ledger,
         ObservationQuery {
             provider: "gemini",
-            model: AssignedModel::HarnessDefault.label(),
+            model: MODEL,
             route: Some("anthropic-messages->gemini-generate-content"),
             harness: Some("claude-code"),
         },

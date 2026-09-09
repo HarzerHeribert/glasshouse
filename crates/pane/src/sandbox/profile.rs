@@ -146,6 +146,21 @@ pub struct Profile {
     diagnostics: Vec<String>,
 }
 
+/// The process names a shell may attempt after one complete command line has
+/// passed [`Profile::admits_command`].  These are evidence for the OS sandbox,
+/// not a second admission decision: every name comes from the first word of a
+/// segment that the existing deny-before-allow check already accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandGrant {
+    executables: Vec<String>,
+}
+
+impl CommandGrant {
+    pub fn executables(&self) -> &[String] {
+        &self.executables
+    }
+}
+
 /// The five `$HOME` directories §4.3 names, refusable by no pattern at all.
 const NEVER_GRANTABLE_HOME: [&str; 5] = [".claude", ".codex", ".ssh", ".aws", ".config"];
 
@@ -586,8 +601,8 @@ impl Profile {
     /// Answering `Ok` grants no file access whatsoever — the process it
     /// spawns gets exactly the grants the `Read`/`Write`/`Edit` patterns
     /// produced, which [`Profile::check`] is what answers.
-    pub fn admits_command(&self, command_line: &str) -> Result<(), PermissionDenied> {
-        let denied = |rule: String| -> Result<(), PermissionDenied> {
+    pub fn admits_command(&self, command_line: &str) -> Result<CommandGrant, PermissionDenied> {
+        let denied = |rule: String| -> Result<CommandGrant, PermissionDenied> {
             Err(PermissionDenied {
                 tool: "Bash".to_string(),
                 path: command_line.to_string(),
@@ -613,6 +628,7 @@ impl Profile {
                 "no `Bash` pattern in permissions.allow admits this command line".to_string(),
             );
         }
+        let mut executables = Vec::with_capacity(segments.len());
         for segment in &segments {
             // A leading redirect is not the command: `2>&1 cargo test` is
             // matched on `cargo test`, never on the operand that happens to
@@ -634,8 +650,39 @@ impl Profile {
                     "no `Bash` pattern in permissions.allow admits `{segment}`"
                 ));
             }
+            if let Some(executable) = literal_executable(command_word) {
+                executables.push(executable.to_string());
+            }
         }
-        Ok(())
+        Ok(CommandGrant { executables })
+    }
+
+    /// Whether an executable already admitted by a `Bash(...)` command is
+    /// outside §4's never-grantable read roots. The command grant supplies
+    /// the positive authority; this method preserves the absolute refusals
+    /// when the OS layer turns that authority into a literal exec rule.
+    pub fn executable_is_refused(&self, path: &Path) -> bool {
+        if self.invalid_root.is_some() {
+            return true;
+        }
+        let resolved = resolve(path, Some(&self.root), self.home.as_deref());
+        let candidate = spelling(&resolved);
+        if device_refusal(&resolved).is_some() {
+            return true;
+        }
+        let never = self.never.iter().any(|never| {
+            !never.write_only
+                && contains_refusing(&never.prefix, &candidate)
+                && !never
+                    .except_spelling
+                    .as_ref()
+                    .is_some_and(|except| contains(except, &candidate))
+        });
+        let denied = self
+            .deny
+            .iter()
+            .any(|rule| rule.read && covers(&rule.glob, &candidate, true));
+        never || denied
     }
 
     /// Whether a bare `Bash` grant admits every command line.
@@ -1155,6 +1202,22 @@ fn skip_leading_redirects(segment: &str) -> &str {
         }
         rest = rest[word_end..].trim_start();
     }
+}
+
+/// The first shell word where its spelling is already the executable name.
+/// Substitutions and quoting stay opaque and therefore retain the OS-level
+/// refusal described in §4.6 instead of being guessed into authority.
+fn literal_executable(command: &str) -> Option<&str> {
+    let word = command.split_whitespace().next()?;
+    if word.chars().any(|c| {
+        matches!(
+            c,
+            '$' | '`' | '\'' | '"' | '\\' | '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')'
+        )
+    }) {
+        return None;
+    }
+    Some(word)
 }
 
 /// The text up to the `close` that balances the one already consumed, and the

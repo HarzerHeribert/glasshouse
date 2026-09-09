@@ -43,6 +43,23 @@ fn absent_pane_toml_means_the_defaults() {
     assert_eq!(config.supervisor.every, 4);
     assert_eq!(config.supervisor.model, None);
     assert!(config.supervisor.enabled);
+    assert!(!config.helpers.preflight);
+}
+
+#[test]
+fn helper_preflight_is_an_explicit_boolean_opt_in() {
+    let root = scratch_dir("preflight-on");
+    write_pane_toml(
+        &root,
+        "[helpers]\nmodel = \"helper-tier\"\npreflight = true\n",
+    );
+    assert!(PaneConfig::load(&root).unwrap().helpers.preflight);
+
+    let root = scratch_dir("preflight-not-boolean");
+    write_pane_toml(&root, "[helpers]\npreflight = \"sometimes\"\n");
+    let error = PaneConfig::load(&root).unwrap_err();
+    assert!(error.contains("preflight"), "{error}");
+    assert_eq!(error.lines().count(), 1);
 }
 
 #[test]

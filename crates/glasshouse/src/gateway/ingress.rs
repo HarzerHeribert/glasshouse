@@ -28,6 +28,7 @@ use crate::routing::evidence::{EffortLevel, TurnShape};
 
 use super::GatewayToken;
 use super::http::{self, HeadError};
+use super::request_model;
 use super::translate;
 use super::upstream::{Route, ServedBy, Upstream, UpstreamBackend};
 use super::usage;
@@ -97,6 +98,9 @@ pub(super) struct Exchange {
     /// never reaching [`forward`]'s header loop. Never client text: this
     /// field is a name from a fixed list or nothing.
     pub(super) purpose: Option<String>,
+    /// The bounded top-level model name observed on the request wire.
+    /// This is what the client asked for, never an inferred backend identity.
+    pub(super) requested_model: Option<String>,
     /// The upstream host **of the route that carried it**. A host: never a
     /// path, never a query. Empty when no route was chosen, because there is
     /// then no host this request was ever going to reach — and naming one
@@ -492,7 +496,19 @@ pub(super) fn serve(
         );
     }
 
-    forward(head, reader, &mut out, upstream, agent)
+    let purpose = client_purpose(&head);
+    forward(head, reader, &mut out, upstream, agent, purpose)
+}
+
+fn client_purpose(head: &http::RequestHead) -> Option<String> {
+    head.headers.iter().find_map(|(name, value)| {
+        name.as_str()
+            .eq_ignore_ascii_case(PURPOSE_HEADER)
+            .then(|| value.to_str().ok())
+            .flatten()
+            .filter(|value| crate::routing::evidence::CLIENT_NAMEABLE_PURPOSES.contains(value))
+            .map(str::to_owned)
+    })
 }
 
 /// The three rewrites, and everything that is not one: the request target is
@@ -508,8 +524,9 @@ pub(super) fn serve(
 /// a byte of the body is read: looking at the body to guess a protocol would
 /// make this module a parser of the payload it exists to be unable to
 /// distinguish from any other bytes. A target belonging to no served
-/// protocol gets a `404` and **nothing is opened upstream** — a deliberate
-/// narrowing measured against real harness traffic (Claude Code, Codex).
+/// protocol gets a `404` and **nothing is opened upstream**. Once routing is
+/// fixed, a bounded observer may retain the request's top-level model for
+/// evidence, without using it to place or rewrite the request.
 ///
 /// History: design-decisions.md, "Trims: gateway/ingress.rs", fn forward.
 fn forward(
@@ -518,6 +535,7 @@ fn forward(
     out: &mut TcpStream,
     upstream: &Upstream,
     agent: &Agent,
+    purpose: Option<String>,
 ) -> (Exchange, RateLimitHeaders) {
     // The serving backend is read **once**, here, and used for the whole of
     // this exchange. Phase 9H's failover moves which backend serves from
@@ -527,7 +545,7 @@ fn forward(
     let Some(route) = serving.route_for(&head.target) else {
         // Phase 56's one branch — see `unrouted`. A served target has a
         // route and never reaches it.
-        return unrouted(head, reader, out, upstream, serving, agent);
+        return unrouted(head, reader, out, upstream, serving, agent, purpose);
     };
 
     let Some(uri) = route.uri_for(&head.target) else {
@@ -552,15 +570,9 @@ fn forward(
     // `Exchange::purpose`. The header itself is never forwarded, whatever
     // its value: the `continue` below drops it before the `is_hop_by_hop`
     // check even runs.
-    let mut purpose: Option<String> = None;
     let mut request = Request::builder().method(head.method.clone()).uri(uri);
     for (name, value) in head.headers.iter() {
         if name.as_str().eq_ignore_ascii_case(PURPOSE_HEADER) {
-            if let Ok(value) = value.to_str()
-                && crate::routing::evidence::CLIENT_NAMEABLE_PURPOSES.contains(&value)
-            {
-                purpose = Some(value.to_owned());
-            }
             continue;
         }
         if http::is_hop_by_hop(name) || name == header::HOST || name == header::AUTHORIZATION {
@@ -570,6 +582,7 @@ fn forward(
     }
     request = request.header(header::AUTHORIZATION, serving.authorization());
 
+    let mut model_observation = None;
     let body = match head.content_length {
         Some(length) => {
             request = request.header(header::CONTENT_LENGTH, HeaderValue::from(length));
@@ -577,7 +590,9 @@ fn forward(
             // socket without ever being held whole: `take` bounds it at the
             // length the client declared and nothing copies it into a
             // buffer of its own.
-            SendBody::from_owned_reader(reader.take(length))
+            let (observed, observation) = request_model::observe(reader.take(length), length);
+            model_observation = Some(observation);
+            SendBody::from_owned_reader(observed)
         }
         None => SendBody::none(),
     };
@@ -612,7 +627,9 @@ fn forward(
     // what migration 25's `CHECK` refuses and what this measurement cannot
     // produce at all.
     let dispatch = Instant::now();
-    let response = match agent.run(request) {
+    let response = agent.run(request);
+    let requested_model = model_observation.and_then(|observation| observation.model());
+    let response = match response {
         Ok(response) => response,
         Err(err) => {
             let detail = transport_detail(&err);
@@ -632,6 +649,7 @@ fn forward(
             return (
                 Exchange {
                     purpose: purpose.clone(),
+                    requested_model: requested_model.clone(),
                     ..exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route))
                 },
                 no_quota(),
@@ -730,6 +748,7 @@ fn forward(
                 completed_ms: Some(millis_since(dispatch)),
                 framing: Some(framing),
                 purpose: purpose.clone(),
+                requested_model: requested_model.clone(),
                 ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
             },
             quota,
@@ -801,6 +820,7 @@ fn forward(
                         completed_ms: Some(millis_since(dispatch)),
                         framing: Some(framing),
                         purpose: purpose.clone(),
+                        requested_model: requested_model.clone(),
                         ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
                     },
                     quota,
@@ -856,6 +876,7 @@ fn forward(
             first_tool_call_ms: first_tool_call.map(|(_, ms)| ms),
             tokens,
             purpose,
+            requested_model,
             ..exchange(
                 Outcome::Forwarded {
                     upstream_status: status.as_u16(),
@@ -895,11 +916,12 @@ fn unrouted(
     upstream: &Upstream,
     serving: &UpstreamBackend,
     agent: &Agent,
+    purpose: Option<String>,
 ) -> (Exchange, RateLimitHeaders) {
     let served = serving.served_protocols();
     let message = match translate::place(&head.target, &served) {
         translate::Placement::Translate(pair) => {
-            return translate::serve(head, reader, out, upstream, serving, agent, pair);
+            return translate::serve(head, reader, out, upstream, serving, agent, pair, purpose);
         }
         translate::Placement::PairRefused { from, refused } => {
             translate::pair_refusal_message(from, &refused)
@@ -1175,6 +1197,7 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // is the only producer, and `forward`'s own returns override this
         // via struct-update syntax once it has run.
         purpose: None,
+        requested_model: None,
         host: route.map(Route::host).unwrap_or_default(),
         // Every caller of this helper returns before a response ever
         // arrived; [`forward`]'s own three post-response returns override
@@ -1372,6 +1395,7 @@ mod tests {
                 provider: "openrouter".to_owned(),
                 protocol: Some("anthropic-messages".to_owned()),
                 purpose: None,
+                requested_model: None,
                 host: "openrouter.ai".to_owned(),
                 first_byte_at: Some(1_700_000_000),
                 first_token_at: Some(1_700_000_001),

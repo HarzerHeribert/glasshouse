@@ -843,7 +843,7 @@ fn a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_pre
         &ledger.ledger,
         ObservationQuery {
             provider: "responsesonly",
-            model: AssignedModel::HarnessDefault.label(),
+            model: "claude-x",
             route: Some("anthropic-messages->openai-responses"),
             harness: Some("claude-code"),
         },
@@ -1165,7 +1165,7 @@ fn a_codex_request_is_translated_to_anthropic_messages_and_back_with_ids_preserv
         &ledger.ledger,
         ObservationQuery {
             provider: "anthroponly",
-            model: AssignedModel::HarnessDefault.label(),
+            model: "gpt-5",
             route: Some("openai-responses->anthropic-messages"),
             harness: Some("codex"),
         },

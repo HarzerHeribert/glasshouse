@@ -60,6 +60,7 @@ fn relay_sources() -> Vec<(&'static str, &'static str)> {
         ("gateway/mod.rs", include_str!("mod.rs")),
         ("gateway/http.rs", include_str!("http.rs")),
         ("gateway/ingress.rs", include_str!("ingress.rs")),
+        ("gateway/request_model.rs", include_str!("request_model.rs")),
         ("gateway/session.rs", include_str!("session/mod.rs")),
         (
             "gateway/subscription_broker.rs",
@@ -965,16 +966,15 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
     assert!(!production_code(tested).contains("crate::session"));
     // ... and the file list it runs over is not empty, which would make
     // every assertion in it vacuous.
-    assert_eq!(gateway_sources().len(), 12);
+    assert_eq!(gateway_sources().len(), 13);
 }
 
 /// No file of the **relay** may deserialize anything. The whole of
 /// "preserve tool-call payloads without lossy rewriting" and "keep the
 /// first gateway implementation protocol pass-through" rests on nothing
-/// here ever looking at a body, so a serialization crate reaching these
-/// files is the change that would quietly undo both — and it is the
-/// change that would look most reasonable in a diff ("just read
-/// `error.type` for the log").
+/// here constructing a document from a body. The relay may run bounded
+/// streaming observers for approved evidence fields, but a serialization
+/// crate reaching these files would quietly turn that into body ownership.
 ///
 /// Phase 56 narrowed this rule and did not repeal it: `translate/` is
 /// the one place a body is parsed, entered only from the branch that
@@ -1008,8 +1008,7 @@ fn no_part_of_the_relay_deserializes_anything() {
             assert!(
                 !code.contains(forbidden),
                 "{name} names `{forbidden}` in production code: the relay has started \
-                 looking at a body it is supposed to be unable to distinguish from any \
-                 other bytes"
+                 deserializing a body instead of performing a bounded streaming observation"
             );
         }
     }
@@ -1022,7 +1021,7 @@ fn no_part_of_the_relay_deserializes_anything() {
         codecs_parse,
         "translate/ no longer deserializes anything, so the split above proves nothing"
     );
-    assert_eq!(relay_sources().len(), 7);
+    assert_eq!(relay_sources().len(), 8);
 
     // ... and the scan fires on the change it exists to catch, rather
     // than passing because the needle was misspelled.
@@ -1094,9 +1093,16 @@ fn messages_request_with_header(token: &str, body: &str, header_line: &str) -> V
 fn newest_purpose_row(
     ledger: &crate::routing::evidence::EvidenceLedger,
 ) -> crate::routing::evidence::RoutingObservation {
+    newest_purpose_row_for_model(ledger, "fixture-model")
+}
+
+fn newest_purpose_row_for_model(
+    ledger: &crate::routing::evidence::EvidenceLedger,
+    model: &str,
+) -> crate::routing::evidence::RoutingObservation {
     let query = crate::routing::evidence::ObservationQuery {
         provider: "fixture",
-        model: "fixture-model",
+        model,
         route: Some("anthropic-messages"),
         harness: Some("fixture-harness"),
     };
@@ -1121,16 +1127,83 @@ fn bound_gateway_with_evidence_ledger(
     fixture: &FixtureUpstream,
     ledger: Arc<crate::routing::evidence::EvidenceLedger>,
 ) -> Gateway {
+    bound_gateway_with_evidence_ledger_for_model(fixture, ledger, "fixture-model")
+}
+
+fn bound_gateway_with_evidence_ledger_for_model(
+    fixture: &FixtureUpstream,
+    ledger: Arc<crate::routing::evidence::EvidenceLedger>,
+    assigned_model: &str,
+) -> Gateway {
     use crate::routing::AssignedModel;
 
     let gateway = gateway_to_with_evidence_ledger(fixture, ledger);
     gateway.routing().bind(
         "fixture-harness",
         "anthropic-messages",
-        AssignedModel::named("fixture-model"),
+        AssignedModel::named(assigned_model),
         gateway.upstream(),
     );
     gateway
+}
+
+/// The helper's model is a fact of the request, independent of the task
+/// model that selected the provider. The relay must observe that one bounded
+/// field without changing the body or leaking the private purpose header.
+#[test]
+fn sol_task_and_luna_helper_requests_keep_their_wire_models_and_distinct_purposes() {
+    use crate::routing::evidence::{HARNESS_TURN_PURPOSE, HELPER_PURPOSE};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = purpose_header_evidence_ledger_fixture(tmp.path());
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway =
+        bound_gateway_with_evidence_ledger_for_model(&fixture, Arc::clone(&ledger), "gpt-5.6-sol");
+    let task_body =
+        r#"{"model":"gpt-5.6-sol","max_tokens":64,"messages":[{"role":"user","content":"work"}]}"#;
+    let helper_body = r#"{"model":"gpt-5.6-luna","max_tokens":64,"messages":[{"role":"user","content":"inspect"}]}"#;
+
+    let task_response = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), task_body),
+    ));
+    assert!(
+        task_response.starts_with("HTTP/1.1 200 OK"),
+        "{task_response}"
+    );
+
+    let helper_response = read_all(send(
+        gateway.address(),
+        &messages_request_with_header(
+            gateway.token().expose(),
+            helper_body,
+            "X-Glasshouse-Purpose: helper",
+        ),
+    ));
+    assert!(
+        helper_response.starts_with("HTTP/1.1 200 OK"),
+        "{helper_response}"
+    );
+
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body, task_body.as_bytes(), "task bytes changed");
+    assert_eq!(
+        requests[1].body,
+        helper_body.as_bytes(),
+        "helper bytes changed"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.header("x-glasshouse-purpose").is_none()),
+        "private purpose header reached the upstream"
+    );
+
+    let task_row = newest_purpose_row_for_model(&ledger, "gpt-5.6-sol");
+    assert_eq!(task_row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
+    let helper_row = newest_purpose_row_for_model(&ledger, "gpt-5.6-luna");
+    assert_eq!(helper_row.purpose.as_deref(), Some(HELPER_PURPOSE));
 }
 
 /// A `supervisor` purpose header stamps the ledger row and never reaches the

@@ -141,6 +141,7 @@ pub fn run_narrowed(
         HostGlobals::Every => Runtime::new(profile, glasshouse, session),
     }
     .as_subagent()
+    .with_token(token.clone())
     .with_instruction_context();
     if narrowed.is_none() {
         // A subagent completes a goal, so it hits the same walls the task
@@ -165,14 +166,25 @@ pub fn run_narrowed(
         }
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
-        // A narrowed loop is a helper: it runs on another thread inside a
-        // native callback, where nothing can interrupt it. Bound it.
+        // A narrowed loop is a helper: its provider request can outlive the
+        // caller that stopped waiting, so the wire request keeps a hard bound.
         let deadline = narrowed.map(|_| wire::SIDE_ERRAND_TIMEOUT);
-        let sent = match wire::send_turn_bounded(&request, &options.model, options.effort, deadline)
-        {
+        let purpose = narrowed.map(|_| crate::helpers::PURPOSE_HEADER);
+        let sent = match wire::send_turn_bounded_with(
+            &request,
+            &options.model,
+            options.effort,
+            deadline,
+            purpose,
+        ) {
             Ok(sent) => sent,
             Err(error) => return finish(&error.to_string(), "failed", turn, tokens, trajectory),
         };
+        // A provider response can race the caller's cancellation. Do not let
+        // that late response start one of the helper's read tools.
+        if token.is_cancelled() {
+            return finish("", "cancelled", turn - 1, tokens, trajectory);
+        }
         if let Some(usage) = &sent.usage {
             tokens = tokens.saturating_add(usage.total_tokens());
         }

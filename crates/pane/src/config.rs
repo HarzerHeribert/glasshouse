@@ -55,6 +55,10 @@ impl Default for SupervisorConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpersConfig {
     pub model: Option<String>,
+    /// Run the pushed Scout before the task model's first turn. Off by
+    /// default: configured helpers remain callable without paying for a
+    /// redundant repository scan on every request.
+    pub preflight: bool,
     /// What the completion gate does once a task is accepted.
     pub completion: CompletionStyle,
     pub enabled: bool,
@@ -94,6 +98,7 @@ impl Default for HelpersConfig {
     fn default() -> Self {
         Self {
             model: None,
+            preflight: false,
             completion: CompletionStyle::Silent,
             enabled: true,
             calls_per_cell: 8,
@@ -308,7 +313,15 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
     let defaults = HelpersConfig::default();
 
     for key in table.keys() {
-        if !["model", "enabled", "calls_per_cell", "completion"].contains(&key.as_str()) {
+        if ![
+            "model",
+            "enabled",
+            "preflight",
+            "calls_per_cell",
+            "completion",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(format!("pane.toml: unknown key `{key}` in [helpers]"));
         }
     }
@@ -329,6 +342,12 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             .as_bool()
             .ok_or_else(|| "pane.toml: `enabled` must be true or false".to_string())?,
     };
+    let preflight = match table.get("preflight") {
+        None => defaults.preflight,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `preflight` must be true or false".to_string())?,
+    };
     let calls_per_cell = match int_field(table, "calls_per_cell")? {
         Some(v) => u32::try_from(CALLS_PER_CELL.check(v)?).expect("range is non-negative"),
         None => defaults.calls_per_cell,
@@ -345,6 +364,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
 
     Ok(HelpersConfig {
         model,
+        preflight,
         completion,
         enabled,
         calls_per_cell,

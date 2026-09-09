@@ -475,8 +475,8 @@ impl SessionRouting {
         // Migration 24's three. The session is what this gateway was told it
         // serves — `None`, and so `NULL`, for a gateway nothing told; the
         // other two are the decoded request's own facts, carried on the
-        // exchange from `super::translate::serve` and `None` on every
-        // relayed exchange, whose body this gateway never reads.
+        // exchange from `super::translate::serve`. A relay may additionally
+        // carry the one bounded top-level model observation used below.
         let session_id = self.lock().session_id.clone();
         // Map line 1301's missing join: `task_class` has been migration 23's
         // column since Phase 34C, and this producer is the first to stamp it
@@ -486,7 +486,10 @@ impl SessionRouting {
 
         let new = NewObservation::new(
             exchange.provider.clone(),
-            assignment.backend().model().label().to_owned(),
+            exchange
+                .requested_model
+                .clone()
+                .unwrap_or_else(|| assignment.backend().model().label().to_owned()),
         )
         .with_route(exchange.protocol.clone())
         .with_harness(Some(assignment.harness().to_owned()))

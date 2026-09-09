@@ -804,7 +804,7 @@ fn a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_w
         &ledger.ledger,
         ObservationQuery {
             provider: "chat",
-            model: AssignedModel::HarnessDefault.label(),
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -1471,7 +1471,7 @@ fn a_claude_code_launch_on_a_chat_only_entitlement_is_translated_end_to_end() {
         &ledger,
         ObservationQuery {
             provider: "chat",
-            model: AssignedModel::HarnessDefault.label(),
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },

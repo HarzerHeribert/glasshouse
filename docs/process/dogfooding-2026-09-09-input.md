@@ -290,3 +290,50 @@ Follow-up evidence on the integrated checkout:
 The initial gate log remains a failed run; the corrective checks above are
 separate evidence, not a rewritten all-green gate result. No Windows or Linux
 runtime claim is made. No capability checkbox was added or promoted.
+
+## Installed release and real subscription tasks — 2026-09-10
+
+Installed commit `f912bb9ef2ab6954bf1e0bac1be9bcae4ec75459` with
+`scripts/install-local.sh`, release profile, as
+`v0.1.0-pre.1-126-gf912bb9`. Both installed binary hashes match their manifest.
+The previous installed version remains available. The installed bare `pane`
+opened its composer, accepted `installed-standalone-123`, and exited cleanly
+through `/exit`.
+
+Used the user's existing subscription profiles, without changing account
+settings or using a direct paid API route. Each task requested native file
+tools: read `numbers.txt`, sum its integers, write `result.txt` as
+`sum=<number>` plus newline, read it back, then answer. Each task's rollout
+records exactly `read`, `write`, `read`, all successful. The primary checked
+the actual file bytes independently.
+
+| route/model | task | result | displayed elapsed / task tokens |
+|---|---|---|---|
+| Claude subscription / `claude-sonnet-4-6` | initial 3, 7, 11 fixture | exact `sum=21` plus newline | 8.2 s / about 11.2k |
+| same Claude session | external addition of 13, then follow-up | re-read current file; exact `sum=34` plus newline | 6.1 s / about 12.4k |
+| Gemini subscription / `gemini-3.8-flash-high` | fresh fixture | exact `sum=21` plus newline | 4.9 s / about 10.0k |
+| OpenAI subscription / `gpt-5.6-sol` | fresh fixture | exact `sum=21` plus newline | 12.8 s / about 4.6k |
+
+Observed against the runtime/model contracts: real tool calls and changes
+were visible; structured diagnostic returns in the Claude and Gemini runs
+appeared as notebook output and were followed by final prose; all four tasks
+reached COMPLETE; usage was labeled reported; no shell/network tool ran;
+external file changes were honored on the next task. Claude and Gemini exited
+cleanly and Glasshouse lists them closed. The completed OpenAI session remains
+open in the separate test window, with an empty composer after a successful
+`post-task-input-ok` typing probe. Its active Glasshouse lifecycle describes a
+live process, while Pane's task state is COMPLETE.
+
+The launch banner initially said `Glasshouse not connected` on all three
+subscription routes, then changed to `Glasshouse connected` during real work.
+Thus the initial banner is a transient startup observation here, not proof of
+a permanently disconnected parent/control path. Startup-message clarity remains
+worth improving. These CLI-profile tasks do not close the separate TUI
+quick-open profile-selection gap described above.
+
+Live fixtures and rollouts remain under
+`/private/tmp/glasshouse-input-fixed/{claude-task,gemini-task,openai-task}`.
+Precise coordinate clicks and wheel replay were blocked by the computer-control
+tool's `windowNotFoundAtPosition` error; native Terminal/Ghostty remain blocked.
+The successful keyboard, clipboard and accessibility-target focus observations
+must not be inflated into proof of those unavailable GUI paths.

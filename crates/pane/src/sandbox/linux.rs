@@ -318,6 +318,14 @@ pub struct LandlockRules {
 /// says so in as many words rather than leaving a reader to assume the
 /// ruleset covers it.
 pub fn landlock_rules(profile: &Profile, binary: &Path) -> LandlockRules {
+    landlock_rules_with_descendants(profile, binary, &[])
+}
+
+pub fn landlock_rules_with_descendants(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
+) -> LandlockRules {
     let root = profile.root().to_path_buf();
     let mut read_only: Vec<PathBuf> = SYSTEM_READ_ROOTS
         .iter()
@@ -345,6 +353,12 @@ pub fn landlock_rules(profile: &Profile, binary: &Path) -> LandlockRules {
         }
     };
     executable.extend(LOADER_EXEC_ROOTS.iter().map(PathBuf::from));
+    executable.extend(
+        descendants
+            .iter()
+            .filter(|path| path.as_path() != binary)
+            .cloned(),
+    );
     LandlockRules {
         read_only,
         read_write,
@@ -524,6 +538,16 @@ pub fn confine(
     binary: &Path,
     command: &mut std::process::Command,
 ) -> std::io::Result<bool> {
+    confine_with_descendants(profile, binary, &[], command)
+}
+
+#[cfg(target_os = "linux")]
+pub fn confine_with_descendants(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
+    command: &mut std::process::Command,
+) -> std::io::Result<bool> {
     use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
@@ -532,7 +556,7 @@ pub fn confine(
     if abi < 3 {
         return Ok(false);
     }
-    let rules = landlock_rules(profile, binary);
+    let rules = landlock_rules_with_descendants(profile, binary, descendants);
     let mut handles: Vec<(OwnedFd, u64)> = Vec::new();
     for (paths, rights) in [
         (&rules.read_only, access::READ),

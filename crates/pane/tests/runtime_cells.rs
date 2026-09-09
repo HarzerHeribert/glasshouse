@@ -172,6 +172,41 @@ fn a_top_level_binding_persists_into_the_next_cell_and_a_redeclaration_replaces_
     assert_eq!(returned(&fourth), &Value::Number(9.0));
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_named_runner_reexecutes_tools_across_cells_and_keeps_permission_checks() {
+    let fixture = Fixture::new("named-runner");
+    fixture.write(&fixture.root.join("verdict"), "first run\n");
+    let profile = fixture.profile_with(r#"{"permissions":{"allow":["Read(**)","Bash(cat*)"]}}"#);
+    let session = SessionId::new("named-runner-session");
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &session);
+    let first = runtime.run_cell(
+        r#"const verify = async (command = "cat verdict") => {
+            const result = await bash({command});
+            console.log(result.stdout);
+            return {exit_code: result.exit_code};
+        };
+        await verify();"#,
+    );
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    assert_eq!(first.turn().record.calls.len(), 1);
+    assert!(first.turn().stdout_tail.contains("first run"), "{first:?}");
+
+    fixture.write(&fixture.root.join("verdict"), "changed run\n");
+    let second = runtime.run_cell("await verify();");
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+    assert_eq!(second.turn().record.calls.len(), 1);
+    assert!(
+        second.turn().stdout_tail.contains("changed run"),
+        "{second:?}"
+    );
+    assert!(!second.turn().stdout_tail.contains("first run"));
+
+    let refused = runtime.run_cell("await verify(\"echo not-admitted\");");
+    assert_eq!(threw(&refused).class, "PermissionDenied");
+    assert!(runtime.is_live("verify"));
+}
+
 #[test]
 fn structured_returns_continue_and_scalar_or_text_returns_end_the_task() {
     let fixture = Fixture::new("endings");

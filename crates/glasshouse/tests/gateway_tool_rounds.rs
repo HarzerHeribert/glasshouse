@@ -494,7 +494,7 @@ fn a_translated_stream_with_two_tool_calls_and_one_error_result_counts_both() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -566,7 +566,7 @@ fn a_translated_document_with_one_tool_call_and_no_error_result_counts_both() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -616,7 +616,7 @@ fn a_translated_stream_with_no_tool_use_counts_zero() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -678,7 +678,7 @@ fn a_relayed_exchange_records_no_tool_rounds_or_repairs() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages"),
             harness: Some("claude-code"),
         },

@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, HELPER_PURPOSE, ObservationQuery, Outcome};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, SecretRef, SecretStore};
 
@@ -293,6 +293,18 @@ fn messages_request(token: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn messages_request_with_helper_purpose(token: &str, body: &str) -> Vec<u8> {
+    let request = messages_request(token, body);
+    let split = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("request head terminator");
+    let mut with_header = request[..split].to_vec();
+    with_header.extend_from_slice(b"\r\nX-Glasshouse-Purpose: helper");
+    with_header.extend_from_slice(&request[split..]);
+    with_header
+}
+
 fn send_and_read(address: SocketAddr, raw: &[u8]) -> Vec<u8> {
     let mut client = TcpStream::connect(address).expect("the gateway accepts connections");
     client
@@ -376,7 +388,7 @@ fn a_translated_exchanges_stated_usage_reaches_the_routing_row() {
 
     let response = send_and_read(
         gateway.address(),
-        &messages_request(gateway.token().expose(), HARNESS_BODY),
+        &messages_request_with_helper_purpose(gateway.token().expose(), HARNESS_BODY),
     );
     assert!(
         status_line(&response).starts_with("HTTP/1.1 200"),
@@ -392,7 +404,7 @@ fn a_translated_exchanges_stated_usage_reaches_the_routing_row() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -403,6 +415,7 @@ fn a_translated_exchanges_stated_usage_reaches_the_routing_row() {
         "one routing observation for the translated exchange"
     );
     assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));
+    assert_eq!(rows[0].purpose.as_deref(), Some(HELPER_PURPOSE));
     assert_eq!(
         rows[0].input_tokens,
         Some(32),
@@ -474,7 +487,7 @@ fn a_relayed_exchange_records_the_usage_its_body_states_and_invents_none() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages"),
             harness: Some("claude-code"),
         },

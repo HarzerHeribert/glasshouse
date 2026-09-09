@@ -532,14 +532,47 @@ fn request_may_need_the_repository(task: &str) -> bool {
 /// The configuration gate is here rather than in `helpers::preflight`, which
 /// is handed a model and so cannot see that there is none. This is the call
 /// site, and *not configured, not run* is decided where the money is spent.
-fn preflight_block(task: &str, session: &Session<'_>) -> Option<String> {
+fn preflight_block(
+    task: &str,
+    session: &Session<'_>,
+    transcript: &mut Transcript,
+) -> Option<String> {
     let helpers = &session.config.helpers;
-    if !helpers.enabled || !request_may_need_the_repository(task) {
+    if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
         return None;
     }
     let model = helpers.model.as_deref()?;
-    let record =
-        crate::helpers::preflight(task, model, session.profile, session.glasshouse, session.id)?;
+    let token = invoke::CancellationToken::new();
+    session.interrupt.arm(token.clone());
+    let record = crate::helpers::preflight(
+        task,
+        model,
+        session.profile,
+        session.glasshouse,
+        session.id,
+        &token,
+        |record| {
+            let Some(ui) = session.ui else {
+                return;
+            };
+            // The real user turn is recorded below in the established rollout
+            // order. This snapshot makes the submitted request and its Scout
+            // visible immediately without adding a synthetic model turn.
+            let mut visible = transcript.clone();
+            visible
+                .conversation
+                .messages
+                .push(Message::text(Role::User, task));
+            visible.notebook.preflight = Some(record.clone());
+            ui.publish(&visible, &ServedBy::default(), tui::Activity::Searching);
+        },
+    )?;
+    if record.outcome.cancelled {
+        session.interrupt.consumed();
+    }
+    // Keep the resolved Scout beside this request for every later task-frame.
+    // The next task clears it before deciding whether another preflight runs.
+    transcript.notebook.preflight = Some(record.clone());
     record
         .outcome
         .ok
@@ -738,6 +771,7 @@ fn message_text(message: &Message) -> String {
 /// conversation that grew without its notebook -- a resumed session, whose
 /// cells came back from the rollout file -- would hang every later view under
 /// the wrong cell.
+#[derive(Clone)]
 struct Transcript {
     conversation: Conversation,
     notebook: Notebook,
@@ -1341,6 +1375,7 @@ fn run_task(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     transcript.notebook.handlers.clear();
+    transcript.notebook.preflight = None;
     let result = run_task_inner(task, session, transcript, rollout);
     transcript.notebook.handlers.clear();
     if let Some(ui) = session.ui {
@@ -1370,7 +1405,7 @@ fn run_task_inner(
     // the model's first turn, so the block is paid for as one cache write
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
-    if let Some(block) = preflight_block(task, session) {
+    if let Some(block) = preflight_block(task, session, transcript) {
         transcript.conversation.system.push_str(&block);
     }
     {
@@ -1651,11 +1686,18 @@ fn run_task_inner(
                 .map_err(|e| format!("could not record directory instructions: {e}"))?;
         }
         prose_turns = if step.prose { prose_turns + 1 } else { 0 };
+        let helper_delivered_interrupt = step
+            .view
+            .helpers
+            .iter()
+            .any(|helper| helper.outcome.cancelled);
         if let Some(record) = step.record.take() {
-            if delivered_the_interrupt(&record) {
+            if delivered_the_interrupt(&record) || helper_delivered_interrupt {
                 session.interrupt.consumed();
             }
             cells_since_look.push(record);
+        } else if helper_delivered_interrupt {
+            session.interrupt.consumed();
         }
 
         // `supervisor.md` §3: one look every `every` cells, and only when

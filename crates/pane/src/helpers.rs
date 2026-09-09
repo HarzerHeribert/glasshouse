@@ -13,7 +13,8 @@
 //! [`FORBIDDEN_TOOLS`] exists as a list a spec cannot hold rather than as a
 //! sentence a model might ignore.
 
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::contract::{Conversation, Message, Role};
 use crate::tools::registry;
@@ -72,6 +73,7 @@ pub enum CallSite {
 }
 
 /// One helper, entirely as data.
+#[derive(Debug, Clone, Copy)]
 pub struct HelperSpec {
     /// Called as `helper.<name>(…)`; also the key in the generated declarations.
     pub name: &'static str,
@@ -275,6 +277,11 @@ pub struct HelperOutcome {
     /// failing look as a healthy one, and this field is why that cannot repeat
     /// here.
     pub ok: bool,
+    /// The caller's cancellation token ended this call. Kept distinct from a
+    /// provider or protocol failure so the session can consume exactly the
+    /// interrupt this helper observed instead of leaking it into a later tool.
+    #[serde(default)]
+    pub cancelled: bool,
     pub elapsed_ms: u64,
 }
 
@@ -284,6 +291,7 @@ impl Default for HelperOutcome {
         Self {
             text: String::new(),
             ok: false,
+            cancelled: false,
             elapsed_ms: 0,
         }
     }
@@ -294,6 +302,16 @@ impl HelperOutcome {
         Self {
             text: reason.into(),
             ok: false,
+            cancelled: false,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }
+    }
+
+    fn cancelled(started: Instant) -> Self {
+        Self {
+            text: "the helper was cancelled".into(),
+            ok: false,
+            cancelled: true,
             elapsed_ms: started.elapsed().as_millis() as u64,
         }
     }
@@ -367,15 +385,82 @@ pub fn run(
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
     session: &crate::contract::SessionId,
+    token: &crate::tools::invoke::CancellationToken,
 ) -> HelperCall {
-    if one_shot(spec) {
-        HelperCall {
-            outcome: run_once(spec, model, input),
-            turns: 1,
+    let started = Instant::now();
+    if token.is_cancelled() {
+        return HelperCall {
+            outcome: HelperOutcome::cancelled(started),
+            turns: 0,
             looked: Vec::new(),
+        };
+    }
+    if one_shot(spec) {
+        let spec = *spec;
+        let model = model.to_string();
+        let input = input.to_string();
+        match wait_for_helper(token, move || run_once(&spec, &model, &input)) {
+            HelperWait::Returned(outcome) => HelperCall {
+                outcome,
+                turns: 1,
+                looked: Vec::new(),
+            },
+            HelperWait::Cancelled => HelperCall {
+                outcome: HelperOutcome::cancelled(started),
+                turns: 0,
+                looked: Vec::new(),
+            },
+            HelperWait::Panicked => HelperCall {
+                outcome: HelperOutcome::failed(
+                    format!("`{}` panicked while running", spec.name),
+                    started,
+                ),
+                turns: 0,
+                looked: Vec::new(),
+            },
         }
     } else {
-        run_with_tools(spec, model, input, profile, glasshouse, session)
+        run_with_tools(spec, model, input, profile, glasshouse, session, token)
+    }
+}
+
+/// How often a blocked helper checks whether its caller cancelled it.
+const HELPER_CANCEL_POLL: Duration = Duration::from_millis(20);
+
+enum HelperWait<T> {
+    Returned(T),
+    Cancelled,
+    Panicked,
+}
+
+/// Run an owned helper operation away from the caller's V8 isolate while the
+/// caller remains able to observe cancellation. A cancelled provider request
+/// may finish on this worker, but it owns every value it retained and remains
+/// bounded by the wire timeout; its result is discarded.
+fn wait_for_helper<T, F>(
+    token: &crate::tools::invoke::CancellationToken,
+    operation: F,
+) -> HelperWait<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        let _ = sender.send(result);
+    });
+    loop {
+        if token.is_cancelled() {
+            return HelperWait::Cancelled;
+        }
+        match receiver.recv_timeout(HELPER_CANCEL_POLL) {
+            Ok(Ok(value)) => return HelperWait::Returned(value),
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return HelperWait::Panicked;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
@@ -413,6 +498,7 @@ pub fn run_once(spec: &HelperSpec, model: &str, input: &str) -> HelperOutcome {
             HelperOutcome {
                 text,
                 ok: true,
+                cancelled: false,
                 elapsed_ms: started.elapsed().as_millis() as u64,
             }
         }
@@ -435,6 +521,7 @@ pub fn run_with_tools(
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
     session: &crate::contract::SessionId,
+    token: &crate::tools::invoke::CancellationToken,
 ) -> HelperCall {
     let started = Instant::now();
     let options = crate::agent::AgentOptions {
@@ -446,31 +533,37 @@ pub fn run_with_tools(
         tools: spec.tools,
         instructions: spec.preamble,
     };
-    // **On another thread, always.** `run_narrowed` builds a Runtime, which is
+    // **On an owned thread, always.** `run_narrowed` builds a Runtime, which is
     // a second V8 isolate, and this function is reached from a host callback
-    // while the caller's isolate is borrowed -- `agent.rs`'s module doc names
-    // that hazard and `bg::serve_once` already solves it the same way. A V8
-    // isolate belongs to one thread, so giving the nested loop its own is what
-    // makes a tool-holding helper safe to call at all.
-    let token = crate::tools::invoke::CancellationToken::new();
-    let result = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                crate::agent::run_narrowed(
-                    profile,
-                    glasshouse,
-                    session,
-                    input,
-                    &options,
-                    &token,
-                    Some(&narrowed),
-                )
-            })
-            .join()
-    });
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => {
+    // while the caller's isolate is borrowed. Owning every input also lets the
+    // caller stop waiting when cancelled; the provider request may finish on
+    // this thread under its hard ceiling, but it retains no session borrow and
+    // the post-response token check starts no late tool.
+    let profile = profile.clone();
+    let glasshouse = glasshouse.clone();
+    let session = session.clone();
+    let input = input.to_string();
+    let worker_token = token.clone();
+    let result = match wait_for_helper(token, move || {
+        crate::agent::run_narrowed(
+            &profile,
+            &glasshouse,
+            &session,
+            &input,
+            &options,
+            &worker_token,
+            Some(&narrowed),
+        )
+    }) {
+        HelperWait::Returned(result) => result,
+        HelperWait::Cancelled => {
+            return HelperCall {
+                outcome: HelperOutcome::cancelled(started),
+                turns: 0,
+                looked: Vec::new(),
+            };
+        }
+        HelperWait::Panicked => {
             return HelperCall {
                 outcome: HelperOutcome::failed(
                     format!("`{}` panicked while running", spec.name),
@@ -502,6 +595,7 @@ pub fn run_with_tools(
         HelperOutcome {
             text: result.answer.clone(),
             ok: true,
+            cancelled: false,
             elapsed_ms: started.elapsed().as_millis() as u64,
         }
     };
@@ -533,19 +627,25 @@ pub fn preflight(
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
     session: &crate::contract::SessionId,
+    token: &crate::tools::invoke::CancellationToken,
+    mut progress: impl FnMut(&HelperRecord),
 ) -> Option<HelperRecord> {
     let spec = HELPERS
         .iter()
         .find(|spec| spec.call_sites.contains(&CallSite::Preflight))?;
-    let call = run(spec, model, task, profile, glasshouse, session);
-    Some(HelperRecord {
+    let mut record = HelperRecord {
         helper: spec.name.to_string(),
         verb: spec.verb.to_string(),
         asked: bounded_ask(task),
-        outcome: call.outcome,
-        turns: call.turns,
-        looked: call.looked,
-    })
+        ..HelperRecord::default()
+    };
+    progress(&record);
+    let call = run(spec, model, task, profile, glasshouse, session, token);
+    record.outcome = call.outcome;
+    record.turns = call.turns;
+    record.looked = call.looked;
+    progress(&record);
+    Some(record)
 }
 
 /// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted.
@@ -559,7 +659,15 @@ pub fn check_completion(
     let spec = HELPERS
         .iter()
         .find(|spec| spec.call_sites.contains(&CallSite::CompletionGate))?;
-    let call = run(spec, model, evidence, profile, glasshouse, session);
+    let call = run(
+        spec,
+        model,
+        evidence,
+        profile,
+        glasshouse,
+        session,
+        &crate::tools::invoke::CancellationToken::new(),
+    );
     Some(HelperRecord {
         helper: spec.name.to_string(),
         verb: spec.verb.to_string(),
@@ -750,5 +858,29 @@ mod tests {
         // The one contract no toolset can express, so it must be in the prose.
         assert!(REDUCER.preamble.contains("Never state a cause"));
         assert!(REDUCER.preamble.contains("evidence"));
+    }
+
+    #[test]
+    fn a_waiting_helper_returns_promptly_when_its_caller_cancels() {
+        let token = crate::tools::invoke::CancellationToken::new();
+        let canceller = token.clone();
+        let (release, held) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            canceller.cancel();
+        });
+
+        let started = Instant::now();
+        let result = wait_for_helper(&token, move || {
+            let _ = held.recv_timeout(Duration::from_secs(1));
+            7
+        });
+        drop(release);
+
+        assert!(matches!(result, HelperWait::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "cancellation waited for the owned helper operation"
+        );
     }
 }

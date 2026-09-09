@@ -10,7 +10,7 @@
 //! objects.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use crate::config::HelpersConfig;
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
-use crate::helpers::{HelperCall, HelperOutcome, HelperRecord};
+use crate::helpers::{HelperCall, HelperRecord};
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
 use crate::runtime::instructions::{InstructionContext, PendingInstructions};
 use crate::runtime::outcome::{PlanItem, SourceEvidence};
@@ -238,11 +238,11 @@ pub(crate) struct RuntimeState {
     reductions: RefCell<Vec<(String, String)>>,
     /// Versions whose exact editing context has crossed a completed cell
     /// boundary and therefore reached the model.
-    visible_sources: RefCell<HashSet<(PathBuf, String)>>,
+    visible_sources: RefCell<HashMap<PathBuf, String>>,
     /// Context produced in the cell currently running. It becomes visible at
     /// the next cell boundary, never earlier merely because code holds it.
-    pending_sources: RefCell<HashSet<(PathBuf, String)>>,
-    pending_context_output: RefCell<Option<String>>,
+    pending_sources: RefCell<Vec<(PathBuf, String)>>,
+    pending_context_output: RefCell<Vec<String>>,
 }
 
 /// Slots a pushed helper may never take, so the model's own `helper.*` calls
@@ -273,9 +273,9 @@ impl RuntimeState {
             instructions: RefCell::new(InstructionContext::default()),
             helpers: RefCell::new(HelpersConfig::default()),
             reductions: RefCell::new(Vec::new()),
-            visible_sources: RefCell::new(HashSet::new()),
-            pending_sources: RefCell::new(HashSet::new()),
-            pending_context_output: RefCell::new(None),
+            visible_sources: RefCell::new(HashMap::new()),
+            pending_sources: RefCell::new(Vec::new()),
+            pending_context_output: RefCell::new(Vec::new()),
         }
     }
 
@@ -324,7 +324,7 @@ impl RuntimeState {
     pub(crate) fn begin_cell(&self) -> u64 {
         self.visible_sources
             .borrow_mut()
-            .extend(self.pending_sources.borrow_mut().drain());
+            .extend(self.pending_sources.borrow_mut().drain(..));
         let cell = self.cell.get() + u64::from(!self.handlers.running.get());
         self.cell.set(cell);
         let mut current = self.current.borrow_mut();
@@ -430,28 +430,9 @@ impl RuntimeState {
         if let Some(record) = self.current.borrow_mut().helpers.get_mut(slot) {
             record.outcome = call.outcome;
             record.turns = call.turns;
+            record.looked = call.looked;
         }
         self.report_helper_progress();
-    }
-
-    /// One call that has already resolved, for a caller with nothing to show
-    /// in flight. It is [`begin_helper`] and [`finish_helper`] back to back,
-    /// so there is one path a record reaches the lane by rather than two.
-    ///
-    /// [`begin_helper`]: RuntimeState::begin_helper
-    /// [`finish_helper`]: RuntimeState::finish_helper
-    pub(crate) fn record_helper(&self, record: HelperRecord) {
-        let call = HelperCall {
-            outcome: record.outcome.clone(),
-            turns: record.turns,
-            looked: record.looked.clone(),
-        };
-        let slot = self.begin_helper(HelperRecord {
-            outcome: HelperOutcome::default(),
-            turns: 0,
-            ..record
-        });
-        self.finish_helper(slot, call);
     }
 
     /// Hands this cell's calls to the installed signal, if there is one. The
@@ -522,27 +503,32 @@ impl RuntimeState {
         self.reductions.borrow_mut().clear();
         self.visible_sources.borrow_mut().clear();
         self.pending_sources.borrow_mut().clear();
-        self.pending_context_output.borrow_mut().take();
+        self.pending_context_output.borrow_mut().clear();
     }
 
-    pub(crate) fn note_source_context(&self, evidence: &SourceEvidence, text: String) {
+    /// Queue only whole contexts that fit the existing feedback budget. Keep
+    /// space for the console omission marker: no context promoted as visible
+    /// may have its beginning cut off by the true-tail renderer.
+    pub(crate) fn note_source_context(&self, evidence: &SourceEvidence, text: String) -> bool {
+        let mut output = self.pending_context_output.borrow_mut();
+        let used: usize = output.iter().map(|s| s.chars().count() + 1).sum();
+        if used + text.chars().count() + 1 > KEEP_CHARS.saturating_sub(256) {
+            return false;
+        }
         let path = self.absolute_source_path(Path::new(&evidence.path));
         if evidence.complete {
             self.pending_sources
                 .borrow_mut()
-                .insert((path, evidence.sha256.clone()));
+                .push((path, evidence.sha256.clone()));
         }
-        *self.pending_context_output.borrow_mut() = Some(text);
+        output.push(text);
+        true
     }
 
-    pub(crate) fn has_pending_source_context(&self) -> bool {
-        self.pending_context_output.borrow().is_some()
-    }
-
-    /// Appends editing context after model-authored console output so the
-    /// bounded true tail always retains the complete target it certifies.
+    /// Appends the complete batch after model-authored output. Contexts that
+    /// did not fit were not queued or certified as visible.
     pub(crate) fn flush_source_context(&self) {
-        if let Some(text) = self.pending_context_output.borrow_mut().take() {
+        for text in self.pending_context_output.borrow_mut().drain(..) {
             self.current.borrow_mut().console.write_line(&text);
         }
     }
@@ -554,23 +540,17 @@ impl RuntimeState {
         let path = self.absolute_source_path(Path::new(path));
         self.visible_sources
             .borrow()
-            .contains(&(path, hash.to_ascii_lowercase()))
+            .get(&path)
+            .is_some_and(|seen| seen == &hash.to_ascii_lowercase())
     }
 
-    /// Supplies the hash when exactly one complete version of this path has
-    /// crossed a cell boundary. This keeps the common edit call small while
-    /// refusing to guess after two different versions were inspected.
-    pub(crate) fn sole_visible_source_hash(
-        &self,
-        args: &crate::tools::invoke::Args,
-    ) -> Option<String> {
+    /// The latest complete version of this path that reached the model.
+    /// Refreshing after an edit replaces the old version instead of making
+    /// every future implicit edit ambiguous. The writer still checks disk's
+    /// actual hash, so an external change remains a stale-version refusal.
+    pub(crate) fn visible_source_hash(&self, args: &crate::tools::invoke::Args) -> Option<String> {
         let path = self.absolute_source_path(Path::new(args.get("path")?));
-        let visible = self.visible_sources.borrow();
-        let mut hashes = visible
-            .iter()
-            .filter_map(|(candidate, hash)| (candidate == &path).then_some(hash.clone()));
-        let hash = hashes.next()?;
-        hashes.next().is_none().then_some(hash)
+        self.visible_sources.borrow().get(&path).cloned()
     }
 
     fn absolute_source_path(&self, path: &Path) -> PathBuf {
@@ -674,6 +654,7 @@ impl HeapGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::HelperOutcome;
 
     #[test]
     fn console_output_is_bounded_and_says_how_much_it_dropped() {
@@ -734,6 +715,7 @@ mod tests {
                 outcome: HelperOutcome {
                     text: "3 distinct root failures".to_string(),
                     ok: true,
+                    cancelled: false,
                     elapsed_ms: 1_100,
                 },
                 turns: 1,
@@ -770,6 +752,7 @@ mod tests {
                 outcome: HelperOutcome {
                     text: "nothing failed".to_string(),
                     ok: true,
+                    cancelled: false,
                     elapsed_ms: 40,
                 },
                 turns: 1,

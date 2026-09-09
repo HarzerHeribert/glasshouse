@@ -1578,6 +1578,62 @@ fn a_sibling_binary_in_the_same_directory_cannot_exec_but_the_resolved_one_can()
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_narrow_shell_grant_runs_homebrew_python_but_not_an_ungranted_binary() {
+    use std::process::{Command, Stdio};
+
+    let Ok(python) = std::fs::canonicalize("/opt/homebrew/bin/python3") else {
+        eprintln!("skipped: /opt/homebrew/bin/python3 is not installed");
+        return;
+    };
+    let fixture = Fixture::new("narrow-python-descendant");
+    let settings = format!(
+        r#"{{"permissions":{{"allow":["Bash({} -c*)"]}}}}"#,
+        python.display()
+    );
+    let profile = fixture.profile(Some(&settings));
+    let shell = std::fs::canonicalize("/bin/bash").unwrap();
+    let companion = macos::python_framework_companion(&python)
+        .expect("Homebrew Python has its one framework launcher companion");
+    let descendants = vec![python.clone(), companion];
+
+    let run = |line: &str| {
+        let mut command = Command::new(&shell);
+        command
+            .arg("-c")
+            .arg(line)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(profile.root());
+        macos::confine_with_descendants(&profile, &shell, &descendants, &mut command).unwrap();
+        command.output()
+    };
+
+    let python_line = format!("{} -c 'print(\"narrow-python-ran\")'", python.display());
+    let granted = run(&python_line).expect("the confined shell starts");
+    assert!(granted.status.success(), "{granted:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&granted.stdout).trim(),
+        "narrow-python-ran"
+    );
+
+    match run("/bin/echo ungranted-binary-ran") {
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        Ok(output) => {
+            assert!(
+                !output.status.success(),
+                "the ungranted binary ran: {output:?}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("ungranted-binary-ran"),
+                "the ungranted binary ran: {output:?}"
+            );
+        }
+    }
+}
+
 /// §1.4, and the one shape of it a profile can defeat without ever saying
 /// no: **a confined tool either runs or is refused, and never dies silently.**
 /// `process-exec*` permits the exec; the image still has to be mapped, and a
@@ -1743,6 +1799,48 @@ fn the_read_literal_names_the_binary_and_only_the_binary() {
         read_literals(&filters),
         sorted(expected),
         "the resolved arm's read literals are the fallback's plus the binary, and nothing else"
+    );
+}
+
+#[test]
+fn an_admitted_descendant_is_one_literal_and_never_its_siblings() {
+    let fixture = Fixture::new("descendant-literal");
+    let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+    let python = PathBuf::from("/opt/homebrew/Cellar/python/3.14/bin/python3");
+    let sibling = PathBuf::from("/opt/homebrew/Cellar/python/3.14/bin/pip3");
+
+    let text = macos::profile_text_with_descendants(
+        &profile,
+        Path::new(RESOLVED),
+        std::slice::from_ref(&python),
+    );
+    let filters = exec_filters(&text);
+    assert!(
+        filters
+            .iter()
+            .any(|filter| filter.form == "literal" && filter.value == python.to_string_lossy()),
+        "the admitted descendant is absent: {text}"
+    );
+    assert!(
+        !filters.iter().any(|filter| {
+            filter.value == sibling.to_string_lossy()
+                || (filter.form == "subpath" && python.starts_with(&filter.value))
+        }),
+        "a descendant grant widened to a sibling: {text}"
+    );
+
+    let rules = linux::landlock_rules_with_descendants(
+        &profile,
+        Path::new(RESOLVED),
+        std::slice::from_ref(&python),
+    );
+    assert!(rules.executable.contains(&python), "{rules:?}");
+    assert!(!rules.executable.contains(&sibling), "{rules:?}");
+    assert!(
+        !rules
+            .executable
+            .contains(&python.parent().unwrap().to_path_buf()),
+        "the exact descendant widened to its directory: {rules:?}"
     );
 }
 

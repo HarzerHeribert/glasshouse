@@ -48,8 +48,11 @@ the byte-for-byte text below remains the compatibility contract.
     live handles rather than repeating reads. For an existing source change,
     `context({path, symbol})` is the first source-reading tool; do not `read` or
     print the whole source first. Its complete target is delivered automatically.
+    Batch independent context calls in one inspection cell. After inspection,
+    related edits, new tests and verification can run in one cell; yield when
+    the next decision needs interpretation of new evidence.
     In the next cell use `edit({path, old, replacement})`; do not name a variable
-    `new`. Pane binds the edit to the sole visible source version. For file or
+    `new`. Pane binds the edit to the latest observed source version. For file or
     script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:
     one double-quoted JavaScript string per logical line, never a template literal.
     Pane supplies line separators. Use
@@ -416,3 +419,36 @@ An overflow of this already-projected request creates one checkpoint and retries
 once, without replaying cells or discarding live runtime bindings. The rollout
 marks that context boundary explicitly; resume starts request history at the
 latest checkpoint while retaining all earlier rows in the append-only log.
+
+
+## Reusing a runner across cells
+
+Request-local bindings can hold ordinary functions, including async functions.
+A model can define a runner once, then invoke its identifier in later cells:
+
+```typescript
+const verify = async () => {
+  const result = await bash({command: "python3 -m unittest discover -s tests"});
+  console.log(result.stdout);
+  console.log(result.stderr);
+  if (result.exit_code !== 0) throw new Error("verification failed");
+};
+await verify();
+```
+
+A later cell can use `await verify();` without generating the function body
+again. The original definition may remain in conversation history and provider
+input; this is not by itself a promise of lower total billed tokens.
+Choose a command admitted by the session and an interpreter available in its
+sandbox. Every invocation executes the real tool, records its trajectory and
+checks current permissions; the function is not a cached test result. Source
+inspection and version checks remain required for edits performed by a runner.
+
+A saved function retains its definition and captured values. Pass changing
+inputs as parameters, or redeclare the runner when its logic changes.
+Functions live only for this user request, like other bindings. For reuse across
+requests, save the test logic as an inspectable project script and invoke that
+script through an admitted command. Changing source or test inputs requires a
+new run; a previous pass does not certify the changed files. The named-runner
+regression changes input between cells and observes new output, then proves an
+unadmitted command is still refused through the same function.

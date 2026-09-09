@@ -620,7 +620,7 @@ fn cache_control_is_carried_as_prompt_cache_key_and_the_read_ratio_still_reaches
         &ledger.ledger,
         ObservationQuery {
             provider: "chat",
-            model: AssignedModel::HarnessDefault.label(),
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },

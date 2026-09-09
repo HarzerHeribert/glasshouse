@@ -254,6 +254,91 @@ fn exec_is_granted_on_the_resolved_binary() {
 
 // --- the confined call -------------------------------------------------
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_narrow_bash_call_executes_the_literal_python_it_admitted() {
+    let Ok(python) = std::fs::canonicalize("/opt/homebrew/bin/python3") else {
+        eprintln!("skipped: /opt/homebrew/bin/python3 is not installed");
+        return;
+    };
+    let fixture = Fixture::new("narrow-python");
+    let command = format!("{} -c 'print(\"literal-python-ran\")'", python.display());
+    let settings = format!(
+        r#"{{"permissions":{{"allow":["Bash({} -c*)"]}}}}"#,
+        python.display()
+    );
+    let profile = Profile::compile(&fixture.root, Some(&settings));
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("narrow-python");
+
+    let result = invoke::run(
+        &context(&profile, &glasshouse, &session),
+        "bash",
+        &Args::new().with("command", command),
+    )
+    .expect("the literal Python command passed argv admission and spawned");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert_eq!(result.stdout.trim(), "literal-python-ran", "{result:?}");
+
+    let companion = pane::sandbox::macos::python_framework_companion(&python)
+        .expect("Homebrew Python has its one framework launcher companion");
+    let denied_settings = format!(
+        r#"{{"permissions":{{
+            "allow":["Bash({} -c*)"],
+            "deny":["Read({})"]
+        }}}}"#,
+        python.display(),
+        companion.display()
+    );
+    let denied_profile = Profile::compile(&fixture.root, Some(&denied_settings));
+    let denied = invoke::run(
+        &context(&denied_profile, &glasshouse, &session),
+        "bash",
+        &Args::new().with(
+            "command",
+            format!("{} -c 'print(\"denied-companion-ran\")'", python.display()),
+        ),
+    )
+    .expect("the Python argv remains admitted while its runtime companion is denied");
+    assert_ne!(denied.exit_code, Some(0), "{denied:?}");
+    assert!(
+        !denied.stdout.contains("denied-companion-ran"),
+        "{denied:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_read_deny_keeps_an_admitted_command_binary_out_of_the_os_grant() {
+    let fixture = Fixture::new("denied-command-binary");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(
+            r#"{"permissions":{
+                "allow":["Bash(/bin/echo*)"],
+                "deny":["Read(/bin/echo)"]
+            }}"#,
+        ),
+    );
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("denied-command-binary");
+    let result = invoke::run(
+        &context(&profile, &glasshouse, &session),
+        "bash",
+        &Args::new().with("command", "/bin/echo denied-binary-ran"),
+    )
+    .expect("argv admission still permits the shell call");
+    assert_ne!(
+        result.exit_code,
+        Some(0),
+        "the read-denied binary ran: {result:?}"
+    );
+    assert!(
+        !result.stdout.contains("denied-binary-ran"),
+        "the read-denied binary ran: {result:?}"
+    );
+}
+
 /// Map line 2455 reaching a caller, and `sandbox-grants.md` §1.4.
 ///
 /// Two halves in one test on purpose: the in-root read must **succeed**, so

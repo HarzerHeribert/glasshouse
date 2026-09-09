@@ -602,7 +602,6 @@ fn the_binary_loads_the_projects_own_instructions() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let system = request["system"][0]["text"].as_str().unwrap();
@@ -2642,7 +2641,198 @@ where
 mod interrupts {
     use super::*;
     use std::process::{Child, Stdio};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    fn captured_request(mut stream: &TcpStream) -> (String, String) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut headers = String::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = rest.trim().parse().unwrap_or(0);
+            }
+            headers.push_str(&line.to_ascii_lowercase());
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
+        // Keep the socket borrowed until the complete request has arrived.
+        let _ = &mut stream;
+        (headers, String::from_utf8(body).unwrap())
+    }
+
+    fn answer(mut stream: TcpStream, body: &str) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+
+    type CapturedRequests = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// First answer asks for a cell helper; the helper and the task turn after
+    /// it are then held independently. Releasing the cancelled helper while
+    /// the task turn remains held makes any late fourth request observable.
+    fn held_cell_helper_provider() -> (
+        String,
+        CapturedRequests,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let (helper_seen_tx, helper_seen) = mpsc::channel();
+        let (helper_release, helper_held) = mpsc::channel();
+        let (task_seen_tx, task_seen) = mpsc::channel();
+        let (task_release, task_held) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            let request = captured_request(&first);
+            captured.lock().unwrap().push(request);
+            answer(
+                first,
+                &assistant_reply(
+                    "```pane\nconst found = await helper.find(\"find the needle\");\nreturn found;\n```",
+                ),
+            );
+
+            let (helper, _) = listener.accept().unwrap();
+            let request = captured_request(&helper);
+            captured.lock().unwrap().push(request);
+            helper_seen_tx.send(()).unwrap();
+            thread::spawn(move || {
+                if helper_held.recv().is_ok() {
+                    answer(
+                        helper,
+                        &assistant_reply(
+                            "```pane\nconst late = await read({ path: \"late.txt\" });\n```",
+                        ),
+                    );
+                }
+            });
+
+            let (task, _) = listener.accept().unwrap();
+            let request = captured_request(&task);
+            captured.lock().unwrap().push(request);
+            task_seen_tx.send(()).unwrap();
+            thread::spawn(move || {
+                if task_held.recv().is_ok() {
+                    answer(task, &ending_reply());
+                }
+            });
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(700);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((late, _)) => {
+                        let request = captured_request(&late);
+                        captured.lock().unwrap().push(request);
+                        answer(late, &ending_reply());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (
+            base,
+            requests,
+            helper_seen,
+            helper_release,
+            task_seen,
+            task_release,
+        )
+    }
+
+    /// Hold pushed preflight first and the ordinary task request second. A
+    /// third request can only come from the cancelled Scout accepting its late
+    /// tool-bearing response.
+    fn held_preflight_provider() -> (
+        String,
+        CapturedRequests,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let (helper_seen_tx, helper_seen) = mpsc::channel();
+        let (helper_release, helper_held) = mpsc::channel();
+        let (task_seen_tx, task_seen) = mpsc::channel();
+        let (task_release, task_held) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (helper, _) = listener.accept().unwrap();
+            let request = captured_request(&helper);
+            captured.lock().unwrap().push(request);
+            helper_seen_tx.send(()).unwrap();
+            thread::spawn(move || {
+                if helper_held.recv().is_ok() {
+                    answer(
+                        helper,
+                        &assistant_reply(
+                            "```pane\nconst late = await read({ path: \"late.txt\" });\n```",
+                        ),
+                    );
+                }
+            });
+
+            let (task, _) = listener.accept().unwrap();
+            let request = captured_request(&task);
+            captured.lock().unwrap().push(request);
+            task_seen_tx.send(()).unwrap();
+            thread::spawn(move || {
+                if task_held.recv().is_ok() {
+                    answer(task, &ending_reply());
+                }
+            });
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(700);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((late, _)) => {
+                        let request = captured_request(&late);
+                        captured.lock().unwrap().push(request);
+                        answer(late, &ending_reply());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (
+            base,
+            requests,
+            helper_seen,
+            helper_release,
+            task_seen,
+            task_release,
+        )
+    }
 
     /// A command that never ends and writes a marker the moment it starts.
     ///
@@ -2861,6 +3051,121 @@ mod interrupts {
         let answer = last_user_text(&bodies[1]);
         assert!(answer.contains("## Error"), "{answer}");
         assert!(answer.contains("Cancelled"), "{answer}");
+    }
+
+    #[test]
+    fn a_sigint_cancels_a_cell_helper_without_leaking_or_running_its_late_reply() {
+        let root = scratch_dir("sigint-helper");
+        write_helpers_pane_toml(&root, "helper-tier");
+        fs::write(root.join("late.txt"), "a late helper must not read this\n").unwrap();
+        let rollout = root.join("rollout.jsonl");
+        let (base, requests, helper_seen, helper_release, task_seen, task_release) =
+            held_cell_helper_provider();
+        // Fewer than four words bypasses pushed preflight; this test reaches
+        // the explicit helper call in the first task-model cell.
+        let child = spawn_session(&root, &rollout, "find this", &base);
+        helper_seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the cell helper request starts");
+
+        let interrupted = Instant::now();
+        send_interrupt(&child);
+        task_seen
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the cancelled helper returns control to the task promptly");
+        assert!(
+            interrupted.elapsed() < Duration::from_secs(2),
+            "helper cancellation stayed blocked on the provider"
+        );
+
+        helper_release.send(()).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                3,
+                "the cancelled helper executed its late read and requested another turn"
+            );
+            assert!(
+                requests[1].0.contains("x-glasshouse-purpose: helper"),
+                "tool-holding helper request lost its routing identity: {}",
+                requests[1].0
+            );
+            let helper_body: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+            assert_eq!(helper_body["model"], "helper-tier");
+            assert!(
+                !requests[0].0.contains("x-glasshouse-purpose: helper")
+                    && !requests[2].0.contains("x-glasshouse-purpose: helper"),
+                "ordinary task traffic was stamped as helper traffic"
+            );
+        }
+
+        task_release.send(()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cells = cell_lines(&rollout);
+        assert_eq!(
+            call_endings(&cells[0]),
+            vec![serde_json::json!({"threw":"Cancelled"})]
+        );
+        assert_eq!(outcomes(&rollout), vec!["threw", "returned"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_sigint_cancels_preflight_without_leaking_into_the_task() {
+        let root = scratch_dir("sigint-preflight");
+        write_helpers_pane_toml(&root, "helper-tier");
+        fs::write(root.join("late.txt"), "a late Scout must not read this\n").unwrap();
+        let rollout = root.join("rollout.jsonl");
+        let (base, requests, helper_seen, helper_release, task_seen, task_release) =
+            held_preflight_provider();
+        let child = spawn_session(
+            &root,
+            &rollout,
+            "find where the cancellation token is used",
+            &base,
+        );
+        helper_seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("preflight starts");
+
+        let interrupted = Instant::now();
+        send_interrupt(&child);
+        task_seen
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancelled preflight gives control to the task promptly");
+        assert!(interrupted.elapsed() < Duration::from_secs(2));
+
+        helper_release.send(()).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                2,
+                "cancelled preflight executed a late read or cancellation reached the task"
+            );
+            assert!(requests[0].0.contains("x-glasshouse-purpose: helper"));
+            let helper_body: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+            assert_eq!(helper_body["model"], "helper-tier");
+            assert!(!requests[1].0.contains("x-glasshouse-purpose: helper"));
+        }
+
+        task_release.send(()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(outcomes(&rollout), vec!["returned"]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A second Ctrl-C inside two seconds ends the session with the status a
@@ -4512,7 +4817,7 @@ fn write_helpers_pane_toml(root: &Path, model: &str) {
     fs::create_dir_all(root.join(".glasshouse")).unwrap();
     fs::write(
         root.join(".glasshouse").join("pane.toml"),
-        format!("[helpers]\nmodel = \"{model}\"\n"),
+        format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
     )
     .unwrap();
 }
@@ -4576,6 +4881,45 @@ fn preflight_does_not_fire_with_helpers_unconfigured() {
     );
 }
 
+#[test]
+fn a_configured_helper_model_does_not_enable_preflight_by_itself() {
+    let root = scratch_dir("preflight-default-off-root");
+    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::write(
+        root.join(".glasshouse/pane.toml"),
+        "[helpers]\nmodel = \"helper-tier\"\n",
+    )
+    .unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-preflight-default-off",
+        "find where the retry budget is applied",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "a helper model alone must keep helpers demand-driven"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&bodies[0]).unwrap()["model"],
+        pane::wire::MODEL
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The measured rule of `little-helpers.md`: **the verbatim request is never
 /// replaced.** A paraphrase that adds a clause becomes the criterion the
 /// model solves for, so the request is the first section and is the bytes the
@@ -4607,6 +4951,11 @@ fn preflight_serves_the_scouts_files_under_the_verbatim_request() {
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        rendered.contains("PREFLIGHT · SCOUT") && rendered.contains("haystack.rs"),
+        "the resolved Scout must survive into the task's later/final notebook frame: {rendered}"
     );
 
     let bodies = bodies.lock().unwrap();

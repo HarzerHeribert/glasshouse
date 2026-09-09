@@ -540,6 +540,9 @@ pub enum SupervisorStatus {
 /// total, and the supervisor's latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Notebook {
+    /// The pushed Scout running before the task model's first turn. This is
+    /// presentation-only and is never persisted as a model-authored cell.
+    pub preflight: Option<HelperRecord>,
     pub inbox_depth: usize,
     pub batches_delivered: u64,
     pub handlers: Vec<crate::runtime::handlers::HandlerInfo>,
@@ -1596,7 +1599,6 @@ fn notebook_lines(
         turn_header(&mut lines, "USER".into(), ACCENT);
         push_text_region(&mut lines, &message_text(task));
     }
-
     let total_cells = cell_ordinal(conversation, notebook);
 
     let mut cell = 0usize;
@@ -1943,6 +1945,14 @@ fn notebook_lines(
                 push_text_region(&mut lines, &format!("you: {}", message_text(message)));
             }
         }
+    }
+
+    // Preflight belongs to the newest submitted request, after all completed
+    // history. Keeping it at the tail also keeps it in the followed viewport
+    // during a later task in the same session.
+    if let Some(record) = notebook.preflight.as_ref() {
+        turn_header(&mut lines, "PREFLIGHT · SCOUT".into(), MUTED);
+        lines.push(helper_lane(record, tick, width));
     }
 
     if !lines.is_empty() {

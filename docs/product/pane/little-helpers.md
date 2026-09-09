@@ -10,7 +10,7 @@ a const table. The guardrails live in the runtime, so a new helper cannot
 introduce a new failure mode — it can only choose within a boundary already
 enforced.
 
-## Status — what is built, measured 2026-09-08
+## Status — what is built, updated 2026-09-10
 
 This section is the truth about the code; everything below it is the design.
 
@@ -24,13 +24,27 @@ This section is the truth about the code; everything below it is the design.
 | `validate()` at startup | **built** |
 | The lane, the `/cell` HELPERS section, and the `looked` trajectory | **built** |
 | Preflight · PostResult · CompletionGate producers | **built** |
-| A lane while a helper is still running | **built, not proven end to end** |
+| A lane while a helper is still running | **built, held-provider and real-PTY regressions** |
 
-**What is NOT done, plainly.** Preflight's gate is a four-word floor rather than
-a classification — `glasshouse classify` is the intended producer and is not
-wired. The preflight scout's `HelperRecord` is discarded, so that one helper gets
-no lane and no `/cell` row. The `## Evidence` section of the preflight block is
-not emitted. The recap has rendering but no producer. `OutputKind::Spans` is
+**Preflight is opt-in.** `[helpers] preflight = false` is the default. A
+configured helper model enables on-demand helpers and post-result reduction;
+it does not automatically scan the repository before every request. Explicit
+`preflight = true` enables the Scout with the existing four-word floor. Its
+submitted request, live lane, elapsed time and resolved result are visible;
+the record is presentation state for this request, not a synthetic `/cell` row.
+The next request clears it.
+
+**Cancellation.** Helpers share their caller's cancellation token. Ctrl-C stops
+waiting promptly and consumes that interrupt, rather than cancelling an
+unrelated later tool. The already-issued synchronous provider request may still
+finish under its 120-second timeout; it cannot start a late helper tool after
+observing cancellation. Cancellation does not guarantee the provider stops
+billing the request.
+
+**What is NOT done, plainly.** Preflight's four-word floor is not a
+classification — `glasshouse classify` is the intended producer and is not
+wired. The preflight record has no persisted `/cell` row. The `## Evidence`
+section of the preflight block is not emitted. The recap has rendering but no producer. `OutputKind::Spans` is
 still returned as text rather than a structured array. And a helper's context
 still binds `helper` and `agent`, closed by refusal rather than by absence.
 

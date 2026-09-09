@@ -1002,6 +1002,7 @@ fn resolved_helper(asked: &str, gave: &str, elapsed_ms: u64) -> HelperRecord {
         outcome: HelperOutcome {
             text: gave.to_string(),
             ok: true,
+            cancelled: false,
             elapsed_ms,
         },
         turns: 1,
@@ -1015,6 +1016,7 @@ fn running_helper(asked: &str, elapsed_ms: u64) -> HelperRecord {
         outcome: HelperOutcome {
             text: String::new(),
             ok: false,
+            cancelled: false,
             elapsed_ms,
         },
         ..resolved_helper(asked, "", 0)
@@ -1027,10 +1029,53 @@ fn failed_helper(asked: &str, reason: &str, elapsed_ms: u64) -> HelperRecord {
         outcome: HelperOutcome {
             text: reason.to_string(),
             ok: false,
+            cancelled: false,
             elapsed_ms,
         },
         ..resolved_helper(asked, "", 0)
     }
+}
+
+#[test]
+fn pushed_scout_keeps_the_submitted_request_and_live_status_visible() {
+    let task = "find where helper cancellation is handled";
+    let conversation = conversation(vec![
+        Message::text(Role::User, "an earlier task"),
+        Message::text(Role::Assistant, "Earlier work finished."),
+        Message::text(Role::User, task),
+    ]);
+    let mut scout = running_helper(task, 2_400);
+    scout.helper = "find".into();
+    scout.verb = "scanning".into();
+    let notebook = Notebook {
+        preflight: Some(scout),
+        ..Notebook::default()
+    };
+
+    let text = buffer_text(&rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        32,
+    ));
+
+    assert!(
+        text.contains(task),
+        "the submitted request disappeared:\n{text}"
+    );
+    assert!(text.contains("PREFLIGHT · SCOUT"), "{text}");
+    assert!(text.contains("find"), "{text}");
+    assert!(text.contains("scanning"), "{text}");
+    assert!(text.contains("2.4s"), "{text}");
+    assert!(
+        text.find(&format!("you: {task}")).unwrap() < text.find("PREFLIGHT · SCOUT").unwrap(),
+        "preflight was attached to old history instead of the newest request:\n{text}"
+    );
+    assert!(
+        !text.contains("Cell 1") && !text.contains("cell 1"),
+        "preflight was presented as a model-authored cell:\n{text}"
+    );
 }
 
 /// One executed cell whose view carries `helpers`, rendered at a width that
@@ -1212,6 +1257,7 @@ fn recap_record(text: &str, ok: bool) -> HelperRecord {
         outcome: HelperOutcome {
             text: text.to_string(),
             ok,
+            cancelled: false,
             elapsed_ms: 900,
         },
         turns: 1,

@@ -591,7 +591,7 @@ fn a_translated_streamed_exchange_measures_the_offsets_from_the_send() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages->openai-chat"),
             harness: Some("claude-code"),
         },
@@ -776,7 +776,7 @@ fn a_relayed_exchange_measures_the_first_byte_and_the_completion_and_neither_tok
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages"),
             harness: Some("claude-code"),
         },

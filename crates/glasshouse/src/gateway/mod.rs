@@ -16,6 +16,7 @@
 
 mod http;
 mod ingress;
+mod request_model;
 pub mod session;
 pub mod subscription_broker;
 pub mod translate;

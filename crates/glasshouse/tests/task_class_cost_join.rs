@@ -39,7 +39,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use glasshouse::routing::AssignedModel;
 use glasshouse::routing::evidence::{
     EvidenceLedger, HARNESS_TURN_PURPOSE, MIN_SAMPLE_FOR_SUMMARY, NewObservation, ObservationQuery,
     Outcome, ROUTING_LATENCY_PURPOSE,
@@ -458,7 +457,7 @@ impl LaunchedSession {
 fn launched_query() -> ObservationQuery<'static> {
     ObservationQuery {
         provider: "chat",
-        model: AssignedModel::HarnessDefault.label(),
+        model: "claude-x",
         route: Some("anthropic-messages->openai-chat"),
         harness: Some("claude-code"),
     }

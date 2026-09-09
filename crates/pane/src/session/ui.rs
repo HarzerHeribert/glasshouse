@@ -416,13 +416,26 @@ impl Editor {
 /// question left. Presentation only: this notebook is the terminal thread's
 /// own clone, and a resolved record carries its real duration already.
 fn tick_helper_clocks(notebook: &mut Notebook, since: &mut HashMap<(usize, usize), Instant>) {
+    const PREFLIGHT: (usize, usize) = (usize::MAX, 0);
     since.retain(|(cell, call), _| {
+        if (*cell, *call) == PREFLIGHT {
+            return notebook
+                .preflight
+                .as_ref()
+                .is_some_and(tui::helper_in_flight);
+        }
         notebook
             .cells
             .get(*cell)
             .and_then(|cell| cell.helpers.get(*call))
             .is_some_and(tui::helper_in_flight)
     });
+    if let Some(record) = notebook.preflight.as_mut()
+        && tui::helper_in_flight(record)
+    {
+        let started = since.entry(PREFLIGHT).or_insert_with(Instant::now);
+        record.outcome.elapsed_ms = started.elapsed().as_millis() as u64;
+    }
     for (index, cell) in notebook.cells.iter_mut().enumerate() {
         for (call, record) in cell.helpers.iter_mut().enumerate() {
             if tui::helper_in_flight(record) {
@@ -1142,6 +1155,7 @@ mod tests {
             outcome: HelperOutcome {
                 text: "3 distinct root failures".into(),
                 ok: true,
+                cancelled: false,
                 elapsed_ms: 120,
             },
             ..running.clone()

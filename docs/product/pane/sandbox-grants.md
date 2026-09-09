@@ -47,17 +47,25 @@ conflating them is the mistake this table exists to prevent.
 | `Read(<glob>)` | filesystem | read grant on the realpath closure of the glob |
 | `Write(<glob>)` | filesystem | create+write grant |
 | `Edit(<glob>)` | filesystem | read+write grant on existing files |
-| `Bash(<prefix>*)` | **argv admission** | nothing in the OS profile |
+| `Bash(<prefix>*)` | **argv admission** | exact resolved literal executables from admitted command segments on macOS/Linux |
 | `Bash` (bare) | argv admission | every command line admitted; the profile is unchanged |
 | `WebFetch(domain:…)` | network | **not registered**; see §4 |
 | `mcp__<server>__<tool>` | tool admission | that MCP tool is registered; no OS rule |
 
-**`Bash(cargo test*)` grants `cargo test` nothing.** It admits the command
-line, and the process it spawns still gets exactly the file grants the
-`Read`/`Write`/`Edit` patterns produced. A reader who takes a `Bash` allow-list
-for a capability list has inverted the model: the allow-list says which
-commands may be *attempted*, and the sandbox says what any of them may
-*touch*. Both are checked, in that order.
+**Command admission and file authority remain separate.** After the whole
+command passes deny-before-allow admission, macOS/Linux may add exact execute
+and executable-read grants for its literal command words. Resolution uses the
+project working directory and PATH; configured read denies and never-grantable
+roots still refuse the executable. Quoting, substitution and wildcard command
+words remain opaque and do not produce guessed grants. This does not admit
+unlisted commands or grant their data files, writes, network access or arbitrary
+child programs. Broad `Bash` retains its existing behavior.
+
+Homebrew framework Python may start a second executable. Its companion grant
+is limited to the canonical same-version, same-owner Python framework layout;
+no whole Homebrew or `/Applications` tree is added. Apple's `/usr/bin/python3`
+developer shim can still fail on Xcode library access. Temporary-file writers
+need a writable TMPDIR, such as a project-local `.pane/tmp`.
 
 Path patterns are resolved before matching: `~` expands, relative paths
 resolve against the project root, and every candidate is compared after

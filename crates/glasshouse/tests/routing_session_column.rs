@@ -700,7 +700,7 @@ impl LaunchedSession {
 fn launched_query() -> ObservationQuery<'static> {
     ObservationQuery {
         provider: "chat",
-        model: AssignedModel::HarnessDefault.label(),
+        model: "claude-x",
         route: Some("anthropic-messages->openai-chat"),
         harness: Some("claude-code"),
     }
@@ -854,7 +854,7 @@ fn a_relayed_exchange_records_the_session_and_neither_request_fact() {
         &ledger.ledger,
         ObservationQuery {
             provider: "fixture",
-            model: "fixture-model",
+            model: "claude-x",
             route: Some("anthropic-messages"),
             harness: Some("claude-code"),
         },

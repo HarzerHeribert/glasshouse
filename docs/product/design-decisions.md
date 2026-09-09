@@ -20272,3 +20272,49 @@ coordinates. Terminal-native text selection stays available rather than
 disabling mouse support globally. Pane's provider/model clicks select only;
 Enter applies. Bare `pane` enters its ordinary session path and top-level help
 must explain the executable instead of falling through to the old echo fixture.
+
+
+## Pane helper dogfood: completion first, reusable cells and attributable usage — 2026-09-10
+
+The person authorized iteration on the real harness, with GPT-5.6 Sol workers,
+compilation, installation and actual subscription tasks. Evaluation prioritizes
+correctness and completeness without repeated user corrections, then weighted
+cost per successful task, then elapsed time. A larger total token count can be
+economical when inexpensive helpers perform most of the work and return compact
+evidence to the task model. Raw cumulative tokens do not establish that claim;
+model, purpose and cache usage must be distinguishable. This machine's
+subscription telemetry is not a per-token invoice.
+
+A configured helper model no longer implies a Scout before every request.
+`[helpers] preflight` defaults off; explicit opt-in keeps the existing bounded
+Scout. Helpers share caller cancellation, publish their running lane before a
+network result, and preserve the submitted request during preflight. Cancellation
+returns promptly; the already-issued synchronous provider request can finish
+under its existing timeout, with a post-response guard against late tool calls.
+
+Independent source contexts may be batched in an inspection cell, then related
+edits, new tests and verification grouped once the evidence has reached the
+model. Complete context targets take priority over console output; overflow
+yields without falsely certifying an unseen target. Refreshing source replaces
+the latest visible version instead of leaving conflicting old hashes. Ordinary
+persistent async functions already provide named runners within a request;
+inspectable project scripts serve cross-request reuse. Neither reuses an old
+successful result as proof of a new run.
+
+The gateway's byte relay gains a narrow observation exception: validate request
+JSON incrementally while retaining only bounded top-level key/model literals,
+then record the requested model after the declared body was consumed. This does
+not select a route, rewrite a request, retain prompt text, or prove backend
+identity. Missing, malformed, ambiguous or over-bound observations fall back to
+the existing session-assignment label. Translation applies the same decoded
+model bound. `helper` joins the fixed client-purpose allowlist and the private
+header is stripped before upstream; ordinary task traffic remains separate.
+
+The actual larger expense-CLI repair exposed correlated requirement drift:
+“require all five columns” became “exactly five columns” in the task model's
+Checker question. The helper then endorsed that stronger requirement and the
+task wrote a matching test. A primary correction was necessary. Helper review
+and self-written tests therefore supplement the original contract and independent
+acceptance evidence; they do not replace either. Full run evidence lives in
+`docs/process/dogfooding-2026-09-10-helpers.md`; this decision closes no capability
+box and makes no claim of competitive performance from a single fixture.

@@ -510,14 +510,27 @@ pub fn send_turn_configured(
 ///
 /// The task path passes `None`: a person is watching it and can stop it. A
 /// **helper's** loop passes [`SIDE_ERRAND_TIMEOUT`], because it runs inside a
-/// native callback on another thread where nothing can interrupt it — the same
-/// reason [`send_turn_with`] carries the ceiling, and it applies verbatim here
-/// once a helper started taking turns of its own.
+/// native callback on another thread. Its caller can stop waiting, but the
+/// owned provider request still needs this ceiling before its thread ends —
+/// the same reason [`send_turn_with`] carries the ceiling.
 pub fn send_turn_bounded(
     conversation: &Conversation,
     model: &str,
     effort: Effort,
     timeout: Option<std::time::Duration>,
+) -> Result<Turn, WireError> {
+    send_turn_bounded_with(conversation, model, effort, timeout, None)
+}
+
+/// [`send_turn_bounded`] with one caller-owned routing header. Narrowed
+/// helpers use this to retain their helper identity even though they take the
+/// multi-turn agent path; ordinary task and subagent traffic passes `None`.
+pub fn send_turn_bounded_with(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    timeout: Option<std::time::Duration>,
+    extra_header: Option<(&str, &str)>,
 ) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let body = request_body_configured(conversation, model, effort);
@@ -531,6 +544,9 @@ pub fn send_turn_bounded(
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION);
     if let Some((name, value)) = credential_header() {
+        request = request.header(name, value);
+    }
+    if let Some((name, value)) = extra_header {
         request = request.header(name, value);
     }
 

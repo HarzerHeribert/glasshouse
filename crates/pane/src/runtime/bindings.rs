@@ -597,17 +597,9 @@ fn tool_callback(
     } else {
         requested_tool
     };
-    if tool.name() == "context" && state.has_pending_source_context() {
-        trace(scope).request_yield(Some(
-            "one complete source context is already queued for this turn; the second `context` call did not run"
-                .into(),
-        ));
-        scope.terminate_execution();
-        return;
-    }
     if tool.name() == "edit"
         && call_args.get("expected_sha256").is_none()
-        && let Some(hash) = state.sole_visible_source_hash(&call_args)
+        && let Some(hash) = state.visible_source_hash(&call_args)
     {
         call_args = call_args.with("expected_sha256", hash);
     }
@@ -687,6 +679,7 @@ fn tool_callback(
         .ok()
         .filter(|_| tool.name() == "context")
         .and_then(|result| serde_json::from_str::<SourceEvidence>(&result.stdout).ok());
+    let mut context_fits = true;
     if let Some(evidence) = &evidence {
         let text = traced
             .outcome
@@ -700,14 +693,22 @@ fn tool_callback(
                     .map(str::to_owned)
             })
             .unwrap_or_default();
-        state.note_source_context(evidence, text);
+        context_fits = state.note_source_context(evidence, text);
     }
     trace(scope).record(CallRecord {
         tool: tool.name().to_string(),
         args: traced.checked,
-        evidence,
+        evidence: evidence.filter(|_| context_fits),
         ended,
     });
+
+    if !context_fits {
+        trace(scope).request_yield(Some(
+            "the complete source-context batch fills this turn's feedback budget; this last context was read but not delivered—request it in the next cell".into(),
+        ));
+        scope.terminate_execution();
+        return;
+    }
 
     if traced.outcome.is_ok() && state.instruction_file_written(tool.name(), &call_args) {
         trace(scope).request_yield(Some(format!(
@@ -1382,6 +1383,14 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<Str
     // a request nor a slot, and a claimed slot is always a request made.
     state.claim_pushed_helper_call().ok()?;
 
+    let asked = asked_summary(&text);
+    let slot = state.begin_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked.clone(),
+        ..crate::helpers::HelperRecord::default()
+    });
+    let token = state.token.borrow().clone();
     let call = crate::helpers::run(
         spec,
         &model,
@@ -1389,17 +1398,15 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<Str
         &state.profile,
         &state.glasshouse,
         &state.session,
+        &token,
     );
     let ok = call.outcome.ok;
+    let cancelled = call.outcome.cancelled;
     let reduction = call.outcome.text.clone();
-    state.record_helper(crate::helpers::HelperRecord {
-        helper: spec.name.to_string(),
-        verb: spec.verb.to_string(),
-        asked: asked_summary(&text),
-        outcome: call.outcome,
-        turns: call.turns,
-        looked: call.looked,
-    });
+    state.finish_helper(slot, call);
+    if cancelled {
+        return None;
+    }
     if !ok {
         return None;
     }
@@ -2191,6 +2198,13 @@ fn helper_callback(
     }
 
     let asked = asked_summary(&input);
+    let slot = state.begin_helper(crate::helpers::HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: asked.clone(),
+        ..crate::helpers::HelperRecord::default()
+    });
+    let token = state.token.borrow().clone();
     let call = crate::helpers::run(
         spec,
         &model,
@@ -2198,20 +2212,15 @@ fn helper_callback(
         &state.profile,
         &state.glasshouse,
         &state.session,
+        &token,
     );
     let ok = call.outcome.ok;
+    let cancelled = call.outcome.cancelled;
     let answer = call.outcome.text.clone();
     // `turns` is what the call took, not what the spec allowed: a Scout that
     // burned its ceiling to serve two files is a bad call the inspector must
     // show as one.
-    state.record_helper(crate::helpers::HelperRecord {
-        helper: spec.name.to_string(),
-        verb: spec.verb.to_string(),
-        asked: asked.clone(),
-        outcome: call.outcome,
-        turns: call.turns,
-        looked: call.looked,
-    });
+    state.finish_helper(slot, call);
     // The trajectory says a helper ran and how big the question was, never
     // the payload: §9.4 explains the cell, and a build log is not an
     // explanation.
@@ -2221,12 +2230,20 @@ fn helper_callback(
         evidence: None,
         ended: if ok {
             Ended::Ok
+        } else if cancelled {
+            Ended::Threw {
+                class: "Cancelled".into(),
+            }
         } else {
             Ended::Threw {
                 class: "ToolError".into(),
             }
         },
     });
+    if cancelled {
+        throw_cancelled(scope, &format!("helper.{name}"));
+        return;
+    }
     if !ok {
         throw_tool_error(scope, &answer);
         return;

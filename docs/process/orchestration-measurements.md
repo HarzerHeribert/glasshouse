@@ -5607,3 +5607,43 @@ bounded corrections rather than a new capability batch. No capability boxes
 closed. This contributes one no-conflict observation to the concurrency
 question, not a general model-quality claim. Token/cost telemetry for these
 Codex subagents was not exposed; no spend estimate is invented.
+
+**Installed dogfood:** `f912bb9` release installed; four real subscription tasks
+passed (Claude initial and follow-up, Gemini, OpenAI Sol). Each recorded
+read/write/read and the exact expected output bytes. The visible standalone
+composer and post-task typing worked. The quick-open profile-selection gap and
+computer-control limits remain explicit in the linked dogfood report; no new
+capability closure is inferred from these trials.
+
+
+### Wave 151 — 2026-09-10: realistic Sol/Luna dogfood drives harness repairs
+
+| package | tier | result |
+|---|---|---|
+| Narrow command executable grants | Sol medium, isolated editor; primary integration | Exact admitted executable resolution, Homebrew Python companion, deny preservation; integrated profile/apply/tool tests green. No broad child executable directory grant. |
+| Helper cancellation, live lane and opt-in preflight | Sol high, isolated editor; independent Sol medium review | Shared caller cancellation, held-provider and real-PTY regressions. Reviewer rejected disappearing completed Scout; worker persisted the actual notebook record and cleared it at the next task. Re-review ACCEPT; integrated full Pane suite 890 passed, one ignored. |
+| Request model and helper purpose evidence | Sol high, isolated editor; primary and Sol medium review | Primary rejected the first scanner's malformed JSON acceptance and unrelated string retention. Revised streaming grammar, partial-body and escaped-model bounds accepted after seven focused tests and a differential malformed-input corpus. Final validation: full workspace sweep plus exact expectation corrections covers 4,237 active tests. |
+| Context batching and latest visible source version | Primary editor, isolated worktree; Sol medium review | Baseline 2 failures reproduced. Seven context tests pass, including output overflow and serialized wire visibility; independent ACCEPT. Named runner regression proves fresh output across cells and unchanged permission refusal. |
+| Actual expense CLI repair | Sol task model, Luna configured helpers, subscription route | Old installed build needed one operator correction of an invented extra-header requirement. Final 13 self-tests and 15 independent black-box cases pass. New installed rerun pending; full Pane suite 890 passed, one ignored. |
+
+**Open-question contribution:** delegation enabled three disjoint repair lanes
+while the primary investigated and tested cell batching, but did not remove the
+integration-review work. Both helper UI and gateway observation required review
+corrections before acceptance. That is evidence for the standing question about
+throughput versus moving serial review, not evidence that any tier closes boxes
+at a known price. This batch closes zero capability boxes. Subagent billing is
+not exposed, and old gateway labels cannot split the live task/helper spend.
+Correctness/completeness and operator corrections are scored before weighted
+model/cache cost; elapsed time is secondary, as the person explicitly requested.
+
+
+**Gate follow-through:** the full macOS gate exposed stale assignment-model
+queries after request-model attribution changed. A repository-wide audit of all
+23 integration files using `ObservationQuery` corrected nine additional test
+files without weakening behavior assertions. Final evidence is 4,237 active
+workspace tests through the complete sweep plus exact corrected-target reruns,
+and 890 Pane tests. The failed intermediate logs remain explicit. Windows GNU
+compile stopped on a missing upstream V8 artifact before Pane compilation; no
+new Windows proof is claimed. A broad staging command was refused by the repo
+guard; the primary then named every reviewed file explicitly, without bypassing
+the guard or requesting user approval.

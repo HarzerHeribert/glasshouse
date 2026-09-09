@@ -1380,12 +1380,28 @@ pub fn exec_grant(program: &str) -> ExecGrant {
 }
 
 pub(crate) fn resolve_program(program: &str) -> Option<PathBuf> {
-    let candidate = Path::new(program);
-    if candidate.components().count() > 1 {
-        return resolved(candidate);
+    resolve_program_from(program, &std::env::current_dir().ok()?)
+}
+
+fn resolve_program_from(program: &str, cwd: &Path) -> Option<PathBuf> {
+    let written = Path::new(program);
+    if written.components().count() > 1 {
+        let candidate = if written.is_absolute() {
+            written.to_path_buf()
+        } else {
+            cwd.join(written)
+        };
+        return resolved(&candidate);
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| resolved(&dir.join(program)))
+    std::env::split_paths(&path).find_map(|dir| {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            cwd.join(dir)
+        };
+        resolved(&dir.join(program))
+    })
 }
 
 /// The canonical path `candidate` names, if it names a runnable file.
@@ -1485,6 +1501,33 @@ fn spawn_confined(
         });
     };
     let grant = exec_grant(executable);
+    let mut descendant_binaries = if tool.argv() == Argv::ShellCommand {
+        argv.get(1)
+            .and_then(|value| value.to_str())
+            .and_then(|line| profile.admits_command(line).ok())
+            .map(|command| {
+                command
+                    .executables()
+                    .iter()
+                    .filter_map(|program| resolve_program_from(program, profile.root()))
+                    .filter(|binary| !profile.executable_is_refused(binary))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let companions = descendant_binaries
+            .iter()
+            .filter_map(|binary| crate::sandbox::macos::python_framework_companion(binary))
+            .filter(|binary| !profile.executable_is_refused(binary))
+            .collect::<Vec<_>>();
+        descendant_binaries.extend(companions);
+    }
+    descendant_binaries.sort();
+    descendant_binaries.dedup();
     // The unresolved branch is a refusal on Windows rather than a wider
     // grant, because that platform has no wider grant to fall back *to*: see
     // [`ExecGrant`]. Refused here as well as in `windows::spawn` so the
@@ -1551,9 +1594,10 @@ fn spawn_confined(
         return Err(cancelled());
     }
 
-    let (mut child, confinement) = confined_spawn(
+    let (mut child, confinement) = confined_spawn_with_descendants(
         profile,
         &grant.binary,
+        &descendant_binaries,
         tool.name(),
         command,
         Pipes {
@@ -1818,32 +1862,45 @@ pub(crate) enum SpawnRefusal {
 /// cannot spawn one. A platform with no applier that has ever executed
 /// refuses rather than spawning — spawning there "for now" would be the one
 /// unconfined path this module exists to not have.
-#[cfg(target_os = "macos")]
 pub(crate) fn confined_spawn(
     profile: &Profile,
     binary: &Path,
+    tool: &str,
+    command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    confined_spawn_with_descendants(profile, binary, &[], tool, command, pipes)
+}
+
+#[cfg(target_os = "macos")]
+fn confined_spawn_with_descendants(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
     tool: &str,
     mut command: Command,
     pipes: Pipes,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     apply_pipes(&mut command, pipes);
-    crate::sandbox::macos::confine(profile, binary, &mut command).map_err(|error| {
-        SpawnRefusal::Denied(PermissionDenied {
-            tool: tool.to_string(),
-            path: String::new(),
-            rule: format!(
-                "the seatbelt profile could not be applied, so nothing was spawned: {error}"
-            ),
-        })
-    })?;
+    crate::sandbox::macos::confine_with_descendants(profile, binary, descendants, &mut command)
+        .map_err(|error| {
+            SpawnRefusal::Denied(PermissionDenied {
+                tool: tool.to_string(),
+                path: String::new(),
+                rule: format!(
+                    "the seatbelt profile could not be applied, so nothing was spawned: {error}"
+                ),
+            })
+        })?;
     let child = command.spawn().map_err(SpawnRefusal::Failed)?;
     Ok((ConfinedChild { inner: child }, Confinement::Seatbelt))
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn confined_spawn(
+fn confined_spawn_with_descendants(
     profile: &Profile,
     binary: &Path,
+    descendants: &[PathBuf],
     tool: &str,
     mut command: Command,
     pipes: Pipes,
@@ -1856,7 +1913,12 @@ pub(crate) fn confined_spawn(
         })
     };
     apply_pipes(&mut command, pipes);
-    match crate::sandbox::linux::confine(profile, binary, &mut command) {
+    match crate::sandbox::linux::confine_with_descendants(
+        profile,
+        binary,
+        descendants,
+        &mut command,
+    ) {
         Ok(true) => {}
         // `linux::confine` returns `Ok(false)` below Landlock ABI 3 and
         // installs nothing. That is a refusal here rather than a warning.
@@ -1886,14 +1948,16 @@ pub(crate) fn confined_spawn(
 /// the container cannot load, an ACL that would not take the grant — comes
 /// back as a refusal here and nothing is started.
 #[cfg(target_os = "windows")]
-pub(crate) fn confined_spawn(
+fn confined_spawn_with_descendants(
     profile: &Profile,
     binary: &Path,
+    descendants: &[PathBuf],
     tool: &str,
     command: Command,
     pipes: Pipes,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     use crate::sandbox::windows::SpawnError;
+    let _ = descendants;
     match crate::sandbox::windows::spawn(profile, binary, &command, pipes) {
         Ok(child) => Ok((ConfinedChild { inner: child }, Confinement::AppContainer)),
         Err(refusal @ SpawnError::NotConfinable(_)) => {
@@ -1908,14 +1972,15 @@ pub(crate) fn confined_spawn(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub(crate) fn confined_spawn(
+fn confined_spawn_with_descendants(
     profile: &Profile,
     binary: &Path,
+    descendants: &[PathBuf],
     tool: &str,
     command: Command,
     pipes: Pipes,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
-    let _ = (profile, binary, command, pipes);
+    let _ = (profile, binary, descendants, command, pipes);
     Err(SpawnRefusal::Denied(PermissionDenied {
         tool: tool.to_string(),
         path: String::new(),
@@ -1939,6 +2004,27 @@ fn apply_pipes(command: &mut Command, pipes: Pipes) {
     command.stdin(stream(pipes.stdin));
     command.stdout(stream(pipes.stdout));
     command.stderr(stream(pipes.stderr));
+}
+
+#[cfg(test)]
+mod descendant_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_descendant_resolves_from_the_requested_project_cwd() {
+        let root =
+            std::env::temp_dir().join(format!("pane-descendant-resolution-{}", std::process::id()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let source = std::env::current_exe().unwrap();
+        let wanted = bin.join("python-fixture");
+        std::fs::copy(&source, &wanted).unwrap();
+
+        let resolved = resolve_program_from("./bin/python-fixture", &root)
+            .expect("the relative executable resolves from the project root");
+        assert_eq!(resolved, std::fs::canonicalize(&wanted).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// Truncates on a character boundary, marking that it did.
