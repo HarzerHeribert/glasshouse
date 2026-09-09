@@ -2480,22 +2480,6 @@ record: the session artifact *The Glasshouse Native Harness*.
 ☐ Show inbox depth, batches delivered and live handlers in the telemetry sidebar.
 ☑ Do not deliver an event as its own turn when a batch window is open, and do not make the model poll for a background result.
 
-61H — Runtime resilience across models and scripting styles
-
-Recorded from the user's decision of 2026-09-07 after the matched subscription
-benchmark. The normative implementation table is
-`docs/product/pane/improvement-register.md`; every row is a requirement, and
-external correctness precedes efficiency.
-
-☐ Keep the stable system prompt limited to durable protocol invariants and declared capabilities; do not add incident-specific model advice or benchmark folklore.
-☐ Detect every mechanically decidable syntax, schema, runtime, tool, process, filesystem and rollout failure in Pane rather than asking the model to remember it in the prompt.
-☐ Return one short, specific, correlated sentence on the next turn when a caught failure needs model judgment; never execute invalid output or silently change its meaning.
-☐ Make planned, executed, skipped, failed and cancelled operations distinguishable to both model and user.
-☐ Catch repeated no-progress failures early through runtime evidence and active observation, never through a cumulative token cap.
-☐ Supply deterministic project, platform, source and version context sufficient for representative verification without broad repository dumps.
-☐ Close every P0 row in the improvement register with independent evidence across providers and scripting styles.
-☐ Repeat the ruler across several tasks, users, models and trials; label human intervention separately and make no parity claim from an assisted result.
-
 61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
 
 ☑ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
@@ -2567,3 +2551,19 @@ other. Sized and ordered after Phase 63; not a release blocker.
 ☐ Add a subagent's reported tokens to the parent task's cumulative spend telemetry without imposing a token cap or refusing useful work because of spend.
 ☐ Show a running subagent in the session's own display and let the person stop it, so no work runs that nothing on screen accounts for.
 ☐ Do not give a subagent its own inbox, its own row in Glasshouse's session list, or the ability to start a subagent of its own.
+
+Phase 61H — Runtime resilience across models and scripting styles
+
+Recorded from the user's decision of 2026-09-07 after the matched subscription
+benchmark. The normative implementation table is
+`docs/product/pane/improvement-register.md`; every row is a requirement, and
+external correctness precedes efficiency.
+
+☐ Keep the stable system prompt limited to durable protocol invariants and declared capabilities; do not add incident-specific model advice or benchmark folklore.
+☐ Detect every mechanically decidable syntax, schema, runtime, tool, process, filesystem and rollout failure in Pane rather than asking the model to remember it in the prompt.
+☐ Return one short, specific, correlated sentence on the next turn when a caught failure needs model judgment; never execute invalid output or silently change its meaning.
+☐ Make planned, executed, skipped, failed and cancelled operations distinguishable to both model and user.
+☐ Catch repeated no-progress failures early through runtime evidence and active observation, never through a cumulative token cap.
+☐ Supply deterministic project, platform, source and version context sufficient for representative verification without broad repository dumps.
+☐ Close every P0 row in the improvement register with independent evidence across providers and scripting styles.
+☐ Repeat the ruler across several tasks, users, models and trials; label human intervention separately and make no parity claim from an assisted result.

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1348 closed · 82 active committed open (94%)** — across 17 phases.
+**1348 closed · 90 active committed open (94%)** — across 18 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -38,6 +38,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
+| Phase 61H | Runtime resilience across models and scripting styles | **8** | 0 | `2555` |
 | Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
 | Phase 62 | Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | **14** | 0 | `2487` |
 | Phase 61 | pane: the first-party harness | **15** | 20 | `2419` |
@@ -48,7 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~70 open lines are not.
+other ~78 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -176,10 +177,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-07, matched benchmark observed after Pane correction
 - Checkpoint — 2026-09-06 (10:40), waves 146–148: 1348 / 1413 (95.3%) — the inbox ruled and its Glasshouse half dispatched, 2475/2481 closed, fix-4 merged, the 2463 preview seam found by its verifier, the sixth build rule
 - Checkpoint — 2026-09-06 (08:00), wave 145: 1342 / 1413 (95.0%) — three pane merges, decision 11's path proven in the third dogfooding session, the credentials verb's sweep red fixed forward, the Fable limit near
 - Checkpoint — 2026-09-06 (03:10), wave 142 in flight: 1331 / 1413 (94.2%) — the credential strip's verifier finds the hooks, the user asks for a key-leak guard, the benchmark's meter is the ledger
-- Checkpoint — 2026-09-06 (02:35), waves 140–141: 1331 / 1413 (94.2%) — Phase 60 complete, the census and the user's rulings move the map, two dogfooding defects, the site in the user's words
 
 ## Evidence ledger files
 

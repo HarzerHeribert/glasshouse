@@ -134,12 +134,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1348 closed** · **82 active committed open** (94%)
+`█████████████████████████████████████░░░` **1348 closed** · **90 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (95 of 112 active phases complete)</summary>
+<summary>Per-phase breakdown (95 of 113 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -257,6 +257,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 | Phase 63 — pane's terminal interface | 0/5 |
 | Phase 64 — pane: subagents | 0/5 |
+| Phase 61H — Runtime resilience across models and scripting styles | 0/8 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 6/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 5/5 — deferred gate |
 
