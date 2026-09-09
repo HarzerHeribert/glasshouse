@@ -1,6 +1,8 @@
 # Fullscreen and mouse — plan
 
-Status: **plan only.** Nothing implemented. Written 2026-09-08 from five verified
+Status: **partly shipped.** Fullscreen itself landed in `be50c50` (2026-09-08) for
+both TUIs; the mouse and clickable-chrome steps were still unbuilt as of 2026-09-09,
+when a user report reopened them. Originally written 2026-09-08 from five verified
 investigations of `crates/pane/src/tui.rs`, `crates/pane/src/session/ui.rs`,
 `crates/glasshouse/src/shell/`, `crates/glasshouse/src/session/runtime.rs`, and the
 `vt100 0.16.2` and `crossterm 0.29.0` sources in the registry.
@@ -210,9 +212,23 @@ so the experiment is controlled. Cells are `delivered / report-count`.
 
 Three findings, each of which changes something.
 
-**1. `?1003h` is the mode that destroys the escape hatch, and crossterm turns it on.**
-Under `?1000h` and `?1002h` a Shift-drag and a Command-drag are **withheld from the
-application** — they never arrive. Under `?1003h` both leak through.
+**1. `?1003h` does NOT destroy the escape hatch — corrected 2026-09-09.** The original
+reading of this table was wrong, and it was the stated cost basis for deferring clickable
+chrome, so the correction matters. The `?1003h` row's **yes/1** and **yes/5** cells are
+**bare motion reports carrying no button**: that is any-motion tracking reporting pointer
+movement, not the Shift-drag or Command-drag gesture leaking through to the application.
+Read correctly, the table says the same thing in every row — **every capture mode costs
+unmodified drag-select, and no capture mode costs Shift-drag or Command-drag.**
+
+*Bounded:* `scripts/probes/mouse-probe.py:259` stores only `sgr[:6]`, so this is proven
+for the head of each sample rather than the whole stream, and an all-motion head is not by
+itself decisive under `?1003h` — `click` and `drag_plain` also open with motion. It is
+enough to retire the claim, not enough to certify `?1003h` for shipping.
+
+**The rule below does not change; its reason does.** We still write `?1000h ?1006h` by
+hand rather than calling crossterm's bundle — but because it is the smallest mode that
+delivers what we actually consume, so we pay less event volume and less fragmentation.
+Not because it buys back text selection. It does not; nothing does.
 
 **Confirmed by eye, same day.** "Not delivered" was equally consistent with the terminal
 *keeping* the gesture for selection and with it *swallowing* the gesture entirely, so the
@@ -227,7 +243,8 @@ operator checked on screen. Results, in cmux:
 | wheel, capture | delivered | terminal no longer scrolls | the app took it |
 
 **Shift-drag and Command-drag survive mouse capture and still select text.** That is the
-fact the whole cost argument rested on, and it holds: enabling `?1000h ?1006h` costs plain
+fact the whole cost argument rested on, and it holds — and per finding 1 above it holds in
+*every* capture mode, not only the narrow pair: enabling `?1000h ?1006h` costs plain
 drag-select and nothing else.
 
 Two caveats to carry, neither of them blocking:
