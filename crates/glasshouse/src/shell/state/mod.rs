@@ -451,13 +451,33 @@ pub(crate) fn short_session_id(id: &SessionId) -> String {
 /// and draw than it is worth to a user who only ever looks at the tail of it.
 pub const ACTIVITY_ROWS: usize = 8;
 
-/// The one thing a fullscreen session puts on screen that is not the harness.
+/// The chord every hint in the shell advertises for leaving session mode.
 ///
-/// [`Chrome::None`] draws no band that could carry `ctrl-] back`, so the note
-/// carries it instead, once, over the harness's own top row — a note rather
-/// than a reserved row, because a reserved row is the mode we already have.
-/// It is an ordinary status note, so the next keystroke clears it.
-pub(super) const FULLSCREEN_HINT: &str = "fullscreen · ctrl-] back to glasshouse";
+/// **`ctrl-5`, not `ctrl-]`, and they are the same byte.** A terminal sends
+/// `0x1D` for both, and `overview::is_session_escape` accepts either — but on
+/// a German Mac layout `]` is Right-Option-6, so `ctrl-]` is a chord the user
+/// cannot type. Advertising the one that works on every Latin layout is the
+/// whole point of naming it in one place: the hints and the handler are
+/// checked against each other by
+/// `state_tests::the_advertised_escape_chord_is_one_the_handler_accepts`, so
+/// they cannot drift. `F12` escapes too and is named where there is room.
+pub(super) const ESCAPE_CHORD: &str = "ctrl-5";
+
+/// The key event [`ESCAPE_CHORD`] names, spelled the way a terminal delivers
+/// it. The other half of the link that test asserts.
+#[cfg(test)]
+pub(super) fn escape_chord_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)
+}
+
+/// The note a fullscreen session shows on entry, beside the badge that stays.
+///
+/// [`Chrome::None`] draws no band, so `view::chrome::render_fullscreen_hint`
+/// paints a persistent badge over the harness's top row; this note explains
+/// what just happened once, and is cleared by the next keystroke like any
+/// other. The badge is what survives, because a one-shot note is exactly the
+/// defect that left a user unable to find the way out.
+pub(super) const FULLSCREEN_HINT: &str = "fullscreen · ctrl-5 back to glasshouse";
 
 /// One line for the activity view, naming exactly what happened.
 ///
@@ -837,6 +857,27 @@ impl ShellState {
     /// Present the previous session, wrapping at the start.
     pub fn previous_session(&mut self) -> Action {
         self.step(-1)
+    }
+
+    /// Present the session with this identifier, if the list holds it.
+    ///
+    /// The invariant: a caller that just created a session may point the
+    /// cursor at it by identity, never by index. [`Self::refresh`] reconciles
+    /// the cursor onto whatever was presented before it ran and orders
+    /// sessions by activity, so "the one I just started" is neither the old
+    /// selection nor a fixed position. Returns whether the identifier was
+    /// found — a caller whose `refresh` failed cannot assume it is there, and
+    /// silently moving the cursor to 0 would present someone else's session.
+    ///
+    /// Presenting is not entering: this never touches [`Self::mode`].
+    pub fn select_session(&mut self, id: &SessionId) -> bool {
+        match self.sessions.iter().position(|record| &record.id == id) {
+            Some(index) => {
+                self.selected = index;
+                true
+            }
+            None => false,
+        }
     }
 
     fn step(&mut self, delta: isize) -> Action {

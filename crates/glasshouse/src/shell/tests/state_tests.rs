@@ -581,9 +581,90 @@ fn encode_translates_the_documented_keys_to_their_bytes() {
     );
 }
 
+/// Every key a harness can bind must arrive as the bytes an ordinary terminal
+/// sends, so `encode` has a case for each of them.
+///
+/// Measured through the shipped binary into a byte-printing harness before
+/// this list existed: `F1`, `F5`, `F12`, `Home`, `End`, `PageUp`, `PageDown`,
+/// `Delete`, `Insert` and `BackTab` all arrived as nothing at all, which is
+/// why Claude Code's `shift+tab` permission cycler could never be reached from
+/// inside Glasshouse. The list is exhaustive rather than a sample because a
+/// key missing from `encode` is silently dropped, not refused.
 #[test]
-fn encode_has_nothing_to_send_for_an_unmapped_key() {
-    assert_eq!(encode(press(KeyCode::F(1))), None);
+fn encode_sends_the_terminal_sequences_for_the_keys_a_harness_binds() {
+    for (code, expected) in [
+        (KeyCode::Home, "\x1b[H"),
+        (KeyCode::End, "\x1b[F"),
+        (KeyCode::PageUp, "\x1b[5~"),
+        (KeyCode::PageDown, "\x1b[6~"),
+        (KeyCode::Delete, "\x1b[3~"),
+        (KeyCode::Insert, "\x1b[2~"),
+        // Shift-Tab. Claude Code 2.1.265 binds it to `meta+m`, its
+        // permission-mode cycler, and it is the single key whose loss the user
+        // reported first.
+        (KeyCode::BackTab, "\x1b[Z"),
+        (KeyCode::F(1), "\x1bOP"),
+        (KeyCode::F(2), "\x1bOQ"),
+        (KeyCode::F(3), "\x1bOR"),
+        (KeyCode::F(4), "\x1bOS"),
+        (KeyCode::F(5), "\x1b[15~"),
+        (KeyCode::F(6), "\x1b[17~"),
+        (KeyCode::F(7), "\x1b[18~"),
+        (KeyCode::F(8), "\x1b[19~"),
+        (KeyCode::F(9), "\x1b[20~"),
+        (KeyCode::F(10), "\x1b[21~"),
+        (KeyCode::F(11), "\x1b[23~"),
+    ] {
+        assert_eq!(
+            encode(press(code)),
+            Some(expected.as_bytes().to_vec()),
+            "{code:?} must reach the harness as {expected:?}"
+        );
+    }
+}
+
+/// The C0 control bytes that have no letter to derive them from.
+///
+/// Crossterm's Unix parser names `0x1C..=0x1F` after the characters `'4'..='7'`
+/// arithmetically, so without a case of their own each one reached the harness
+/// as that literal digit — `Ctrl-\`, a shell's quit, arrived as `4`. Both
+/// spellings of each byte are accepted: the digit a parser derived, and the
+/// character a keyboard actually types.
+#[test]
+fn encode_sends_the_c0_aliases_as_their_control_bytes() {
+    for (c, expected) in [
+        (' ', 0x00),
+        ('4', 0x1c),
+        ('\\', 0x1c),
+        ('6', 0x1e),
+        ('7', 0x1f),
+        ('_', 0x1f),
+    ] {
+        assert_eq!(
+            encode(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)),
+            Some(vec![expected]),
+            "Ctrl-{c:?} is the byte {expected:#04x}"
+        );
+    }
+    // Without CONTROL every one of them is the character itself.
+    assert_eq!(encode(press(KeyCode::Char(' '))), Some(b" ".to_vec()));
+    assert_eq!(encode(press(KeyCode::Char('4'))), Some(b"4".to_vec()));
+}
+
+/// The expectation here inverted: this test used to assert that `F(1)` encodes
+/// to `None`, which pinned the defect the test above now covers — a function
+/// key was measured arriving at a real harness as nothing. What is genuinely
+/// unencodable is a key no terminal sends bytes for at all.
+#[test]
+fn encode_has_nothing_to_send_for_a_key_no_terminal_encodes() {
+    assert_eq!(encode(press(KeyCode::Null)), None);
+    assert_eq!(encode(press(KeyCode::CapsLock)), None);
+    // `F12` is the escape chord, never a key to forward. `handle_session_key`
+    // intercepts it before `encode` is reached; `encode` refuses it as well so
+    // the two can never disagree about who owns it.
+    assert_eq!(encode(press(KeyCode::F(12))), None);
+    // Nothing above `F12` has an agreed encoding.
+    assert_eq!(encode(press(KeyCode::F(13))), None);
 }
 
 /// A real, long-lived child process for [`entering_and_leaving_session_mode_never_touches_a_real_process`].
@@ -607,6 +688,38 @@ fn spawn_long_lived() -> std::process::Child {
 #[cfg(test)]
 mod escape_chord_tests {
     use super::*;
+
+    /// **The link between what the shell says and what the shell does.**
+    ///
+    /// Asserted as a link, not as a literal: the hint strings are built from
+    /// [`ESCAPE_CHORD`] and this feeds [`escape_chord_key`] — the key event
+    /// that spelling stands for — to the real handler. Change the advertised
+    /// chord to one `is_session_escape` does not accept and this fails, which
+    /// is the failure mode that matters. A user who followed the chord on
+    /// screen and stayed stuck is the whole reason it is checked at all.
+    #[test]
+    fn the_advertised_escape_chord_is_one_the_handler_accepts() {
+        assert!(
+            is_session_escape(&escape_chord_key()),
+            "the shell advertises `{ESCAPE_CHORD}`, so the handler must accept it"
+        );
+        assert!(
+            FULLSCREEN_HINT.contains(ESCAPE_CHORD),
+            "the fullscreen note must name the chord that works: `{FULLSCREEN_HINT}`"
+        );
+
+        // And it must actually leave session mode, through the same public
+        // door a keystroke arrives at.
+        let mut state = state_with(1);
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+        state.handle_key(escape_chord_key());
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "the advertised chord must be the chord that works"
+        );
+    }
 
     /// Both spellings of the escape chord must work, because a terminal sends
     /// the byte `0x1D` and the two platforms' parsers name it differently.
@@ -637,6 +750,67 @@ mod escape_chord_tests {
             KeyCode::Char(decoded),
             KeyModifiers::CONTROL
         )));
+    }
+
+    /// `F12` escapes with any modifiers, or none.
+    ///
+    /// Every other spelling of the chord is the single byte `0x1D`, which a
+    /// keyboard that cannot type `]` unmodified cannot produce: on the German
+    /// Mac layout the user runs, `]` is `Right-Option-6`. `F12` is
+    /// layout-independent and no embedded harness binds it, so it is accepted
+    /// whatever modifiers arrive with it.
+    #[test]
+    fn f12_escapes_session_mode_with_or_without_modifiers() {
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            assert!(
+                is_session_escape(&KeyEvent::new(KeyCode::F(12), modifiers)),
+                "F12 with {modifiers:?} must escape session mode"
+            );
+        }
+    }
+
+    /// Only `F12`. Its neighbours are keys a harness binds, and they are
+    /// forwarded as their own escape sequences instead — the reason the new
+    /// spelling is one key rather than a range.
+    #[test]
+    fn the_other_function_keys_are_not_an_escape() {
+        for n in [1u8, 5, 11] {
+            let key = KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE);
+            assert!(!is_session_escape(&key), "F{n} must not escape");
+            assert!(encode(key).is_some(), "F{n} must reach the harness instead");
+        }
+    }
+
+    /// The escape is intercepted, never forwarded: `handle_session_key` tests
+    /// it before `encode` sees the key, so neither spelling of `0x1D` can be
+    /// typed into a harness and neither can be encoded as a character.
+    #[test]
+    fn the_escape_chords_leave_session_mode_instead_of_being_forwarded() {
+        for key in [
+            KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE),
+        ] {
+            let mut state = state_with(1);
+            assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+            assert_eq!(state.mode(), Mode::Session, "setup: must be in a session");
+
+            assert_eq!(
+                state.handle_key(key),
+                Action::Redraw,
+                "{key:?} must be intercepted, not forwarded"
+            );
+            assert_eq!(
+                state.mode(),
+                Mode::Control,
+                "{key:?} must return to control mode"
+            );
+        }
     }
 
     /// Without CONTROL these are ordinary characters a harness must receive.
@@ -2723,6 +2897,62 @@ mod overview_tests {
             let status = state.status().unwrap_or_default().to_owned();
             assert!(status.contains("hidden"), "got {status:?}");
             assert!(status.contains("headless"), "got {status:?}");
+        }
+    }
+
+    /// A session whose process is gone must not be entered.
+    ///
+    /// The footer advertises Enter as "enter session" whatever state the
+    /// presented session is in, so before this refusal existed pressing it
+    /// after a harness exited handed the keyboard to a dead process: every
+    /// keystroke went nowhere, with nothing on screen saying why. Each
+    /// not-live lifecycle is checked, because `is_live` is what decides and a
+    /// new variant defaults to neither answer.
+    #[test]
+    fn a_session_whose_process_is_gone_cannot_be_entered() {
+        for lifecycle in [
+            SessionLifecycle::Stopped,
+            SessionLifecycle::Failed,
+            SessionLifecycle::Closed,
+        ] {
+            let mut state =
+                ShellState::new("p", "/p", "0.1.0", vec![record("finished", lifecycle)]);
+
+            for key in [press(KeyCode::Enter), press(KeyCode::Char('i'))] {
+                assert_eq!(state.handle_key(key), Action::Redraw);
+                assert_eq!(
+                    state.mode(),
+                    Mode::Control,
+                    "a {lifecycle} session must never take the keyboard"
+                );
+                let status = state.status().unwrap_or_default().to_owned();
+                assert!(
+                    status.contains("finished") && status.contains(&lifecycle.to_string()),
+                    "the refusal must name the session and its state; got {status:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the same decision: a live embedded session is still
+    /// entered on the same key, so the refusal above cannot be satisfied by
+    /// refusing everything.
+    #[test]
+    fn a_live_session_is_still_entered() {
+        for lifecycle in [
+            SessionLifecycle::Starting,
+            SessionLifecycle::Running,
+            SessionLifecycle::Idle,
+            SessionLifecycle::WaitingForUser,
+        ] {
+            let mut state = ShellState::new("p", "/p", "0.1.0", vec![record("alive", lifecycle)]);
+
+            assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+            assert_eq!(
+                state.mode(),
+                Mode::Session,
+                "a {lifecycle} session must still take the keyboard"
+            );
         }
     }
 

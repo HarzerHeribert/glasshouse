@@ -17,9 +17,13 @@
 mod start;
 use start::start_session;
 mod appearance;
+mod hotspot;
+mod liveness;
 mod settings_open;
 pub mod state;
 pub mod view;
+
+use hotspot::Hotspot;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -87,6 +91,9 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     // meaningless once the session ends, and a shell that dies mid-session has
     // nothing to capture anyway.
     let mut index_snapshots: HashMap<SessionId, session::native_id::IndexSnapshot> = HashMap::new();
+    // A session the runtime put back on its own is reported nowhere else —
+    // see [`liveness::RestartWatch`].
+    let mut restart_watch = liveness::RestartWatch::new();
 
     // Acquired after the database work above, so a failure there leaves the
     // user's terminal untouched rather than flashing an alternate screen.
@@ -107,14 +114,29 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         std::sync::mpsc::channel::<anyhow::Result<SettingsRows>>();
     let mut settings_pending: Option<settings_open::Placement> = None;
 
-    screen.draw(|frame| view::render(&state, frame))?;
+    // What the last frame drew, and where. Cleared and refilled by every
+    // draw, so a click is answered against the frame in front of the user —
+    // see [`hotspot`], whose whole invariant this holds.
+    let mut hotspots: Vec<Hotspot> = Vec::new();
+    // Key presses a click has been rewritten into, waiting to be answered
+    // exactly as if they had been typed.
+    let mut pending: std::collections::VecDeque<crossterm::event::KeyEvent> =
+        std::collections::VecDeque::new();
+    draw(&mut screen, &state, &mut hotspots)?;
 
     // Every `return` below leaves through this, so the last few events reach
     // the database rather than dying with the writer thread.
     let _flush = FlushOnLeaving(event_log);
 
     loop {
-        match events.next()? {
+        // A queued press outranks the terminal: a click on a session tab is
+        // the `Tab` presses a user would have made, and they must land before
+        // the next real event can reorder the sessions underneath them.
+        let event = match pending.pop_front() {
+            Some(key) => Event::Key(key),
+            None => events.next()?,
+        };
+        match event {
             Event::Key(key) => {
                 let mode_before = state.mode();
                 let action = state.handle_key(key);
@@ -145,17 +167,33 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 view::terminal_size_for(&screen, &state),
                                 &mut index_snapshots,
                             ) {
-                                Ok(()) => {
+                                Ok(id) => {
                                     if let Ok(records) = sessions.store().list() {
                                         state.refresh(records);
                                     }
+                                    // `n` selects what it started. `refresh`
+                                    // reconciles onto the session that was
+                                    // presented *before* the key, so without
+                                    // this the new session is nowhere on
+                                    // screen and the natural reaction — a
+                                    // second `n` — silently spawns a second
+                                    // harness that neither the viewport nor
+                                    // the keyboard is attached to.
+                                    // Deliberately not entering it: starting
+                                    // and focusing stay separate keys.
+                                    let named = state::short_session_id(&id);
+                                    state.select_session(&id);
                                     if presentation == SessionPresentation::Headless {
                                         // No viewport, so `N` would look like a
                                         // no-op — `render_viewport`'s placeholder
                                         // says so on every frame.
-                                        state.set_status(
-                                            "started a headless session — `o` lists it",
-                                        );
+                                        state.set_status(format!(
+                                            "started headless session `{named}` — `o` lists it"
+                                        ));
+                                    } else {
+                                        state.set_status(format!(
+                                            "started session `{named}` — Enter to type in it"
+                                        ));
                                     }
                                 }
                                 // Refusing to guess is right; sending the user away to answer is not.
@@ -432,13 +470,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 let outer = screen.size().unwrap_or_default();
                 sync_focus(&mut live, &state, outer, state.mode() != mode_before);
                 if !matches!(action, Action::None) {
-                    screen.draw(|frame| view::render(&state, frame))?;
+                    draw(&mut screen, &state, &mut hotspots)?;
                 }
             }
             Event::Resize(cols, rows) => {
                 screen.on_resize(cols, rows)?;
                 sync_focus(&mut live, &state, TerminalSize::new(rows, cols), true);
-                screen.draw(|frame| view::render(&state, frame))?;
+                draw(&mut screen, &state, &mut hotspots)?;
             }
             Event::Tick => {
                 // A signal is the only thing besides a key that ends the
@@ -453,6 +491,11 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 live.answer_terminal_queries();
 
                 let mut redraw = state.advance_artwork();
+                // Read BEFORE the poll: `poll_exits` moves focus off a
+                // session it finds ended, so asking afterwards names the
+                // successor it chose rather than the session the user was
+                // actually typing into.
+                let attached_before = live.focused().cloned();
                 let exits = live.poll_exits();
                 let any_exited = !exits.is_empty();
                 for (id, status) in exits {
@@ -473,18 +516,31 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     if let Err(err) = sessions.store().set_lifecycle(&id, lifecycle) {
                         tracing::warn!(session = %id, %err, "could not record a session's exit");
                     }
-                    // Session mode with the just-exited session presented has
-                    // nowhere left to send keystrokes.
-                    if state.active_session().is_some_and(|record| record.id == id)
-                        && state.session_exited() == Action::Redraw
-                    {
+                    // Session mode with the just-exited session behind the
+                    // keyboard has nowhere left to send keystrokes — and the
+                    // keyboard is the focused session, not the cursor.
+                    if liveness::note_exit(&mut state, attached_before.as_ref(), &id) {
                         redraw = true;
                     }
+                }
+                // A session the runtime put back on its own reaches no
+                // consumer through `exits` — by design, see `poll_exits`.
+                for id in restart_watch.observe(&live) {
+                    state.set_status(format!(
+                        "session `{}` stopped unexpectedly and was restarted",
+                        state::short_session_id(&id)
+                    ));
+                    redraw = true;
                 }
                 // Phase 11 line 688: disposition only turns `Resumable` here,
                 // on exit — without this, `r` on a session that just exited
                 // would still read "still running".
                 if any_exited && state.refresh(sessions.store().list()?) == Action::Redraw {
+                    redraw = true;
+                }
+                // The net under all of that: no reported exit is needed for
+                // session mode to have nothing behind it.
+                if liveness::heal_orphaned_session_mode(&mut state, &live) {
                     redraw = true;
                 }
 
@@ -522,24 +578,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     redraw = true;
                 }
 
-                // Headless is skipped here too, though `render_viewport`
-                // already refuses to draw one — see design-decisions.md,
-                // "Trims: `shell/mod.rs`" for the mutation that proved this
-                // load-bearing anyway. The runtime's presentation is the
-                // authority, not the stored record.
-                let grid = state
-                    .active_session()
-                    .and_then(|record| live.get(&record.id))
-                    .filter(|session| session.presentation() != SessionPresentation::Headless)
-                    .map(|session| session.with_screen(build_viewport_grid))
-                    .unwrap_or_default();
+                // Headlessness, and what a dead session may still show,
+                // both decided in one place — see [`liveness::viewport_grid`]
+                // for the void a blank frozen grid drew after `/exit`, and
+                // for the older headless reasoning that moved with it.
+                let grid = liveness::viewport_grid(&state, &live);
                 if grid != *state.viewport_grid() {
                     state.set_viewport_grid(grid);
                     redraw = true;
                 }
 
                 if redraw {
-                    screen.draw(|frame| view::render(&state, frame))?;
+                    draw(&mut screen, &state, &mut hotspots)?;
                 }
             }
             Event::Shutdown => return Ok(()),
@@ -553,12 +603,37 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     &mut settings_pending,
                 );
                 if state.refresh(sessions.store().list()?) == Action::Redraw || probed || settled {
-                    screen.draw(|frame| view::render(&state, frame))?;
+                    draw(&mut screen, &state, &mut hotspots)?;
                 }
             }
-            Event::Paste(_) | Event::Mouse(_) => {}
+            // A click is a second door to a key, never a parallel path: the
+            // pill under the pointer is rewritten into the presses it
+            // advertises and they go through `handle_key` like any other.
+            // Press, not release, and only the left button — everything else
+            // a `?1000h` terminal reports is discarded here.
+            Event::Mouse(mouse) => {
+                if matches!(
+                    mouse.kind,
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                ) && let Some(spot) = hotspot::hit(&hotspots, mouse.column, mouse.row)
+                {
+                    pending.extend(spot.keys().iter().copied());
+                }
+            }
+            Event::Paste(_) => {}
         }
     }
+}
+
+/// Draw one frame and keep what it painted.
+///
+/// The one place `view` is entered in production, so no frame can reach the
+/// terminal without its hotspots being recorded — which is what makes the hit
+/// test an answer about the frame the user is looking at rather than a
+/// re-derivation of its geometry.
+fn draw(screen: &mut Screen, state: &ShellState, hotspots: &mut Vec<Hotspot>) -> Result<()> {
+    hotspots.clear();
+    screen.draw(|frame| view::render_recording(state, frame, hotspots))
 }
 
 /// Send this shell's lifecycle events to the project's durable log as well.

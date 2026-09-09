@@ -132,8 +132,16 @@ fn the_worked_turn_renders_byte_for_byte() {
     assert_eq!(prompt::render_result(&result), cell_1_result);
 }
 
-/// The constant against §2's text, embedded here so the two can never drift
-/// without this test noticing.
+/// The constant against §2's preamble block, embedded here so the two can
+/// never drift without this test noticing.
+///
+/// The contract is the four-space-indented block that opens `You are Pane,`,
+/// not the whole of §2: the section also carries unindented prose *about* the
+/// preamble (Phase 61H's migration note is one), and 61H's first rule is that
+/// the shipped prompt must not gain explanatory material. So the region is
+/// anchored on that line and ended at the last indented line, and every line
+/// between the two must itself be indented or empty — commentary inside the
+/// block fails here rather than being silently dropped from the comparison.
 #[test]
 fn the_preamble_is_the_contracts_verbatim() {
     let contract = include_str!("../../../docs/product/pane/model-contract.md");
@@ -144,9 +152,28 @@ fn the_preamble_is_the_contracts_verbatim() {
         .split("## 3.")
         .next()
         .unwrap();
-    let expected = section
-        .trim_matches('\n')
-        .lines()
+
+    let lines: Vec<&str> = section.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("    You are Pane,"))
+        .expect("§2 must hold an indented preamble opening `    You are Pane,`");
+    let end = lines
+        .iter()
+        .rposition(|line| line.starts_with("    "))
+        .expect("§2's preamble must hold at least one indented line")
+        + 1;
+    let block = &lines[start..end];
+    for line in block {
+        assert!(
+            line.is_empty() || line.starts_with("    "),
+            "§2's preamble block holds an unindented line, which the preamble \
+             constant cannot carry: {line:?}"
+        );
+    }
+
+    let expected = block
+        .iter()
         .map(|line| line.strip_prefix("    ").unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n");

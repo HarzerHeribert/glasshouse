@@ -269,6 +269,34 @@ impl Panel {
         }
     }
 }
+/// The pill vocabulary, the twin of Glasshouse's `shell::hotspot`.
+///
+/// **A resting affordance, not only a selected one.** Every surface in either
+/// product already drew *selection*; none drew "this is a thing you can
+/// press", so an unselected row and a line of prose were the same pixels.
+/// A pill is `[`, a one-cell marker, the label, a pad and `]`: the marker slot
+/// is why the width never changes as the cursor moves, and brackets rather
+/// than half blocks because both half blocks are East Asian *Ambiguous* and a
+/// CJK terminal may draw them two cells wide.
+///
+/// Design: `docs/product/tui-actionables.md`.
+const CAP_LEFT: &str = "[";
+const CAP_RIGHT: &str = "]";
+const MARK_FOCUSED: &str = "▸";
+const MARK_RESTING: &str = " ";
+
+/// One actionable drawn as a button: focused fills with the accent, resting
+/// fills with the dock so it still reads as pressable.
+fn pill(label: &str, focused: bool, theme: super::Theme) -> (String, Style) {
+    let marker = if focused { MARK_FOCUSED } else { MARK_RESTING };
+    let style = if focused {
+        Style::default().bg(theme.accent()).fg(Color::Black)
+    } else {
+        Style::default().bg(theme.dock()).fg(theme.accent())
+    };
+    (format!("{CAP_LEFT}{marker}{label} {CAP_RIGHT}"), style)
+}
+
 pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: super::Theme) {
     let block = if panel.search.is_some() {
         Block::default()
@@ -333,28 +361,32 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: 
         .skip(start)
         .take(usize::from(inner.height))
         .map(|(i, row)| {
-            let text = format!(
-                "{} {}",
-                if i == panel.selected { "›" } else { " " },
-                row.text
-            );
-            Line::styled(
-                super::abbreviate(&text, inner.width as usize),
-                Style::default().fg(
-                    if let Some(theme) = row
-                        .command
-                        .as_deref()
-                        .and_then(|command| command.strip_prefix("/theme "))
-                        .and_then(super::Theme::parse)
-                    {
-                        theme.accent()
-                    } else if i == panel.selected {
+            let focused = i == panel.selected;
+            // A row that carries a command is a button; a group heading, a
+            // "no models match" note and a locked entry are prose, and
+            // drawing prose as a button is exactly the confusion the pill
+            // exists to remove. The theme rows keep their own swatch colour,
+            // which is the one place the label is the value.
+            let Some(command) = row.command.as_deref() else {
+                let text = format!("{} {}", if focused { "›" } else { " " }, row.text);
+                return Line::styled(
+                    super::abbreviate(&text, inner.width as usize),
+                    Style::default().fg(if focused {
                         theme.accent()
                     } else {
                         Color::White
-                    },
-                ),
-            )
+                    }),
+                );
+            };
+            let (text, mut style) = pill(&row.text, focused, theme);
+            if let Some(swatch) = command
+                .strip_prefix("/theme ")
+                .and_then(super::Theme::parse)
+                && !focused
+            {
+                style = style.fg(swatch.accent());
+            }
+            Line::styled(super::abbreviate(&text, inner.width as usize), style)
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
@@ -528,6 +560,77 @@ mod tests {
         assert_eq!(
             panel.rows[panel.selected].command.as_deref(),
             Some("/model gemini/exact")
+        );
+    }
+
+    /// **The finding this vocabulary exists for: a resting actionable still
+    /// looks pressable.**
+    ///
+    /// Before this, an unselected panel row and a line of prose were the same
+    /// pixels — selection was drawn, "you can press this" was not. Asserted on
+    /// the background, because that is the affordance: a row that carries a
+    /// command is filled with `dock` when resting and `accent` when focused,
+    /// and a heading is filled with neither.
+    ///
+    /// Rows are located by the text they drew rather than by arithmetic on
+    /// `inner`: a models panel opens with its provider carousel and search
+    /// lines above the list, so counting from the top asserts about the wrong
+    /// row and passes for the wrong reason.
+    #[test]
+    fn an_actionable_row_looks_pressable_even_when_it_is_not_selected() {
+        let theme = super::super::Theme::Neon;
+        let panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "google".into(),
+                account: "gemini-sub".into(),
+                scope: "declared".into(),
+                models: vec!["gemini/one".into(), "gemini/two".into()],
+                selectable: Some(true),
+                unavailable_reason: None,
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| render_panel(frame, frame.area(), &panel, theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<String> = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+
+        // The background of the first non-blank cell of the row that drew
+        // `needle` — the pill's own left cap when there is one.
+        let fill = |needle: &str| -> Color {
+            let y = lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` was not drawn:\n{}", lines.join("\n")));
+            let x = lines[y]
+                .chars()
+                .position(|c| c != ' ')
+                .expect("a drawn row has a first character");
+            buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())].bg
+        };
+
+        assert_eq!(
+            panel.selected, 1,
+            "the fixture opens on the first model, so row 2 is the resting one"
+        );
+        assert_eq!(
+            fill("gemini/one"),
+            theme.accent(),
+            "the focused button is filled with the accent"
+        );
+        assert_eq!(
+            fill("gemini/two"),
+            theme.dock(),
+            "and an unselected button is still filled — this is the whole point"
+        );
+        assert_eq!(
+            fill("gemini-sub · declared"),
+            Color::Reset,
+            "a heading is prose and must not be filled"
         );
     }
 

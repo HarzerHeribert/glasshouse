@@ -15,6 +15,10 @@ use chrome::{
     render_title,
 };
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::hotspot::{self, Hotspot, Pill};
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -31,14 +35,30 @@ use crate::session::{
 };
 
 use super::state::{
-    Chrome, KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind, ProviderRow,
-    SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid, format_usd,
+    Chrome, ESCAPE_CHORD, KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind,
+    ProviderRow, SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid,
+    format_usd,
 };
 
 /// Control mode's fixed vertical chrome: title, root, session bar, viewport,
 /// footer, in that order. The one place this split is computed, so
 /// [`viewport_slot`] can hand the run loop the same rectangle [`render`]
 /// hands [`render_viewport`] without the two ever drifting apart.
+///
+/// The footer's height comes from [`hotspot::control_band_rows`] and is a
+/// function of the terminal's shape alone. It is not one row any more: the
+/// old single-row footer clipped a 168-column hint at 80 columns and drew
+/// eight of its fifteen actions nowhere at all, with no ellipsis to say so.
+/// The bar wraps instead, and the rows it needs are reserved here so the
+/// harness's pseudo-terminal is told the truth about the space it has.
+///
+/// The band is the bar **plus the status note's own row**, which is reserved
+/// whether or not a note is showing. Both halves of that matter: the note on
+/// its own full-width row is what lets [`render_footer`] give the bar the
+/// width this reservation was measured at — measuring at one width and
+/// painting at another is what dropped seven actions again — and reserving
+/// it unconditionally is what keeps this height independent of the shell's
+/// state, so a note cannot resize a live harness.
 fn regions(area: Rect) -> [Rect; 5] {
     Layout::default()
         .direction(Direction::Vertical)
@@ -47,7 +67,7 @@ fn regions(area: Rect) -> [Rect; 5] {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(1),
+            Constraint::Length(hotspot::control_band_rows(area)),
         ])
         .areas(area)
 }
@@ -108,33 +128,54 @@ pub fn terminal_size_for(screen: &crate::tui::Screen, state: &ShellState) -> Ter
     viewport_terminal_size(screen.size().unwrap_or_default(), state.chrome())
 }
 
-/// Draw the shell.
+/// Draw the shell, discarding what was clickable.
+///
+/// The signature every caller that only wants pixels keeps — the tests below
+/// and the integration tests that drive a `TestBackend`. Production draws
+/// through [`render_recording`] instead, because a click can only be answered
+/// against the frame it landed on.
 pub fn render(state: &ShellState, frame: &mut Frame) {
+    render_recording(state, frame, &mut Vec::new());
+}
+
+/// Draw the shell and record every pill it painted.
+///
+/// The invariant [`super::hotspot`] rests on: a hotspot is pushed by the same
+/// call that drew the pill, from the rectangle it drew into, so the run loop's
+/// hit test is answering about the frame in front of the user rather than a
+/// re-derivation of it.
+pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut Vec<Hotspot>) {
     let area = frame.area();
     match state.chrome() {
         Chrome::Full => {
             let [title_area, root_area, bar_area, viewport_area, footer_area] = regions(area);
             render_title(state, frame, title_area);
             render_root(state, frame, root_area);
-            render_session_bar(state, frame, bar_area);
+            render_session_bar(state, frame, bar_area, sink);
             render_viewport(state, frame, viewport_area);
-            render_footer(state, frame, footer_area);
+            render_footer(state, frame, footer_area, sink);
         }
         Chrome::Header => {
             let [header_area, viewport_area] = session_regions(area);
-            render_header(state, frame, header_area);
+            render_header(state, frame, header_area, sink);
             render_viewport(state, frame, viewport_area);
         }
         // Frame-free: the viewport is the whole terminal, and the only mark
-        // Glasshouse leaves is the transient note naming the way out.
+        // Glasshouse leaves is the badge naming the way out.
         Chrome::None => {
             render_viewport(state, frame, area);
             render_fullscreen_hint(state, frame, area);
         }
     }
 
+    // An overlay owns the keyboard, so it owns the mouse: whatever the bands
+    // underneath recorded is dropped rather than left clickable through a
+    // popup drawn over it.
+    if state.overlay().is_some() {
+        sink.clear();
+    }
     match state.overlay() {
-        Some(Overlay::HarnessChoice) => render_harness_choice(state, frame, area),
+        Some(Overlay::HarnessChoice) => render_harness_choice(state, frame, area, sink),
         Some(Overlay::Overview) => render_overview(state, frame, area),
         Some(Overlay::Settings) => render_settings(state, frame, area),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
@@ -145,6 +186,24 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::RouteDecisions) => render_route_decisions(state, frame, area),
         Some(Overlay::ProjectMemory) => render_project_memory(state, frame, area),
         None => {}
+    }
+
+    // **Session mode does not steal the mouse.** [`render_header`] still
+    // draws the tab strip while a session has the keyboard, and a click on a
+    // tab was answered by queueing `Tab` into the run loop's pending keys —
+    // which `ShellState::handle_key` in [`Mode::Session`] `encode`s and
+    // writes to the harness's stdin. Measured: a left-press inside the second
+    // tab left the focus marker exactly where it was and delivered `0x09` to
+    // the session, firing the embedded harness's own tab completion. A click
+    // that types into the harness is worse than a click that does nothing.
+    //
+    // Cleared here, beside the overlay's clear and after every band and
+    // overlay has drawn, because this is the one place production enters
+    // `view`: one door covers every surface that records a pill, including
+    // any added later. The recorded set stays exactly the frame's clickable
+    // surface, which is what the run loop's hit test answers from.
+    if state.mode() != Mode::Control {
+        sink.clear();
     }
 }
 
@@ -258,7 +317,12 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
 /// Deliberately small and centred rather than a full overlay: it is one
 /// question with a short answer, and the fleet behind it stays visible so it
 /// is obvious nothing has started yet.
-fn render_harness_choice(state: &ShellState, frame: &mut Frame, area: Rect) {
+fn render_harness_choice(
+    state: &ShellState,
+    frame: &mut Frame,
+    area: Rect,
+    sink: &mut Vec<Hotspot>,
+) {
     let Some(choice) = state.harness_choice() else {
         return;
     };
@@ -284,32 +348,30 @@ fn render_harness_choice(state: &ShellState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let mut lines: Vec<Line> = Vec::new();
+    // One pill per row, and clicking one is the arrows-then-Enter a user
+    // would have typed — see `hotspot::walk_to`. The rows are laid out one
+    // per line rather than through `render_bar`'s wrapping walk, because a
+    // picker is a column and a footer is a row.
     for (index, id) in choice.options.iter().enumerate() {
-        let selected = index == choice.cursor;
-        let style = if selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(state.theme().accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(state.theme().secondary())
-        };
-        lines.push(Line::from(Span::styled(
-            format!(
-                " {} {} ",
-                if selected { "▸" } else { " " },
-                id.display_name()
-            ),
-            style,
-        )));
+        let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
+        if row.y >= inner.bottom() {
+            break;
+        }
+        let mut keys = hotspot::walk_to(choice.cursor, index, KeyCode::Up, KeyCode::Down);
+        keys.push(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let pill = Pill::run("", id.display_name(), keys).focused(index == choice.cursor);
+        hotspot::render_bar(frame, row, std::slice::from_ref(&pill), state.theme(), sink);
     }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "up/down pick   enter start   esc cancel",
-        Style::default().fg(state.theme().quiet()),
-    )));
-    frame.render_widget(Paragraph::new(lines), inner);
+    let hint_row = inner.y + choice.options.len() as u16 + 1;
+    if hint_row < inner.bottom() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "up/down pick   enter start   esc cancel",
+                Style::default().fg(state.theme().quiet()),
+            )),
+            Rect::new(inner.x, hint_row, inner.width, 1),
+        );
+    }
 }
 
 fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {

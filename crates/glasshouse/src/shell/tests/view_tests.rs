@@ -1,7 +1,10 @@
 use super::*;
+use crate::integrations::IntegrationId;
 use crate::session::{
     SessionId, SessionLifecycle, SessionPresentation, SessionRecord, SessionRole,
 };
+use crate::shell::hotspot::Hotspot;
+use crate::shell::state::Action;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -50,15 +53,84 @@ fn first_row(state: &ShellState, width: u16, height: u16) -> String {
         .to_owned()
 }
 
-/// The bottom row of a rendered frame, trimmed.
-fn last_row(state: &ShellState, width: u16, height: u16) -> String {
+/// The whole footer band, every row of it.
+///
+/// [`last_row`] is not the footer any more: the action bar wraps, so the
+/// bottom row alone is its tail. Read through [`regions`] rather than by
+/// counting from the bottom, so the band this asserts on is the band the
+/// renderer was given.
+fn footer(state: &ShellState, width: u16, height: u16) -> String {
+    let band = regions(Rect::new(0, 0, width, height))[4];
     rendered(state, width, height)
         .lines()
-        .last()
+        .skip(usize::from(band.y))
+        .take(usize::from(band.height))
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The tab strip's band, which is `regions`' third — read through `regions`
+/// for the same reason [`footer`] is, so the row asserted on is the row the
+/// renderer was handed.
+fn strip(state: &ShellState, width: u16, height: u16) -> String {
+    let band = regions(Rect::new(0, 0, width, height))[2];
+    rendered(state, width, height)
+        .lines()
+        .nth(usize::from(band.y))
         .expect("a frame has rows")
         .trim_end()
         .to_owned()
 }
+
+/// Five sessions: a tab pill is 28 columns, so two of them fit an
+/// eighty-column strip and three cannot be on it.
+fn five_sessions() -> ShellState {
+    ShellState::new(
+        "p",
+        "/p",
+        "0.1.0",
+        (1..=5)
+            .map(|n| {
+                record(
+                    &format!("session-{n}"),
+                    "claude-code",
+                    SessionLifecycle::Running,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The fifteen actions control mode advertises, each as the text its pill
+/// paints. One list, so "on screen" and "clickable" are asserted about the
+/// same set rather than about two lists that can drift.
+const CONTROL_ACTIONS: [&str; 15] = [
+    "tab session",
+    "enter session",
+    "f fullscreen",
+    "n new",
+    "N headless",
+    "o overview",
+    "q quit",
+    "s settings",
+    "M memory",
+    "p project",
+    "k knowledge",
+    "e events",
+    "r routes",
+    "h health",
+    "d decisions",
+];
+
+/// The three notes measured mid-sentence at eighty columns, verbatim from the
+/// production code that sets them: `shell::liveness`, `state::overview` and
+/// the run loop's launch arm.
+const MEASURED_NOTES: [&str; 3] = [
+    "session `c0d538f1877a` exited — back in control mode",
+    "cannot enter session `73b335015a80`: it is stopped, not running",
+    "started session `cd3f5d6c7bc2` — Enter to type in it",
+];
 
 fn sample() -> ShellState {
     ShellState::new(
@@ -363,12 +435,12 @@ fn an_embedded_sessions_screen_does_reach_the_viewport() {
 fn the_footer_names_the_overview_and_headless_keys() {
     let mut state = sample();
     assert!(
-        last_row(&state, 120, 10).contains("N headless"),
+        footer(&state, 120, 10).contains("N headless"),
         "control mode must offer the headless key"
     );
 
     state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-    let row = last_row(&state, 120, 10);
+    let row = footer(&state, 120, 10);
     assert!(row.contains("m send text"), "got {row:?}");
     assert!(row.contains("c interrupt"), "got {row:?}");
 }
@@ -500,13 +572,13 @@ fn the_status_bar_always_shows_the_key_bindings() {
     // it to exactly 154, so this was 156; `f fullscreen` adds fourteen
     // more again, taking it to exactly 168 — measured against the row, not
     // guessed.
-    let bottom = last_row(&state, 170, 24);
+    let bottom = footer(&state, 170, 24);
     assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
     assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
     assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
     state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-    let bottom = last_row(&state, 170, 24);
+    let bottom = footer(&state, 170, 24);
     assert!(
         bottom.contains("esc") && bottom.contains("quit"),
         "the overlay's bindings must be shown too: `{bottom}`"
@@ -514,14 +586,19 @@ fn the_status_bar_always_shows_the_key_bindings() {
 }
 
 /// Feedback and the primary navigation keys both fit a normal terminal.
+///
+/// Beside each other once, under each other now: the note has a full-width
+/// row at the foot of the band and the bar has every column above it. The
+/// assertion is unchanged and the reason it holds is stronger — the note
+/// cannot displace a binding because it is not on the same row as one.
 #[test]
 fn the_status_bar_shows_a_note_next_to_the_bindings() {
     let mut state = ShellState::new("p", "/p", "0.1.0", vec![lone_session()]);
     state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let bottom = last_row(&state, 80, 24);
+    let bottom = footer(&state, 80, 24);
     assert!(
-        bottom.contains("only one session"),
-        "the note must reach the status bar: `{bottom}`"
+        bottom.contains("this project has only one session"),
+        "the note must reach the status bar, whole: `{bottom}`"
     );
     assert!(
         bottom.contains("tab"),
@@ -529,19 +606,576 @@ fn the_status_bar_shows_a_note_next_to_the_bindings() {
     );
 }
 
-/// On a narrow terminal the bindings win: they are needed permanently, the
-/// note only once. This holds because the bindings are written first and
-/// the row clips on the right — swap the order and this fails.
+/// On a short terminal the bindings win: they are needed permanently, the
+/// note only once.
+///
+/// The rule that decides it moved from the width to the height, because the
+/// note moved from beside the bindings to under them. A band with a single
+/// row is all `hotspot::control_band_rows`' quarter-of-the-screen clamp
+/// allows below eight rows, and `split_band` spends that row on the bar. The
+/// old form of this test asserted the same thing about a thirty-column
+/// terminal, where the note is now merely clipped by the width — which would
+/// have kept passing while proving nothing.
 #[test]
 fn a_note_is_dropped_rather_than_crowding_out_the_bindings() {
     let mut state = ShellState::new("p", "/p", "0.1.0", vec![lone_session()]);
     state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let bottom = last_row(&state, 30, 12);
+    let band = regions(Rect::new(0, 0, 80, 6))[4];
+    assert_eq!(band.height, 1, "a six-row terminal affords one footer row");
+    let bottom = footer(&state, 80, 6);
     assert!(
         !bottom.contains("only one session"),
-        "there was no room for the note: `{bottom}`"
+        "there was no row for the note: `{bottom}`"
     );
     assert!(bottom.contains("tab"), "bindings must survive: `{bottom}`");
+}
+
+// -----------------------------------------------------------------
+// Buttons: what is drawn, and what clicking it does.
+// -----------------------------------------------------------------
+
+/// Render one frame and hand back both the text and what was clickable.
+fn recorded(state: &ShellState, width: u16, height: u16) -> (String, Vec<Hotspot>) {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut sink = Vec::new();
+    terminal
+        .draw(|frame| render_recording(state, frame, &mut sink))
+        .expect("draw must not panic");
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (text, sink)
+}
+
+/// The pill whose painted cells contain `needle`.
+///
+/// Found by reading the frame rather than by index, so the assertion is about
+/// the button the user can see rather than about the table behind it.
+fn pill_at(state: &ShellState, width: u16, height: u16, needle: &str) -> Hotspot {
+    let (text, spots) = recorded(state, width, height);
+    let rows: Vec<&str> = text.lines().collect();
+    for spot in &spots {
+        let rect = spot.rect();
+        let painted: String = rows[usize::from(rect.y)]
+            .chars()
+            .skip(usize::from(rect.x))
+            .take(usize::from(rect.width))
+            .collect();
+        if painted.contains(needle) {
+            return spot.clone();
+        }
+    }
+    panic!("no pill containing {needle:?} was drawn:\n{text}");
+}
+
+/// The `Action` `state` answers a run of keys with — the last one's, which is
+/// the one the run loop acts on. Takes the state by value because a
+/// `ShellState` is deliberately not `Clone`: each caller builds its own.
+fn action_of(mut state: ShellState, keys: &[KeyEvent]) -> Action {
+    let mut action = Action::None;
+    for key in keys {
+        action = state.handle_key(*key);
+    }
+    action
+}
+
+/// `sample()` with the harness picker open on two options, cursor on the
+/// first — the overlay this file clicks a row inside.
+fn picking() -> ShellState {
+    let mut state = sample();
+    state.open_harness_choice(
+        vec![IntegrationId::ClaudeCode, IntegrationId::Codex],
+        SessionPresentation::Embedded,
+    );
+    state
+}
+
+/// **The regression the 168-column footer caused, and the one that came back
+/// through the note.**
+///
+/// Fifteen actions were listed in one `Paragraph` with no `.wrap()`, so at 80
+/// columns the row stopped after `q quit` and eight of them — settings,
+/// memory, project, knowledge, events, routes, health, decisions — were drawn
+/// nowhere at all, with no ellipsis and nothing to say they existed. Every one
+/// of them is asserted by name, at the width a normal terminal actually is.
+///
+/// **With a note showing as well, which is the state it silently failed in.**
+/// The wrapped bar's rows were reserved from the terminal's full width and
+/// then painted into a `keys_area` up to half of it, so a note put the bar
+/// back over its rows: measured at 80x24 after `n`, eight actions were drawn
+/// and `M memory`, `p project`, `k knowledge`, `e events`, `r routes`,
+/// `h health` and `d decisions` were on no screen again. A note now has a row
+/// of its own and the bar always has the whole width.
+#[test]
+fn every_control_mode_action_is_on_screen_at_eighty_columns() {
+    for note in [None, Some(MEASURED_NOTES[2])] {
+        let mut state = sample();
+        if let Some(note) = note {
+            state.set_status(note);
+        }
+        let band = footer(&state, 80, 24);
+        for action in CONTROL_ACTIONS {
+            assert!(
+                band.contains(action),
+                "`{action}` must be drawn at 80 columns with note {note:?}:\n{band}"
+            );
+        }
+    }
+}
+
+/// The other half of the same defect: an action that is drawn but recorded no
+/// hotspot is a pill the user can read and cannot press.
+///
+/// `hotspot::render_bar` returned before *both* painting a pill and pushing
+/// its hotspot, so the seven actions the note pushed off the band were
+/// invisible and unclickable together. Asserted both ways round: every action
+/// has a hotspot over the cells that spell it — [`pill_at`] reads the frame,
+/// so a hotspot somewhere else does not count — and the footer band records
+/// exactly as many hotspots as there are actions, so none is recorded twice
+/// or left over from a pill that is no longer there.
+#[test]
+fn every_control_mode_action_is_clickable_at_eighty_columns() {
+    for note in [None, Some(MEASURED_NOTES[0])] {
+        let mut state = sample();
+        if let Some(note) = note {
+            state.set_status(note);
+        }
+        for action in CONTROL_ACTIONS {
+            let spot = pill_at(&state, 80, 24, action);
+            assert!(
+                !spot.keys().is_empty(),
+                "`{action}` is drawn as a button, so pressing it must do something"
+            );
+        }
+
+        let band = regions(Rect::new(0, 0, 80, 24))[4];
+        let (text, spots) = recorded(&state, 80, 24);
+        let in_band = spots
+            .iter()
+            .filter(|spot| spot.rect().y >= band.y && spot.rect().y < band.bottom())
+            .count();
+        assert_eq!(
+            in_band,
+            CONTROL_ACTIONS.len(),
+            "the footer band must record one hotspot per action with note {note:?}:\n{text}"
+        );
+    }
+}
+
+/// **A note is readable to its last word**, which is the word it exists for.
+///
+/// The note was clamped to `area.width / 2` — forty columns at eighty — and
+/// every one of these was cut exactly where its answer began: `exited — back
+/// i`, `: i`, `— Enter`. Being returned to control mode with no explanation
+/// is the same complaint as not being returned at all.
+#[test]
+fn a_status_note_is_readable_to_its_last_word_at_eighty_columns() {
+    for note in MEASURED_NOTES {
+        let mut state = sample();
+        state.set_status(note);
+        let band = footer(&state, 80, 24);
+        assert!(
+            band.contains(note),
+            "the note must be drawn whole at 80 columns:\n{band}"
+        );
+    }
+}
+
+/// The property that makes the two tests above hold by construction: the note
+/// has a row of its own, so it takes nothing from the bar. The pill rows are
+/// byte-identical with and without one, and the band is the same height —
+/// which is also what stops a note resizing the harness's pseudo-terminal.
+///
+/// **The note's row is the band's first, not its last.** The pills own the
+/// band's foot in every state, because the band's foot is the terminal's last
+/// row and a row nothing paints is a row the terminal is never told about —
+/// see [`the_footer_bands_last_row_is_painted_in_every_state`], which is the
+/// regression, and `hotspot::split_band`, which is where the flip lives.
+#[test]
+fn a_note_costs_the_action_bar_no_column_and_the_harness_no_row() {
+    let plain = footer(&sample(), 80, 24);
+    let mut noted = sample();
+    noted.set_status(MEASURED_NOTES[1]);
+    let with_note = footer(&noted, 80, 24);
+
+    // The reserved band is one row taller than the pills need, in both
+    // states — that spare row is the note's, and reserving it whether or not
+    // a note is showing is what keeps `viewport_slot` a function of the
+    // terminal rather than of the last keystroke.
+    let band_rows: Vec<&str> = plain.lines().collect();
+    assert_eq!(
+        regions(Rect::new(0, 0, 80, 24))[4].height,
+        u16::try_from(band_rows.len()).expect("small"),
+        "the band is the pills' rows plus the note's:\n{plain}"
+    );
+    assert_eq!(
+        band_rows.first().copied(),
+        Some(""),
+        "the spare row is the band's first, and holds nothing when there is \
+         no note:\n{plain}"
+    );
+
+    let noted_rows: Vec<&str> = with_note.lines().collect();
+    assert_eq!(
+        noted_rows[1..],
+        band_rows[1..],
+        "the pills must be drawn identically:\n{plain}\n---\n{with_note}"
+    );
+    assert_eq!(
+        noted_rows.first().copied(),
+        Some(format!("  {}", MEASURED_NOTES[1]).as_str()),
+        "and the note takes the row above them"
+    );
+}
+
+/// **The terminal's last row is painted in every state the footer has**, which
+/// is what makes a resize visible at all.
+///
+/// The band became the bar's rows plus the note's, and the note's row was the
+/// band's last — so with no note showing, which is the ordinary state, nothing
+/// wrote the bottom row of the terminal. ratatui's diff emits nothing for a
+/// row of default-styled spaces, so that row is not merely blank: it is a row
+/// the terminal is never addressed at.
+/// `terminal_loss::a_resize_still_arrives_on_a_terminal_that_has_been_silent`
+/// reads exactly that — measured, a terminal resized to 100x50 was redrawn
+/// with its pills on rows 47–49 and `\x1b[50;` never sent — and calls it,
+/// correctly, an interface drawing itself at a size its terminal no longer is.
+///
+/// Held here as well as there because this is the cheap half: no pty, no
+/// child, and it names the state that broke it. Every state of the footer is
+/// swept, because the defect was invisible in exactly the one nobody had put
+/// a note in.
+#[test]
+fn the_footer_bands_last_row_is_painted_in_every_state() {
+    for (width, height) in [(100u16, 50u16), (80, 24), (120, 30)] {
+        for note in [None, Some(MEASURED_NOTES[1])] {
+            for overlay in [false, true] {
+                let mut state = sample();
+                if overlay {
+                    state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                }
+                if let Some(note) = note {
+                    state.set_status(note);
+                }
+                let text = rendered(&state, width, height);
+                let last = text.lines().last().expect("a frame has rows").to_owned();
+                assert!(
+                    !last.trim().is_empty(),
+                    "nothing painted the last row of a {width}x{height} terminal with note \
+                     {note:?} and overlay {overlay}, so the terminal is never told the \
+                     interface reaches it:\n{text}"
+                );
+                assert_eq!(
+                    u16::try_from(text.lines().count()).expect("small"),
+                    height,
+                    "the frame is the terminal's own height"
+                );
+            }
+        }
+    }
+}
+
+/// **The key that closes the Settings overlay is on the screen at the widths a
+/// terminal actually is.**
+///
+/// The hint was one unwrapped 97-column line: at 80 columns it stopped inside
+/// `r setup` and ` esc close` was drawn nowhere — and `esc` is the only key
+/// that closes this overlay, so the single way out was the thing the clip
+/// hid. Below 70 columns `w save` went with it, which leaves a user who has
+/// edited settings unable to discover either the way to keep them or the way
+/// out. Asserted on the whole frame rather than on the band, because what
+/// matters is that the user can read it.
+#[test]
+fn the_settings_overlay_shows_the_keys_that_save_and_close_it() {
+    let mut state = sample();
+    state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for width in [40u16, 60, 70, 80, 100] {
+        let text = rendered(&state, width, 24);
+        for key in ["esc close", "w save", "tab section"] {
+            assert!(
+                text.contains(key),
+                "`{key}` must be readable at {width} columns:\n{text}"
+            );
+        }
+    }
+}
+
+/// The note an overlay's own keys set is readable while that overlay is still
+/// open, and costs nothing the hint needed.
+///
+/// `w` inside Settings answers with `saved to user configuration` and leaves
+/// the overlay up, so that note is a settings save's only acknowledgement.
+/// The band's first row is under the popup — measured at 80x24, the `Clear`
+/// covers the band's first two rows — which is why the note moves to the
+/// band's foot for exactly this state, and why the hint moves up a row
+/// instead of losing one.
+#[test]
+fn a_note_set_from_inside_an_overlay_is_not_drawn_under_it() {
+    let mut state = sample();
+    state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    state.set_status("saved to user configuration");
+    let text = rendered(&state, 80, 24);
+    assert!(
+        text.contains("saved to user configuration"),
+        "the note must be readable with the overlay it was set from still \
+         open:\n{text}"
+    );
+    assert!(
+        text.contains("esc close"),
+        "and it must not cost the hint the row carrying the way out:\n{text}"
+    );
+}
+
+/// **Session mode does not steal the mouse.**
+///
+/// The header draws the tab strip while a session has the keyboard, and its
+/// pills were recorded as hotspots there. A click on one queued `Tab` into
+/// the run loop's pending keys, which `handle_key` in `Mode::Session`
+/// `encode`s and writes to the harness: measured, a left-press inside the
+/// second tab left the focus marker where it was and delivered `0x09` to the
+/// session, firing the embedded harness's own tab completion.
+///
+/// Asserted at the level it is implemented — `render_recording` records
+/// nothing for a frame the session owns — so the strip stays drawn and
+/// nothing on it is clickable.
+#[test]
+fn session_mode_records_no_hotspot() {
+    let mut state = sample();
+    let (_, control) = recorded(&state, 100, 24);
+    assert!(!control.is_empty(), "control mode has pills to click");
+
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(state.mode(), Mode::Session);
+    let (text, spots) = recorded(&state, 100, 24);
+    assert!(
+        text.contains("claude-code"),
+        "the tab strip is still drawn in session mode:\n{text}"
+    );
+    assert!(
+        spots.is_empty(),
+        "nothing on a session-mode frame may be clickable, or a click types \
+         into the harness:\n{text}"
+    );
+}
+
+/// **The strip pans to the selected tab, and says what it is hiding.**
+///
+/// A tab pill is 28 columns and the strip is one row, so at eighty columns
+/// two of five sessions are on it. Rewritten onto the wrapping bar, the strip
+/// laid out from index 0 every time and wrapped the rest onto a row that does
+/// not exist: the cursor moved to the third session, the viewport switched to
+/// it, and the strip still showed the first two with the focus marker on
+/// neither and nothing marking the overflow.
+#[test]
+fn the_tab_strip_pans_to_keep_the_selected_session_on_screen() {
+    let mut state = five_sessions();
+    let row = strip(&state, 80, 24);
+    assert!(
+        row.contains("1 claude-code"),
+        "the strip starts at the first tab: `{row}`"
+    );
+    assert!(
+        row.contains('›'),
+        "the three tabs past the edge must be marked: `{row}`"
+    );
+
+    // `▸` is the focus marker, so this asserts the strip shows the tab the
+    // viewport switched to — not merely that its number is somewhere.
+    state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(state.selected_index(), 1);
+    let row = strip(&state, 80, 24);
+    assert!(
+        row.contains("▸ 2 claude-code"),
+        "the selected tab must be on screen: `{row}`"
+    );
+
+    for _ in 0..3 {
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    assert_eq!(state.selected_index(), 4);
+    let row = strip(&state, 80, 24);
+    assert!(
+        row.contains("▸ 5 claude-code"),
+        "the strip must pan to the last tab: `{row}`"
+    );
+    assert!(
+        row.contains('‹'),
+        "and say the tabs it panned past are still there: `{row}`"
+    );
+}
+
+/// A panned tab is still the keyboard path: clicking the one the strip
+/// scrolled to must be the `Tab` presses that reach it, not the presses that
+/// would reach whatever used to be drawn in those cells.
+#[test]
+fn clicking_a_panned_tab_reaches_the_session_it_names() {
+    let mut state = five_sessions();
+    for _ in 0..4 {
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    assert_eq!(state.selected_index(), 4);
+
+    let fourth = pill_at(&state, 80, 24, "4 claude-code");
+    assert_eq!(
+        fourth.keys(),
+        [KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)],
+        "the tab before the selected one is one BackTab away"
+    );
+    for key in fourth.keys() {
+        state.handle_key(*key);
+    }
+    assert_eq!(
+        state.selected_index(),
+        3,
+        "clicking it must present the session it names"
+    );
+}
+
+/// Arming fullscreen from control mode changes nothing a control-mode user
+/// can see — `ShellState::chrome` keeps every band, deliberately — so the
+/// flag was previously readable only from a status note the next keystroke
+/// erased. The footer states it, both ways.
+#[test]
+fn the_footer_states_whether_fullscreen_is_armed() {
+    let mut state = sample();
+    assert!(
+        footer(&state, 100, 24).contains("f fullscreen: off"),
+        "fullscreen starts disarmed and must say so:\n{}",
+        footer(&state, 100, 24)
+    );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    assert!(state.fullscreen());
+    assert!(
+        footer(&state, 100, 24).contains("f fullscreen: on"),
+        "arming it must be visible without entering a session:\n{}",
+        footer(&state, 100, 24)
+    );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    assert!(
+        footer(&state, 100, 24).contains("f fullscreen: off"),
+        "and disarming it too"
+    );
+}
+
+/// **A click does exactly what the key does, because it *is* the key.**
+///
+/// Three pills in three different surfaces — the footer bar, the session tab
+/// strip, and a row inside an overlay — each clicked at the middle of the
+/// rectangle it was drawn into. The assertion is not "something happened": it
+/// is that the `Action` matches the one the advertised keyboard path produces
+/// on an identical state.
+#[test]
+fn clicking_a_pill_produces_the_action_its_key_produces() {
+    // --- the footer bar --------------------------------------------------
+    let settings = pill_at(&sample(), 100, 24, "s settings");
+    assert_eq!(
+        action_of(sample(), settings.keys()),
+        action_of(
+            sample(),
+            &[KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)]
+        ),
+        "clicking `s settings` must be pressing `s`"
+    );
+    assert_eq!(
+        action_of(sample(), settings.keys()),
+        Action::OpenSettings,
+        "and that is what `s` does"
+    );
+
+    // --- the session tab strip -------------------------------------------
+    // `sample()` has two sessions and starts on the first; clicking the
+    // second is `Tab`, and it must land on the second session.
+    let second = pill_at(&sample(), 100, 24, "2 codex");
+    assert_eq!(
+        second.keys(),
+        [KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)],
+        "the strip's second tab is one Tab away"
+    );
+    let mut clicked = sample();
+    for key in second.keys() {
+        clicked.handle_key(*key);
+    }
+    assert_eq!(
+        clicked.selected_index(),
+        1,
+        "clicking the second tab must present the second session"
+    );
+
+    // --- a row inside an overlay -----------------------------------------
+    let row = pill_at(&picking(), 100, 24, "Codex");
+    let by_keyboard = [
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ];
+    assert_eq!(row.keys(), by_keyboard, "the row is down-then-enter");
+    assert_eq!(
+        action_of(picking(), row.keys()),
+        action_of(picking(), &by_keyboard),
+        "and clicking it starts the harness the cursor would have started"
+    );
+    assert!(
+        matches!(
+            action_of(picking(), row.keys()),
+            Action::StartSessionWith { .. }
+        ),
+        "which is a start, not a redraw"
+    );
+}
+
+/// The bound check, which is the whole of `hotspot::hit`.
+///
+/// A click on the project root band, on the wordmark, and on the viewport
+/// must all do nothing — the alternative, answering with whichever pill is
+/// nearest, turns unrelated parts of the screen into buttons.
+#[test]
+fn a_click_outside_every_pill_does_nothing() {
+    let state = sample();
+    let (_, spots) = recorded(&state, 100, 24);
+    assert!(!spots.is_empty(), "there are pills to miss");
+
+    for (column, row) in [(0u16, 0u16), (60, 1), (50, 10), (99, 23), (99, 0)] {
+        assert!(
+            super::super::hotspot::hit(&spots, column, row).is_none(),
+            "({column},{row}) is not on a pill, so it must not act"
+        );
+    }
+}
+
+/// Every recorded rectangle is one row tall, inside the frame, and does not
+/// overlap its neighbours — the properties `hit` returning the *first* match
+/// is only correct under.
+#[test]
+fn recorded_pills_never_overlap_and_never_leave_the_frame() {
+    let state = sample();
+    for (width, height) in [(40u16, 12u16), (80, 24), (100, 24), (200, 40)] {
+        let (_, spots) = recorded(&state, width, height);
+        for spot in &spots {
+            let rect = spot.rect();
+            assert_eq!(rect.height, 1, "a pill is one row: {rect:?}");
+            assert!(
+                rect.right() <= width && rect.bottom() <= height,
+                "{rect:?} left the {width}x{height} frame"
+            );
+        }
+        for (i, a) in spots.iter().enumerate() {
+            for b in spots.iter().skip(i + 1) {
+                let (a, b) = (a.rect(), b.rect());
+                assert!(
+                    a.y != b.y || a.right() <= b.x || b.right() <= a.x,
+                    "{a:?} and {b:?} overlap at {width}x{height}"
+                );
+            }
+        }
+    }
 }
 
 /// "Keep the visual design text-first and avoid decorative graph
@@ -800,14 +1434,22 @@ fn session_mode_collapses_the_chrome_to_a_single_header() {
 /// harness is told about the rows the chrome stopped taking. Nothing else
 /// in the shell may compute that size — `shell::viewport_terminal_size`
 /// funnels through here — so this is where it is pinned.
+///
+/// Not "three more rows" any more, and the number is derived rather than
+/// written down: the collapse hands back the title, the root band, the tab
+/// strip *and* however many rows the wrapped action bar took, which is a
+/// function of the terminal's width. Writing a literal here would pin the
+/// bar's shape rather than the collapse's promise.
 #[test]
-fn session_mode_hands_the_viewport_three_more_rows() {
+fn session_mode_hands_the_viewport_the_bands_control_mode_reserved() {
     let area = Rect::new(0, 0, 100, 24);
     let control = viewport_slot(area, Chrome::Full);
     let session = viewport_slot(area, Chrome::Header);
+    let bands = 3 + super::super::hotspot::control_band_rows(area);
+    assert!(bands >= 4, "control mode has at least four rows of chrome");
     assert_eq!(
         session.height,
-        control.height + 3,
+        control.height + bands - 1,
         "control {control:?} against session {session:?}"
     );
     assert_eq!(
@@ -897,7 +1539,7 @@ fn a_user_who_enters_fullscreen_can_leave_it() {
 
     let entered = first_row(&state, 100, 24);
     assert!(
-        entered.contains("ctrl-]"),
+        entered.contains(ESCAPE_CHORD),
         "entering a frame-free screen must name the way out: `{entered}`"
     );
 
@@ -923,30 +1565,45 @@ fn a_user_who_enters_fullscreen_can_leave_it() {
     );
 }
 
-/// The note is transient, which is what keeps it a note rather than chrome.
+/// **The badge is not a note, and this test's expectation inverted.**
 ///
-/// It survives exactly as long as any other status note — until the next
-/// keystroke — and what is underneath it is the harness's own row, not a
-/// reserved one.
+/// It used to assert the opposite — that the way out disappeared at the first
+/// keystroke, because it was an ordinary status note and `handle_key` clears
+/// those. That is the defect. A user entered fullscreen, typed, and the only
+/// chord left on screen was the embedded harness's own `ctrl+j for newline`,
+/// which they read as the way out; `fullscreen-mode.md:376-379` had accepted
+/// exactly this wart and the user's report is the evidence it was not
+/// acceptable. The badge is painted from the chrome now, not from the status,
+/// so it survives every keystroke — and it still reserves no row: what is
+/// under it is the harness's own text, repainted next frame.
 #[test]
-fn the_way_out_note_goes_at_the_first_keystroke() {
+fn the_way_out_survives_every_keystroke_in_fullscreen() {
     let mut state = sample();
     state.set_viewport_grid(grid_from_lines(&[
-        "harness first row that is long enough to reach under the note",
+        "harness first row that is long enough to reach under the badge",
     ]));
     state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
     state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(first_row(&state, 100, 24).contains("ctrl-]"));
+    assert_eq!(state.chrome(), Chrome::None);
+    assert!(first_row(&state, 100, 24).contains(ESCAPE_CHORD));
 
-    state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    for key in ['x', 'y', 'z', 'q'] {
+        state.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+    }
     let typed = first_row(&state, 100, 24);
     assert!(
-        !typed.contains("ctrl-]"),
-        "a keystroke clears the note like any other: `{typed}`"
+        typed.contains(ESCAPE_CHORD),
+        "the way out must still be on screen after typing: `{typed}`"
     );
     assert!(
-        typed.starts_with("harness first row that is long enough to reach under the note"),
-        "and the harness's own row is what was underneath: `{typed}`"
+        typed.starts_with("harness first row that is long enough"),
+        "and the harness's own row is what is underneath it: `{typed}`"
+    );
+
+    // No row was taken to say it: fullscreen is still the whole terminal.
+    assert_eq!(
+        viewport_slot(Rect::new(0, 0, 100, 24), Chrome::None),
+        Rect::new(0, 0, 100, 24)
     );
 }
 
@@ -963,9 +1620,13 @@ fn a_narrow_header_keeps_the_way_out_and_drops_the_wordmark() {
     state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(state.mode(), Mode::Session);
 
-    let header = first_row(&state, 44, 12);
+    // 56, not 44: the exit field names two chords now — `ctrl-5` for the
+    // keyboards `ctrl-]` is unreachable on — so it reserves nine more
+    // columns, and the width at which the tab strip is still affordable
+    // moved with it. The order it drops fields in is what this pins.
+    let header = first_row(&state, 56, 12);
     assert!(
-        header.contains("ctrl-]"),
+        header.contains(ESCAPE_CHORD),
         "the way out is never dropped: `{header}`"
     );
     assert!(
@@ -1001,7 +1662,7 @@ fn the_status_bar_shows_control_mode_bindings_by_default() {
     let state = sample();
     assert_eq!(state.mode(), Mode::Control);
     // 170, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
-    let bottom = last_row(&state, 170, 24).to_lowercase();
+    let bottom = footer(&state, 170, 24).to_lowercase();
     assert!(!bottom.contains("session mode"), "got: `{bottom}`");
     assert!(bottom.contains("quit"), "got: `{bottom}`");
 }
@@ -1885,7 +2546,7 @@ fn the_project_memory_view_renders_no_decorative_graph_glyphs() {
 #[test]
 fn the_footer_advertises_the_project_memory_key() {
     let state = sample();
-    let bottom = last_row(&state, 132, 24);
+    let bottom = footer(&state, 132, 24);
     assert!(bottom.contains("M memory"), "bindings missing: `{bottom}`");
 }
 
@@ -2992,12 +3653,7 @@ mod settings_tests {
     #[test]
     fn the_footer_names_the_settings_bindings() {
         let state = state_with_settings_open();
-        let bottom = rendered(&state, 100, 30)
-            .lines()
-            .last()
-            .unwrap()
-            .trim_end()
-            .to_owned();
+        let bottom = footer(&state, 100, 30);
         assert!(bottom.contains("save"), "got: `{bottom}`");
         assert!(bottom.contains("toggle"), "got: `{bottom}`");
     }

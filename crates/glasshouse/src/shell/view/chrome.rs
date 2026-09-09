@@ -73,8 +73,25 @@ pub(super) fn render_root(state: &ShellState, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Every session known to the project, as a bar of tabs.
-pub(super) fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Rect) {
+/// Every session known to the project, as a bar of tabs — one pill each.
+///
+/// Clicking a tab is `Tab`/`BackTab` pressed the right number of times, which
+/// is the same door the keyboard uses rather than a second way to move the
+/// cursor; see [`hotspot::walk_to`].
+///
+/// **The strip pans, it does not wrap** — [`hotspot::render_panned_bar`], not
+/// [`hotspot::render_bar`]. It is given one row in both the places it is
+/// drawn (`view::regions` reserves one, and [`render_header`] has only one
+/// line to give), so a wrapped tab lands on a row that does not exist: with
+/// three sessions at eighty columns the cursor moved to the third, the
+/// viewport switched to it, and the strip went on showing the first two with
+/// the focus marker on neither.
+pub(super) fn render_session_bar(
+    state: &ShellState,
+    frame: &mut Frame,
+    area: Rect,
+    sink: &mut Vec<Hotspot>,
+) {
     if state.sessions().is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -87,55 +104,39 @@ pub(super) fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Re
     }
 
     let selected = state.selected_index();
-    let tabs: Vec<_> = state
+    let pills: Vec<Pill> = state
         .sessions()
         .iter()
         .enumerate()
-        .map(|(index, row)| tab_label(index, row))
+        .map(|(index, row)| tab_pill(index, row, selected))
         .collect();
-    let mut start = 0;
-    while start < selected
-        && tabs[start..=selected]
-            .iter()
-            .map(|s| s.chars().count() + 1)
-            .sum::<usize>()
-            > usize::from(area.width)
-    {
-        start += 1;
-    }
-    let mut spans = Vec::new();
-    if start > 0 {
-        spans.push(Span::styled(
-            "‹ ",
-            Style::default().fg(state.theme().quiet()),
-        ));
-    }
-    for (index, label) in tabs.iter().enumerate().skip(start) {
-        let row = &state.sessions()[index];
-        let color = match row.lifecycle {
-            SessionLifecycle::WaitingForUser => Color::Yellow,
-            SessionLifecycle::Failed => Color::Red,
-            SessionLifecycle::Running | SessionLifecycle::Starting => state.theme().accent(),
-            _ => state.theme().quiet(),
-        };
-        let style = if index == selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(color)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(color)
-        };
-        spans.push(Span::styled(label.clone(), style));
-        spans.push(Span::raw(" "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    hotspot::render_panned_bar(frame, area, &pills, selected, state.theme(), sink);
 }
 
-/// One tab's label. Written once so [`render_header`] can reserve exactly
-/// what the strip is going to draw rather than restating its arithmetic.
+/// One tab. Written once so [`render_header`] can reserve exactly what
+/// [`render_session_bar`] is going to draw rather than restating its
+/// arithmetic — get that wrong and the header drops the project root a few
+/// columns early, or clips the strip.
+fn tab_pill(index: usize, row: &SessionRecord, selected: usize) -> Pill {
+    // The number is part of the label, not a mnemonic: a tab has no key of
+    // its own to press — reaching it is `Tab` however many times — and one
+    // span keeps `2 claude-code · running` the single styled run it has
+    // always been. See `Pill::pieces`.
+    Pill::run(
+        "",
+        &format!("{} {} · {}", index + 1, row.harness, row.lifecycle),
+        hotspot::walk_to(selected, index, KeyCode::BackTab, KeyCode::Tab),
+    )
+    .focused(index == selected)
+}
+
+/// The room one tab takes, as a string of that many columns.
+///
+/// The header's fields are measured as text, and the tab strip's "text" is
+/// only ever a width — [`render_session_bar`] draws the strip itself. Taken
+/// from the pill rather than restated, so the two cannot disagree.
 fn tab_label(index: usize, row: &SessionRecord) -> String {
-    format!(" {} {} · {} ", index + 1, row.harness, row.lifecycle)
+    " ".repeat(usize::from(tab_pill(index, row, index).width()))
 }
 
 /// A field of session mode's collapsed header.
@@ -175,7 +176,12 @@ const GAP: &str = "   ";
 /// back a row this mode exists to hand the harness — in [`DROP_ORDER`], and
 /// never past the last field standing, so `ctrl-] back` is on screen at every
 /// width a terminal can actually draw.
-pub(super) fn render_header(state: &ShellState, frame: &mut Frame, area: Rect) {
+pub(super) fn render_header(
+    state: &ShellState,
+    frame: &mut Frame,
+    area: Rect,
+    sink: &mut Vec<Hotspot>,
+) {
     let mut kept = header_fields(state);
     for field in DROP_ORDER {
         if kept.len() <= 1 || header_width(&kept) <= usize::from(area.width) {
@@ -237,7 +243,7 @@ pub(super) fn render_header(state: &ShellState, frame: &mut Frame, area: Rect) {
         );
     }
     if value(HeaderField::Tabs).is_some() {
-        render_session_bar(state, frame, tabs_area);
+        render_session_bar(state, frame, tabs_area, sink);
     }
     frame.render_widget(Paragraph::new(accessory), accessory_area);
 }
@@ -270,7 +276,18 @@ fn header_fields(state: &ShellState) -> Vec<(HeaderField, String)> {
     {
         fields.push((HeaderField::Model, model.label().to_owned()));
     }
-    fields.push((HeaderField::Exit, "ctrl-] back".to_owned()));
+    // `ctrl-5` first, and `ctrl-]` kept beside it. They are the same byte
+    // (0x1D), but `]` on a German Mac layout is Right-Option-6 and the chord
+    // is unreachable there — a user who cannot type the way out has not been
+    // given one. `F12` escapes too (see `state::overview::is_session_escape`)
+    // and is named in the wider hints below, where there is room for it —
+    // but it is named *after* the other two and never as the reliable one:
+    // measured on the development Mac, `defaults read -g
+    // com.apple.keyboard.fnState` does not exist, so the F-row defaults to
+    // its media keys and F12 is Volume-Up. It reaches the application only
+    // with Fn held. `ctrl-5` is the chord that works there, and it is the
+    // byte the pty tests send.
+    fields.push((HeaderField::Exit, format!("{ESCAPE_CHORD} · ctrl-] back")));
     fields
 }
 
@@ -288,56 +305,180 @@ fn field_cells(text: &str) -> u16 {
     u16::try_from(text.chars().count() + GAP.len()).unwrap_or(u16::MAX)
 }
 
-/// The whole of fullscreen's chrome: the current status note, painted over
-/// the harness's own top row, which is how the way out reaches a screen with
-/// no band to carry it.
+/// The whole of fullscreen's chrome: a small badge naming the way out,
+/// painted over the harness's own top row.
 ///
-/// A note rather than a band, because a band is [`render_header`]'s mode and
-/// this one exists to spend that row on the harness. It reserves nothing —
-/// `super::viewport_slot` has already given the session every row, and these
-/// cells are repainted from the emulator on the next frame — and
-/// `ShellState::handle_key` clears the status on any key, so it is gone the
-/// moment the user types. Right-aligned because a harness draws its own title
-/// on the left.
+/// **Persistent, not a note, and that is a correction.**
+/// `docs/product/fullscreen-mode.md:376-379` accepted a one-shot status line
+/// on entry and explicitly refused to keep a line of chrome. A user then
+/// entered fullscreen, typed, and could not get out: `handle_key` clears the
+/// status on the very next keystroke, so the only chord left on screen was
+/// the embedded harness's own `ctrl+j for newline`, and it was read as the
+/// way out. The badge costs no row — `super::viewport_slot` has already given
+/// the session every one, and these cells are repainted from the emulator on
+/// the next frame — so the refusal it overrides was about rows and this
+/// spends none. Right-aligned because a harness draws its own title on the
+/// left. See `design-decisions.md`, "The fullscreen escape chord is chrome".
 pub(super) fn render_fullscreen_hint(state: &ShellState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let Some(note) = state.status() else {
-        return;
-    };
-    let text = format!(" {note} ");
-    let width = u16::try_from(text.chars().count())
+    // The note keeps its place beside the badge rather than instead of it:
+    // being told why a key did nothing and being able to leave are not
+    // mutually exclusive, which is the same reasoning `render_footer` splits
+    // its own row by.
+    let badge = format!(" {ESCAPE_CHORD} back ");
+    let mut spans = Vec::new();
+    if let Some(note) = state.status() {
+        spans.push(Span::styled(
+            format!(" {note} "),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        ));
+    }
+    spans.push(Span::styled(
+        badge,
+        Style::default()
+            .fg(Color::Black)
+            .bg(state.theme().accent())
+            .add_modifier(Modifier::BOLD),
+    ));
+    let line = Line::from(spans);
+    let width = u16::try_from(line.width())
         .unwrap_or(u16::MAX)
         .min(area.width);
-    let [_, note_area] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
+    let [_, badge_area] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .areas(Rect::new(area.x, area.y, area.width, 1));
+    frame.render_widget(Paragraph::new(line), badge_area);
+}
+
+/// The bottom band: which mode owns the keyboard, Glasshouse's own actions as
+/// a row of pills, plus a note when the last key needs explaining.
+///
+/// **Every action is drawn or none is: the bar wraps rather than clips.** The
+/// hint it replaces was one 168-column `Paragraph` with no `.wrap()`, so at 80
+/// columns it stopped after `q quit` and eight of the fifteen actions —
+/// settings, memory, project, knowledge, events, routes, health, decisions —
+/// were on no screen at all, with nothing to say they existed. `regions`
+/// reserves the rows [`hotspot::control_bar_rows`] says this needs.
+///
+/// **A note gets a full-width row of its own**, and the bar keeps the whole
+/// width on every row it has. It used to take the right-hand
+/// side instead — up to half the terminal — and that was two defects at once.
+/// The bar was then painted into a `keys_area` narrower than the width
+/// `hotspot::control_band_rows` had measured the reservation at, so it
+/// wrapped past the rows it had and stopped: measured at 80x24 with a note
+/// showing, eight of the fifteen actions were drawn and seven — `M memory`,
+/// `p project`, `k knowledge`, `e events`, `r routes`, `h health`,
+/// `d decisions` — were on no screen and had no hotspot. And the note itself
+/// was clamped to `width / 2`, which at eighty columns cut every one of them
+/// mid-answer: `session \`c0d538f1877a\` exited — back i`. The clause a note
+/// exists for is its last one.
+///
+/// The row is reserved whether or not a note is showing, so the band's height
+/// still does not depend on the shell's state — see
+/// [`hotspot::control_band_rows`] — and the split is taken from the band that
+/// was handed in, so the reservation and the paint are the same rectangles.
+///
+/// **The reserved row is the band's first and the bar owns its last**, which
+/// is the terminal's last: a row nothing writes is a row ratatui's diff never
+/// mentions, so the note's row at the foot left the bottom line of the
+/// terminal unaddressed in every state where no note was showing. See
+/// [`hotspot::split_band`], which carries the measurement and the one state
+/// that moves the note back.
+///
+/// Control mode's band. Session mode collapses its four rows of chrome into
+/// [`render_header`], which is what carries the escape chord there. The
+/// session arm below survives because the mode is a runtime value and a band
+/// drawn without one would say nothing at all.
+pub(super) fn render_footer(
+    state: &ShellState,
+    frame: &mut Frame,
+    area: Rect,
+    sink: &mut Vec<Hotspot>,
+) {
+    // The note moves to the foot of the band only when there is a note to put
+    // there: an overlay covers the band's first rows, and giving up the last
+    // row to something nobody drew is the defect this whole split exists for.
+    let (keys_area, note_area) =
+        hotspot::split_band(area, state.overlay().is_some() && state.status().is_some());
+
+    if state.mode() == Mode::Control && state.overlay().is_none() {
+        let pills = hotspot::control_pills(state.fullscreen());
+        hotspot::render_bar(frame, keys_area, &pills, state.theme(), sink);
+    } else {
+        render_hint(state, frame, keys_area);
+    }
+
+    if let (Some(status), Some(note_area)) = (state.status(), note_area) {
+        frame.render_widget(
+            Paragraph::new(format!("  {status}")).style(Style::default().fg(Color::Yellow)),
+            Rect {
+                height: 1,
+                ..note_area
+            },
+        );
+    }
+}
+
+/// The gap between two hint items, in columns. Two spaces, which is what the
+/// unwrapped hint put between them; [`hotspot::wrap_items`] gives it to the
+/// item on its right so a wrapped row never starts with it.
+const HINT_GAP: u16 = 2;
+
+/// Draw the hint over the **foot** of the rows the bar would have had,
+/// wrapped, and never over more of them than the band actually has.
+///
+/// **The foot, because an overlay is painted over the band's head.** An
+/// overlay is centred on the whole terminal and drawn after the bands, so its
+/// bottom border lands on the band's first row as soon as the band is taller
+/// than the bar it used to be: measured at 100x30, `└──────┘` drawn straight
+/// through `tab section … w save`.
+///
+/// **Wrapped, because the Settings hint is 97 columns.** Drawn as one
+/// unwrapped line it stopped inside `r setup` at 80 columns and ` esc close`
+/// was on no screen — and `esc` is the only key that closes that overlay, so
+/// the one way out was the thing the clip hid. Below 70 columns `w save` went
+/// too. `hotspot::wrap_items` is the same greedy walk the action bar wraps
+/// its pills by, one row above.
+///
+/// When even the wrapped hint needs more rows than the band has, the **last**
+/// rows are the ones kept: the way out is the last item of every hint here,
+/// and an overlay whose exit is on no screen is the complaint this fixes.
+fn render_hint(state: &ShellState, frame: &mut Frame, keys_area: Rect) {
+    if keys_area.width == 0 || keys_area.height == 0 {
+        return;
+    }
+    let mut lines = hotspot::wrap_items(hint_items(state), keys_area.width, HINT_GAP);
+    let rows = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(keys_area.height);
+    if rows == 0 {
+        return;
+    }
+    let lines = lines.split_off(lines.len() - usize::from(rows));
     frame.render_widget(
-        Paragraph::new(text).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(state.theme().accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        note_area,
+        Paragraph::new(lines),
+        Rect {
+            y: keys_area.bottom() - rows,
+            height: rows,
+            ..keys_area
+        },
     );
 }
 
-/// The bottom status bar: which mode owns the keyboard, Glasshouse's own key
-/// bindings, plus a note when the last key needs explaining.
+/// The hint the modes that are not "control mode with nothing open" draw: an
+/// overlay's own keys, or session mode's reminder of whose keyboard it is —
+/// one entry per item, so [`hotspot::wrap_items`] can break between two of
+/// them and never inside one.
 ///
-/// All on one compact row. A note takes the right-hand side rather than
-/// replacing the hints, so learning the keys and being told why one did nothing
-/// are not mutually exclusive.
-///
-/// Control mode's bar. Session mode collapses its four rows of chrome into
-/// [`render_header`], which is what carries the escape chord there — see the
-/// design note: "A user who cannot see how to get out is the failure this
-/// design exists to prevent." The session arm below survives because the mode
-/// is a runtime value and a footer drawn without one would say nothing at all.
-pub(super) fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
+/// Still a string split on three spaces: the split is what makes the items,
+/// and the item is what makes the key and its description one unbreakable
+/// unit.
+fn hint_items(state: &ShellState) -> Vec<Vec<Span<'static>>> {
     let hint = match (state.mode(), state.overlay()) {
-        (Mode::Session, _) => "SESSION MODE   ctrl-] for glasshouse   keys go to the session",
+        (Mode::Session, _) => {
+            "SESSION MODE   ctrl-5 (or ctrl-] or F12) for glasshouse   keys go to the session"
+        }
         (Mode::Control, Some(Overlay::Overview)) => {
             "up/down pick   m send text   c interrupt   esc back to session   q quit"
         }
@@ -346,59 +487,26 @@ pub(super) fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
              w save   W project   r setup   esc close"
         }
         (Mode::Control, Some(Overlay::HarnessChoice)) => "up/down pick   enter start   esc cancel",
-        (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteHealth)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteDecisions)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
-        (Mode::Control, None) => {
-            "tab session   enter session   f fullscreen   n new   N headless   o overview   \
-             q quit   s settings   M memory   p project   k knowledge   e events   r routes   \
-             h health   d decisions"
-        }
+        (Mode::Control, _) => "esc back to session   q quit",
     };
-    let mut spans = Vec::new();
-    for (index, item) in hint.split("   ").enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        let (key, description) = item.split_once(' ').unwrap_or((item, ""));
-        spans.push(Span::styled(
-            key.to_owned(),
-            Style::default()
-                .fg(state.theme().accent())
-                .add_modifier(Modifier::BOLD),
-        ));
-        if !description.is_empty() {
-            spans.push(Span::styled(
-                format!(" {description}"),
-                Style::default().fg(state.theme().quiet()),
-            ));
-        }
-    }
-
-    // Keep the first navigation keys visible while giving feedback real room.
-    // Appending it after every shortcut hid launch failures on normal terminals.
-    let (keys_area, note_area) = if state.status().is_some() && area.width >= 50 {
-        let note_width = state
-            .status()
-            .map_or(0, |text| text.chars().count() + 2)
-            .min(usize::from(area.width / 2)) as u16;
-        let [keys, note] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(note_width)]).areas(area);
-        (keys, Some(note))
-    } else {
-        (area, None)
-    };
-    frame.render_widget(Paragraph::new(Line::from(spans)), keys_area);
-    if let (Some(status), Some(note_area)) = (state.status(), note_area) {
-        frame.render_widget(
-            Paragraph::new(format!("  {status}")).style(Style::default().fg(Color::Yellow)),
-            note_area,
-        );
-    }
+    hint.split("   ")
+        .map(|item| {
+            let (key, description) = item.split_once(' ').unwrap_or((item, ""));
+            let mut spans = vec![Span::styled(
+                key.to_owned(),
+                Style::default()
+                    .fg(state.theme().accent())
+                    .add_modifier(Modifier::BOLD),
+            )];
+            if !description.is_empty() {
+                spans.push(Span::styled(
+                    format!(" {description}"),
+                    Style::default().fg(state.theme().quiet()),
+                ));
+            }
+            spans
+        })
+        .collect()
 }
 
 /// A quiet launch surface; a live harness grid never passes through this function.
@@ -408,9 +516,21 @@ pub(super) fn render_landing(state: &ShellState, frame: &mut Frame, area: Rect) 
     }
     let theme = state.theme();
     let margin = if area.width >= 50 { 2 } else { 0 };
+    // The vertical margin is airy when there is air and tight when there is
+    // not: the wrapped action bar took two rows off this panel, and a margin
+    // that stayed at two spent them on whitespace instead of on the session's
+    // own facts. The status note's own row took a third, and the thresholds
+    // moved again for it — measured, because the row that fell off an
+    // eighty-by-twenty-four panel was `This session is headless: it runs with
+    // no viewport.`, which is the one line stopping an empty viewport from
+    // looking broken. A panel this short spends its rows on facts.
     let inner = area.inner(ratatui::layout::Margin::new(
         margin,
-        if area.height >= 16 { 2 } else { 0 },
+        match area.height {
+            22.. => 2,
+            18.. => 1,
+            _ => 0,
+        },
     ));
     let roomy = inner.width >= 100 && inner.height >= 20;
     let [body, art] = Layout::horizontal(if roomy {
@@ -499,27 +619,56 @@ pub(super) fn render_landing(state: &ShellState, frame: &mut Frame, area: Rect) 
             Style::default().fg(theme.quiet()),
         )));
     }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "OBSERVE & NAVIGATE",
-        Style::default()
-            .fg(theme.secondary())
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(
-        "p project   e events   h health   d decisions   r routes",
-    ));
-    lines.push(Line::from("tab session   enter focus   ctrl-] back here"));
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        format!(
-            "t theme: {}   a motion: {}",
-            theme.name(),
-            if state.motion_paused() { "off" } else { "on" }
-        ),
-        Style::default().fg(theme.quiet()),
-    )));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    let navigation = vec![
+        Line::from(Span::styled(
+            "OBSERVE & NAVIGATE",
+            Style::default()
+                .fg(theme.secondary())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("p project   e events   h health   d decisions   r routes"),
+        Line::from(format!(
+            "tab session   enter focus   {ESCAPE_CHORD} back here"
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            format!(
+                "t theme: {}   a motion: {}",
+                theme.name(),
+                if state.motion_paused() { "off" } else { "on" }
+            ),
+            Style::default().fg(theme.quiet()),
+        )),
+    ];
+    // **The keys sit at the foot of the panel, not after the detail.**
+    // While they were the tail of one wrapped `Paragraph`, a session's own
+    // detail block pushed them off the bottom the moment the viewport lost a
+    // row — which is precisely what the wrapped action bar did. What a panel
+    // clips must be the description of a session, never the way to reach one.
+    // Below ten rows there is no room to reserve, and everything goes back
+    // into one flow rather than being cut in half.
+    let navigation_rows = u16::try_from(navigation.len() + 1).unwrap_or(u16::MAX);
+    if body.height >= navigation_rows + 5 {
+        let [detail, keys] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(navigation_rows)]).areas(body);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), detail);
+        // Styled as a block, not line by line: these are hints, and a widget
+        // style paints the whole band rather than only the glyphs, which is
+        // what keeps the band one visual object instead of five sentences
+        // that happen to be adjacent.
+        frame.render_widget(
+            Paragraph::new(navigation).style(Style::default().fg(theme.quiet())),
+            Rect {
+                y: keys.y + 1,
+                height: keys.height - 1,
+                ..keys
+            },
+        );
+    } else {
+        lines.push(Line::default());
+        lines.extend(navigation);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    }
     if roomy {
         let [label, drawing, facts] = Layout::vertical([
             Constraint::Length(2),

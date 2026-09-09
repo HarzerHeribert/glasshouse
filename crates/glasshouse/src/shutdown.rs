@@ -53,6 +53,40 @@ static NEXT_CLEANUP_ID: AtomicU64 = AtomicU64::new(0);
 /// Exit code conventionally reported for a process terminated by SIGINT.
 const EXIT_INTERRUPTED: i32 = 130;
 
+/// The mouse reporting Glasshouse asks a terminal for: `?1000h` (button press
+/// and release) plus `?1006h` (SGR encoding, so a click past column 223 is
+/// still reported).
+///
+/// **Deliberately narrower than crossterm's `EnableMouseCapture`,** which also
+/// sets `?1002h` and `?1003h` — drag and any-motion tracking. Nothing in the
+/// shell consumes motion: there is no hover state anywhere, because under
+/// `?1000h` there is no hover event to have one. Every capture mode costs
+/// unmodified drag-select equally, so this is not a mode that preserves
+/// selection; it is the smallest thing that delivers what is actually read.
+pub(crate) const MOUSE_ENABLE: &str = "\x1b[?1000h\x1b[?1006h";
+
+/// The exact reset for [`MOUSE_ENABLE`], innermost mode first.
+///
+/// **Load-bearing on every exit path.** A stuck bracketed-paste mode is
+/// invisible; a stuck `?1000h` makes every click in the user's shell spray
+/// escape sequences into whatever is reading, which is why this is written
+/// here — the one function a panic, a signal, `force_exit` and an ordinary
+/// return all reach — rather than only in `tui::Screen`'s `Drop`, which
+/// `force_exit` does not run.
+pub(crate) const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1000l";
+
+/// Everything handing the terminal back writes, in order, to `out`.
+///
+/// A free function over a `Write` so a test can prove the bytes without a
+/// terminal to write them to — see `the_restore_sequence_turns_mouse_reporting_off`.
+/// Mouse reporting goes off first, while the alternate screen is still the
+/// one that has it on.
+fn write_restore_sequence(out: &mut impl Write) {
+    let _ = out.write_all(MOUSE_DISABLE.as_bytes());
+    let _ = execute!(out, LeaveAlternateScreen, cursor::Show);
+    let _ = out.flush();
+}
+
 /// Restore the terminal to its normal state.
 ///
 /// Safe to call repeatedly and safe to call when the terminal was never
@@ -61,10 +95,8 @@ pub fn restore_terminal() {
     if !TERMINAL_ENGAGED.swap(false, Ordering::SeqCst) {
         return;
     }
-    let mut out = std::io::stdout();
     let _ = terminal::disable_raw_mode();
-    let _ = execute!(out, LeaveAlternateScreen, cursor::Show);
-    let _ = out.flush();
+    write_restore_sequence(&mut std::io::stdout());
 }
 
 /// True once a signal has requested shutdown. The TUI event loop polls this so
@@ -562,6 +594,54 @@ mod tests {
             (2, 1),
             "the registry must be empty once every guard has dropped"
         );
+    }
+
+    /// The stuck-mode defect, proven on the bytes rather than on a terminal.
+    ///
+    /// A shell left in `?1000h` sprays escape sequences at whatever the user
+    /// runs next every time they click, and nothing on screen says why. This
+    /// is the one function a normal return, a panic, a signal and
+    /// `force_exit` all reach, so it is where the reset has to be — and the
+    /// reset has to come out *before* `LeaveAlternateScreen`, while the
+    /// screen that has the mode set is still the current one.
+    #[test]
+    fn the_restore_sequence_turns_mouse_reporting_off() {
+        let mut written = Vec::new();
+        write_restore_sequence(&mut written);
+        let bytes = String::from_utf8(written).expect("escape sequences are ASCII");
+
+        for mode in ["\x1b[?1000l", "\x1b[?1006l"] {
+            assert!(
+                bytes.contains(mode),
+                "restoring the terminal must emit {mode:?}: {bytes:?}"
+            );
+        }
+        let disable = bytes
+            .find("\x1b[?1000l")
+            .expect("the disable was just asserted");
+        let leave = bytes
+            .find("\x1b[?1049l")
+            .or_else(|| bytes.find("\x1b[?1047l"))
+            .unwrap_or(usize::MAX);
+        assert!(
+            disable < leave,
+            "mouse reporting must go off before the alternate screen does: {bytes:?}"
+        );
+    }
+
+    /// The enable and the disable are one pair, written once. A `?1002h`
+    /// here would be crossterm's `EnableMouseCapture` bundle creeping back
+    /// in, and with it motion reporting nothing in this codebase reads.
+    #[test]
+    fn only_the_two_mouse_modes_glasshouse_reads_are_asked_for() {
+        assert_eq!(MOUSE_ENABLE, "\x1b[?1000h\x1b[?1006h");
+        assert_eq!(MOUSE_DISABLE, "\x1b[?1006l\x1b[?1000l");
+        for unwanted in ["?1002", "?1003", "?1015"] {
+            assert!(
+                !MOUSE_ENABLE.contains(unwanted),
+                "{unwanted} is not a mode Glasshouse consumes"
+            );
+        }
     }
 
     #[test]

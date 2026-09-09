@@ -33,6 +33,11 @@ use crate::session::{
 /// was pressed, not the terminal's outer size — see `view::viewport_slot`
 /// and `HarnessLaunch::size`: a harness TUI lays itself out from the size it
 /// sees at startup, so the wrong geometry draws its first frame short.
+///
+/// Returns the new session's identifier, because the caller has to select it:
+/// `ShellState::refresh` reconciles onto whatever was presented before the
+/// key, so a start that returned nothing left the session it created invisible
+/// and unaddressable — see the `Action::StartSession` arm.
 pub(super) fn start_session(
     app_runtime: &Runtime,
     live: &mut SessionRuntime,
@@ -41,7 +46,7 @@ pub(super) fn start_session(
     harness: Option<IntegrationId>,
     size: TerminalSize,
     index_snapshots: &mut HashMap<SessionId, session::native_id::IndexSnapshot>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SessionId> {
     let user = UserConfig::load(app_runtime.paths())?;
     let project_config = config::load_project_config(app_runtime.project())?;
     let effective = EffectiveConfig::new(&user, project_config.as_ref());
@@ -212,5 +217,5 @@ pub(super) fn start_session(
         );
     }
 
-    Ok(())
+    Ok(record.id)
 }

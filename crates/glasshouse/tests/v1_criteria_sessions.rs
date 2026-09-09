@@ -534,15 +534,24 @@ fn v1_1920_switching_between_two_live_sessions_and_back_does_not_respawn_either(
 
     shell.send("n");
     shell.expect("claude-code");
-    let presented = native_ids(&mut shell, 1)[0].clone();
+    let first_started = native_ids(&mut shell, 1)[0].clone();
 
     shell.send("n");
     shell.expect("2 claude-code");
     let both = native_ids(&mut shell, 2);
-    let target = both
+    let second_started = both
         .into_iter()
-        .find(|id| id != &presented)
+        .find(|id| id != &first_started)
         .expect("the second session must have a different native id");
+
+    // `n` selects what it started, so after the second one the bar presents
+    // the second session and `open_overview`'s cursor opens on its row: one
+    // `Down` reaches the first-started session, and one `Up` from there comes
+    // back to the second. The two are named by start order rather than by
+    // role because start order is what the harness's reply identifies them
+    // by, while the roles follow the selection rule.
+    let presented = second_started;
+    let target = first_started;
 
     let pid_file = |id: &str| project.join(format!("pid-{id}"));
     let read_pid = |id: &str| -> String {

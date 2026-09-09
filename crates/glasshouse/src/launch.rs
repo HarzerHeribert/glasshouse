@@ -656,15 +656,46 @@ mod tests {
         assert!(command.env_overrides().is_empty());
     }
 
+    /// The index of the first line of `lines` that belongs to the file's own
+    /// test module, or `lines.len()` when the file has none.
+    ///
+    /// A `#[cfg(test)]` gates an item as readily as a module — `shell/hotspot.rs`
+    /// carries one on `Hotspot::rect` — so "cut at the first `#[cfg(test)]`"
+    /// reads part of a file while reporting as though it had read all of it,
+    /// and a launch site below the cut is then neither counted nor
+    /// window-checked. An item inside an `impl` is indented and survives that
+    /// by luck; a `#[cfg(test)] use` or a gated free function at column zero
+    /// does not, and truncates the file at its first line. So the marker is
+    /// the one thing that really ends the production code: an unindented
+    /// `#[cfg(test)]` introducing a `mod` — inline (`mod broker_selection_tests {`
+    /// in `commands/resume.rs`) or by path (`#[path = …] mod tests;` in
+    /// `shell/mod.rs` and `shell/hotspot.rs`), both of which are scanned here.
+    /// The caller then proves the tail was only that module, so a cut in the
+    /// wrong place is loud rather than silent.
+    fn production_prefix(lines: &[&str]) -> usize {
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim_end() == "#[cfg(test)]"
+                && lines[index + 1..]
+                    .iter()
+                    .take(2)
+                    .any(|next| next.starts_with("mod "))
+            {
+                return index;
+            }
+        }
+        lines.len()
+    }
+
     /// Map line 488 holds only if *every* production site that builds a
     /// `HarnessLaunch` strips — the first cut wired `launch_session` alone
     /// and left the shell's two starters, the API's spawn door and
     /// `resume_session` inheriting the credential. Source scan over the
     /// files that own those sites: each `HarnessLaunch::new(` in production
     /// code must be followed by `.without_provider_credentials(` within a
-    /// short window. A test module below a `#[cfg(test)]` marker is skipped;
-    /// the count of sites found is asserted so a scan that sees nothing
-    /// cannot pass.
+    /// short window. A file's own test module is skipped; the count of sites
+    /// found is asserted so a scan that sees nothing cannot pass, and the
+    /// span each file was read to is asserted so a scan that sees only a
+    /// *prefix* of one cannot pass either.
     #[test]
     fn every_production_harness_launch_site_strips_provider_credentials() {
         const SOURCES: &[(&str, &str)] = &[
@@ -675,6 +706,16 @@ mod tests {
             // site it carries is one of the five below and is scanned here,
             // not in the file it used to live in.
             ("shell/start.rs", include_str!("shell/start.rs")),
+            // The same move, continued: the viewport-grid and session-exited
+            // blocks became `shell/liveness.rs`, and the click targets
+            // `shell/hotspot.rs`. Neither builds a `HarnessLaunch` today —
+            // which is why the count below is still five — and they are
+            // listed because this guard is a whitelist by enumeration: a file
+            // it does not name is not merely unchecked, it is invisible, and
+            // a shell that starts a harness from a new file is exactly how
+            // the credential got out the first time.
+            ("shell/liveness.rs", include_str!("shell/liveness.rs")),
+            ("shell/hotspot.rs", include_str!("shell/hotspot.rs")),
             ("api/unix/sessions.rs", include_str!("api/unix/sessions.rs")),
         ];
         const WINDOW: usize = 20;
@@ -685,10 +726,29 @@ mod tests {
         let mut sites = 0;
         let mut unstripped = Vec::new();
         for (name, source) in SOURCES {
-            let production: Vec<&str> = source
-                .lines()
-                .take_while(|line| line.trim_end() != "#[cfg(test)]")
-                .collect();
+            let lines: Vec<&str> = source.lines().collect();
+            let cut = production_prefix(&lines);
+            let production = &lines[..cut];
+
+            // A scan is worth exactly what it read, so what it skipped is
+            // proved to be the file's own test module and nothing else.
+            // Production items sit at column zero: a `fn`, `impl`, `const` or
+            // `pub` below the cut is code this scan never looked at.
+            for (offset, line) in lines[cut..].iter().enumerate() {
+                let top_level = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                let opens_the_test_module = line.starts_with("mod ")
+                    || line.starts_with("#[")
+                    || line.starts_with("//")
+                    || line.trim_end() == "}";
+                assert!(
+                    !top_level || opens_the_test_module,
+                    "{name}: the scan stopped at line {}, and line {} below it is production \
+                     code it never read: {line:?}",
+                    cut + 1,
+                    cut + offset + 1
+                );
+            }
+
             for (index, line) in production.iter().enumerate() {
                 if line.trim_start().starts_with("//") || !line.contains("HarnessLaunch::new(") {
                     continue;

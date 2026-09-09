@@ -61,6 +61,14 @@ impl Screen {
         if let Err(e) = execute!(out, EnableBracketedPaste) {
             tracing::debug!(error = %e, "terminal does not support bracketed paste");
         }
+        // Mouse reporting, written by hand rather than through crossterm's
+        // `EnableMouseCapture` bundle: see [`crate::shutdown::MOUSE_ENABLE`]
+        // for why press-and-release plus SGR is the whole of what Glasshouse
+        // asks for. Enabled here so a `Screen` is the only thing that ever
+        // turns it on, and [`Screen::drop`] and every `restore_terminal`
+        // turn it off again.
+        let _ = out.write_all(crate::shutdown::MOUSE_ENABLE.as_bytes());
+        let _ = out.flush();
 
         let backend = CrosstermBackend::new(stdout());
         let terminal =
@@ -114,9 +122,7 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let mut out = stdout();
-        let _ = execute!(out, DisableBracketedPaste);
-        let _ = out.flush();
+        write_screen_teardown(&mut stdout());
 
         // SAFETY: `self.terminal` is taken exactly once, here, in the one
         // place a `Screen` is ever dropped.
@@ -124,6 +130,20 @@ impl Drop for Screen {
         drop_terminal_tolerantly(terminal);
         // `_guard` restores raw mode and the alternate screen after this.
     }
+}
+
+/// The modes [`Screen::acquire`] set, turned off again, innermost first.
+///
+/// **A `Screen` turns off exactly what it turned on.** `_guard`'s own drop
+/// runs [`crate::shutdown::restore_terminal`] straight after this and disables
+/// mouse reporting a second time, which is deliberate belt and braces: that
+/// path also covers a panic, a signal and `force_exit`, none of which run this
+/// destructor. A free function over a `Write` so a test can read the bytes
+/// without a terminal — see `the_screen_teardown_turns_mouse_reporting_off`.
+fn write_screen_teardown(out: &mut impl Write) {
+    let _ = out.write_all(crate::shutdown::MOUSE_DISABLE.as_bytes());
+    let _ = execute!(out, DisableBracketedPaste);
+    let _ = out.flush();
 }
 
 /// Drop a Ratatui terminal without letting its own `Drop` impl's panic
@@ -254,6 +274,36 @@ mod tests {
     #[test]
     fn dropping_a_terminal_that_writes_on_drop_does_not_panic() {
         drop_terminal_tolerantly(primed_to_panic_on_drop());
+    }
+
+    /// A `Screen` turns off exactly what it turned on, on the ordinary path.
+    ///
+    /// The belt to `shutdown::restore_terminal`'s braces — that one covers
+    /// the panic, signal and forced-exit paths this destructor never runs on,
+    /// and this one covers the case where the guard's own drop is not what
+    /// the reader is looking at.
+    #[test]
+    fn the_screen_teardown_turns_mouse_reporting_off() {
+        let mut written = Vec::new();
+        write_screen_teardown(&mut written);
+        let bytes = String::from_utf8(written).expect("escape sequences are ASCII");
+        assert!(
+            bytes.contains("\x1b[?1000l") && bytes.contains("\x1b[?1006l"),
+            "dropping a Screen must disable both mouse modes: {bytes:?}"
+        );
+    }
+
+    /// The startup half of the same pair: press-and-release plus SGR, and
+    /// nothing crossterm's `EnableMouseCapture` would have added.
+    #[test]
+    fn startup_asks_for_press_and_sgr_and_nothing_wider() {
+        let enable = crate::shutdown::MOUSE_ENABLE;
+        assert!(enable.contains("\x1b[?1000h"), "press/release: {enable:?}");
+        assert!(enable.contains("\x1b[?1006h"), "SGR encoding: {enable:?}");
+        assert!(
+            !enable.contains("?1002") && !enable.contains("?1003"),
+            "drag and any-motion tracking are deliberately not asked for: {enable:?}"
+        );
     }
 
     #[test]

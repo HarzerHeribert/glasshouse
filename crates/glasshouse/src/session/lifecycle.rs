@@ -356,12 +356,21 @@ mod tests {
             ("main.rs", main_and_commands.as_str()),
             ("shell/mod.rs", include_str!("../shell/mod.rs")),
             ("shell/start.rs", include_str!("../shell/start.rs")),
+            ("shell/liveness.rs", include_str!("../shell/liveness.rs")),
             ("session/runtime.rs", include_str!("runtime.rs")),
             ("session/attach.rs", include_str!("attach.rs")),
             ("session/select/mod.rs", include_str!("select/mod.rs")),
         ];
         // `shell/start.rs` is the shell path, not a new one: `start_session`
         // moved there from `shell/mod.rs` on 2026-09-08 unchanged.
+        //
+        // `shell/liveness.rs` is scanned but deliberately *not* allowed. It is
+        // the file this invariant is most about: it decides what the shell
+        // does when a process ends, and `viewport_grid` reads the harness's
+        // emulator screen to do it. A session state written from there would
+        // be derived from terminal output by the shortest possible path, so
+        // the day one appears this fails and the widening is a ruling, not an
+        // edit.
         let allowed = ["main.rs", "shell/mod.rs", "shell/start.rs"];
         for (name, source) in writers {
             let code = production_code(source);

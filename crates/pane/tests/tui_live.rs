@@ -128,6 +128,27 @@ impl App {
     fn contains(&mut self, needle: &str) {
         self.wait(needle, |screen| screen.contents().contains(needle));
     }
+    /// Apply whatever the session has emitted so far. An assertion about the
+    /// *absence* of text needs this: `wait` stops pumping the moment its
+    /// predicate holds, so a screen that was never brought up to date can
+    /// satisfy a `!contains` for the wrong reason.
+    fn settle(&mut self, millis: u64) {
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        while Instant::now() < deadline {
+            if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(25)) {
+                self.answer_cursor_query(&bytes);
+                self.screen.process(&bytes);
+                self.bytes.extend(bytes);
+            }
+        }
+    }
+    /// Send an SGR mouse report the way the defect arrives in a real PTY: the
+    /// Escape in one read, the printable remainder in the next.
+    fn send_split_mouse_report(&mut self, tail: &[u8]) {
+        self.send(b"\x1b");
+        thread::sleep(Duration::from_millis(5));
+        self.send(tail);
+    }
     fn resize(&mut self, width: u16) {
         self.screen.screen_mut().set_size(30, width);
         self.master
@@ -527,14 +548,111 @@ fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     assert_eq!(app.exited(), 0);
 }
 
+fn emitted(stream: &[u8], needle: &[u8]) -> bool {
+    stream.windows(needle.len()).any(|bytes| bytes == needle)
+}
+
+/// The modes pane asks the terminal for are the modes its own event loop
+/// reads. `?1002`/`?1003` would report every pointer movement over the window
+/// into a handler that only matches the wheel, and each of those reports is
+/// another chance for a read boundary to split one into the composer.
+#[test]
+fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("PANE /");
+    let startup = app.bytes.len();
+    assert!(
+        emitted(&app.bytes, b"\x1b[?1000h"),
+        "press/release reporting must be requested"
+    );
+    assert!(
+        emitted(&app.bytes, b"\x1b[?1006h"),
+        "SGR encoding must be requested"
+    );
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+    let shutdown = app.bytes[startup..].to_vec();
+    assert!(
+        emitted(&shutdown, b"\x1b[?1000l") && emitted(&shutdown, b"\x1b[?1006l"),
+        "both requested modes must be reset on exit"
+    );
+    for unused in [b"?1002".as_slice(), b"?1003".as_slice()] {
+        assert!(
+            !emitted(&app.bytes, unused),
+            "a motion mode nothing handles was negotiated: {}",
+            String::from_utf8_lossy(unused)
+        );
+    }
+}
+
+/// A click is the case the wheel-only repair missed. Before it, the tail of a
+/// split `[<0;10;5M` failed the wheel test, was queued behind the Escape and
+/// typed: the composer held `[<0;10;5M[<0;10;5m` and the model was sent it.
+#[test]
+fn a_fragmented_click_report_does_not_become_prompt_text() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send_split_mouse_report(b"[<0;10;5M");
+    app.send_split_mouse_report(b"[<0;10;5m");
+    app.settle(200);
+    let screen = app.screen.screen().contents();
+    assert!(
+        !screen.contains("[<0"),
+        "report reached the screen:\n{screen}"
+    );
+    assert!(
+        !screen.contains("10;5"),
+        "report reached the screen:\n{screen}"
+    );
+    app.send(b"CLICK_INPUT_OK\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        request["messages"][0]["content"][0]["text"],
+        "CLICK_INPUT_OK"
+    );
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+/// The wheel half of the same repair, proved by its effect rather than by the
+/// absence of text: a transcript taller than the viewport scrolls back to its
+/// first line under fragmented wheel-up reports.
+#[test]
+fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("PANE /");
+    let mut paste = b"\x1b[200~TOP_OF_TRANSCRIPT".to_vec();
+    for line in 0..60 {
+        paste.extend(format!("\nfiller {line:02}").as_bytes());
+    }
+    paste.extend(b"\x1b[201~");
+    app.send(&paste);
+    app.contains("filler 59");
+    app.send(b"\r");
+    app.contains("ERROR:");
+    app.wait("the first line leaves the viewport", |screen| {
+        !screen.contents().contains("TOP_OF_TRANSCRIPT")
+    });
+    for _ in 0..30 {
+        app.send_split_mouse_report(b"[<64;10;5M");
+        app.settle(20);
+        if app.screen.screen().contents().contains("TOP_OF_TRANSCRIPT") {
+            break;
+        }
+    }
+    app.contains("TOP_OF_TRANSCRIPT");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
 #[test]
 fn fragmented_mouse_reports_do_not_become_prompt_text() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
-    app.send(b"\x1b");
-    thread::sleep(Duration::from_millis(5));
-    app.send(b"[<65;101;28M");
+    app.send_split_mouse_report(b"[<65;101;28M");
     app.send(b"WHEEL_INPUT_OK\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(

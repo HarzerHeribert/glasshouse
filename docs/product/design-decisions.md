@@ -20100,3 +20100,80 @@ Pane's stable prompt therefore carries only durable protocol invariants and the 
 The implementation register is `docs/product/pane/improvement-register.md`. Its acceptance corpus varies model, provider, scripting representation, operating-system boundary and task shape. A quirk may enter that corpus without entering the prompt.
 
 The same ruling exposes the supervisor's current limit. Its request path and loop tests exist, but no model is selected by default; the benchmark explicitly disabled it, and configuration only assumes that a named model is cheaper. Pane must resolve an eligible lower-cost model through Glasshouse or an explicit setting, show every look and its serving model, and prove one real intervention before the supervisor counts as operational evidence.
+
+## The fullscreen escape chord is chrome, not a note — the user's report, 2026-09-09
+
+_Overrides `docs/product/fullscreen-mode.md:376-379`, which accepted the
+opposite as a known wart._
+
+The user entered a fullscreen session, typed, and could not find the way out.
+The cause is exact and was confirmed by reading the code: `Chrome::None` draws
+no band, so the chord reached the screen as an ordinary status note; the very
+next keystroke cleared it — `ShellState::handle_key` takes the status before
+answering any key — and from then on the only chord on screen was the embedded
+harness's own `ctrl+j for newline`, which the user read as the way out.
+`fullscreen-mode.md` had priced this: *"Mitigate with a one-shot status line on
+entry … Do not mitigate by keeping a line of chrome."* The refusal was about
+**rows**, and it stands. A right-aligned badge painted over the harness's own
+top row spends none: `view::viewport_slot` has already handed the session every
+row, and those cells are repainted from the emulator on the next frame. So the
+badge is persistent now, and the note keeps its place beside it for as long as
+a note lasts.
+
+Two adjacent causes were fixed with it, because a user who cannot leave a mode
+usually could not tell they were in it either. **Arming fullscreen from control
+mode was invisible** — `ShellState::chrome` deliberately keeps every band in
+control mode, so `f` changed nothing on screen except a status note the next
+keystroke erased; the footer now states `f fullscreen: on` / `off` from the
+flag. And **the advertised chord was one the user cannot type**: `ctrl-]` is
+the same byte as `ctrl-5`, but `]` on the German Mac layout this project is
+developed on is `Right-Option-6`. Every hint names `ctrl-5` first, from one
+constant (`state::ESCAPE_CHORD`) that a test feeds straight to
+`is_session_escape`, so the hint and the handler cannot drift; `ctrl-]` and
+`F12` are named beside it where there is room.
+
+## Actionables are buttons, and the footer wraps rather than clipping — 2026-09-09
+
+_Implements `docs/product/tui-actionables.md`, with two deviations recorded
+below._
+
+Control mode's footer listed fifteen actions in one 168-column `Paragraph`
+with no `.wrap()`. At 80 columns it stopped after `q quit`: settings, memory,
+project, knowledge, events, routes, health and decisions were drawn nowhere at
+all, with no ellipsis and nothing to say they existed. The bar is a row of
+pills now and wraps onto as many rows as it needs, and `view::regions` reserves
+them, so the harness's pseudo-terminal is told the truth about the space it
+has. That costs control mode two rows at 80 columns and is the trade: an
+action nobody can see is not reachable.
+
+Every actionable gets a **resting** affordance, not only a selected one — the
+survey's central finding was that an unselected row and a line of prose were
+the same pixels. Session tabs, the harness picker's rows and pane's panel rows
+use the same vocabulary; pane's rows draw a pill only when the row carries a
+command, so a group heading stays prose.
+
+Clicking a pill replays **the key presses it advertises**, through
+`ShellState::handle_key`, never a parallel path. Glasshouse asks the terminal
+for `?1000h` plus `?1006h` only — press-and-release and SGR encoding, written
+by hand rather than through crossterm's `EnableMouseCapture`, which also sets
+`?1002h` and `?1003h`; nothing in the shell consumes motion, and under
+`?1000h` there is no hover event to style. The reset is emitted from
+`shutdown::restore_terminal` as well as `tui::Screen`'s `Drop`, because a
+stuck bracketed-paste mode is invisible while a stuck `?1000h` sprays escape
+sequences into the user's next shell command, and `force_exit` runs no
+destructor.
+
+**Two deviations from the plan, both forced.** The end caps are `[` and `]`
+rather than `▌` and `▐`: map line 1771 keeps this design text-first and
+`view_tests` enforces it by refusing every character in U+2580..U+259F, the
+range gauges and sparklines are made of, and both half blocks are in it —
+weakening a map-line guard to buy a nicer cap is the wrong trade, and the
+plan had already named brackets as its fallback for the ambiguous-width risk.
+And a hotspot carries key presses rather than an `Action`: an `Action` is only
+half of what a key does (`t` also cycles the theme on the way past), so a
+stored `Action` would have been the parallel path the design exists to avoid.
+
+Session-mode clicks are **not** captured: a click in the session viewport does
+nothing, and no mouse report is forwarded to the harness PTY. That is the next
+package, and it needs the text-recovery prerequisite `fullscreen-mode.md`
+names before it can be worth having.

@@ -10,10 +10,7 @@ use std::time::{Duration, Instant};
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{self, Activity, Notebook, ScreenState, SidebarVisibility};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    MouseEventKind,
-};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -36,18 +33,28 @@ pub(super) fn output(message: String) {
     });
 }
 
+/// **Ask for exactly the mouse reports the UI consumes.** `?1000` is
+/// press/release reporting and `?1006` is the SGR encoding those reports are
+/// parsed from — together they are what the scroll handler reads and all a
+/// click handler would need. `EnableMouseCapture` would add `?1002`
+/// (button-drag motion) and `?1003` (any motion), which no arm of this file's
+/// `Event::Mouse` match looks at: they make the terminal report every pointer
+/// movement over the window, and each discarded report is another chance for a
+/// read boundary to split one into text (`terminal_input`). Crossterm has no
+/// command for the narrow pair, so the bytes are written directly.
+const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// The matching resets, in the same order.
+const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000l\x1b[?1006l";
+
 /// Also called by the existing second-SIGINT exit path, which skips Drop.
 pub(super) fn restore_terminal() {
     let _guard = super::lock(&DRAWING);
     if ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        let _ = io::stdout().write_all(DISABLE_MOUSE_REPORTING);
+        let _ = io::stdout().flush();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
 struct Restore;
@@ -410,12 +417,9 @@ fn run(
         let _guard = super::lock(&DRAWING);
         enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
-        execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+        io::stdout().write_all(ENABLE_MOUSE_REPORTING)?;
+        io::stdout().flush()?;
         Terminal::new(CrosstermBackend::new(io::stdout()))
     })();
     let _restore = Restore;

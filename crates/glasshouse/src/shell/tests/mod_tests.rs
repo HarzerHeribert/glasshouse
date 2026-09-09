@@ -818,7 +818,7 @@ mod settings_persistence_tests {
             + start;
         let arm = &source[start..end];
         assert!(
-            arm.contains("screen.draw("),
+            arm.contains("draw(&mut screen,"),
             "the Event::Key arm must still end in a redraw, or this scan watches nothing"
         );
         let offenders: Vec<usize> = arm
@@ -3599,7 +3599,11 @@ mod session_mode_geometry_tests {
         let id = records[0].id.clone();
         live.focus(&id).expect("focus the session just started");
         let control = emulator_rows(&live, &id);
-        assert_eq!(control, 20, "24 rows less control mode's four of chrome");
+        assert_eq!(
+            control,
+            view::viewport_terminal_size(outer, state::Chrome::Full).rows,
+            "the harness is told the size of control mode's viewport slot"
+        );
 
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records);
         sync_focus(&mut live, &state, outer, false);
@@ -3614,8 +3618,8 @@ mod session_mode_geometry_tests {
         sync_focus(&mut live, &state, outer, true);
         assert_eq!(
             emulator_rows(&live, &id),
-            control + 3,
-            "the collapsed chrome's three rows must reach the harness"
+            view::viewport_terminal_size(outer, state::Chrome::Header).rows,
+            "the rows the collapse hands back must reach the harness"
         );
 
         state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
@@ -3669,7 +3673,11 @@ mod session_mode_geometry_tests {
         let leaving = records[selected].id.clone();
         live.focus(&leaving).expect("focus the selected session");
         let control = emulator_rows(&live, &leaving);
-        assert_eq!(control, 20, "24 rows less control mode's four of chrome");
+        assert_eq!(
+            control,
+            view::viewport_terminal_size(outer, state::Chrome::Full).rows,
+            "the harness is told the size of control mode's viewport slot"
+        );
 
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let arriving = records[state.selected_index()].id.clone();
@@ -3684,7 +3692,7 @@ mod session_mode_geometry_tests {
 
         assert_eq!(
             emulator_rows(&live, &arriving),
-            control + 3,
+            view::viewport_terminal_size(outer, state::Chrome::Header).rows,
             "the session entering the viewport must be told about the collapsed chrome"
         );
         assert_eq!(
@@ -3726,7 +3734,10 @@ mod session_mode_geometry_tests {
         let records = sessions.store().list().expect("list sessions");
         let id = records[0].id.clone();
         live.focus(&id).expect("focus the session just started");
-        assert_eq!(emulator_rows(&live, &id), 20);
+        assert_eq!(
+            emulator_rows(&live, &id),
+            view::viewport_terminal_size(outer, state::Chrome::Full).rows
+        );
 
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records);
         state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -3743,8 +3754,8 @@ mod session_mode_geometry_tests {
         sync_focus(&mut live, &state, outer, true);
         assert_eq!(
             emulator_rows(&live, &id),
-            20,
-            "leaving gives control mode's four rows of chrome back"
+            view::viewport_terminal_size(outer, state::Chrome::Full).rows,
+            "leaving gives control mode's bands back"
         );
     }
 }
@@ -3965,5 +3976,469 @@ mod shell_started_session_lifecycle_tests {
             SessionLifecycle::Running,
             "a shell-started session whose harness spawned must leave `Starting`"
         );
+    }
+}
+
+/// What the shell shows, and where the keyboard points, once a harness is
+/// gone.
+///
+/// The user's complaint these tests come from: *"`/exit` does not really work
+/// as intended and bring me back into glasshouse"*. Glasshouse did return to
+/// control mode — onto a full-size grid of blank cells belonging to the dead
+/// session, with the landing surface never drawn underneath it. Every test
+/// here drives a **real** `SessionRuntime` with the fixture's fake harness (a
+/// shell script that exits 0 immediately), because the whole defect lives in
+/// the gap between a process ending and a `LiveSession` still answering.
+#[cfg(test)]
+mod after_the_harness_exits_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// Start one embedded session against the fake harness and hand back
+    /// everything the run loop would be holding.
+    fn one_session() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        ProjectSessions,
+        SessionRuntime,
+        ShellState,
+        SessionId,
+    ) {
+        let (data, workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let id = start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            None,
+            view::viewport_terminal_size(TerminalSize::new(24, 80), state::Chrome::Full),
+            &mut index_snapshots,
+        )
+        .expect("starting a session from the shell must succeed");
+        let records = sessions.store().list().expect("list sessions");
+        let state = ShellState::new("glasshouse", "/work", "0.1.0", records);
+        (data, workspace, sessions, live, state, id)
+    }
+
+    /// Poll until the runtime has *observed* the process end.
+    ///
+    /// `is_running` is `exit.is_none()`, and only `poll_exits` sets `exit` —
+    /// so a session is "running" until it is asked, however long the process
+    /// has been dead. That is what makes the control assertions below
+    /// deterministic rather than a race.
+    fn wait_for_exit(live: &mut SessionRuntime, id: &SessionId) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if live.poll_exits().iter().any(|(ended, _)| ended == id) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake harness exits immediately; the runtime must see it end"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Render and flatten the frame, so the assertion is on what a user would
+    /// read rather than on state that merely implies it.
+    fn rendered(state: &ShellState, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("a test terminal");
+        terminal
+            .draw(|frame| view::render(state, frame))
+            .expect("drawing must not panic");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The void itself: after the process ends the renderer must be handed no
+    /// grid, and the frame must carry the landing surface.
+    ///
+    /// The control comes first and is the reason this test has teeth — before
+    /// the exit is observed the very same call produces a full 20×80 grid, so
+    /// "empty" afterwards is the liveness test doing work and not an accident
+    /// of a harness that printed nothing.
+    #[test]
+    fn a_dead_session_hands_the_renderer_no_grid_and_the_landing_surface_is_drawn() {
+        let (_data, _workspace, _sessions, mut live, mut state, id) = one_session();
+        live.focus(&id).expect("focus the session just started");
+
+        let while_running = liveness::viewport_grid(&state, &live);
+        assert!(
+            !while_running.is_empty(),
+            "a running session must put its screen on the viewport, or this test \
+             proves nothing about the one below it"
+        );
+
+        wait_for_exit(&mut live, &id);
+
+        let after_exit = liveness::viewport_grid(&state, &live);
+        assert!(
+            after_exit.is_empty(),
+            "a session whose process is gone must hand the renderer nothing; it \
+             offered a {}x{} grid of blanks",
+            after_exit.rows(),
+            after_exit.cols()
+        );
+
+        state.set_viewport_grid(after_exit);
+        let frame = rendered(&state, 200, 40);
+        assert!(
+            frame.contains("This viewport is reserved for the session's own terminal."),
+            "the landing surface must be drawn where the dead session's screen was; \
+             frame was:\n{frame}"
+        );
+    }
+
+    /// Session mode follows the KEYBOARD, not the cursor.
+    ///
+    /// `sync_focus` ignores `RuntimeError::NotLive`, so Tab-ing the bar onto
+    /// another record leaves keystrokes going to the session that is still
+    /// running. Testing `active_session` alone therefore left session mode
+    /// alive after that session died, forwarding every key into a closed pty.
+    #[test]
+    fn session_mode_ends_when_the_focused_session_exits_under_a_cursor_elsewhere() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        for _ in 0..2 {
+            start_session(
+                &runtime,
+                &mut live,
+                &sessions,
+                SessionPresentation::Embedded,
+                None,
+                view::viewport_terminal_size(TerminalSize::new(24, 80), state::Chrome::Full),
+                &mut index_snapshots,
+            )
+            .expect("starting a session from the shell must succeed");
+        }
+        let records = sessions.store().list().expect("list sessions");
+        assert_eq!(records.len(), 2, "the fixture must give us two sessions");
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", records.clone());
+
+        // The keyboard stays on the session the bar started on; the cursor
+        // moves off it.
+        let attached = records[state.selected_index()].id.clone();
+        live.focus(&attached).expect("focus the presented session");
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let under_the_cursor = records[state.selected_index()].id.clone();
+        assert_ne!(
+            under_the_cursor, attached,
+            "Tab must have moved the bar off the focused session"
+        );
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            state.mode(),
+            Mode::Session,
+            "the fixture must reach session mode"
+        );
+
+        // Exactly the run loop's order, and the reason it is that order:
+        // `poll_exits` moves focus off the session it finds ended, so the
+        // answer has to be taken before the poll or it names the successor.
+        let attached_before = live.focused().cloned();
+        assert_eq!(attached_before.as_ref(), Some(&attached));
+        wait_for_exit(&mut live, &attached);
+        assert_ne!(
+            live.focused(),
+            Some(&attached),
+            "the runtime has already moved focus off the dead session by now"
+        );
+
+        assert!(
+            liveness::note_exit(&mut state, attached_before.as_ref(), &attached),
+            "the exit of the session holding the keyboard must redraw"
+        );
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "session mode must not survive the death of the process it writes to"
+        );
+        let status = state.status().unwrap_or_default().to_string();
+        assert!(
+            status.contains(&state::short_session_id(&attached)),
+            "the note must name the session that exited; it said {status:?}"
+        );
+    }
+
+    /// The safety net, on the tick rather than on a reported exit.
+    ///
+    /// Its control is the first assertion: while the process is alive the
+    /// heal must do nothing at all, or it would fire on every tick of every
+    /// session and session mode would be unusable.
+    #[test]
+    fn the_tick_returns_to_control_mode_when_the_attached_session_is_gone() {
+        let (_data, _workspace, _sessions, mut live, mut state, id) = one_session();
+        live.focus(&id).expect("focus the session just started");
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            state.mode(),
+            Mode::Session,
+            "the fixture must reach session mode"
+        );
+
+        assert!(
+            !liveness::heal_orphaned_session_mode(&mut state, &live),
+            "a live session behind the keyboard must not be healed away"
+        );
+        assert_eq!(state.mode(), Mode::Session);
+
+        wait_for_exit(&mut live, &id);
+
+        assert!(
+            liveness::heal_orphaned_session_mode(&mut state, &live),
+            "a session mode with no live session behind it must be ended"
+        );
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "the tick is the net under every way a session can stop being reachable"
+        );
+        // `poll_exits` has already moved focus off the dead session — to the
+        // next running one, and to nothing when there is none — so the note
+        // names the mode, which is the part the user needs either way.
+        let status = state.status().unwrap_or_default().to_string();
+        assert!(
+            status.contains("back in control mode"),
+            "the return to control mode must be spoken; it said {status:?}"
+        );
+    }
+}
+
+/// `n` selects what it started.
+///
+/// The defect: `refresh` reconciles the cursor onto whatever was presented
+/// *before* the key, so a started session appeared nowhere — and the natural
+/// reaction, pressing `n` again, silently spawned a second harness that
+/// neither the viewport nor the keyboard was attached to.
+#[cfg(test)]
+mod starting_selects_what_it_started_tests {
+    use super::*;
+
+    #[test]
+    fn two_starts_leave_the_cursor_on_the_second_and_both_in_the_list() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+
+        // The `Action::StartSession` arm, twice, in its own order.
+        let mut started: Vec<SessionId> = Vec::new();
+        for _ in 0..2 {
+            let id = start_session(
+                &runtime,
+                &mut live,
+                &sessions,
+                SessionPresentation::Embedded,
+                None,
+                view::viewport_terminal_size(TerminalSize::new(24, 80), state::Chrome::Full),
+                &mut index_snapshots,
+            )
+            .expect("starting a session from the shell must succeed");
+            let records = sessions.store().list().expect("list sessions");
+            // The defect, asserted before the fix that answers it: the
+            // refresh alone never moves the cursor onto the new session.
+            state.refresh(records);
+            if started.len() == 1 {
+                assert_eq!(
+                    state.active_session().map(|record| record.id.clone()),
+                    Some(started[0].clone()),
+                    "refresh keeps the previous selection — which is why the arm must select"
+                );
+            }
+            assert!(
+                state.select_session(&id),
+                "the session just created must be in the list the store handed back"
+            );
+            started.push(id);
+        }
+
+        assert_eq!(state.sessions().len(), 2, "both sessions must be listed");
+        assert_eq!(
+            state.active_session().map(|record| record.id.clone()),
+            Some(started[1].clone()),
+            "the cursor must sit on the session the second `n` started"
+        );
+    }
+
+    /// The wiring, which no unit test can reach: the run loop's own arm needs
+    /// a real terminal, so the one thing left to prove is that it still calls
+    /// [`ShellState::select_session`] with the identifier `start_session`
+    /// returned. Scanned by single-line literals, so a CRLF checkout cannot
+    /// defeat it (practice §14).
+    #[test]
+    fn the_start_session_arm_selects_the_session_it_started() {
+        let source = include_str!("../mod.rs");
+        let start = source
+            .find("match start_session(")
+            .expect("the run loop still starts sessions");
+        let end = source[start..]
+            .find("Action::InterruptSession(")
+            .expect("InterruptSession still follows the start arm")
+            + start;
+        let arm = &source[start..end];
+        assert!(
+            arm.contains("state.select_session(&id)"),
+            "the arm must select what it started, or `n` looks like it did nothing:\n{arm}"
+        );
+    }
+}
+
+/// The run loop's mouse arm: read, because it has no seam a unit test can
+/// drive — it needs a live `Screen` and a real terminal.
+mod click_routing_tests {
+    /// **The production caller, asserted where it lives.**
+    ///
+    /// `view_tests` proves a click on a pill's cells yields the key that pill
+    /// advertises; that is worth nothing unless the run loop actually asks.
+    /// The arm has no seam a unit test can drive — it needs a live `Screen`
+    /// and a real terminal — so it is read, the same way
+    /// `no_key_handler_skips_the_redraw_at_the_end_of_its_arm` below reads
+    /// its own arm.
+    ///
+    /// Three claims, each the one that would silently un-wire the feature:
+    /// the mouse arm consults the hit test rather than discarding the event;
+    /// what it finds is queued rather than acted on inline; and the queue is
+    /// drained ahead of the terminal, so a click's presses land before the
+    /// next real event can move the sessions underneath them.
+    #[test]
+    fn a_click_is_answered_by_the_hit_test_and_queued_as_keys() {
+        let source = include_str!("../mod.rs").replace("\r\n", "\n");
+        let start = source
+            .find("Event::Mouse(mouse) => {")
+            .expect("the run loop still has an Event::Mouse arm");
+        let end = source[start..]
+            .find("Event::Paste(")
+            .expect("Event::Paste still follows Event::Mouse")
+            + start;
+        let arm = &source[start..end];
+        assert!(
+            arm.contains("hotspot::hit(&hotspots,"),
+            "a click must be answered against the frame's own hotspots: {arm}"
+        );
+        assert!(
+            arm.contains("pending.extend(spot.keys()"),
+            "and must be queued as the keys the pill advertises: {arm}"
+        );
+        assert!(
+            source.contains("match pending.pop_front()"),
+            "the queue must be drained ahead of the terminal"
+        );
+        assert!(
+            !arm.contains("state.handle_key"),
+            "the arm must not answer a click itself — that is the parallel \
+             path the pill vocabulary exists to avoid: {arm}"
+        );
+    }
+}
+
+/// A restart the user never asked for is spoken once.
+///
+/// `poll_exits` drops a restarted session from the exits it returns, so
+/// nothing else in the run loop is told the process the user was talking to
+/// died and another took its place. [`liveness::RestartWatch`] is the only
+/// thing that notices, and the two mistakes it can make are opposite and both
+/// silent from the outside: never reporting (the note the defect is about,
+/// gone again) and reporting every tick (`>` written as `>=`, which overwrites
+/// the status row roughly ten times a second and permanently hides every other
+/// note). Both halves are asserted below — nothing before the restart, the id
+/// exactly once at it, nothing after.
+///
+/// Unix only, for the reason every restart test in
+/// `tests/session_supervision.rs` is: the shape being driven is a harness that
+/// comes up, is verified healthy, and then dies badly, and that is a shell
+/// script here.
+#[cfg(unix)]
+mod restart_is_spoken_once_tests {
+    use super::*;
+
+    /// A harness that comes up, stays up past `HEALTHY_AFTER`, and then dies
+    /// badly — the one shape `SessionRuntime::consider_restart` acts on. The
+    /// fixture's own `exit 0` harness is restarted by nothing: a clean exit is
+    /// excluded, and so is a session that was never healthy.
+    ///
+    /// The same body as `session_supervision.rs`'s
+    /// `A_HARNESS_THAT_WORKS_THEN_DIES`, and the `sleep` is the load-bearing
+    /// part: `HEALTHY_AFTER` is two seconds and health is granted only at a
+    /// poll that finds the process still alive after them.
+    const WORKS_THEN_DIES: &str = "#!/bin/sh\necho UP\nsleep 3\nexit 3\n";
+
+    /// How long to wait for a real process to come up, be called healthy, die
+    /// and be put back — four seconds of work, given room for a loaded
+    /// machine.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    #[test]
+    fn a_restart_is_reported_once_and_not_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let script = data.path().join("bin").join("works-then-dies");
+        std::fs::write(&script, WORKS_THEN_DIES).expect("write the harness");
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        // Straight to a `HarnessLaunch`, the way `session_supervision.rs`'s
+        // own `one_session` does: this test is about the runtime's restart
+        // counter, and a session record would add a store to keep in step
+        // with it for nothing.
+        let executable =
+            crate::platform::exec::resolve_explicit(&script).expect("the harness resolves");
+        let launch = HarnessLaunch::new(executable, runtime.project());
+        let mut live = SessionRuntime::new();
+        let id = SessionId::new("aaaaaaaabbbbbbbbccccccccdddddddd");
+        live.start(id.clone(), SessionPresentation::Headless, &launch)
+            .expect("the session starts");
+
+        let mut watch = liveness::RestartWatch::new();
+        assert!(
+            watch.observe(&live).is_empty(),
+            "a session that has never been restarted must be reported as nothing"
+        );
+
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            live.poll_exits();
+            if live.get(&id).is_some_and(|session| session.restarts() >= 1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited {PATIENCE:?} for the runtime to restart the harness; sessions: {live:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            watch.observe(&live),
+            vec![id.clone()],
+            "the restart must be reported, naming the session it happened to"
+        );
+        assert!(
+            watch.observe(&live).is_empty(),
+            "and reported once: the same count, looked at again, is not a new restart"
+        );
+
+        live.close(&id).expect("close the session");
     }
 }

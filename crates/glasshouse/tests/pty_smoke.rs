@@ -3012,6 +3012,81 @@ fn the_shell_enters_and_leaves_session_mode_in_a_real_terminal() {
     );
 }
 
+/// The same escape, through the other chord: `F12`, as the bytes a terminal
+/// actually sends.
+///
+/// `is_session_escape` accepts `KeyCode::F(12)`, and every unit test that
+/// exercises it builds that `KeyEvent` by hand. That is precisely the proof
+/// that failed for `Ctrl-]` — twice, once per platform — because a real
+/// terminal sends *bytes*, and what a synthetic `KeyEvent` asserts is that
+/// Glasshouse agrees with itself about a value Crossterm never produced. So
+/// this sends `ESC [ 2 4 ~`, the xterm form of `F12`, and lets Crossterm's
+/// own parser decide what that is.
+///
+/// The assertion is the one above's: `q` quits only from control mode, and
+/// the harness is a `sleep` that cannot end on its own, so a shell still in
+/// session mode would forward `q` into it and never exit.
+///
+/// Unix only. `F12`'s escape sequence is what a Unix terminal writes; on
+/// Windows Crossterm reads console key records rather than a byte stream, so
+/// writing these bytes into a ConPTY tests ConPTY's own VT-input translation
+/// rather than anything in Glasshouse. The `Ctrl-]` test above stays
+/// cross-platform because `0x1D` is a control character on both.
+#[cfg(unix)]
+#[test]
+fn f12_leaves_session_mode_in_a_real_terminal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let harness = install_sleep_harness(&bin_dir, "lingering", 20);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&harness)
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+
+    shell.expect("root ");
+    shell.send("n");
+    shell.expect("claude-code");
+    shell.send("\r");
+    shell.expect("ctrl-]");
+
+    // `F12` as xterm spells it, not as a `KeyEvent` names it.
+    shell.send("\x1b[24~");
+    shell.send("q");
+
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell did not quit after F12, so `ESC [ 2 4 ~` never reached \
+         `is_session_escape` as F12: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
 /// A resize of Glasshouse's own terminal reaching the harness's.
 ///
 /// The mechanism (`PtyProcess::resize`) has its own tests, and the shell calls
@@ -4316,6 +4391,13 @@ fn install_tagged_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::p
 /// binding deleted entirely — caught only because this one uses two.
 /// [`install_tagged_echo_harness`]'s reply names which session answered, so
 /// this asserts the *right* one did, not merely that *a* harness echoed.
+///
+/// The premise about *which* session is which: `n` selects what it started,
+/// so after the second `n` the bar presents the second session and
+/// `open_overview`'s cursor opens on its row — one `Down` therefore reaches
+/// the first-started one. The body names the two by the order they were
+/// started in rather than by a role, because the roles follow the selection
+/// rule and the start order does not.
 #[test]
 fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -4385,28 +4467,37 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
         }
     };
 
-    // `ShellState::refresh` keeps the bar's selection on whichever session
-    // was active *before* the refresh, by identity — see its own doc
-    // comment — so starting a second session does not move the viewport off
-    // the first one, and `open_overview`'s cursor starts on that same
-    // presented row. This test does not trust that reading of the source
-    // alone, though: `list()`'s tie-breaking between two sessions recorded
-    // in the same second is not specified, so which array index a session
-    // lands at is not something to assume. `presented`, captured while it
-    // is genuinely the *only* session, is ground truth regardless; `target`
-    // is then whichever of the two is *not* it, however `list()` orders
-    // them once there are two.
+    // `n` selects what it started (`Action::StartSession` calls
+    // `ShellState::select_session` with the identifier `start_session`
+    // returned), so the second `n` moves the bar onto the session it just
+    // created and `open_overview`'s cursor starts on *that* row. One `Down`
+    // therefore reaches the FIRST-started session, and that is the one this
+    // test focuses and expects an answer from.
+    //
+    // This test does not trust that reading of the source alone, though:
+    // `list()`'s tie-breaking between two sessions recorded in the same
+    // second is not specified, so which array index a session lands at is
+    // not something to assume. `first_started`, captured while it is
+    // genuinely the *only* session, is ground truth regardless; the other is
+    // then whichever of the two is not it, however `list()` orders them once
+    // there are two.
     shell.send("n");
     shell.expect("claude-code");
-    let presented = native_ids(&mut shell, 1)[0].clone();
+    let first_started = native_ids(&mut shell, 1)[0].clone();
 
     shell.send("n");
     shell.expect("2 claude-code");
     let both = native_ids(&mut shell, 2);
-    let target = both
+    let second_started = both
         .into_iter()
-        .find(|id| id != &presented)
+        .find(|id| id != &first_started)
         .expect("the second session must have a different native id");
+
+    // The two roles the test is about, now that starting selects: the bar
+    // presents the second session, and the overview's cursor reaches the
+    // first. `Enter` must honour the cursor, not the viewport.
+    let presented = second_started;
+    let target = first_started;
 
     shell.send("o");
     shell.expect("sessions");
@@ -4416,6 +4507,15 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
 
     shell.send("quiet\r");
     shell.expect(&format!("GOT:{target}:quiet"));
+    // The other half of the same claim, and the half a fall-through to
+    // `enter_session_mode` would fail: the presented session was never given
+    // the keyboard, so it never saw the line.
+    assert!(
+        !shell.output().contains(&format!("GOT:{presented}:quiet")),
+        "the presented session answered, so `Enter` focused the viewport's \
+         session rather than the cursor's\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
 
     shell.send("\x1d");
     shell.send("q");

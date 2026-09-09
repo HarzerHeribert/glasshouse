@@ -497,19 +497,41 @@ impl ShellState {
     /// focus it (`RuntimeError::Headless`) and keystrokes would go to
     /// whichever session held focus before — the user would be typing into a
     /// session the bar is not showing. Saying no is the only honest answer.
+    ///
+    /// Refused for a session whose **process is gone**, for the third time the
+    /// same reason. The footer advertises Enter as "enter session" whatever
+    /// the presented session's state is, and a stopped one has no PTY left to
+    /// receive anything, so entering hands the keyboard to a dead process and
+    /// every keystroke after it vanishes with nothing on screen saying why.
+    /// [`Self::actionable_overview_target`] already refuses the overview's own
+    /// keys on exactly this test; this is the viewport's half of it.
     pub(super) fn enter_session_mode(&mut self) -> Action {
         let Some(record) = self.active_session() else {
             self.set_status("no session to enter — start one with `n`");
             return Action::Redraw;
         };
-        if record.presentation == SessionPresentation::Headless {
-            let id = record.id.clone();
+        // Read out before the refusals rather than in them: `set_status`
+        // borrows `self` mutably and `record` is borrowed from `self`, so the
+        // record cannot outlive the first note.
+        let id = record.id.clone();
+        let presentation = record.presentation;
+        let lifecycle = record.lifecycle;
+        if presentation == SessionPresentation::Headless {
             // Short on purpose: a status note shares its row with the key
             // bindings, which are written first, so a long refusal is a
             // clipped one. The viewport itself carries the full explanation
             // on every frame — see `view::render_viewport`.
             self.set_status(format!(
                 "`{}` is headless — no viewport to enter",
+                short_session_id(&id)
+            ));
+            return Action::Redraw;
+        }
+        if !lifecycle.is_live() {
+            // The same sentence `actionable_overview_target` speaks, so a
+            // refusal reads identically wherever the user met it.
+            self.set_status(format!(
+                "cannot enter session `{}`: it is {lifecycle}, not running",
                 short_session_id(&id)
             ));
             return Action::Redraw;
@@ -550,14 +572,16 @@ impl ShellState {
     }
 }
 
-/// `Ctrl-]` — the one chord that returns to control mode from session mode
-/// (what `telnet` has used for decades; no ordinary key produces it). It
-/// has more than one spelling, and all of them must be accepted. The
-/// chord is really the byte `0x1D`, and Crossterm's Unix parser decodes the
-/// control range `0x1C..=0x1F` arithmetically, so a real terminal's `Ctrl-]`
-/// arrives as `Ctrl` + `'5'`, never as `Ctrl` + `']'` — matching too
-/// narrowly traps the user in session mode with no way back, and only a
-/// real pseudo-terminal caught it (twice, once per platform), since a
+/// `Ctrl-]` or `F12` — the chords that return to control mode from session
+/// mode, both of which must always be accepted.
+///
+/// `Ctrl-]` is what `telnet` has used for decades, and no ordinary key
+/// produces it. It has more than one spelling, and all of them must be
+/// accepted: the chord is really the byte `0x1D`, and Crossterm's Unix parser
+/// decodes the control range `0x1C..=0x1F` arithmetically, so a real
+/// terminal's `Ctrl-]` arrives as `Ctrl` + `'5'`, never as `Ctrl` + `']'` —
+/// matching too narrowly traps the user in session mode with no way back, and
+/// only a real pseudo-terminal caught it (twice, once per platform), since a
 /// synthetic `KeyEvent` is not what any terminal sends.
 ///
 /// On Windows, Crossterm asks the keyboard layout which character a
@@ -570,7 +594,19 @@ impl ShellState {
 /// spurious escape as the acceptable failure direction. History:
 /// design-decisions.md, "Trims: the remaining module docs, second packet",
 /// `is_session_escape`.
+///
+/// `F12` exists because every spelling above is the single byte `0x1D`, and a
+/// keyboard that cannot type `]` without a modifier cannot produce it: on a
+/// German Mac layout `]` is `Right-Option-6`, and `Ctrl` with that is not the
+/// chord. `F12` is layout-independent, and no harness Glasshouse embeds binds
+/// it. Accepted with any modifiers or none, since nothing else claims it.
+/// Deliberately **not** `Ctrl-Q`: that is XON, real harnesses bind it, and
+/// design-decisions.md ("Session mode") chose `Ctrl-]` precisely so the escape
+/// steals no harness key.
 pub(super) fn is_session_escape(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::F(12) {
+        return true;
+    }
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
@@ -590,30 +626,91 @@ pub(super) fn is_session_escape(key: &KeyEvent) -> bool {
 
 /// Turn one key event into the bytes a PTY expects.
 ///
-/// `None` for a key with no sensible byte encoding (a bare modifier, a
-/// function key Glasshouse does not translate) — session mode simply has
-/// nothing to send for it.
+/// `None` only for a key no terminal has bytes for at all (a bare modifier,
+/// `CapsLock`, a media key) — anything a harness could bind must arrive, and a
+/// key silently dropped here is indistinguishable from a harness that ignored
+/// it. Every sequence below is the one an ordinary terminal emulator sends, so
+/// the harness's own input parser needs no special case for Glasshouse.
 pub(super) fn encode(key: KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        // Ctrl-A..Ctrl-Z as the control byte 0x01..0x1a. Checked before the
-        // plain `Char` arm below so a control chord never encodes as its
-        // literal character instead.
-        KeyCode::Char(c) if ctrl && c.is_ascii_alphabetic() => {
-            Some(vec![c.to_ascii_lowercase() as u8 - b'a' + 1])
-        }
         KeyCode::Char(c) => {
-            let mut buf = [0u8; 4];
-            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            // A control chord is its control byte, never its literal
+            // character: without this `Ctrl-\` would reach the harness as the
+            // `'4'` Crossterm named it after.
+            let control = if ctrl { control_byte(c) } else { None };
+            Some(match control {
+                Some(byte) => vec![byte],
+                None => {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                }
+            })
         }
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+        KeyCode::F(n) => function_key(n).map(<[u8]>::to_vec),
         _ => None,
     }
+}
+
+/// The control byte `Ctrl` with `c` sends, or `None` when the chord has no
+/// control byte and the character itself is what the harness should receive.
+///
+/// Two families. `Ctrl-A..Ctrl-Z` are `0x01..=0x1a`, derived from the letter.
+/// The C0 codes with no letter to derive them from are spelled by whichever
+/// character a parser named them after: Crossterm's Unix parser maps
+/// `0x1C..=0x1F` to `'4'..='7'` arithmetically, while a keyboard that can type
+/// `\` or `_` reports those literally — both spellings mean the same byte, so
+/// both are listed. `'5'` and `']'` (`0x1D`) are deliberately missing:
+/// [`is_session_escape`] claims that byte in
+/// [`ShellState::handle_session_key`] before this is ever called.
+fn control_byte(c: char) -> Option<u8> {
+    match c {
+        c if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase() as u8 - b'a' + 1),
+        ' ' => Some(0x00),
+        '4' | '\\' => Some(0x1c),
+        '6' => Some(0x1e),
+        '7' | '_' => Some(0x1f),
+        _ => None,
+    }
+}
+
+/// The escape sequence a function key sends, or `None` for the one Glasshouse
+/// keeps for itself.
+///
+/// `F1..=F4` are the VT100 `SS3` forms and `F5..=F11` the xterm `CSI ~` forms,
+/// which is what a harness's own input parser reads a function-key binding
+/// from — before this existed every one of them was dropped. `F12` is
+/// absent on purpose: it is the layout-independent escape, and
+/// [`ShellState::handle_session_key`] tests [`is_session_escape`] first, so it
+/// cannot reach here. `F13` and up have no agreed encoding and are dropped.
+fn function_key(n: u8) -> Option<&'static [u8]> {
+    Some(match n {
+        1 => b"\x1bOP",
+        2 => b"\x1bOQ",
+        3 => b"\x1bOR",
+        4 => b"\x1bOS",
+        5 => b"\x1b[15~",
+        6 => b"\x1b[17~",
+        7 => b"\x1b[18~",
+        8 => b"\x1b[19~",
+        9 => b"\x1b[20~",
+        10 => b"\x1b[21~",
+        11 => b"\x1b[23~",
+        _ => return None,
+    })
 }
