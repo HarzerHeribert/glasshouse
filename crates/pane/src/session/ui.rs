@@ -1,6 +1,6 @@
 //! One thread owns the terminal and keys; the task thread only sends view state.
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -412,7 +412,7 @@ fn run(
     ready: mpsc::SyncSender<Result<(), String>>,
     handler_cancellations: Arc<Mutex<Vec<String>>>,
 ) -> io::Result<()> {
-    let mut pending_events = VecDeque::new();
+    let mut input = terminal_input::TerminalInput::default();
     let setup = (|| {
         let _guard = super::lock(&DRAWING);
         enable_raw_mode()?;
@@ -600,12 +600,10 @@ fn run(
             io::stdout().flush()?;
             dirty = false;
         }
-        if pending_events.is_empty()
-            && !event::poll(Duration::from_millis(if moving { 40 } else { 100 }))?
-        {
+        if !input.queued() && !event::poll(Duration::from_millis(if moving { 40 } else { 100 }))? {
             continue;
         }
-        let Some(input_event) = terminal_input::read(&mut pending_events)? else {
+        let Some(input_event) = input.read()? else {
             continue;
         };
         match input_event {

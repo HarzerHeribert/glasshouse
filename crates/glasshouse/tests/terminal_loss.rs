@@ -177,6 +177,28 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// exit?" cannot distinguish them and this file used to check neither.
 const EXIT_FORCED: u32 = 130;
 
+/// The exit code an interface that wound itself down cleanly reports.
+///
+/// **The vacuity guard for the blinded test below.** A blinded interface
+/// reaching this saw its hangup and left by the front door, which is the one
+/// thing `GLASSHOUSE_TUI_BLIND_TO_HANGUPS` exists to prevent — the switch has
+/// stopped reaching the code it aims at and the test has quietly become a
+/// second copy of the sighted one, passing while proving nothing. That is the
+/// vacuous-test failure practice §59 records.
+const EXIT_CLEAN: u32 = 0;
+
+/// The exit code a Rust process reports when a panic unwinds out of `main`.
+///
+/// Never an acceptable way for a closed window to end Glasshouse: it is the
+/// code that means *this build is broken*, and spending it on a user closing
+/// their terminal hides the reds that mean something. This file has now seen
+/// two writes-after-the-terminal-is-gone reach it — Ratatui's `Drop for
+/// Terminal` (packet HANGUP-FOLLOWUP, defect 2, fixed in
+/// `tui::drop_terminal_tolerantly`) and the fatal-error report on `main`'s
+/// error arm (fixed in `shutdown::report_fatal`, after GitHub run
+/// 34340063488 reported exactly this code here).
+const EXIT_PANIC: u32 = 101;
+
 /// How many times the blinded scenario is run.
 ///
 /// Three, where the sighted one needs [`TRIALS`], and the difference is the
@@ -300,16 +322,30 @@ const RESIZE_TRIALS: usize = 16;
 /// whether to run the trials than the trials themselves cost.
 const CALIBRATION_SAMPLES: usize = 8;
 
-/// How much longer than requested a `sleep` may run before the gap it was
-/// building is not trustworthy.
+/// Which of [`RESIZE_TO_KEYSTROKE`]'s gaps this host cannot build, given the
+/// worst `sleep` overrun [`measure_scheduling_slop`] saw.
 ///
-/// [`RESIZE_TO_KEYSTROKE`]'s shorter gap, deliberately: if this host cannot
-/// get a `sleep(500µs)` back within another 500µs, a keystroke `sleep`d
-/// "500µs after" a resize is not landing in a window that narrow — it lands
-/// wherever the scheduler next resumes the thread, which reaches into the
-/// 2–8ms region [`RESIZE_TO_KEYSTROKE`]'s own by-hand measurement names as
-/// the worst of the unfixed curve.
-const CALIBRATION_THRESHOLD: Duration = RESIZE_TO_KEYSTROKE[1];
+/// **A gap narrower than the host's own scheduling slop is not a gap**: a
+/// keystroke `sleep`d "`gap` after" a resize does not land in a window that
+/// narrow, it lands wherever the scheduler next resumes the thread. Counting
+/// what such a "gap" swallowed measures the runner, not the tree.
+///
+/// **Each gap is compared against its own width**, and that is the whole of
+/// what changed here. The skip used to be one boolean, pinned to the shorter
+/// gap and applied only to the shorter gap's trials — correct on every host
+/// measured at the time, because the slop seen then (210µs here under eight
+/// spinners) sat *between* the two gaps, so pinning and per-gap agreed.
+/// GitHub run 34340063488 measured the hosted macOS runners at **4.223667ms,
+/// 7.43825ms and 7.766375ms**, every one of them larger than the 4ms gap
+/// itself. There the old rule skipped the 500µs proof and then went on to
+/// judge a 4ms gap the host could not build either, which is how
+/// `macos-latest, msrv` reported "5 of 8 swallowed" against a tolerance of 3.
+///
+/// This gates whether a gap exists, never what it tolerates — [`MAX_STALLS`]
+/// stays unconditional for the reason its own comment gives.
+fn unmeasurable_gaps(slop: Duration) -> [bool; RESIZE_TO_KEYSTROKE.len()] {
+    RESIZE_TO_KEYSTROKE.map(|gap| slop >= gap)
+}
 
 /// The size the terminal is changed to in the resize test, chosen only to be
 /// different in both directions from the 40x120 it starts at.
@@ -417,7 +453,8 @@ const HARNESS_GONE_DEADLINE: Duration = Duration::from_secs(2);
 /// the gate — **unconditionally, not gated on [`measure_scheduling_slop`]**.
 /// A slop gate was tried first and dropped: eight background spinners, the
 /// load this file's own acceptance command builds, measured this host at
-/// 210µs against [`CALIBRATION_THRESHOLD`]'s 500µs, so a gate gets to decide
+/// 210µs against the 500µs of [`RESIZE_TO_KEYSTROKE`]'s shorter gap, so a
+/// gate gets to decide
 /// "quiet" on exactly the load a real flake needs covered. A trial that ends
 /// [`Ending::Forced`] is re-run once, alone, and counts as forced only if it
 /// is forced again on the retry; a quiet run simply never has one to retry,
@@ -441,8 +478,9 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
     }
     println!(
         "{TRIALS} hangups: {} forced, {retried} retried once (slop {scheduling_slop:?} against \
-         the {CALIBRATION_THRESHOLD:?} threshold).",
+         the {:?} of the shorter resize gap).",
         forced.len(),
+        RESIZE_TO_KEYSTROKE[1],
     );
     // Every trial above has already required the process to be *gone*. This
     // requires the interface to have got there itself, which is the thing the
@@ -599,19 +637,53 @@ fn one_terminal_loss(trial: usize) -> Ending {
 /// this machine, that is the field stack exactly: every sample in
 /// `FileDesc::read`, under `crossterm::event::poll`, at 97% of a core.
 ///
-/// Nothing the interface can do ends that process. What ends it is
-/// `tui::event`'s watchdog, and this is the only test that can say so, because
-/// it is the only one where the interface is guaranteed to have failed.
+/// # What the switch does not blind, and what this therefore asserts
+///
+/// **The blindness is one-sided, and pretending otherwise is what made this
+/// test red.** Closing a pty master does three things at once: it delivers
+/// `SIGHUP`, it sets `POLLHUP`, and it makes the next *write* fail `EIO`. The
+/// switch hides only the third-of-three from `wait_for_terminal`. So a
+/// blinded interface still has a second, independent way to discover its loss
+/// — the next `Screen::draw` fails, the error propagates out of `shell::run`,
+/// and the process ends itself with a failure code without the watchdog ever
+/// being needed. Which of the two wins is a property of the host: crossterm's
+/// read on a revoked pty loops on Linux (the trapped case, watchdog) and
+/// errors on macOS (the propagating case). This machine takes the watchdog;
+/// the hosted macOS runners of GitHub run 34340063488 left by the error route
+/// in 90.7ms and 174.7ms, and an assertion pinned to [`EXIT_FORCED`] called
+/// that a failure.
+///
+/// Both of those are the product working. So the assertion is on the two
+/// endings that are **not**: [`EXIT_CLEAN`], which means the switch stopped
+/// blinding anything and the test is vacuous, and [`EXIT_PANIC`], which means
+/// a write to the dead terminal was not tolerated. The substantive claims are
+/// untouched and are what the trial body still enforces: the process is
+/// **gone** inside [`HANGUP_DEADLINE`], and it burned no more than
+/// [`MAX_CPU_AFTER_HANGUP`] getting there — a spinning interface fails both,
+/// on either route, which is the defect this file exists for.
+///
+/// A watchdog deleted outright is still caught: on Linux the interface is
+/// genuinely trapped, nothing ends it, and the deadline fires. The tally of
+/// endings is printed every run so a `--nocapture` log always says which
+/// route each host took.
 #[test]
 fn an_interface_that_cannot_see_a_hangup_is_still_ended() {
+    let mut endings = Vec::new();
     for trial in 1..=BLIND_TRIALS {
-        one_blinded_terminal_loss(trial);
+        endings.push(one_blinded_terminal_loss(trial));
     }
+    let forced = endings.iter().filter(|code| **code == EXIT_FORCED).count();
+    println!(
+        "{BLIND_TRIALS} blinded hangups: {forced} ended by the watchdog ({EXIT_FORCED}), \
+         {} ended themselves on a failed write — codes {endings:?}.",
+        endings.len() - forced,
+    );
 }
 
 /// One trial of the above: start the interface unable to see hangups, let it
-/// settle, take its terminal away, and require it gone anyway.
-fn one_blinded_terminal_loss(trial: usize) {
+/// settle, take its terminal away, and require it gone anyway. Returns the
+/// exit code it went out on, so the caller can report which route it took.
+fn one_blinded_terminal_loss(trial: usize) -> u32 {
     let fixture = Fixture::new();
     let mut child = fixture.start_shell_with(&[("GLASSHOUSE_TUI_BLIND_TO_HANGUPS", "1")]);
     child.wait_for_first_frame();
@@ -641,19 +713,23 @@ fn one_blinded_terminal_loss(trial: usize) {
     loop {
         if let Some(status) = child.try_wait() {
             let took = hangup.elapsed();
-            // **The one place this file requires the forced code rather than
-            // forbidding it.** A blinded interface cannot leave by itself, so
-            // an exit code of 0 here would not be good news — it would mean
-            // the blindness switch stopped reaching the code it is aimed at
-            // and this test had quietly become a second copy of the one above,
-            // passing while proving nothing. That is the vacuous-test failure
-            // practice §59 records, and this assertion is what would catch it.
-            assert_eq!(
-                status.exit_code(),
-                EXIT_FORCED,
-                "trial {trial}: a blinded interface exited on its own after {took:?}, which it \
+            // The two endings that are not the product working. See this
+            // test's doc for why the watchdog's code is not required here and
+            // an error exit is: the switch blinds `wait_for_terminal`, not
+            // the write that discovers the same loss a moment later.
+            let code = status.exit_code();
+            assert_ne!(
+                code, EXIT_CLEAN,
+                "trial {trial}: a blinded interface wound down cleanly after {took:?}, which it \
                  cannot do — the switch that is supposed to hide the hangup from it is no longer \
                  hiding anything, and this test is proving nothing about the watchdog"
+            );
+            assert_ne!(
+                code, EXIT_PANIC,
+                "trial {trial}: a blinded interface panicked its way out after {took:?}. A \
+                 terminal going away is an ordinary end, not a broken build: something on the \
+                 way out wrote to the dead terminal and was not tolerant of the failure. See \
+                 `shutdown::report_fatal` and `tui::drop_terminal_tolerantly`."
             );
             let cpu = cpu_after
                 .zip(cpu_before)
@@ -663,11 +739,11 @@ fn one_blinded_terminal_loss(trial: usize) {
             // Measured on this machine: gone in 0.08s to 0.13s over 8 trials.
             assert!(
                 cpu.is_none_or(|burned| burned <= MAX_CPU_AFTER_HANGUP),
-                "trial {trial}: the watchdog ended the interface after {took:?}, but it burned \
-                 {:?}s of processor time first — the point of ending it is not to let it spin",
+                "trial {trial}: the interface ended after {took:?}, but it burned {:?}s of \
+                 processor time first — the point of ending it is not to let it spin",
                 cpu.unwrap_or_default(),
             );
-            return;
+            return code;
         }
 
         if Instant::now() >= next_sample {
@@ -801,22 +877,39 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
 ///
 /// # On a loaded host
 ///
-/// This test decides whether the shorter gap can be judged here at all from
-/// a measurement taken every run, never from where it runs.
-/// [`measure_scheduling_slop`] carries the reasoning; when it says no, the
-/// run prints why and the longer gap is unaffected.
+/// This test decides whether **each** gap can be judged here at all from a
+/// measurement taken every run, never from where it runs.
+/// [`measure_scheduling_slop`] takes it and [`unmeasurable_gaps`] applies it,
+/// gap by gap against that gap's own width; when it says no, the run
+/// prints why and the other gap is unaffected. A run where both are skipped
+/// says so in as many words.
 #[test]
 fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
     let scheduling_slop = measure_scheduling_slop();
-    let short_gap_unmeasurable = scheduling_slop >= CALIBRATION_THRESHOLD;
-    if short_gap_unmeasurable {
+    let unmeasurable = unmeasurable_gaps(scheduling_slop);
+    for (which, gap) in RESIZE_TO_KEYSTROKE.iter().enumerate() {
+        if unmeasurable[which] {
+            println!(
+                "{gap:?} gap's proof skipped: this host's std::thread::sleep({:?}) overran by \
+                 {scheduling_slop:?} in the worst of {CALIBRATION_SAMPLES} samples, which is at \
+                 or past the {gap:?} gap itself — a keystroke sent that long after a resize is \
+                 not landing in a window that narrow here, so counting what it swallowed would \
+                 measure this host and not this tree.",
+                RESIZE_TO_KEYSTROKE[1]
+            );
+        }
+    }
+    // Loud, because a run where neither gap can be built asserts nothing and
+    // must not be mistaken for a proof that passed. It is still not a failure:
+    // a host that cannot hold a 4ms gap cannot answer the question this test
+    // asks, and reporting that as a red buries the reds that mean something.
+    if unmeasurable.iter().all(|skipped| *skipped) {
         println!(
-            "{:?} gap's proof skipped: this host's std::thread::sleep({:?}) overran by \
-             {scheduling_slop:?} in the worst of {CALIBRATION_SAMPLES} samples, at or past the \
-             {CALIBRATION_THRESHOLD:?} threshold this test holds it to — a keystroke sent that \
-             long after a resize is not landing in a window that narrow here. The {:?} gap ran \
-             and was judged normally.",
-            RESIZE_TO_KEYSTROKE[1], RESIZE_TO_KEYSTROKE[1], RESIZE_TO_KEYSTROKE[0]
+            "NOTE: every gap was skipped, so this run proves nothing about resize-swallowed \
+             keystrokes — this host's scheduling slop ({scheduling_slop:?}) is at or past even \
+             the widest gap ({:?}). The quiet hosts and the other CI cells are where this test \
+             is a proof.",
+            RESIZE_TO_KEYSTROKE[0]
         );
     }
 
@@ -824,7 +917,7 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
     let mut last_screen = String::new();
     for trial in 1..=RESIZE_TRIALS {
         let which = trial % RESIZE_TO_KEYSTROKE.len();
-        if short_gap_unmeasurable && which == 1 {
+        if unmeasurable[which] {
             continue;
         }
         if let Some(drawn) = one_resize_then_keystroke(trial, RESIZE_TO_KEYSTROKE[which]) {
@@ -837,7 +930,7 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
     // unconditionally (practice §60: a rate, not a pass) so a `--nocapture`
     // run reports the counts without needing a failure to see them.
     for (which, swallowed) in stalls.iter().enumerate() {
-        if short_gap_unmeasurable && which == 1 {
+        if unmeasurable[which] {
             println!("{:?} gap: skipped", RESIZE_TO_KEYSTROKE[which]);
             continue;
         }
@@ -857,6 +950,53 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
             RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len(),
             RESIZE_TO_KEYSTROKE[which],
             MAX_STALLS[which],
+        );
+    }
+}
+
+/// Every gap this host cannot build is skipped, and no gap it can build is.
+///
+/// The unit test for [`unmeasurable_gaps`], and the regression test for the
+/// hole that made `macos-latest, msrv` red in GitHub run 34340063488. The
+/// middle case is the one that discriminates: at 1ms the two rules agree that
+/// the 500µs gap is gone and the 4ms gap is fine, which is why the pinned
+/// rule looked right for as long as it did. The runner numbers are the ones
+/// that tell them apart — the old rule answers `[false, true]` there and the
+/// 4ms trials get judged on a host that cannot place them.
+///
+/// It runs in microseconds and touches no pty, so it is the cheap half of a
+/// proof whose expensive half cannot be made to fail on demand.
+#[test]
+fn a_gap_narrower_than_the_hosts_scheduling_slop_is_not_judged() {
+    // This development machine under eight spinners: both gaps stand.
+    assert_eq!(
+        unmeasurable_gaps(Duration::from_micros(210)),
+        [false, false],
+        "a host whose worst sleep overran by 210µs can build both gaps, and skipping either \
+         there would throw away the proof this file exists for"
+    );
+
+    // Between the two gaps: exactly where the pinned rule and this one agree.
+    assert_eq!(
+        unmeasurable_gaps(Duration::from_millis(1)),
+        [false, true],
+        "1ms of slop swallows the 500µs gap and leaves the 4ms one, which is the case the \
+         old pinned rule got right and the reason it survived this long"
+    );
+
+    // Run 34340063488, the three macOS cells: 4.223667ms (msrv, the cell that
+    // failed), 7.43825ms and 7.766375ms. Every gap is gone on all three.
+    for slop in [
+        Duration::from_nanos(4_223_667),
+        Duration::from_nanos(7_438_250),
+        Duration::from_nanos(7_766_375),
+    ] {
+        assert_eq!(
+            unmeasurable_gaps(slop),
+            [true, true],
+            "a host whose worst sleep overran by {slop:?} cannot place a keystroke 4ms after a \
+             resize either, so the 4ms gap must be skipped too. Judging it is what reported \
+             '5 of 8 swallowed' against a tolerance of 3 — a red about the runner's scheduler."
         );
     }
 }

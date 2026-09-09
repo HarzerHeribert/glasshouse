@@ -1003,6 +1003,14 @@ fn the_cell_ceiling_bounds_reductions_nobody_asked_for() {
 /// Both halves spend one per-cell budget, so an automatic reduction firing on
 /// several oversized results could leave the model refused for a `helper.*`
 /// call it did make. Slots are reserved for the pulled half.
+///
+/// Gated like its five siblings above, and for the same reason: it spends
+/// `PRINTF_ONLY` and `oversized_command`, which are a bash grant and a brace
+/// expansion. Those are gated to the two Unix hosts, so leaving this test
+/// ungated does not make it run on Windows — it makes the file fail to
+/// compile there, since `-D warnings` is the least of it once the names have
+/// gone. It was added after the other five and simply lost the attribute.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_pushed_reduction_leaves_slots_for_the_models_own_calls() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());

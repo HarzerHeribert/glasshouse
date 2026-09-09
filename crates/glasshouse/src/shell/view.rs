@@ -132,7 +132,7 @@ pub fn terminal_size_for(screen: &crate::tui::Screen, state: &ShellState) -> Ter
 ///
 /// The signature every caller that only wants pixels keeps — the tests below
 /// and the integration tests that drive a `TestBackend`. Production draws
-/// through [`render_recording`] instead, because a click can only be answered
+/// through `render_recording` instead, because a click can only be answered
 /// against the frame it landed on.
 pub fn render(state: &ShellState, frame: &mut Frame) {
     render_recording(state, frame, &mut Vec::new());

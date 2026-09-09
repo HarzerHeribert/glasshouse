@@ -27,7 +27,11 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(err) => {
             shutdown::restore_terminal();
-            eprintln!("glasshouse: {err:#}");
+            // Not `eprintln!`: the error that reaches here is very often the
+            // one raised *by* stderr going away, and `eprintln!` panics when
+            // its write fails, which would exit 101 instead of 1. See
+            // `shutdown::report_fatal`.
+            shutdown::report_fatal(&err);
             ExitCode::FAILURE
         }
     }

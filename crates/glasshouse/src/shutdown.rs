@@ -110,6 +110,35 @@ pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+/// Report a fatal error on stderr, tolerating a stderr that can no longer be
+/// written.
+///
+/// **The invariant: a failed stderr write must not turn a failure exit into a
+/// panic exit.** `eprintln!` panics when the write fails
+/// (`std::io::_eprint` → "failed printing to stderr"), and this is the one
+/// report that routinely runs *after* the terminal it would print to has gone
+/// away — [`restore_terminal`] is called immediately before it on `main`'s
+/// error arm, and the error being reported is very often the `EIO` from the
+/// draw that discovered the terminal was revoked. A panic there unwinds out of
+/// `main` and the process exits **101** instead of 1, so the one exit code
+/// that means "this build is broken" is spent on the ordinary end of a closed
+/// window. Measured directly: a Rust program whose stderr write returns
+/// `EPIPE` exits 101 from `eprintln!` alone.
+///
+/// Seen in `tests/terminal_loss.rs`'s blinded trials on the macOS runner of
+/// GitHub run 34340063488, which reported exit 101 where the interface had in
+/// fact ended itself perfectly well.
+pub fn report_fatal(err: &anyhow::Error) {
+    report_fatal_to(&mut std::io::stderr(), err);
+}
+
+/// [`report_fatal`] against any writer, so the tolerance is testable without
+/// taking this process's stderr away.
+fn report_fatal_to(out: &mut impl Write, err: &anyhow::Error) {
+    let _ = writeln!(out, "glasshouse: {err:#}");
+    let _ = out.flush();
+}
+
 /// Install the panic hook that restores the terminal before the panic message
 /// is printed, so the report is readable and the shell is usable afterwards.
 pub fn install_panic_hook() {
@@ -362,6 +391,76 @@ mod tests {
 
     fn terminal_state_turn() -> std::sync::MutexGuard<'static, ()> {
         TERMINAL_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A writer that fails the way a revoked terminal does.
+    ///
+    /// `EIO` rather than a generic error because that is the errno a write to
+    /// the slave side of a closed pty actually returns; the `flush` fails too,
+    /// because a tolerance that only covers `write` would still panic on the
+    /// line after.
+    struct DeadStderr;
+
+    impl Write for DeadStderr {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(libc_eio()))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc_eio()))
+        }
+    }
+
+    /// `EIO`, without pulling `libc` into this module for one constant.
+    ///
+    /// It is 5 on every platform Glasshouse builds for; the value only has to
+    /// make the writer fail, not to be recognised.
+    fn libc_eio() -> i32 {
+        5
+    }
+
+    /// The fatal-error report survives a stderr it cannot write to.
+    ///
+    /// Without this — with `eprintln!`, or with an `unwrap` on the write —
+    /// the report panics, the panic unwinds out of `main`, and the process
+    /// exits **101**: the code that means "Glasshouse is broken", spent on a
+    /// user closing their terminal window. `tests/terminal_loss.rs` saw
+    /// exactly that on GitHub run 34340063488. This test is the one that
+    /// fails without the fix on every platform, rather than only on a host
+    /// that loses the race.
+    #[test]
+    fn reporting_a_fatal_error_to_a_dead_stderr_does_not_panic() {
+        let err = anyhow::anyhow!("could not draw the interface")
+            .context("the terminal went away mid-frame");
+
+        // The assertion is that this returns at all. A panic here is the
+        // defect, and it fails the test by unwinding, so there is nothing
+        // further to assert about the value.
+        report_fatal_to(&mut DeadStderr, &err);
+    }
+
+    /// The report reaches a stderr that *is* writable, so the tolerance above
+    /// did not buy silence.
+    #[test]
+    fn reporting_a_fatal_error_writes_the_whole_context_chain() {
+        let err = anyhow::anyhow!("could not draw the interface")
+            .context("the terminal went away mid-frame");
+        let mut out = Vec::new();
+
+        report_fatal_to(&mut out, &err);
+
+        let written = String::from_utf8(out).expect("the report is UTF-8");
+        assert!(
+            written.starts_with("glasshouse: the terminal went away mid-frame"),
+            "the report must lead with the program name and the outermost \
+             context, as every other error line does — got {written:?}"
+        );
+        assert!(
+            written.contains("could not draw the interface"),
+            "`{{err:#}}` prints the whole chain; a report that dropped the \
+             root cause would leave the user with only the summary — got \
+             {written:?}"
+        );
     }
 
     /// A terminal that goes away is one event seen twice: `tui::event`'s own

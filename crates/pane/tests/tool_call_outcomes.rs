@@ -1,3 +1,8 @@
+//! Every test here needs a real sandbox root, so the whole file is
+//! Unix-only — imports included, because `-D warnings` makes an unused
+//! import an error on Windows and gating only the tests left these dead.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
+
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
 use pane::runtime::isolate::Runtime;
@@ -5,7 +10,6 @@ use pane::runtime::outcome::Ended;
 use pane::sandbox::profile::Profile;
 
 #[test]
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn typed_tool_failures_and_bash_exit_codes_have_truthful_call_outcomes() {
     let root = std::env::temp_dir().join(format!("pane-tool-call-outcomes-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -50,7 +54,6 @@ fn typed_tool_failures_and_bash_exit_codes_have_truthful_call_outcomes() {
 /// with a typed result built from whatever partial output the child had
 /// managed.
 #[test]
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn a_signal_killed_child_is_not_a_successful_call() {
     let root = std::env::temp_dir().join(format!("pane-signal-outcome-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

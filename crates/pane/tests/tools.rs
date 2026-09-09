@@ -27,6 +27,9 @@ use pane::sandbox::profile::Access;
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::{self, Args, ToolContext};
 use pane::tools::registry::{self, ArgKind, Purity, Tool};
+// Only the literal-line-arrays edit test hashes anything, and that test is
+// gated; same reason as `Access` above.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

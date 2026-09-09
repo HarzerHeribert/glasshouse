@@ -1940,16 +1940,27 @@ fn a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit() 
     .expect("parse cli");
     let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
 
+    // Both halves of the exit-time write, not just the first. `shell::run`
+    // captures the native identifier and records the lifecycle as two
+    // separate statements, so a reader from this second process can land
+    // between them and snapshot a record that already names the rollout while
+    // its lifecycle still reads `Running` — `disposition()` is then `Active`,
+    // and the assertion below fails on a session that was about to be
+    // perfectly resumable. Observed once on the windows-11-arm cell of run
+    // 34340063488 and on no other cell of it. Waiting for the lifecycle to
+    // stop being live costs the assertion nothing: `Failed` and `Closed`
+    // also end the wait and are still not `Resumable`.
     let deadline = Instant::now() + TIMEOUT;
     let mut captured = None;
     while Instant::now() < deadline {
         shell.answer_pending_queries();
         let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
         let records = sessions.store().list().expect("list sessions");
-        if let Some(record) = records
-            .into_iter()
-            .find(|record| record.harness == "codex" && record.native_session_id.is_some())
-        {
+        if let Some(record) = records.into_iter().find(|record| {
+            record.harness == "codex"
+                && record.native_session_id.is_some()
+                && !record.lifecycle.is_live()
+        }) {
             captured = Some(record);
             break;
         }

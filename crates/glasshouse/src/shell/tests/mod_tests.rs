@@ -4030,9 +4030,21 @@ mod after_the_harness_exits_tests {
     /// so a session is "running" until it is asked, however long the process
     /// has been dead. That is what makes the control assertions below
     /// deterministic rather than a race.
+    ///
+    /// `answer_terminal_queries` is in the loop because it is in the
+    /// production tick this stands in for, and on Windows it is not a
+    /// nicety: ConPTY sends `ESC[6n` on the pty's own output while bringing
+    /// the pseudo-console up and does not let the child start until
+    /// something replies, and Glasshouse is the terminal for an embedded
+    /// session, so nothing else can. Without it the fake harness has not run
+    /// a single line by the deadline and all three tests below fail on every
+    /// Windows CI cell — measured on run 34340063488, x64 and arm64, both
+    /// toolchains. Same reason as `shell_entitlement_scrub_tests`' loop a few
+    /// hundred lines above and `tests/events_lifecycle.rs`'s `drive`.
     fn wait_for_exit(live: &mut SessionRuntime, id: &SessionId) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
+            live.answer_terminal_queries();
             if live.poll_exits().iter().any(|(ended, _)| ended == id) {
                 return;
             }

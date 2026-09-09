@@ -143,10 +143,24 @@ impl App {
         }
     }
     /// Send an SGR mouse report the way the defect arrives in a real PTY: the
-    /// Escape in one read, the printable remainder in the next.
+    /// Escape in one write, the printable remainder in the next.
+    ///
+    /// **This is a smoke test, not a control.** Nothing here can make the
+    /// reader split at a chosen boundary: on an idle machine both writes are
+    /// usually drained in one read and the split never happens, and on a
+    /// loaded one the pause is whatever the scheduler gives. That is exactly
+    /// how a timing-dependent reassembler shipped green from here and failed
+    /// on a CI runner. The boundary-by-boundary coverage is the unit tests in
+    /// `session::ui::terminal_input`, which feed the reassembler directly.
     fn send_split_mouse_report(&mut self, tail: &[u8]) {
+        self.send_report_split_by(tail, Duration::from_millis(5));
+    }
+    /// The same, with the gap named. A *large* gap is the control the 5 ms one
+    /// is not: pane polls the terminal every 40--100 ms, so a third of a
+    /// second between the two writes cannot land in one read.
+    fn send_report_split_by(&mut self, tail: &[u8], gap: Duration) {
         self.send(b"\x1b");
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(gap);
         self.send(tail);
     }
     fn resize(&mut self, width: u16) {
@@ -588,6 +602,10 @@ fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
 /// A click is the case the wheel-only repair missed. Before it, the tail of a
 /// split `[<0;10;5M` failed the wheel test, was queued behind the Escape and
 /// typed: the composer held `[<0;10;5M[<0;10;5m` and the model was sent it.
+///
+/// Smoke only — `send_split_mouse_report` cannot guarantee the split, so a
+/// green run here does not prove the reassembly. That proof is
+/// `a_report_split_at_any_boundary_is_never_typed` in the unit tests.
 #[test]
 fn a_fragmented_click_report_does_not_become_prompt_text() {
     let (base, requests) = provider();
@@ -616,9 +634,48 @@ fn a_fragmented_click_report_does_not_become_prompt_text() {
     assert_eq!(app.exited(), 0);
 }
 
+/// **The one PTY test here that controls the split.** Five milliseconds is a
+/// hope — both writes usually drain in a single read, and then nothing is
+/// split at all — but 300 ms cannot be: pane polls every 40--100 ms, so the
+/// Escape is certainly read alone and the tail certainly arrives in a later
+/// read, long after any timer a reassembler could have kept. This is the
+/// condition CI created by accident on a loaded runner, and the condition the
+/// timing-based predecessor lost under: it typed `[<65;101;28M` into the
+/// composer and sent it to the model. Holding a run by the grammar rather than
+/// by a clock is what makes the size of the gap irrelevant.
+#[test]
+fn a_report_whose_halves_are_a_third_of_a_second_apart_is_still_not_typed() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    let gap = Duration::from_millis(300);
+    app.send_report_split_by(b"[<65;101;28M", gap);
+    app.send_report_split_by(b"[<0;10;5M", gap);
+    app.send_report_split_by(b"[<0;10;5m", gap);
+    app.settle(200);
+    let screen = app.screen.screen().contents();
+    for leak in ["[<65", "[<0;", "101;28", "10;5"] {
+        assert!(
+            !screen.contains(leak),
+            "report reached the screen:\n{screen}"
+        );
+    }
+    app.send(b"SLOW_SPLIT_OK\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        request["messages"][0]["content"][0]["text"],
+        "SLOW_SPLIT_OK"
+    );
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
 /// The wheel half of the same repair, proved by its effect rather than by the
 /// absence of text: a transcript taller than the viewport scrolls back to its
-/// first line under fragmented wheel-up reports.
+/// first line under fragmented wheel-up reports. What only a real terminal can
+/// show is that the reassembled event reaches the scroll handler at all; that
+/// it survives *every* split boundary is the unit tests' job, not this one's.
 #[test]
 fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
     let mut app = App::start("http://127.0.0.1:1");
@@ -647,6 +704,11 @@ fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
     assert_eq!(app.exited(), 0);
 }
 
+/// The report must not reach the composer, and the text typed after it must
+/// arrive alone. Smoke only, for the reason in `send_split_mouse_report`: this
+/// test was green on every local run of the timing-based reassembler and red
+/// on a loaded CI runner, where the composer held
+/// `[<65;101;28MWHEEL_INPUT_OK`.
 #[test]
 fn fragmented_mouse_reports_do_not_become_prompt_text() {
     let (base, requests) = provider();

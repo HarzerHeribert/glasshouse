@@ -1,17 +1,36 @@
-use pane::contract::SessionId;
-use pane::glasshouse::Glasshouse;
-use pane::sandbox::profile::{Access, Profile};
-use pane::tools::invoke::{self, Args, ToolContext};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+//! Two of the three tests here need a real sandbox and a real working
+//! directory, so they are Unix-only — and so are the imports and the
+//! `RestoreCwd` guard only they use, because `-D warnings` makes an unused
+//! import an error on Windows. They are gated together, in one block, so the
+//! helper cannot drift out of step with what uses it.
+//!
+//! The third, `missing_relative_root_is_anchored_without_falling_back_to_cwd`,
+//! is deliberately NOT gated: it asserts how a relative root is anchored, which
+//! is precisely the behaviour Windows spells differently, so it is the one test
+//! in this file that the Windows cell most needs to run.
+
+use pane::sandbox::profile::Profile;
+use std::sync::Mutex;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use {
+    pane::contract::SessionId,
+    pane::glasshouse::Glasshouse,
+    pane::sandbox::profile::Access,
+    pane::tools::invoke::{self, Args, ToolContext},
+    std::path::{Path, PathBuf},
+    std::sync::MutexGuard,
+};
 
 static CWD: Mutex<()> = Mutex::new(());
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct RestoreCwd {
     original: PathBuf,
     _lock: MutexGuard<'static, ()>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl RestoreCwd {
     fn enter(path: &Path) -> Self {
         let lock = CWD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -24,6 +43,7 @@ impl RestoreCwd {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for RestoreCwd {
     fn drop(&mut self) {
         std::env::set_current_dir(&self.original).unwrap();
