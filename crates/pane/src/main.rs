@@ -1,4 +1,13 @@
-use std::io::{stdin, stdout};
+const HELP: &str = "pane — the Glasshouse native harness
+
+Usage:
+  pane
+  pane session --root <path> [options]
+  pane ruler run [options]
+  pane --help
+  pane --version
+
+Running `pane` with no arguments starts a session in the current project.";
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -8,6 +17,13 @@ fn main() -> std::io::Result<()> {
         println!("pane {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if args.is_empty() {
+        return dispatch_session(&["--root".into(), ".".into()]);
+    }
     if args.first().map(String::as_str) == Some("ruler") {
         if let Err(message) = pane::ruler::cli::dispatch(&args[1..]) {
             eprintln!("{message}");
@@ -16,15 +32,23 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("session") {
-        if let Err(message) = pane::session::dispatch(&args[1..]) {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
-        return Ok(());
+        return dispatch_session(&args[1..]);
     }
 
-    let mut input = stdin().lock();
-    let mut output = stdout().lock();
-    pane::echo_line(&mut input, &mut output)?;
+    let kind = if args[0].starts_with('-') {
+        "option"
+    } else {
+        "command"
+    };
+    eprintln!("pane: unknown {kind}: {}", args[0]);
+    eprintln!("Try 'pane --help' for usage.");
+    std::process::exit(2);
+}
+
+fn dispatch_session(args: &[String]) -> std::io::Result<()> {
+    if let Err(message) = pane::session::dispatch(args) {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
     Ok(())
 }

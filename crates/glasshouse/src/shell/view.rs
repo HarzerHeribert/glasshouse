@@ -185,23 +185,9 @@ pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut
         None => {}
     }
 
-    // **Session mode does not steal the mouse.** [`render_header`] still
-    // draws the tab strip while a session has the keyboard, and a click on a
-    // tab was answered by queueing `Tab` into the run loop's pending keys —
-    // which `ShellState::handle_key` in [`Mode::Session`] `encode`s and
-    // writes to the harness's stdin. Measured: a left-press inside the second
-    // tab left the focus marker exactly where it was and delivered `0x09` to
-    // the session, firing the embedded harness's own tab completion. A click
-    // that types into the harness is worse than a click that does nothing.
-    //
-    // Cleared here, beside the overlay's clear and after every band and
-    // overlay has drawn, because this is the one place production enters
-    // `view`: one door covers every surface that records a pill, including
-    // any added later. The recorded set stays exactly the frame's clickable
-    // surface, which is what the run loop's hit test answers from.
-    if state.mode() != Mode::Control {
-        sink.clear();
-    }
+    // Header hotspots remain recorded while the child owns the keyboard.
+    // The run loop first moves keyboard ownership to the header, then replays
+    // the pill's keys, so a click can never become input to the child.
 }
 
 /// Draws a [`ViewportGrid`] cell by cell into whatever area it is given.

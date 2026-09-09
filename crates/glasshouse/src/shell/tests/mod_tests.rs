@@ -4343,6 +4343,40 @@ mod starting_selects_what_it_started_tests {
         );
     }
 
+    #[test]
+    fn a_started_session_is_resized_for_the_header_layout_before_input() {
+        let (_data, _workspace, runtime) =
+            native_session_facts_tests::runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+        let outer = TerminalSize::new(24, 80);
+        let id = start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            None,
+            view::viewport_terminal_size(outer, state::Chrome::Full),
+            &mut index_snapshots,
+        )
+        .expect("start embedded session");
+        state.refresh(sessions.store().list().expect("list sessions"));
+
+        let before = state.chrome();
+        state.session_started(&id);
+        sync_focus(&mut live, &state, outer, state.chrome() != before);
+
+        let expected = view::viewport_terminal_size(outer, state::Chrome::Header);
+        let actual = live
+            .get(&id)
+            .expect("started session stays live")
+            .with_screen(|screen| screen.size());
+        assert_eq!(actual, (expected.rows, expected.cols));
+        assert_eq!(state.mode(), Mode::Session);
+    }
+
     /// The wiring, which no unit test can reach: the run loop's own arm needs
     /// a real terminal, so the one thing left to prove is that it still calls
     /// [`ShellState::select_session`] with the identifier `start_session`
@@ -4385,32 +4419,72 @@ mod click_routing_tests {
     /// next real event can move the sessions underneath them.
     #[test]
     fn a_click_is_answered_by_the_hit_test_and_queued_as_keys() {
-        let source = include_str!("../mod.rs").replace("\r\n", "\n");
-        let start = source
+        let caller = include_str!("../mod.rs").replace("\r\n", "\n");
+        let start = caller
             .find("Event::Mouse(mouse) => {")
             .expect("the run loop still has an Event::Mouse arm");
-        let end = source[start..]
+        let end = caller[start..]
             .find("Event::Paste(")
             .expect("Event::Paste still follows Event::Mouse")
             + start;
-        let arm = &source[start..end];
+        let arm = &caller[start..end];
         assert!(
-            arm.contains("hotspot::hit(&hotspots,"),
-            "a click must be answered against the frame's own hotspots: {arm}"
+            arm.contains("input::route_mouse("),
+            "the production arm must call the input router: {arm}"
+        );
+
+        let source = include_str!("../input.rs").replace("\r\n", "\n");
+        let start = source.find("pub(super) fn route_mouse(").unwrap();
+        let end = source[start..].find("pub(super) fn route_paste(").unwrap() + start;
+        let route = &source[start..end];
+        assert!(
+            route.contains("hotspot::hit(hotspots,"),
+            "a click must be answered against the frame's own hotspots: {route}"
         );
         assert!(
-            arm.contains("pending.extend(spot.keys()"),
-            "and must be queued as the keys the pill advertises: {arm}"
+            route.contains("pending.extend(spot.keys()"),
+            "and must be queued as the keys the pill advertises: {route}"
         );
         assert!(
-            source.contains("match pending.pop_front()"),
+            caller.contains("match pending.pop_front()"),
             "the queue must be drained ahead of the terminal"
         );
         assert!(
-            !arm.contains("state.handle_key"),
+            !route.contains("state.handle_key"),
             "the arm must not answer a click itself — that is the parallel \
-             path the pill vocabulary exists to avoid: {arm}"
+             path the pill vocabulary exists to avoid: {route}"
         );
+    }
+
+    #[test]
+    fn shift_selection_is_refused_before_any_mouse_routing() {
+        let source = include_str!("../input.rs").replace("\r\n", "\n");
+        let start = source.find("pub(super) fn route_mouse(").unwrap();
+        let end = source[start..].find("pub(super) fn route_paste(").unwrap() + start;
+        let route = &source[start..end];
+        let shift = route.find("KeyModifiers::SHIFT").expect("Shift guard");
+        let hotspot = route.find("hotspot::hit").expect("chrome route");
+        let child = route.find("mouse(event, viewport").expect("child route");
+        assert!(shift < hotspot && shift < child);
+    }
+
+    #[test]
+    fn paste_is_forwarded_only_while_the_child_owns_the_keyboard() {
+        let caller = include_str!("../mod.rs").replace("\r\n", "\n");
+        let start = caller.find("Event::Paste(text) => {").unwrap();
+        assert!(caller[start..].contains("input::route_paste(&text, &state, &mut live)"));
+
+        let source = include_str!("../input.rs").replace("\r\n", "\n");
+        let start = source.find("pub(super) fn route_paste(").unwrap();
+        let end = source[start..]
+            .find("pub(super) fn sync_mouse_capture(")
+            .unwrap()
+            + start;
+        let route = &source[start..end];
+        assert!(route.contains("state.mode() == Mode::Session"));
+        assert!(route.contains("live.focused_input_modes()"));
+        assert!(route.contains("paste(text, modes.bracketed_paste)"));
+        assert!(route.contains("live.write_to_focused(&bytes)"));
     }
 }
 

@@ -274,6 +274,23 @@ fn a_refresh_with_identical_sessions_does_not_ask_for_a_redraw() {
     assert_eq!(state.refresh(same), Action::None);
 }
 
+#[test]
+fn a_successfully_started_embedded_session_is_selected_and_entered() {
+    let mut state = state_with(2);
+    let id = SessionId::new("id-1");
+    assert_eq!(state.session_started(&id), Action::Redraw);
+    assert_eq!(state.active_session().unwrap().id, id);
+    assert_eq!(state.mode(), Mode::Session);
+    assert!(state.session_view());
+
+    let missing = SessionId::new("start-failed-before-refresh");
+    let mut unchanged = state_with(1);
+    assert_eq!(unchanged.session_started(&missing), Action::Redraw);
+    assert_eq!(unchanged.mode(), Mode::Control);
+    assert!(!unchanged.session_view());
+    assert_eq!(unchanged.active_session().unwrap().id.as_str(), "id-0");
+}
+
 // -----------------------------------------------------------------
 // Session modes — `.agent-runtime/design-shell-session-modes.md`.
 // -----------------------------------------------------------------

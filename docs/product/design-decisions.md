@@ -20256,3 +20256,19 @@ at the same count: `t` was an arm of `handle_control_key` the bar did not
 mirror, and the palette it selects was readable only from a status note the
 next keystroke erased — the same defect the fullscreen toggle's value was added
 to fix.
+
+## Enter the harness on launch; preserve native input — user repair request, 2026-09-09
+
+Live dogfooding showed a ready composer whose keyboard still belonged to
+Glasshouse, ignored viewport clicks and lost clipboard paste. The user asked
+to fix these with GPT-5.6 Sol subagents. The target state and reproduction
+record are in `docs/process/dogfooding-2026-09-09-input.md`.
+
+A successful embedded launch now targets immediate keyboard focus, superseding
+the implementation's deliberate separation of starting and focusing. Clicking
+the viewport restores focus; shell chrome and overlays still own their own
+events. Child mouse and paste modes determine forwarding, with viewport-relative
+coordinates. Terminal-native text selection stays available rather than
+disabling mouse support globally. Pane's provider/model clicks select only;
+Enter applies. Bare `pane` enters its ordinary session path and top-level help
+must explain the executable instead of falling through to the old echo fixture.

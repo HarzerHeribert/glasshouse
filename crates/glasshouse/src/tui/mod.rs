@@ -47,6 +47,15 @@ pub const DEFAULT_TICK: Duration = Duration::from_millis(16);
 pub struct Screen {
     terminal: ManuallyDrop<ratatui::Terminal<CrosstermBackend<Stdout>>>,
     _guard: TerminalGuard,
+    mouse_capture: MouseCapture,
+}
+
+/// Mouse reports requested from Glasshouse's containing terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MouseCapture {
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
 }
 
 impl Screen {
@@ -86,7 +95,28 @@ impl Screen {
         Ok(Self {
             terminal: ManuallyDrop::new(terminal),
             _guard: guard,
+            mouse_capture: MouseCapture::PressRelease,
         })
+    }
+
+    /// Match host motion reporting to what the focused child can consume.
+    /// SGR remains the host encoding; Glasshouse translates it to the
+    /// child's requested encoding after subtracting viewport chrome.
+    pub(crate) fn set_mouse_capture(&mut self, capture: MouseCapture) {
+        if self.mouse_capture == capture {
+            return;
+        }
+        let enable = match capture {
+            MouseCapture::PressRelease => "\x1b[?1000h",
+            MouseCapture::ButtonMotion => "\x1b[?1002h",
+            MouseCapture::AnyMotion => "\x1b[?1003h",
+        };
+        let mut out = stdout();
+        let _ = out.write_all(b"\x1b[?1003l\x1b[?1002l\x1b[?1000l");
+        let _ = out.write_all(enable.as_bytes());
+        let _ = out.write_all(b"\x1b[?1006h");
+        let _ = out.flush();
+        self.mouse_capture = capture;
     }
 
     /// Draw one frame.

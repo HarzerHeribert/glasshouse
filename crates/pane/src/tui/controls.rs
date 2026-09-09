@@ -65,6 +65,43 @@ pub struct PanelRow {
     /// A user-selected local slash command, never model-supplied executable text.
     pub command: Option<String>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PanelGeometry {
+    providers: Vec<(Rect, usize)>,
+    models: Vec<(Rect, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanelHit {
+    Provider(usize),
+    Model(usize),
+}
+
+impl PanelGeometry {
+    pub(crate) fn hit(&self, column: u16, row: u16) -> Option<PanelHit> {
+        self.providers
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+            .map(|(_, index)| PanelHit::Provider(*index))
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .find(|(area, _)| contains(*area, column, row))
+                    .map(|(_, index)| PanelHit::Model(*index))
+            })
+    }
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    area.width > 0
+        && area.height > 0
+        && column >= area.x
+        && column < area.right()
+        && row >= area.y
+        && row < area.bottom()
+}
+
 impl Panel {
     pub fn text(title: impl Into<String>, text: impl AsRef<str>) -> Self {
         Self {
@@ -129,6 +166,29 @@ impl Panel {
             search.active.saturating_sub(1)
         };
         self.provider_rows();
+    }
+
+    pub(crate) fn select_provider(&mut self, index: usize) -> bool {
+        let Some(search) = self.search.as_mut() else {
+            return false;
+        };
+        if index >= search.providers.len() || search.active == index {
+            return index < search.providers.len();
+        }
+        search.active = index;
+        self.provider_rows();
+        true
+    }
+
+    pub(crate) fn select_model_row(&mut self, index: usize) -> bool {
+        let selectable = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.choices.contains(&index));
+        if selectable {
+            self.selected = index;
+        }
+        selectable
     }
 
     pub fn search_insert(&mut self, text: &str) -> bool {
@@ -297,12 +357,23 @@ fn pill(label: &str, focused: bool, theme: super::Theme) -> (String, Style) {
     (format!("{CAP_LEFT}{marker}{label} {CAP_RIGHT}"), style)
 }
 
-pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: super::Theme) {
+pub(super) fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    theme: super::Theme,
+) -> PanelGeometry {
+    let mut geometry = PanelGeometry::default();
     let block = if panel.search.is_some() {
+        let hint = if area.width >= 100 {
+            " ↑↓/click select · Enter apply · text selection: terminal modifier (usually Shift) · Esc close "
+        } else {
+            " ↑↓/click · Enter apply · Esc "
+        };
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .title(format!(" {} ", panel.title))
-            .title_bottom(" ↑↓ model · Enter apply · Esc close ")
+            .title_bottom(hint)
     } else {
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -314,7 +385,7 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: 
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(search) = &panel.search {
-        render_providers(frame, &mut inner, search, theme);
+        geometry.providers = render_providers(frame, &mut inner, search, theme);
         let matches: usize = search.matched.iter().map(|g| g.models.len()).sum();
         let total: usize = search.source.iter().map(|g| g.models.len()).sum();
         let prompt = if search.query.is_empty() {
@@ -360,7 +431,18 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: 
         .enumerate()
         .skip(start)
         .take(usize::from(inner.height))
-        .map(|(i, row)| {
+        .enumerate()
+        .map(|(visible_row, (i, row))| {
+            if panel
+                .search
+                .as_ref()
+                .is_some_and(|search| search.choices.contains(&i))
+            {
+                geometry.models.push((
+                    Rect::new(inner.x, inner.y + visible_row as u16, inner.width, 1),
+                    i,
+                ));
+            }
             let focused = i == panel.selected;
             // A row that carries a command is a button; a group heading, a
             // "no models match" note and a locked entry are prose, and
@@ -390,11 +472,18 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: 
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+    geometry
 }
 
-fn render_providers(frame: &mut Frame, area: &mut Rect, search: &PanelSearch, theme: super::Theme) {
+fn render_providers(
+    frame: &mut Frame,
+    area: &mut Rect,
+    search: &PanelSearch,
+    theme: super::Theme,
+) -> Vec<(Rect, usize)> {
+    let mut geometry = Vec::new();
     if area.height < 3 || area.width < 6 || search.providers.is_empty() {
-        return;
+        return geometry;
     }
     let available = usize::from(area.width.saturating_sub(4));
     let visible = (available / 22).max(1).min(search.providers.len());
@@ -417,6 +506,7 @@ fn render_providers(frame: &mut Frame, area: &mut Rect, search: &PanelSearch, th
             card_width,
             3,
         );
+        geometry.push((card, slot));
         let locked = search
             .matched
             .iter()
@@ -461,6 +551,7 @@ fn render_providers(frame: &mut Frame, area: &mut Rect, search: &PanelSearch, th
     }
     area.y += 3;
     area.height -= 3;
+    geometry
 }
 
 #[cfg(test)]
@@ -592,7 +683,9 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
-            .draw(|frame| render_panel(frame, frame.area(), &panel, theme))
+            .draw(|frame| {
+                render_panel(frame, frame.area(), &panel, theme);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let lines: Vec<String> = (0..20)
@@ -639,8 +732,10 @@ mod tests {
         for theme in super::super::Theme::ALL {
             let mut panel = catalogue();
             let mut wide = Terminal::new(TestBackend::new(80, 22)).unwrap();
-            wide.draw(|frame| render_panel(frame, frame.area(), &panel, theme))
-                .unwrap();
+            wide.draw(|frame| {
+                render_panel(frame, frame.area(), &panel, theme);
+            })
+            .unwrap();
             assert_eq!(wide.backend().buffer()[(2, 1)].bg, theme.accent());
             assert_eq!(wide.backend().buffer()[(27, 1)].bg, theme.dock());
             let mut terminal = Terminal::new(TestBackend::new(44, 22)).unwrap();
@@ -649,7 +744,9 @@ mod tests {
                     panel.move_provider(true);
                 }
                 terminal
-                    .draw(|frame| render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme))
+                    .draw(|frame| {
+                        render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme);
+                    })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
                 assert_eq!(buffer[(2, 3)].symbol() == "◀", left);
@@ -665,10 +762,88 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal
                     .draw(|frame| {
-                        render_panel(frame, frame.area(), &catalogue(), super::super::Theme::Neon)
+                        render_panel(frame, frame.area(), &catalogue(), super::super::Theme::Neon);
                     })
                     .unwrap();
             }
         }
+    }
+
+    fn geometry(panel: &Panel, width: u16, height: u16) -> PanelGeometry {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut geometry = PanelGeometry::default();
+        terminal
+            .draw(|frame| {
+                geometry = render_panel(frame, frame.area(), panel, super::super::Theme::Neon);
+            })
+            .unwrap();
+        geometry
+    }
+
+    #[test]
+    fn hit_geometry_is_the_visible_carousel_and_scrolled_model_slice() {
+        let mut panel = catalogue();
+        let visible = geometry(&panel, 80, 22);
+        assert_eq!(
+            visible
+                .providers
+                .iter()
+                .map(|(_, index)| *index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        let first = visible.providers[0].0;
+        assert_eq!(visible.hit(first.x, first.y), Some(PanelHit::Provider(0)));
+        assert_eq!(
+            visible.hit(first.right() - 1, first.bottom() - 1),
+            Some(PanelHit::Provider(0))
+        );
+        assert_eq!(
+            visible.hit(first.right(), first.y),
+            None,
+            "the one-column gap between provider cards is not a hidden target"
+        );
+
+        for _ in 0..4 {
+            panel.move_provider(true);
+        }
+        let shifted = geometry(&panel, 80, 22);
+        assert_eq!(
+            shifted
+                .providers
+                .iter()
+                .map(|(_, index)| *index)
+                .collect::<Vec<_>>(),
+            [2, 3, 4],
+            "offscreen provider tabs must not retain hit targets"
+        );
+
+        let mut long = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "provider".into(),
+                account: "account".into(),
+                scope: "declared".into(),
+                models: (0..20).map(|index| format!("model-{index:02}")).collect(),
+                selectable: Some(true),
+                unavailable_reason: None,
+            }],
+        );
+        long.move_selection(true, 19);
+        let scrolled = geometry(&long, 40, 10);
+        let drawn: Vec<_> = scrolled.models.iter().map(|(_, index)| *index).collect();
+        assert_eq!(drawn, [19, 20]);
+        for (area, index) in &scrolled.models {
+            assert_eq!(scrolled.hit(area.x, area.y), Some(PanelHit::Model(*index)));
+        }
+        assert_eq!(scrolled.hit(40, scrolled.models[0].0.y), None);
+        assert_eq!(scrolled.hit(0, 10), None);
+
+        let narrow = geometry(&catalogue(), 5, 10);
+        assert!(narrow.providers.is_empty());
+        assert!(
+            !matches!(narrow.hit(0, 1), Some(PanelHit::Provider(_))),
+            "a provider card that was clipped away cannot be clicked"
+        );
     }
 }

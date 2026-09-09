@@ -73,7 +73,7 @@ pub(crate) const MOUSE_ENABLE: &str = "\x1b[?1000h\x1b[?1006h";
 /// here — the one function a panic, a signal, `force_exit` and an ordinary
 /// return all reach — rather than only in `tui::Screen`'s `Drop`, which
 /// `force_exit` does not run.
-pub(crate) const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1000l";
+pub(crate) const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
 /// Everything handing the terminal back writes, in order, to `out`.
 ///
@@ -728,13 +728,16 @@ mod tests {
         );
     }
 
-    /// The enable and the disable are one pair, written once. A `?1002h`
-    /// here would be crossterm's `EnableMouseCapture` bundle creeping back
-    /// in, and with it motion reporting nothing in this codebase reads.
+    /// Startup requests only click reports. The shell may opt into motion
+    /// later while a focused child has asked for it; teardown therefore
+    /// disables every mode that path can enable.
     #[test]
     fn only_the_two_mouse_modes_glasshouse_reads_are_asked_for() {
         assert_eq!(MOUSE_ENABLE, "\x1b[?1000h\x1b[?1006h");
-        assert_eq!(MOUSE_DISABLE, "\x1b[?1006l\x1b[?1000l");
+        assert_eq!(
+            MOUSE_DISABLE,
+            "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
         for unwanted in ["?1002", "?1003", "?1015"] {
             assert!(
                 !MOUSE_ENABLE.contains(unwanted),

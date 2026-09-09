@@ -5592,3 +5592,18 @@ Closed these waves: **1304 → 1305**.
 | broker model catalogue | Red, Sol high; primary fix-forward | Three live authenticated catalogues reported 11 Google, 16 Anthropic and 9 OpenAI models. 2,207 library tests, 116 binary tests and 54 focused integration tests green; Clippy clean. |
 
 **Finding.** A catalogue can be complete globally and still be wrong for the active route. The first live picker exposed 444 API-provider models while its own `gemini-3.8-flash-high` was absent. Catalogue entries now carry provider, account and selectability separately; Pane shows every subscription but applies only models belonging to the gateway's pinned entitlement.
+
+### Wave 150 — 2026-09-09–10: input dogfood repairs with GPT-5.6 Sol
+
+| package | tier | result |
+|---|---|---|
+| Glasshouse launch focus, mouse and paste | Sol high, isolated editor | Immediate typing plus real PTY paste/mouse proofs; input routing extracted to retain the 2,500-line production ceiling. Three older PTY sequences and one V1 session sequence required explicit return to control after auto-focused launches; all 80 PTY tests and the seven-test V1 session target then passed in the integrated checkout. |
+| Pane picker clicks and bare entrypoint | Sol high, isolated editor | Rendered hit geometry, fragmented SGR buttons, real help and ordinary bare launch. Integrated entrypoint/session/live-TUI checks: 103 passed. An old echo-line expectation was corrected; a separate handler-panel timeout passed an exact worker rerun and the integrated 16-test PTY suite. |
+| independent input review | Sol medium, read-only | ACCEPT after catching the fragmented SGR button-drop path and UTF-8 mouse coordinate boundary. Primary owns integration and installed subscription dogfood. |
+
+**Measurement:** two editors ran concurrently with disjoint crate ownership;
+zero merge conflicts and zero reverts. Review and the integrated gate caused
+bounded corrections rather than a new capability batch. No capability boxes
+closed. This contributes one no-conflict observation to the concurrency
+question, not a general model-quality claim. Token/cost telemetry for these
+Codex subagents was not exposed; no spend estimate is invented.

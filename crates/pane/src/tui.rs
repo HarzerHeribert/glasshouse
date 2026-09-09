@@ -7,6 +7,7 @@ mod markdown;
 mod ribbon;
 mod telemetry;
 pub use controls::{Mode, ModelGroup, Panel, PanelRow, StatusLine};
+pub(crate) use controls::{PanelGeometry, PanelHit};
 pub use telemetry::Pulse;
 
 use crate::commands::{BUILT_INS, BuiltIn};
@@ -624,6 +625,18 @@ pub fn render_screen(
     notebook: &Notebook,
     state: &ScreenState,
 ) {
+    let _ = render_screen_with_geometry(frame, conversation, served_by, handles, notebook, state);
+}
+
+pub(crate) fn render_screen_with_geometry(
+    frame: &mut Frame,
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+    notebook: &Notebook,
+    state: &ScreenState,
+) -> PanelGeometry {
+    let mut panel_geometry = PanelGeometry::default();
     let regions = screen_regions(frame.area(), state);
     // An explicit canvas also paints blank cells when the caller creates a
     // fresh Terminal over pre-existing stdout; default blank cells do not.
@@ -728,7 +741,7 @@ pub fn render_screen(
             Block::default().style(Style::default().fg(Color::White).bg(Color::Reset)),
             regions.transcript,
         );
-        controls::render_panel(frame, regions.transcript, panel, state.theme);
+        panel_geometry = controls::render_panel(frame, regions.transcript, panel, state.theme);
     }
     ribbon::activity(frame, regions.activity, state);
     if let Some(notice) = &state.notice {
@@ -909,6 +922,7 @@ pub fn render_screen(
             cell.set_bg(state.theme.accent());
         }
     }
+    panel_geometry
 }
 
 fn compact_tokens(value: u64) -> String {

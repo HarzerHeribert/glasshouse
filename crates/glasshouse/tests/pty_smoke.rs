@@ -2425,6 +2425,26 @@ fn install_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::Pa
     shared_fixture(name, "#!/bin/sh\nread line\necho GOT:$line\n")
 }
 
+#[cfg(unix)]
+fn install_bracketed_paste_capture(name: &str, bytes: usize) -> std::path::PathBuf {
+    shared_fixture(
+        name,
+        &format!(
+            "#!/bin/sh\nprintf '\\033[?2004h'\nstty raw -echo\nprintf 'PASTE:'\ndd bs=1 count={bytes} 2>/dev/null | od -An -v -tx1 | tr -d ' \\n'\nprintf '\\r\\n'\n"
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn install_mouse_capture(name: &str, bytes: usize) -> std::path::PathBuf {
+    shared_fixture(
+        name,
+        &format!(
+            "#!/bin/sh\nprintf '\\033[?1000h\\033[?1006h'\nstty raw -echo\nprintf 'MOUSE:'\ndd bs=1 count={bytes} 2>/dev/null | od -An -v -tx1 | tr -d ' \\n'\nprintf '\\r\\n'\n"
+        ),
+    )
+}
+
 /// Write a fake installed harness that prints nothing at all and exits with
 /// `exit_code` -- used to prove that exit detection depends on the process
 /// itself, never on anything appearing in its output.
@@ -2885,8 +2905,8 @@ fn keystrokes_reach_the_focused_session() {
 /// Everything else about the wiring is unit-tested against a `ShellState` with
 /// no processes behind it. This is the one test that proves the whole chain
 /// exists in the shipped binary: `glasshouse` with no arguments opens the
-/// shell, `n` starts a real harness in a real pseudo-terminal, session mode
-/// hands the keyboard to it, the bytes arrive, and its reply is drained into
+/// shell, `n` starts and immediately enters a real harness in a real
+/// pseudo-terminal, the bytes arrive, and its reply is drained into
 /// the session's scrollback and drawn.
 ///
 /// It also proves the mode split does what it is for: `q` is typed while in
@@ -2936,11 +2956,10 @@ fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
     shell.send("n");
     shell.expect("claude-code");
 
-    // Enter session mode, then type. `q` is deliberately part of the payload:
-    // in session mode it belongs to the harness, and if the mode split were
+    // The successful embedded launch has already entered session mode. `q`
+    // is deliberately part of the payload: in session mode it belongs to the harness, and if the mode split were
     // wrong it would quit Glasshouse instead and the expect below would time
     // out on a dead process.
-    shell.send("\r");
     shell.expect("ctrl-5");
     shell.send("quiet\r");
 
@@ -2959,11 +2978,126 @@ fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
     );
 }
 
+/// A bracketed paste crosses both terminal boundaries as one child write.
+/// The payload deliberately contains a newline, Unicode, a tab and an escape;
+/// the raw child reads an exact byte count, so a dropped wrapper leaves it
+/// waiting and fails the production-path test. Exact byte construction,
+/// including the absence of an added carriage return, is covered in the
+/// encoder unit test.
+#[cfg(unix)]
+#[test]
+fn multiline_paste_reaches_the_focused_child_with_its_requested_brackets() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let text = "one\n雪\t\x1bend";
+    let expected = [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~"].concat();
+    let harness = install_bracketed_paste_capture("paste-capture", expected.len());
+    let executable = harness.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{executable}\"\n"
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+    shell.expect("root ");
+    shell.send("n");
+    // The marker is emitted after the child enabled bracketed paste and put
+    // its PTY in raw mode, so observing it closes both startup races.
+    shell.expect("PASTE:");
+    shell.send(&format!("\x1b[200~{text}\x1b[201~"));
+
+    let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    shell.expect(&format!("PASTE:{hex}"));
+    shell.send("\x1d");
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "shell exit failed: {status}\n{}",
+        shell.output()
+    );
+}
+
+/// A host SGR click is translated into the focused child's coordinate space.
+/// The first click lands on Glasshouse's one-row header and is deliberately
+/// absent from the exact child capture; only the viewport click follows.
+#[cfg(unix)]
+#[test]
+fn a_mouse_report_reaches_only_the_focused_child_viewport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let expected = b"\x1b[<0;10;4M";
+    let harness = install_mouse_capture("mouse-capture", expected.len());
+    let executable = harness.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{executable}\"\n"
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+    shell.expect("root ");
+    shell.send("n");
+    shell.expect("MOUSE:");
+
+    // Host coordinates are one-based. Row 1 is Glasshouse's header; row 5
+    // becomes row 4 in the child viewport below it.
+    shell.send("\x1b[<0;10;1M");
+    shell.send("\x1b[<0;10;5M");
+    let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    shell.expect(&format!("MOUSE:{hex}"));
+    shell.send("\x1d");
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "shell exit failed: {status}\n{}",
+        shell.output()
+    );
+}
+
 /// The shell's mode machinery, in a real terminal, on every platform.
 ///
 /// Separated from the round-trip above so Windows keeps coverage of the part
 /// that does not depend on how a fake `.cmd` harness reads its input: the shell
-/// opens, `n` starts a real harness, Enter hands the keyboard to it, `Ctrl-]`
+/// opens, `n` starts a real harness and hands the keyboard to it, `Ctrl-]`
 /// takes it back, and `q` then quits Glasshouse rather than reaching the
 /// harness. If the escape chord did not match — as it did not, before a real
 /// terminal was used to check — `q` would go to the harness and this would hang.
@@ -3007,7 +3141,6 @@ fn the_shell_enters_and_leaves_session_mode_in_a_real_terminal() {
     shell.expect("root ");
     shell.send("n");
     shell.expect("claude-code");
-    shell.send("\r");
     shell.expect("ctrl-5");
 
     // Back to control mode, then quit. `q` only quits if the escape landed.
@@ -3082,7 +3215,6 @@ fn f12_leaves_session_mode_in_a_real_terminal() {
     shell.expect("root ");
     shell.send("n");
     shell.expect("claude-code");
-    shell.send("\r");
     shell.expect("ctrl-5");
 
     // `F12` as xterm spells it, not as a `KeyEvent` names it.
@@ -3151,7 +3283,6 @@ fn resizing_the_shell_reaches_the_harness_terminal() {
     shell.expect("root ");
     shell.send("n");
     shell.expect("codex");
-    shell.send("\r");
     shell.expect("ctrl-5");
 
     // The harness's view of its own terminal, before anything moves. It is
@@ -4495,9 +4626,10 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
     shell.send("n");
     shell.expect("claude-code");
     let first_started = native_ids(&mut shell, 1)[0].clone();
+    shell.send("\x1d");
+    shell.expect("enter session");
 
     shell.send("n");
-    shell.expect("2 claude-code");
     let both = native_ids(&mut shell, 2);
     let second_started = both
         .into_iter()
@@ -4510,6 +4642,8 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
     let presented = second_started;
     let target = first_started;
 
+    shell.send("\x1d");
+    shell.expect("2 claude-code");
     shell.send("o");
     shell.expect("sessions");
     shell.send("\x1b[B");
@@ -6072,12 +6206,15 @@ fn a_line_sent_from_the_overview_reaches_a_session_the_viewport_is_not_showing()
 
     shell.expect("root ");
 
-    // Two sessions. The first stays presented across the second's start —
-    // `ShellState::refresh` reconciles by identity — so the second is the one
-    // nobody is looking at.
+    // Start two sessions, explicitly returning keyboard ownership to
+    // Glasshouse after each auto-focused launch. The second stays presented,
+    // so the first is the one nobody is looking at.
     shell.send("n");
     shell.expect("claude-code");
+    shell.send("\x1d");
+    shell.expect("enter session");
     shell.send("n");
+    shell.send("\x1d");
     shell.expect(" 2 ");
 
     // The overview, with its cursor moved off the presented session. With
@@ -6140,7 +6277,10 @@ fn an_interrupt_sent_from_the_overview_reaches_a_real_child() {
     shell.expect("root ");
     shell.send("n");
     shell.expect("claude-code");
+    shell.send("\x1d");
+    shell.expect("enter session");
     shell.send("n");
+    shell.send("\x1d");
     shell.expect(" 2 ");
 
     // **Both** harnesses must have installed their traps before anything is

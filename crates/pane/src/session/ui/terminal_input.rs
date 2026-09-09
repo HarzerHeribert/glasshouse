@@ -3,7 +3,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 /// The longest tail an SGR mouse report can have: `[<`, three fields wide
@@ -35,8 +35,9 @@ const ESCAPE_GRACE: Duration = Duration::from_millis(20);
 /// of waiting changes what a prefix is. The moment a character arrives that
 /// the grammar cannot accept, the run was never a report: it is released to
 /// the editor at once, ahead of that character. A complete report is consumed
-/// either way — the wheel scrolls, and a button report is dropped because no
-/// arm of the caller's `Event::Mouse` match reads one.
+/// either way and is handed back as the same `Event::Mouse` that crossterm's
+/// ordinary byte path produces. This includes button presses: provider and
+/// model clicks use them, while wheel reports keep scrolling.
 ///
 /// The predecessor made this a race: a 20 ms grace that restarted on every
 /// character, with a 200 ms ceiling, and a release into the editor when either
@@ -150,7 +151,7 @@ impl TerminalInput {
         match classify(&text(&tail)) {
             Sgr::Opening | Sgr::Body => self.hold = Hold::Open { escape, tail },
             Sgr::Report => {
-                if let Some(mouse) = sgr_wheel_event(&text(&tail)) {
+                if let Some(mouse) = sgr_mouse_event(&text(&tail)) {
                     self.ready.push_back(Event::Mouse(mouse));
                 }
             }
@@ -279,23 +280,53 @@ fn text(tail: &[Event]) -> String {
     tail.iter().filter_map(report_char).collect()
 }
 
-/// The wheel is reported as a press with code 64 or 65; every other code is a
-/// button this UI does not handle.
-fn sgr_wheel_event(text: &str) -> Option<MouseEvent> {
+/// Convert the report through the same bit layout crossterm uses on its
+/// ordinary Unix parser. This path exists for reports that crossterm surfaced
+/// as key events (notably fragmented PTY/ConPTY input), so dropping a button
+/// here would make click behavior depend on how one report happened to split.
+fn sgr_mouse_event(text: &str) -> Option<MouseEvent> {
     let report = parse_report(text)?;
-    if !report.press {
-        return None;
-    }
-    let kind = match report.code {
-        64 => MouseEventKind::ScrollUp,
-        65 => MouseEventKind::ScrollDown,
+    let code = u8::try_from(report.code).ok()?;
+    let button = (code & 0b0000_0011) | ((code & 0b1100_0000) >> 4);
+    let dragging = code & 0b0010_0000 != 0;
+    let kind = match (button, dragging) {
+        (0, false) => MouseEventKind::Down(MouseButton::Left),
+        (1, false) => MouseEventKind::Down(MouseButton::Middle),
+        (2, false) => MouseEventKind::Down(MouseButton::Right),
+        (0, true) => MouseEventKind::Drag(MouseButton::Left),
+        (1, true) => MouseEventKind::Drag(MouseButton::Middle),
+        (2, true) => MouseEventKind::Drag(MouseButton::Right),
+        (3, false) => MouseEventKind::Up(MouseButton::Left),
+        (3..=5, true) => MouseEventKind::Moved,
+        (4, false) => MouseEventKind::ScrollUp,
+        (5, false) => MouseEventKind::ScrollDown,
+        (6, false) => MouseEventKind::ScrollLeft,
+        (7, false) => MouseEventKind::ScrollRight,
         _ => return None,
     };
+    let kind = if report.press {
+        kind
+    } else {
+        match kind {
+            MouseEventKind::Down(button) => MouseEventKind::Up(button),
+            other => other,
+        }
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    if code & 0b0000_0100 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if code & 0b0000_1000 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if code & 0b0001_0000 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
     Some(MouseEvent {
         kind,
         column: report.column - 1,
         row: report.row - 1,
-        modifiers: KeyModifiers::NONE,
+        modifiers,
     })
 }
 
@@ -366,7 +397,7 @@ mod tests {
             .collect()
     }
 
-    fn scrolls(events: &[Event]) -> Vec<MouseEventKind> {
+    fn mouse_kinds(events: &[Event]) -> Vec<MouseEventKind> {
         events
             .iter()
             .filter_map(|event| match event {
@@ -387,19 +418,19 @@ mod tests {
     /// once the 20 ms grace had already released it.
     #[test]
     fn a_report_split_at_any_boundary_is_never_typed() {
-        for (tail, scroll) in [
+        for (tail, kind) in [
             ("[<65;101;28M", Some(MouseEventKind::ScrollDown)),
             ("[<64;1;2M", Some(MouseEventKind::ScrollUp)),
-            ("[<0;10;5M", None),
-            ("[<0;10;5m", None),
+            ("[<0;10;5M", Some(MouseEventKind::Down(MouseButton::Left))),
+            ("[<0;10;5m", Some(MouseEventKind::Up(MouseButton::Left))),
             ("[<65535;65535;65535M", None),
         ] {
             let stream = report(tail);
-            let expected: Vec<MouseEventKind> = scroll.into_iter().collect();
+            let expected: Vec<MouseEventKind> = kind.into_iter().collect();
             for split in 1..stream.len() {
                 let seen = drive(&stream, &[split]);
                 assert_eq!(typed(&seen), "", "{tail} split after {split}");
-                assert_eq!(scrolls(&seen), expected, "{tail} split after {split}");
+                assert_eq!(mouse_kinds(&seen), expected, "{tail} split after {split}");
             }
         }
     }
@@ -413,7 +444,7 @@ mod tests {
                 let seen = drive(&stream, &[first, second]);
                 assert_eq!(typed(&seen), "", "split after {first} and {second}");
                 assert_eq!(
-                    scrolls(&seen),
+                    mouse_kinds(&seen),
                     vec![MouseEventKind::ScrollDown],
                     "split after {first} and {second}"
                 );
@@ -428,7 +459,7 @@ mod tests {
     fn a_tail_that_arrives_after_the_escape_was_delivered_still_scrolls() {
         let seen = drive(&report("[<65;101;28M"), &[1]);
         assert_eq!(typed(&seen), "");
-        assert_eq!(scrolls(&seen), vec![MouseEventKind::ScrollDown]);
+        assert_eq!(mouse_kinds(&seen), vec![MouseEventKind::ScrollDown]);
         assert_eq!(escapes(&seen), 1);
     }
 
@@ -458,7 +489,7 @@ mod tests {
     #[test]
     fn a_report_read_whole_never_shows_the_ui_an_escape() {
         let seen = drive(&report("[<65;101;28M"), &[]);
-        assert_eq!(scrolls(&seen), vec![MouseEventKind::ScrollDown]);
+        assert_eq!(mouse_kinds(&seen), vec![MouseEventKind::ScrollDown]);
         assert_eq!(seen.len(), 1);
     }
 
@@ -468,7 +499,7 @@ mod tests {
         stream.extend(report("[<65;3;4M"));
         let seen = drive(&stream, &[]);
         assert_eq!(
-            scrolls(&seen),
+            mouse_kinds(&seen),
             vec![MouseEventKind::ScrollUp, MouseEventKind::ScrollDown]
         );
         assert_eq!(typed(&seen), "");
@@ -482,7 +513,10 @@ mod tests {
         let seen = drive(&stream, &[]);
         assert_eq!(typed(&seen), "hello");
         assert_eq!(escapes(&seen), 0);
-        assert!(scrolls(&seen).is_empty());
+        assert_eq!(
+            mouse_kinds(&seen),
+            vec![MouseEventKind::Down(MouseButton::Left)]
+        );
     }
 
     /// A real Escape key press, resolved by silence. With no silence at all it
@@ -520,7 +554,7 @@ mod tests {
         for quiet in 1..=stream.len() {
             let seen = drive(&stream, &[quiet]);
             assert_eq!(typed(&seen), "", "quiet after {quiet}");
-            assert!(scrolls(&seen).is_empty(), "quiet after {quiet}");
+            assert!(mouse_kinds(&seen).is_empty(), "quiet after {quiet}");
         }
     }
 
@@ -586,23 +620,33 @@ mod tests {
     }
 
     #[test]
-    fn only_a_wheel_press_becomes_a_scroll() {
-        let down = sgr_wheel_event("[<65;101;28M").unwrap();
+    fn sgr_reports_preserve_buttons_wheels_coordinates_and_modifiers() {
+        let down = sgr_mouse_event("[<65;101;28M").unwrap();
         assert_eq!(down.kind, MouseEventKind::ScrollDown);
         assert_eq!((down.column, down.row), (100, 27));
-        let up = sgr_wheel_event("[<64;1;2M").unwrap();
+        let up = sgr_mouse_event("[<64;1;2M").unwrap();
         assert_eq!(up.kind, MouseEventKind::ScrollUp);
         assert_eq!((up.column, up.row), (0, 1));
+        let left = sgr_mouse_event("[<0;10;5M").unwrap();
+        assert_eq!(left.kind, MouseEventKind::Down(MouseButton::Left));
+        assert_eq!((left.column, left.row), (9, 4));
+        let release = sgr_mouse_event("[<0;10;5m").unwrap();
+        assert_eq!(release.kind, MouseEventKind::Up(MouseButton::Left));
+        let modified = sgr_mouse_event("[<28;2;3M").unwrap();
+        assert_eq!(modified.kind, MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(
+            modified.modifiers,
+            KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
+        );
         for text in [
             "[<65;101;28",
             "[<65;101;28;M",
             "[<65;0;2M",
-            "[<0;1;2M",
-            "[<65;1;2m",
+            "[<65535;1;2M",
             "[200~",
             "literal[<65;101;28M",
         ] {
-            assert!(sgr_wheel_event(text).is_none(), "accepted {text}");
+            assert!(sgr_mouse_event(text).is_none(), "accepted {text}");
         }
     }
 
@@ -638,19 +682,19 @@ mod tests {
     /// every boundary, like the Unix stream above.
     #[test]
     fn a_report_in_the_windows_console_shape_is_never_typed() {
-        for (tail, scroll) in [
+        for (tail, kind) in [
             ("[<65;101;28M", Some(MouseEventKind::ScrollDown)),
             ("[<64;1;2M", Some(MouseEventKind::ScrollUp)),
-            ("[<0;10;5M", None),
-            ("[<0;10;5m", None),
+            ("[<0;10;5M", Some(MouseEventKind::Down(MouseButton::Left))),
+            ("[<0;10;5m", Some(MouseEventKind::Up(MouseButton::Left))),
         ] {
             let stream = windows_report(tail);
-            let expected: Vec<MouseEventKind> = scroll.into_iter().collect();
+            let expected: Vec<MouseEventKind> = kind.into_iter().collect();
             for split in 0..stream.len() {
                 let quiet: &[usize] = if split == 0 { &[] } else { &[split] };
                 let seen = drive(&stream, quiet);
                 assert_eq!(typed(&seen), "", "{tail} split after {split}");
-                assert_eq!(scrolls(&seen), expected, "{tail} split after {split}");
+                assert_eq!(mouse_kinds(&seen), expected, "{tail} split after {split}");
                 // The one cost silence is allowed: an Escape still alone when
                 // the stream goes quiet is delivered as the key press it also
                 // is. `split == 0` is the whole run read without a pause, and

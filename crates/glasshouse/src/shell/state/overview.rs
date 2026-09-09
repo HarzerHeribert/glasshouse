@@ -622,6 +622,18 @@ impl ShellState {
         self.enter_session_mode()
     }
 
+    /// Put a newly started embedded session under the keyboard immediately.
+    ///
+    /// Called only after the process exists. Selecting by identifier first
+    /// keeps a failed record refresh from entering whichever older session
+    /// happened to remain selected.
+    pub fn session_started(&mut self, id: &SessionId) -> Action {
+        if !self.select_session(id) {
+            return Action::Redraw;
+        }
+        self.enter_session_mode()
+    }
+
     /// Answer one key while a session owns the keyboard.
     ///
     /// Everything is forwarded to the focused PTY untouched — including `q`,

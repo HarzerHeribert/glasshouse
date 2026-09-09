@@ -29,6 +29,14 @@ struct App {
 }
 impl App {
     fn start(base: &str) -> Self {
+        Self::start_with(base, false)
+    }
+
+    fn start_bare(base: &str) -> Self {
+        Self::start_with(base, true)
+    }
+
+    fn start_with(base: &str, bare: bool) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-live-{}-{}",
@@ -45,10 +53,17 @@ impl App {
             })
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_pane"));
-        command.args(["session", "--root"]);
-        command.arg(&root);
-        command.args(["--model", "fixture-model", "--glasshouse"]);
-        command.arg(root.join("no-glasshouse"));
+        if bare {
+            command.cwd(&root);
+            // A developer install must not receive this fixture's lifecycle
+            // events. The absent command is the normal fail-soft seam.
+            command.env("PATH", "");
+        } else {
+            command.args(["session", "--root"]);
+            command.arg(&root);
+            command.args(["--model", "fixture-model", "--glasshouse"]);
+            command.arg(root.join("no-glasshouse"));
+        }
         command.env("ANTHROPIC_BASE_URL", base);
         command.env_remove("ANTHROPIC_API_KEY");
         command.env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -274,6 +289,19 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
         }
     });
     (base, requests)
+}
+
+#[test]
+fn bare_pane_opens_the_live_composer_in_its_current_project() {
+    let mut app = App::start_bare("http://127.0.0.1:1");
+    app.contains("PANE /");
+    app.contains("message or / for commands");
+    app.send(b"bare entrypoint draft");
+    app.contains("bare entrypoint draft");
+    app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+    assert!(app.root.join(".pane/rollout.jsonl").is_file());
+    assert!(!app.screen.screen().alternate_screen());
 }
 
 #[test]

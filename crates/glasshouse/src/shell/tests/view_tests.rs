@@ -956,35 +956,30 @@ fn a_note_set_from_inside_an_overlay_is_not_drawn_under_it() {
     );
 }
 
-/// **Session mode does not steal the mouse.**
-///
-/// The header draws the tab strip while a session has the keyboard, and its
-/// pills were recorded as hotspots there. A click on one queued `Tab` into
-/// the run loop's pending keys, which `handle_key` in `Mode::Session`
-/// `encode`s and writes to the harness: measured, a left-press inside the
-/// second tab left the focus marker where it was and delivered `0x09` to the
-/// session, firing the embedded harness's own tab completion.
-///
-/// Asserted at the level it is implemented — `render_recording` records
-/// nothing for a frame the session owns — so the strip stays drawn and
-/// nothing on it is clickable.
+/// Session mode keeps Glasshouse chrome clickable without marking any child
+/// cell as a Glasshouse hotspot. The run loop changes keyboard ownership
+/// before replaying one of these keys, so a tab click cannot become a Tab in
+/// the child.
 #[test]
-fn session_mode_records_no_hotspot() {
+fn session_mode_records_only_header_hotspots() {
     let mut state = sample();
     let (_, control) = recorded(&state, 100, 24);
     assert!(!control.is_empty(), "control mode has pills to click");
 
     state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(state.mode(), Mode::Session);
-    let (text, spots) = recorded(&state, 100, 24);
+    let (text, spots) = recorded(&state, 200, 24);
     assert!(
         text.contains("claude-code"),
         "the tab strip is still drawn in session mode:\n{text}"
     );
     assert!(
-        spots.is_empty(),
-        "nothing on a session-mode frame may be clickable, or a click types \
-         into the harness:\n{text}"
+        !spots.is_empty(),
+        "the session header keeps its tab actions"
+    );
+    assert!(
+        spots.iter().all(|spot| spot.rect().bottom() <= 1),
+        "no child viewport cell may become Glasshouse chrome:\n{text}"
     );
 }
 

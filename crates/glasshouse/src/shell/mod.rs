@@ -18,6 +18,7 @@ mod start;
 use start::start_session;
 mod appearance;
 mod hotspot;
+mod input;
 mod liveness;
 mod settings_open;
 pub mod state;
@@ -196,11 +197,9 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     // second `n` — silently spawns a second
                                     // harness that neither the viewport nor
                                     // the keyboard is attached to.
-                                    // Deliberately not entering it: starting
-                                    // and focusing stay separate keys.
                                     let named = state::short_session_id(&id);
-                                    state.select_session(&id);
                                     if presentation == SessionPresentation::Headless {
+                                        state.select_session(&id);
                                         // No viewport, so `N` would look like a
                                         // no-op — `render_viewport`'s placeholder
                                         // says so on every frame.
@@ -208,9 +207,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                             "started headless session `{named}` — `o` lists it"
                                         ));
                                     } else {
-                                        state.set_status(format!(
-                                            "started session `{named}` — Enter to type in it"
-                                        ));
+                                        state.session_started(&id);
+                                        state.set_status(format!("started session `{named}`"));
                                     }
                                 }
                                 // Refusing to guess is right; sending the user away to answer is not.
@@ -509,6 +507,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 }
                 let outer = screen.size().unwrap_or_default();
                 sync_focus(&mut live, &state, outer, state.chrome() != chrome_before);
+                input::sync_mouse_capture(&mut screen, &state, &live);
                 if !matches!(action, Action::None) {
                     draw(&mut screen, &state, &mut hotspots)?;
                 }
@@ -529,6 +528,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 // `ESC[6n` — Glasshouse must, every tick, or a harness
                 // waiting on the reply hangs looking like it did nothing.
                 live.answer_terminal_queries();
+                input::sync_mouse_capture(&mut screen, &state, &live);
 
                 let mut redraw = state.advance_artwork();
                 // Read BEFORE the poll: `poll_exits` moves focus off a
@@ -646,21 +646,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     draw(&mut screen, &state, &mut hotspots)?;
                 }
             }
-            // A click is a second door to a key, never a parallel path: the
-            // pill under the pointer is rewritten into the presses it
-            // advertises and they go through `handle_key` like any other.
-            // Press, not release, and only the left button — everything else
-            // a `?1000h` terminal reports is discarded here.
+            // Mouse routing keeps Glasshouse chrome on the normal key path
+            // and forwards only events accepted by the focused child.
             Event::Mouse(mouse) => {
-                if matches!(
-                    mouse.kind,
-                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                ) && let Some(spot) = hotspot::hit(&hotspots, mouse.column, mouse.row)
-                {
-                    pending.extend(spot.keys().iter().copied());
-                }
+                input::route_mouse(
+                    mouse,
+                    screen.size().unwrap_or_default(),
+                    &state,
+                    &hotspots,
+                    &mut pending,
+                    &mut live,
+                );
             }
-            Event::Paste(_) => {}
+            Event::Paste(text) => {
+                input::route_paste(&text, &state, &mut live);
+            }
         }
     }
 }

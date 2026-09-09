@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{self, Activity, Notebook, ScreenState, SidebarVisibility};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -431,6 +433,21 @@ fn tick_helper_clocks(notebook: &mut Notebook, since: &mut HashMap<(usize, usize
     }
 }
 
+fn select_panel_at(
+    panel: &mut tui::Panel,
+    geometry: &tui::PanelGeometry,
+    mouse: MouseEvent,
+) -> bool {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return false;
+    }
+    match geometry.hit(mouse.column, mouse.row) {
+        Some(tui::PanelHit::Provider(index)) => panel.select_provider(index),
+        Some(tui::PanelHit::Model(index)) => panel.select_model_row(index),
+        None => false,
+    }
+}
+
 fn run(
     mut state: ScreenState,
     mut conversation: Conversation,
@@ -471,6 +488,7 @@ fn run(
     let mut helper_clocks: HashMap<(usize, usize), Instant> = HashMap::new();
     let mut previous_rows = 0usize;
     let mut viewport_height = 10usize;
+    let mut panel_geometry = tui::PanelGeometry::default();
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
             break;
@@ -615,7 +633,7 @@ fn run(
                 );
             }
             terminal.draw(|frame| {
-                tui::render_screen(
+                panel_geometry = tui::render_screen_with_geometry(
                     frame,
                     &conversation,
                     &served,
@@ -638,6 +656,14 @@ fn run(
                 dirty = true;
             }
             Event::Mouse(mouse) => {
+                if state
+                    .panel
+                    .as_mut()
+                    .is_some_and(|panel| select_panel_at(panel, &panel_geometry, mouse))
+                {
+                    dirty = true;
+                    continue;
+                }
                 let up = mouse.kind == MouseEventKind::ScrollUp;
                 if up || mouse.kind == MouseEventKind::ScrollDown {
                     if let Some(inspection) = state.inspection.as_mut() {
@@ -1098,6 +1124,7 @@ fn refresh_handler_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
 
     /// A call in flight is dated from the frame it first appeared in, so its
     /// lane's seconds keep counting while the cell that made it blocks the
@@ -1236,6 +1263,115 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+
+    fn point_for(geometry: &tui::PanelGeometry, hit: tui::PanelHit) -> (u16, u16) {
+        for row in 0..24 {
+            for column in 0..80 {
+                if geometry.hit(column, row) == Some(hit) {
+                    return (column, row);
+                }
+            }
+        }
+        panic!("no rendered point for {hit:?}");
+    }
+
+    fn render_panel_geometry(state: &ScreenState) -> tui::PanelGeometry {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut geometry = tui::PanelGeometry::default();
+        terminal
+            .draw(|frame| {
+                geometry = tui::render_screen_with_geometry(
+                    frame,
+                    &Conversation::default(),
+                    &ServedBy::default(),
+                    &crate::runtime::handles::HandleTable::new(),
+                    &Notebook::default(),
+                    state,
+                );
+            })
+            .unwrap();
+        geometry
+    }
+
+    #[test]
+    fn model_picker_clicks_select_from_the_rendered_geometry_without_applying() {
+        let mut state = ScreenState {
+            panel: Some(tui::Panel::models(
+                "Models",
+                vec![
+                    tui::ModelGroup {
+                        provider: "anthropic".into(),
+                        account: "one".into(),
+                        scope: "declared".into(),
+                        models: vec!["a-model".into()],
+                        selectable: Some(true),
+                        unavailable_reason: None,
+                    },
+                    tui::ModelGroup {
+                        provider: "openrouter".into(),
+                        account: "two".into(),
+                        scope: "declared".into(),
+                        models: vec!["o-one".into(), "o-two".into()],
+                        selectable: Some(true),
+                        unavailable_reason: None,
+                    },
+                ],
+            )),
+            ..ScreenState::default()
+        };
+
+        let geometry = render_panel_geometry(&state);
+        let (column, row) = point_for(&geometry, tui::PanelHit::Provider(1));
+        assert!(select_panel_at(
+            state.panel.as_mut().unwrap(),
+            &geometry,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        ));
+        let panel = state.panel.as_ref().unwrap();
+        assert_eq!(
+            panel.rows[panel.selected].command.as_deref(),
+            Some("/model o-one"),
+            "a provider click changes the tab and highlights its first model"
+        );
+
+        let geometry = render_panel_geometry(&state);
+        let (column, row) = point_for(&geometry, tui::PanelHit::Model(2));
+        assert!(select_panel_at(
+            state.panel.as_mut().unwrap(),
+            &geometry,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        ));
+        let panel = state.panel.as_ref().unwrap();
+        assert_eq!(panel.selected, 2);
+        assert_eq!(panel.rows[2].command.as_deref(), Some("/model o-two"));
+        assert!(
+            state.panel.is_some(),
+            "selection alone must not apply or close"
+        );
+
+        assert!(!select_panel_at(
+            state.panel.as_mut().unwrap(),
+            &tui::PanelGeometry::default(),
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        ));
+        assert_eq!(state.panel.as_ref().unwrap().selected, 2);
+    }
+
     #[test]
     fn editing_preserves_unicode_boundaries_and_multiline_paste() {
         let mut editor = Editor::default();

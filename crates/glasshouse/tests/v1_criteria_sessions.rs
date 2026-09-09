@@ -536,13 +536,19 @@ fn v1_1920_switching_between_two_live_sessions_and_back_does_not_respawn_either(
     shell.expect("claude-code");
     let first_started = native_ids(&mut shell, 1)[0].clone();
 
+    // Each successful launch now owns the keyboard immediately. Return it
+    // to Glasshouse before starting or selecting another session.
+    shell.send("\x1d");
+    shell.expect("enter session");
+
     shell.send("n");
-    shell.expect("2 claude-code");
     let both = native_ids(&mut shell, 2);
     let second_started = both
         .into_iter()
         .find(|id| id != &first_started)
         .expect("the second session must have a different native id");
+    shell.send("\x1d");
+    shell.expect("2 claude-code");
 
     // `n` selects what it started, so after the second one the bar presents
     // the second session and `open_overview`'s cursor opens on its row: one

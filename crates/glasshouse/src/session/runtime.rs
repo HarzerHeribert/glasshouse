@@ -777,6 +777,24 @@ pub struct CrashReport {
     pub history: Vec<RecordedEvent>,
 }
 
+/// Input modes requested by the focused child terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalInputModes {
+    pub bracketed_paste: bool,
+    pub mouse_mode: vt100::MouseProtocolMode,
+    pub mouse_encoding: vt100::MouseProtocolEncoding,
+}
+
+impl TerminalInputModes {
+    fn from_screen(screen: &vt100::Screen) -> Self {
+        Self {
+            bracketed_paste: screen.bracketed_paste(),
+            mouse_mode: screen.mouse_protocol_mode(),
+            mouse_encoding: screen.mouse_protocol_encoding(),
+        }
+    }
+}
+
 impl SessionRuntime {
     pub fn new() -> Self {
         Self::with_scrollback_bytes(DEFAULT_SCROLLBACK_BYTES)
@@ -979,6 +997,12 @@ impl SessionRuntime {
     /// Which session the keyboard reaches, if any.
     pub fn focused(&self) -> Option<&SessionId> {
         self.focused.as_ref()
+    }
+
+    /// What the focused child has asked its terminal to send back.
+    pub fn focused_input_modes(&self) -> Option<TerminalInputModes> {
+        let session = self.get(self.focused.as_ref()?)?;
+        Some(session.with_screen(TerminalInputModes::from_screen))
     }
 
     /// Bring a session forward.
@@ -1721,6 +1745,37 @@ fn short(id: &SessionId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_input_modes_follow_the_childs_latest_requests() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        assert_eq!(
+            TerminalInputModes::from_screen(parser.screen()),
+            TerminalInputModes {
+                bracketed_paste: false,
+                mouse_mode: vt100::MouseProtocolMode::None,
+                mouse_encoding: vt100::MouseProtocolEncoding::Default,
+            }
+        );
+        parser.process(b"\x1b[?2004h\x1b[?1002h\x1b[?1006h");
+        assert_eq!(
+            TerminalInputModes::from_screen(parser.screen()),
+            TerminalInputModes {
+                bracketed_paste: true,
+                mouse_mode: vt100::MouseProtocolMode::ButtonMotion,
+                mouse_encoding: vt100::MouseProtocolEncoding::Sgr,
+            }
+        );
+        parser.process(b"\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?9h\x1b[?1005h");
+        assert_eq!(
+            TerminalInputModes::from_screen(parser.screen()),
+            TerminalInputModes {
+                bracketed_paste: false,
+                mouse_mode: vt100::MouseProtocolMode::Press,
+                mouse_encoding: vt100::MouseProtocolEncoding::Utf8,
+            }
+        );
+    }
 
     /// An interrupted read is not an ending, and `pump` is where that matters
     /// most: it is the only thing draining a session's pseudo-terminal and

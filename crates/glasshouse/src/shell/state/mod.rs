@@ -522,10 +522,8 @@ pub(super) fn escape_chord_key() -> KeyEvent {
 pub(super) const FOCUS_CHORD: &str = "ctrl-6";
 
 /// The key event [`FOCUS_CHORD`] names, spelled the way a terminal delivers
-/// it — the other half of the link
-/// `state_tests::the_advertised_focus_chord_is_one_the_handler_accepts`
-/// asserts.
-#[cfg(test)]
+/// it. Tests use it to keep the hint and handler together; production queues
+/// it before replaying a click on session-header chrome.
 pub(super) fn focus_chord_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL)
 }

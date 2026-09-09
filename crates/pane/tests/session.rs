@@ -690,24 +690,34 @@ fn handles_command_reports_the_recorded_preview() {
 }
 
 #[test]
-fn the_binary_with_no_arguments_still_echoes_a_line() {
-    use std::io::Write as _;
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pane"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
+fn the_binary_with_no_arguments_starts_a_session_in_its_current_directory() {
+    let root = scratch_dir("bare-entrypoint-root");
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .current_dir(&root)
+        .env("ANTHROPIC_BASE_URL", refused_base_url())
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        // A developer install must not receive this fixture's lifecycle
+        // events. Missing Glasshouse is the session seam's normal fail-soft
+        // path.
+        .env("PATH", "")
+        .stdin(std::process::Stdio::null())
+        .output()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"hello, pane\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
 
-    assert!(output.status.success());
-    assert_eq!(output.stdout, b"hello, pane\n");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rollout = root.join(".pane/rollout.jsonl");
+    assert!(rollout.is_file(), "bare pane did not use cwd as --root .");
+    let lines = rollout_lines(&rollout);
+    assert!(
+        lines.iter().all(|line| line["kind"] != "turn"),
+        "EOF must not invent a provider turn: {lines:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
