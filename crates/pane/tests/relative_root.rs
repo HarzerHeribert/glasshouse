@@ -93,10 +93,21 @@ fn dot_root_is_anchored_and_real_tools_do_not_fail_with_enoent() {
 fn missing_relative_root_is_anchored_without_falling_back_to_cwd() {
     let _lock = CWD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let cwd = std::env::current_dir().unwrap();
+    // The anchor is the *canonical* cwd, because `Profile::compile` resolves
+    // the longest existing prefix of the root it was handed. On Windows that
+    // is `\\?\D:\…`, on macOS `/var/…` becomes `/private/var/…`; asking for
+    // the raw cwd asserted one host's spelling of the answer rather than the
+    // anchoring this test is named for.
+    let anchor = std::fs::canonicalize(&cwd).unwrap();
     let missing = format!("pane-no-such-root-{}", std::process::id());
     let profile = Profile::compile(&missing, None);
-    assert_eq!(profile.root(), cwd.join(missing));
+    assert_eq!(profile.root(), anchor.join(&missing));
+    assert!(profile.root().is_absolute());
+    // Both spellings of "it did not fall back to the working directory": the
+    // one the caller holds, and the one the anchoring actually produced — on
+    // Windows only the second can fail.
     assert_ne!(profile.root(), cwd);
+    assert_ne!(profile.root(), anchor);
 }
 
 #[test]

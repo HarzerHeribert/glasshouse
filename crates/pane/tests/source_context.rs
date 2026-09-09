@@ -1,5 +1,5 @@
 use pane::project::source_context::{ContextRole, pack};
-use pane::sandbox::profile::Profile;
+use pane::sandbox::profile::{Access, Profile};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -401,19 +401,33 @@ fn unique_incomplete_definition_is_inferred_without_a_symbol() {
 fn denial_and_oversize_are_errors_not_partial_context() {
     let f = Fixture::new("bounds");
     let secret = f.put("secret.py", "def target():\n    pass\n");
-    let deny = format!(
-        r#"{{"permissions":{{"deny":["Read({})"]}}}}"#,
-        secret.display()
+    // Serialised, never spliced: a Windows path is full of backslashes, and
+    // every one of them is a JSON escape. Interpolating `secret.display()`
+    // into the document made it unparseable there, so the profile compiled no
+    // rule at all, the implicit root grant admitted the read, and this test
+    // asserted a denial it had never actually asked for.
+    let deny = serde_json::json!({
+        "permissions": { "deny": [format!("Read({})", secret.display())] }
+    })
+    .to_string();
+    let denied = Profile::compile(&f.root, Some(&deny));
+    assert!(
+        denied.diagnostics().is_empty(),
+        "the deny document must compile a rule, not be discarded: {:?}",
+        denied.diagnostics()
+    );
+    // Named in two layers so a future red says which one moved: the profile
+    // refuses the path, and `pack` turns that refusal into an error rather
+    // than into partial context.
+    assert!(
+        denied.check("Read", Access::Read, &secret).is_err(),
+        "the compiled deny rule must refuse the file"
     );
     assert!(
-        pack(
-            &Profile::compile(&f.root, Some(&deny)),
-            &secret,
-            Some("target")
-        )
-        .unwrap_err()
-        .0
-        .contains("refused")
+        pack(&denied, &secret, Some("target"))
+            .unwrap_err()
+            .0
+            .contains("refused")
     );
     let huge = f.put("huge.py", &"x".repeat(1_048_577));
     assert!(

@@ -42,18 +42,46 @@ pub(super) fn output(message: String) {
 /// movement over the window, and each discarded report is another chance for a
 /// read boundary to split one into text (`terminal_input`). Crossterm has no
 /// command for the narrow pair, so the bytes are written directly.
+///
+/// **On Windows these bytes are necessary and not sufficient**, which is why
+/// [`enable_mouse_reporting`] exists. They reach the ConPTY emulator and tell
+/// it to accept mouse input from the terminal outside it, but crossterm reads
+/// Windows input as console records rather than as bytes, and a record only
+/// reaches it once `ENABLE_MOUSE_INPUT` is set on the console handle — which
+/// is all `EnableMouseCapture` does there (`is_ansi_code_supported` is `false`
+/// on Windows, so it writes no `?1002`/`?1003` either). Without that call
+/// pane's wheel did nothing on Windows at all.
 const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 /// The matching resets, in the same order.
 const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000l\x1b[?1006l";
+
+/// Request mouse reporting in both of the spellings a host can need.
+fn enable_mouse_reporting() -> io::Result<()> {
+    io::stdout().write_all(ENABLE_MOUSE_REPORTING)?;
+    io::stdout().flush()?;
+    #[cfg(windows)]
+    execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+    Ok(())
+}
+
+/// The reverse, and it must run **before** `disable_raw_mode`: crossterm's
+/// `DisableMouseCapture` restores the whole console input mode that was
+/// captured when capture was enabled, and that snapshot was already raw — so
+/// undoing it afterwards would hand the console straight back to raw mode.
+fn disable_mouse_reporting() {
+    #[cfg(windows)]
+    let _ = execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = io::stdout().write_all(DISABLE_MOUSE_REPORTING);
+    let _ = io::stdout().flush();
+}
 
 /// Also called by the existing second-SIGINT exit path, which skips Drop.
 pub(super) fn restore_terminal() {
     let _guard = super::lock(&DRAWING);
     if ACTIVE.swap(false, Ordering::SeqCst) {
+        disable_mouse_reporting();
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableBracketedPaste);
-        let _ = io::stdout().write_all(DISABLE_MOUSE_REPORTING);
-        let _ = io::stdout().flush();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
@@ -418,8 +446,7 @@ fn run(
         enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
         execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-        io::stdout().write_all(ENABLE_MOUSE_REPORTING)?;
-        io::stdout().flush()?;
+        enable_mouse_reporting()?;
         Terminal::new(CrosstermBackend::new(io::stdout()))
     })();
     let _restore = Restore;

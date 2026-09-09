@@ -1,6 +1,6 @@
 use pane::project::orientation;
 use pane::sandbox::profile::Profile;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -21,6 +21,23 @@ impl Fixture {
     fn profile(&self, permissions: &str) -> Profile {
         Profile::compile(&self.root, Some(permissions))
     }
+    /// The root as a settings pattern writes it, exactly as
+    /// `sandbox_profile.rs`'s fixture does: see [`pattern_path`].
+    fn pattern_root(&self) -> String {
+        pattern_path(&self.root)
+    }
+}
+
+/// `path` as a settings pattern writes it: forward slashes.
+///
+/// The separator is the escaping, not a preference. A settings document is
+/// JSON, and a Windows path interpolated into one carries `\U`, `\A`, `\T`
+/// … — invalid JSON escapes — so the document fails to parse and compiles to
+/// no rules at all, which is a grant rather than the denial the test asked
+/// for. `Profile` folds `\` to `/` on every host, so the forward-slashed
+/// spelling names the same path everywhere.
+fn pattern_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -121,7 +138,7 @@ fn denied_git_metadata_is_reported_unknown_without_reading_it() {
         "ref: refs/heads/secret-name\n",
     )
     .unwrap();
-    let root = fixture.root.display();
+    let root = fixture.pattern_root();
     let settings =
         format!(r#"{{"permissions":{{"deny":["Read({root}/.git)","Read({root}/.git/**)"]}}}}"#);
     let text = orientation::collect(&fixture.profile(&settings));
@@ -144,7 +161,7 @@ fn denied_commondir_is_not_reported_as_the_git_directory() {
     let denied = git_dir.join("commondir");
     let settings = format!(
         r#"{{"permissions":{{"deny":["Read({})"]}}}}"#,
-        denied.display()
+        pattern_path(&denied)
     );
     let text = orientation::collect(&fixture.profile(&settings));
     assert!(text.contains("branch=visible"), "{text}");

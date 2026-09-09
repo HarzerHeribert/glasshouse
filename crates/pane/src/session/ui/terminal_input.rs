@@ -107,6 +107,18 @@ impl TerminalInput {
     /// Offer one event to the state machine. Everything it resolves is pushed
     /// to `ready`, in order; anything still ambiguous stays in `hold`.
     fn accept(&mut self, event: Event) {
+        // A key release carries no character, so it can neither extend a run
+        // nor end one, and an open run steps over it. Windows is why this is
+        // load-bearing: crossterm's console event source maps every
+        // `bKeyDown == false` record straight to `KeyEventKind::Release`, so
+        // one arrives between every two characters of a report there, and
+        // treating it as "not a report character" released the whole run into
+        // the composer — `[<0;10;5M[<0;10;5m` typed on screen. The caller
+        // discards releases anyway (`ui.rs`'s `Event::Key` arm), so dropping
+        // the ones that fall inside a run costs it nothing.
+        if is_key_release(&event) && matches!(self.hold, Hold::Open { .. }) {
+            return;
+        }
         let Hold::Open { escape, mut tail } = std::mem::take(&mut self.hold) else {
             if is_plain_escape(&event) {
                 self.hold = Hold::Open {
@@ -232,9 +244,23 @@ fn is_plain_escape(event: &Event) -> bool {
         && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE)
 }
 
+/// True for a key release, which no platform's report grammar contains and
+/// which [`TerminalInput::accept`] steps over rather than reading.
+fn is_key_release(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
+}
+
 /// The character an event contributes to a run, or `None` if the event cannot
-/// be part of a report at all. `M` is the only uppercase letter in the
-/// grammar, so it is the only character crossterm reports with Shift.
+/// be part of a report at all.
+///
+/// **Shift is ignored, because it names the key struck and not the character
+/// produced, and which characters carry it is a platform and a layout
+/// decision.** Unix reports only `M` shifted, so the previous rule — Shift
+/// permitted for `M` alone — happened to hold there; the Windows console
+/// derives the modifier from `control_key_state`, where `<` is shifted too, so
+/// every report died on its second character. A digit is shifted on AZERTY.
+/// Control and Alt do change what a key press means, so they still disqualify
+/// one.
 fn report_char(event: &Event) -> Option<char> {
     let Event::Key(key) = event else { return None };
     if key.kind == KeyEventKind::Release {
@@ -243,8 +269,9 @@ fn report_char(event: &Event) -> Option<char> {
     let KeyCode::Char(character) = key.code else {
         return None;
     };
-    let shifted = character == 'M' && key.modifiers == KeyModifiers::SHIFT;
-    (key.modifiers == KeyModifiers::NONE || shifted).then_some(character)
+    (key.modifiers - KeyModifiers::SHIFT)
+        .is_empty()
+        .then_some(character)
 }
 
 /// Every element of a held tail came through `report_char`, so none is lost.
@@ -323,12 +350,14 @@ mod tests {
         seen
     }
 
-    /// What the composer would be left holding.
+    /// What the composer would be left holding. A key *release* is not typing
+    /// and never reaches the editor — `ui.rs`'s `Event::Key` arm drops one —
+    /// so this filters them exactly as the caller does.
     fn typed(events: &[Event]) -> String {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::Key(key) => match key.code {
+                Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
                     KeyCode::Char(character) => Some(character),
                     _ => None,
                 },
@@ -574,6 +603,82 @@ mod tests {
             "literal[<65;101;28M",
         ] {
             assert!(sgr_wheel_event(text).is_none(), "accepted {text}");
+        }
+    }
+
+    /// The same report as the Windows console delivers it. Two differences
+    /// from the Unix stream, and each on its own typed the report into the
+    /// composer: conhost synthesises a release record for every press, and
+    /// crossterm derives the modifiers from `control_key_state`, so `<` — a
+    /// shifted key on a US layout — arrives with `SHIFT` just as `M` does.
+    fn windows_report(tail: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        let mut struck = |code: KeyCode, modifiers: KeyModifiers| {
+            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+                events.push(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)));
+            }
+        };
+        struck(KeyCode::Esc, KeyModifiers::NONE);
+        for character in tail.chars() {
+            let shifted = character == '<' || character.is_uppercase();
+            let modifiers = if shifted {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            struck(KeyCode::Char(character), modifiers);
+        }
+        events
+    }
+
+    /// **The report the Windows cell watched being typed into the composer.**
+    /// Nothing in this file is platform-specific, so the platform's own event
+    /// shape is covered here rather than on the one runner that can produce
+    /// it: a release between every two characters, and `<` shifted. Split at
+    /// every boundary, like the Unix stream above.
+    #[test]
+    fn a_report_in_the_windows_console_shape_is_never_typed() {
+        for (tail, scroll) in [
+            ("[<65;101;28M", Some(MouseEventKind::ScrollDown)),
+            ("[<64;1;2M", Some(MouseEventKind::ScrollUp)),
+            ("[<0;10;5M", None),
+            ("[<0;10;5m", None),
+        ] {
+            let stream = windows_report(tail);
+            let expected: Vec<MouseEventKind> = scroll.into_iter().collect();
+            for split in 0..stream.len() {
+                let quiet: &[usize] = if split == 0 { &[] } else { &[split] };
+                let seen = drive(&stream, quiet);
+                assert_eq!(typed(&seen), "", "{tail} split after {split}");
+                assert_eq!(scrolls(&seen), expected, "{tail} split after {split}");
+                // The one cost silence is allowed: an Escape still alone when
+                // the stream goes quiet is delivered as the key press it also
+                // is. `split == 0` is the whole run read without a pause, and
+                // "alone" spans the Escape's own press *and* the release that
+                // follows it — so exactly the first two positions, and never
+                // once a report character has been read.
+                assert_eq!(
+                    escapes(&seen),
+                    usize::from((1..=2).contains(&split)),
+                    "{tail} split after {split}"
+                );
+            }
+        }
+    }
+
+    /// Shift names the key that was struck, not the character it produced, and
+    /// which characters carry it is a layout decision — `<` is shifted on a US
+    /// keyboard and every digit is on AZERTY. Control and Alt do change what a
+    /// press means, so they still end a run.
+    #[test]
+    fn shift_does_not_disqualify_a_report_character() {
+        for character in ['<', 'M', '6', ';'] {
+            let shifted = Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT));
+            assert_eq!(report_char(&shifted), Some(character), "{character}");
+        }
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let held = Event::Key(KeyEvent::new(KeyCode::Char('<'), modifiers));
+            assert_eq!(report_char(&held), None, "{modifiers:?}");
         }
     }
 

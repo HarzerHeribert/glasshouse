@@ -122,7 +122,7 @@ fn a_large_self_matching_rollout_cannot_starve_the_real_source_match() {
 
     let grep = fixture.grep("needle", None);
     assert!(
-        grep.contains("src/lib.rs"),
+        grep.contains(&fixture.root.join("src/lib.rs").display().to_string()),
         "real source match was lost: {grep}"
     );
     assert!(grep.contains("needle source"), "{grep}");
@@ -132,9 +132,19 @@ fn a_large_self_matching_rollout_cannot_starve_the_real_source_match() {
 
 #[test]
 fn a_colon_in_the_project_path_cannot_hide_the_rollout_prefix() {
+    // A colon inside a path *component* is a unix-only spelling: Windows
+    // reserves `:` for the drive separator and refuses the name outright
+    // (`ERROR_INVALID_NAME`). The colon this test needs is already in
+    // every absolute Windows path, so the default fixture supplies it.
+    #[cfg(unix)]
     let fixture = Fixture::with_prefix("pane:colon-search-artifacts");
+    #[cfg(not(unix))]
+    let fixture = Fixture::new();
     let grep = fixture.grep("needle", None);
-    assert!(grep.contains("src/lib.rs"), "{grep}");
+    assert!(
+        grep.contains(&fixture.root.join("src/lib.rs").display().to_string()),
+        "{grep}"
+    );
     assert!(!grep.contains("rollout.jsonl"), "{grep}");
     assert!(!grep.contains("model feedback"), "{grep}");
 }
@@ -150,7 +160,10 @@ fn explicit_hidden_targets_opt_back_in_without_changing_read_authority() {
         "a .pane opt-in also exposed Git: {pane}"
     );
     let git = fixture.glob(".git/*", None);
-    assert!(git.contains(".git/config"), "{git}");
+    assert!(
+        git.contains(&fixture.root.join(".git/config").display().to_string()),
+        "{git}"
+    );
 
     let rollout = fixture.root.join(".pane/rollout.jsonl");
     let explicit = fixture.grep("model feedback", Some(&rollout));

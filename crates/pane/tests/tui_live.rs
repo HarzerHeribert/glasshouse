@@ -240,6 +240,13 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
         sender.send(request).unwrap();
         thread::sleep(Duration::from_millis(700));
         let body=serde_json::json!({"role":"assistant","content":[{"type":"text","text":"```pane\nreturn \"LIVE RESULT INTACT\";\n```"}],"usage":{"input_tokens":123,"output_tokens":12}}).to_string();
+        // The client is allowed to be gone by now: every test kills pane in
+        // `App::drop`, and this thread is still inside its 700 ms sleep when
+        // that happens. Windows spells the resulting write `ConnectionReset`
+        // rather than `BrokenPipe`, and unwrapping it panicked a detached
+        // thread mid-run for no defect at all. The request was already
+        // delivered above, so a test that needed it is unaffected, and one
+        // that does not gets a quiet exit instead of a panic in the log.
         if streaming {
             let body: serde_json::Value = serde_json::from_str(&body).unwrap();
             let response = body["content"][0]["text"].as_str().unwrap();
@@ -253,9 +260,17 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
                 .iter()
                 .map(|e| format!("data: {e}\n\n"))
                 .collect::<String>();
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
         } else {
-            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
         }
     });
     (base, requests)
@@ -562,6 +577,11 @@ fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     assert_eq!(app.exited(), 0);
 }
 
+/// Unix-only, like its one caller's assertions: see
+/// `mouse_reporting_asks_only_for_the_modes_the_ui_consumes`. Left ungated it
+/// would be dead code on Windows, and dead code is an error under
+/// `-D warnings`.
+#[cfg(unix)]
 fn emitted(stream: &[u8], needle: &[u8]) -> bool {
     stream.windows(needle.len()).any(|bytes| bytes == needle)
 }
@@ -570,32 +590,51 @@ fn emitted(stream: &[u8], needle: &[u8]) -> bool {
 /// reads. `?1002`/`?1003` would report every pointer movement over the window
 /// into a handler that only matches the wheel, and each of those reports is
 /// another chance for a read boundary to split one into the composer.
+///
+/// **The negotiation this reads is a DECSET one, and DECSET negotiation is not
+/// how a Windows host asks for mouse input** — crossterm reports the ANSI form
+/// unsupported there and sets `ENABLE_MOUSE_INPUT` on the console handle
+/// instead, which writes no byte at all, while the bytes that do reach this
+/// pty are conhost's rendering of pane's screen rather than pane's own output
+/// (it consumes `?1000h`/`?1006h` into its emulator and asks the outer
+/// terminal in its own words). Neither the presence nor the absence of a mode
+/// on this wire is a fact about pane there, so the wire assertions are unix's.
+/// What Windows still proves is the effect, in
+/// `a_fragmented_wheel_report_still_scrolls_the_transcript`, which never reads
+/// a byte pane wrote.
 #[test]
 fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("PANE /");
+    #[cfg(unix)]
     let startup = app.bytes.len();
-    assert!(
-        emitted(&app.bytes, b"\x1b[?1000h"),
-        "press/release reporting must be requested"
-    );
-    assert!(
-        emitted(&app.bytes, b"\x1b[?1006h"),
-        "SGR encoding must be requested"
-    );
+    #[cfg(unix)]
+    {
+        assert!(
+            emitted(&app.bytes, b"\x1b[?1000h"),
+            "press/release reporting must be requested"
+        );
+        assert!(
+            emitted(&app.bytes, b"\x1b[?1006h"),
+            "SGR encoding must be requested"
+        );
+    }
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
-    let shutdown = app.bytes[startup..].to_vec();
-    assert!(
-        emitted(&shutdown, b"\x1b[?1000l") && emitted(&shutdown, b"\x1b[?1006l"),
-        "both requested modes must be reset on exit"
-    );
-    for unused in [b"?1002".as_slice(), b"?1003".as_slice()] {
+    #[cfg(unix)]
+    {
+        let shutdown = &app.bytes[startup..];
         assert!(
-            !emitted(&app.bytes, unused),
-            "a motion mode nothing handles was negotiated: {}",
-            String::from_utf8_lossy(unused)
+            emitted(shutdown, b"\x1b[?1000l") && emitted(shutdown, b"\x1b[?1006l"),
+            "both requested modes must be reset on exit"
         );
+        for unused in [b"?1002".as_slice(), b"?1003".as_slice()] {
+            assert!(
+                !emitted(&app.bytes, unused),
+                "a motion mode nothing handles was negotiated: {}",
+                String::from_utf8_lossy(unused)
+            );
+        }
     }
 }
 
@@ -676,19 +715,35 @@ fn a_report_whose_halves_are_a_third_of_a_second_apart_is_still_not_typed() {
 /// first line under fragmented wheel-up reports. What only a real terminal can
 /// show is that the reassembled event reaches the scroll handler at all; that
 /// it survives *every* split boundary is the unit tests' job, not this one's.
+///
+/// **The transcript is built from submitted turns, not from one bracketed
+/// paste.** A paste is not how every host delivers a multi-line draft:
+/// crossterm reads Windows input as console records and has no `Event::Paste`
+/// there at all, so the paste that made this transcript tall on unix left it
+/// short on Windows — and the test then failed on its own setup, three lines
+/// before it reached the wheel it exists to test. A submitted turn is the same
+/// height everywhere.
 #[test]
 fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("PANE /");
-    let mut paste = b"\x1b[200~TOP_OF_TRANSCRIPT".to_vec();
-    for line in 0..60 {
-        paste.extend(format!("\nfiller {line:02}").as_bytes());
-    }
-    paste.extend(b"\x1b[201~");
-    app.send(&paste);
-    app.contains("filler 59");
-    app.send(b"\r");
+    app.send(b"TOP_OF_TRANSCRIPT\r");
     app.contains("ERROR:");
+    // Named before it is pushed away, so "the first line left the viewport"
+    // can never be satisfied by a first line that was never drawn.
+    app.contains("TOP_OF_TRANSCRIPT");
+    // Each refused turn adds a user block and an error block, so the viewport
+    // fills in a handful; the rest of the budget is slack for a host that
+    // renders either one shorter.
+    for line in 0..12 {
+        if !app.screen.screen().contents().contains("TOP_OF_TRANSCRIPT") {
+            break;
+        }
+        let marker = format!("filler {line:02}");
+        app.send(format!("{marker}\r").as_bytes());
+        app.contains(&marker);
+        app.settle(40);
+    }
     app.wait("the first line leaves the viewport", |screen| {
         !screen.contents().contains("TOP_OF_TRANSCRIPT")
     });
