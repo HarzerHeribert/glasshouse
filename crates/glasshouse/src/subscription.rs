@@ -23,6 +23,8 @@
 //! TUI's job is to name the command, which is what [`connect_command`] and
 //! [`disconnect_command`] are for.
 
+pub mod connect;
+
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
