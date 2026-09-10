@@ -9,6 +9,7 @@
 
 pub mod dialect;
 pub mod intent;
+pub mod lift;
 pub mod provenance;
 pub mod types;
 

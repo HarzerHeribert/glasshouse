@@ -125,6 +125,7 @@ fn execute(
             tool: "checks.run".into(),
             args,
             evidence: None,
+            lifted_from: None,
             ended: match &result {
                 Ok(_) => Ended::Ok,
                 Err(_) => Ended::Threw {

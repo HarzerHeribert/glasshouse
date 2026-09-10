@@ -588,6 +588,7 @@ fn record_mcp_call<T>(scope: &mut v8::PinScope, name: &str, result: &Result<T, T
         tool: name.into(),
         args: std::collections::BTreeMap::new(),
         evidence: None,
+        lifted_from: None,
         ended,
     });
 }
@@ -618,6 +619,30 @@ fn tag_mcp_result(
         let marker = v8::Number::new(scope, id as f64);
         object.set_private(scope, tag, marker.into());
     }
+}
+
+/// Takes an exact line range from a capability's observed output.
+///
+/// `head` and `tail` are ranges, not summaries, so the result stays an exact
+/// subset of what pane actually read. Nothing is reworded, reordered or
+/// elided within the range.
+fn project(
+    result: invoke::ToolResult,
+    projection: crate::abi::lift::Projection,
+) -> invoke::ToolResult {
+    let lines: Vec<&str> = result.stdout.lines().collect();
+    let kept: Vec<&str> = match projection {
+        crate::abi::lift::Projection::Head(n) => lines.iter().take(n).copied().collect(),
+        crate::abi::lift::Projection::Tail(n) => {
+            let start = lines.len().saturating_sub(n);
+            lines[start..].to_vec()
+        }
+    };
+    let mut stdout = kept.join("\n");
+    if !stdout.is_empty() && result.stdout.ends_with('\n') {
+        stdout.push('\n');
+    }
+    invoke::ToolResult { stdout, ..result }
 }
 
 fn tool_callback(
@@ -662,6 +687,43 @@ fn tool_callback(
         }
     }
     let state = state(scope);
+
+    // Semantic command lifting (`semantic-command-lifting.md`). A command
+    // whose meaning pane can prove runs the stronger capability underneath
+    // the shape the model wrote.
+    //
+    // The admission check comes first and is the safety rule: `bash` is
+    // admitted by `admits_command` while `read` and `grep` are admitted by a
+    // path check, and `sandbox-grants.md` §2 forbids conflating the two. A
+    // lift that skipped it would let a project that refuses `rg` get search
+    // anyway. So a lift only ever *substitutes* for a command the shell would
+    // itself have run; anything else falls through to the ordinary path.
+    let mut lifted_from: Option<String> = None;
+    let mut projection: Option<crate::abi::lift::Projection> = None;
+    let mut requested_tool = requested_tool;
+    // What the result is marshalled as. A lift changes which capability runs;
+    // it must not change the shape the caller was promised. `shell` promises a
+    // process result, so a lifted `cat` still answers with `stdout` and
+    // `exit_code` — the bytes are identical, because the capability runs the
+    // same program. Returning a `File` instead would silently break every
+    // caller that reads `result.stdout`.
+    let marshal_as = requested_tool;
+    if requested_tool.name() == "bash"
+        && let Some(command) = call_args.get("command")
+        && state.profile.admits_command(command).is_ok()
+        && let Some(lift) = crate::abi::lift::recognize(command)
+        && let Some(target) = registry::lookup(lift.capability)
+    {
+        let mut lifted = Args::new();
+        for (name, value) in &lift.args {
+            lifted = lifted.with(*name, value.clone());
+        }
+        lifted_from =
+            crate::abi::lift::words::split(command).and_then(|words| words.first().cloned());
+        projection = lift.projection;
+        call_args = lifted;
+        requested_tool = target;
+    }
     let tool = if requested_tool.name() == "read" {
         call_args
             .get("path")
@@ -783,6 +845,7 @@ fn tool_callback(
         tool: tool.name().to_string(),
         args: traced.checked,
         evidence: evidence.filter(|_| context_fits),
+        lifted_from: lifted_from.clone(),
         ended,
     });
 
@@ -805,7 +868,11 @@ fn tool_callback(
 
     match traced.outcome {
         Ok(result) => {
-            let value = typed_result(scope, tool, &call_args, &result, &state);
+            let result = match projection {
+                Some(projection) => project(result, projection),
+                None => result,
+            };
+            let value = typed_result(scope, marshal_as, &call_args, &result, &state);
             // The canonical typed result, captured as the model sees it, for a
             // frame lowered from direct provider calls. Stringifying the value
             // the isolate returns is what makes the provider result and the
@@ -2235,6 +2302,7 @@ fn agent_run_callback(
             .into_iter()
             .collect(),
         evidence: None,
+        lifted_from: None,
         ended: Ended::Ok,
     });
     let object = agent_object(scope, &handle);
@@ -2333,6 +2401,7 @@ fn helper_callback(
         tool: format!("helper.{}", spec.name),
         args: [("asked".to_string(), asked)].into_iter().collect(),
         evidence: None,
+        lifted_from: None,
         ended: if ok {
             Ended::Ok
         } else if cancelled {

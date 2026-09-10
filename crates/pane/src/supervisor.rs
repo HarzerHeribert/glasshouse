@@ -168,6 +168,7 @@ mod tests {
                 tool: "grep".into(),
                 args: BTreeMap::from([("pattern".to_string(), "x".to_string())]),
                 evidence: None,
+                lifted_from: None,
                 ended: Ended::Ok,
             }],
         };

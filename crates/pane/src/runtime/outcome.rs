@@ -242,6 +242,14 @@ pub struct CallRecord {
     /// semantic edit. Absent for ordinary calls and older rollout rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<SourceEvidence>,
+    /// The program the model actually wrote, when pane proved the command's
+    /// meaning and ran a capability instead.
+    ///
+    /// One word, never the command line: `semantic-command-lifting.md` asks
+    /// the ledger to explain that a shell-shaped request was lifted without
+    /// persisting its payload, and `tool` already names what really ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifted_from: Option<String>,
     pub ended: Ended,
 }
 
@@ -316,12 +324,14 @@ mod tests {
                     tool: "grep".into(),
                     args: BTreeMap::from([("path".to_string(), "/tmp/root".to_string())]),
                     evidence: None,
+                    lifted_from: None,
                     ended: Ended::Ok,
                 },
                 CallRecord {
                     tool: "bash".into(),
                     args: BTreeMap::new(),
                     evidence: None,
+                    lifted_from: None,
                     ended: Ended::Denied {
                         rule: "no allow".into(),
                     },
@@ -330,6 +340,7 @@ mod tests {
                     tool: "read".into(),
                     args: BTreeMap::new(),
                     evidence: None,
+                    lifted_from: None,
                     ended: Ended::Threw {
                         class: "Cancelled".into(),
                     },

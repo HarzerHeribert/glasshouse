@@ -2366,6 +2366,15 @@ fn act_on(
                             format!("denied · {rule}")
                         }
                     };
+                    // A lifted call shows what the model asked for and what
+                    // pane ran for it, so the screen never implies the model
+                    // reached for a capability it did not name
+                    // (`semantic-command-lifting.md`, *TUI, ledger and
+                    // telemetry*).
+                    let ran = match &call.lifted_from {
+                        Some(written) => format!("{written} ↳ {}", call.tool),
+                        None => call.tool.clone(),
+                    };
                     format!(
                         "{} {}{} · {status}",
                         if i + 1 == record.calls.len() {
@@ -2373,7 +2382,7 @@ fn act_on(
                         } else {
                             "├─"
                         },
-                        call.tool,
+                        ran,
                         call.args
                             .get("path")
                             .map(|path| format!(
