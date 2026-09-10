@@ -911,9 +911,7 @@ pub fn resolve_with_gateway(
         // argv, environment or configuration, which is what "Native behaviour
         // does not change" has always meant here.
         BackendResource::Native => {
-            let kind = crate::provider::registry::ResourceKind::NativeSubscription {
-                harness: profile.harness,
-            };
+            let kind = crate::provider::registry::native_subscription(profile.harness);
             overlay.mechanisms.push(MechanismNote {
                 category: "resource kind",
                 detail: format!("{} — {}", kind.label(), kind.quota().as_str()),

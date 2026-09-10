@@ -991,7 +991,6 @@ fn preventions_after_a_failover(
         None,
         None,
         None,
-        None,
         Some(sink),
     )
     .expect("loopback is bindable")

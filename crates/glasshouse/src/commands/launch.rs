@@ -1250,6 +1250,7 @@ pub(crate) fn launch_session(
     // sink has to exist before the thing it writes into does — see
     // `DegradeRelay`. It is installed below, once the session record and the
     // event recorder are both real.
+    use crate::commands::resume::evidence_ledger;
     let degrade_relay = crate::commands::resume::DegradeRelay::new();
     let gateway = match glasshouse::gateway::start_if_required_with_degrade_sink(
         &[launch_profile.backend_demand()],
@@ -1266,6 +1267,12 @@ pub(crate) fn launch_session(
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths().data_dir(),
         )),
+        // Capability map lines 1311/1321/1322/1324: the durable resource-
+        // health cache, the same additive shape as the quota cache above and
+        // read back by exactly the same `glasshouse resources` invocation.
+        Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
+            runtime.paths().data_dir(),
+        )),
         // Phase 33A: the routing evidence ledger, reached from the shipped
         // binary only here — the same shape `GatewayQuotaCache` had for a
         // batch before `QUOTA-LIVE` wired it.
@@ -1275,15 +1282,12 @@ pub(crate) fn launch_session(
         // rather than the user's session. Telemetry is the one subsystem in
         // this binary whose failure is always survivable, and a `?` here would
         // make a read-only data directory or a locked database into "glasshouse
-        // will not start".
-        crate::commands::resume::evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
-        // Capability map lines 1311/1321/1322/1324: the durable resource-
-        // health cache, the same additive shape as the quota cache above and
-        // read back by exactly the same `glasshouse resources` invocation.
-        Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths().data_dir(),
-        )),
-        Some(degrade_relay.sink()),
+        // will not start". The relay beside it receives what the ledger
+        // does not record.
+        glasshouse::routing::evidence::optional_observation_sink(
+            evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
+            Some(degrade_relay.sink()),
+        ),
         // Capability map line 1851: what the failure-domain term did to each
         // failover this gateway takes. A sink rather than a ledger handle —
         // `gateway::session::FailoverPreventionSink`'s own doc comment has

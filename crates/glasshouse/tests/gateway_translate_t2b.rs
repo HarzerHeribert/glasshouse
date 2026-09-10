@@ -461,7 +461,6 @@ fn start_gateway(harness: IntegrationId, upstream: Upstream) -> Gateway {
         None,
         None,
         None,
-        None,
     )
     .expect("loopback is bindable")
     .expect("a gateway-backed profile requires a gateway")

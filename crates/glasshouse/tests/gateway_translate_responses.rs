@@ -486,9 +486,8 @@ fn start_gateway(
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        ledger,
         None,
-        None,
+        ledger.map(|ledger| glasshouse::routing::evidence::observation_sink(ledger, None)),
         None,
     )
     .expect("loopback is bindable")

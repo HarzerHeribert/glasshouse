@@ -543,8 +543,9 @@ pub fn observed_capacity(
         );
     }
 
-    if let ResourceKind::NativeSubscription { harness } = kind
-        && let Some(report) = telemetry.for_harness(*harness)
+    if let ResourceKind::NativeSubscription { client } = kind
+        && let Some(harness) = crate::provider::registry::integration_for(client)
+        && let Some(report) = telemetry.for_harness(harness)
     {
         state = apply_harness_report(state, report);
     }

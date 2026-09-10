@@ -506,9 +506,8 @@ fn start_gateway(upstream: Upstream, ledger: Option<Arc<EvidenceLedger>>) -> Gat
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        ledger,
         None,
-        None,
+        ledger.map(|ledger| glasshouse::routing::evidence::observation_sink(ledger, None)),
         None,
     )
     .expect("loopback is bindable")

@@ -576,7 +576,7 @@ fn nothing_in_this_build_infers_task_nearly_complete() {
         ("routing/disposable.rs", disposable_source.as_str()),
         (
             "provider/quota.rs",
-            include_str!("../src/provider/quota/mod.rs"),
+            include_str!("../../inference-gateway/src/provider/quota/mod.rs"),
         ),
         ("main.rs + commands/*", main_source.as_str()),
     ];

@@ -284,7 +284,6 @@ fn gateway_to_stub(
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        None,
         Some(health_cache),
     )
     .expect("loopback is bindable")

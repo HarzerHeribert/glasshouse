@@ -35,6 +35,7 @@ use super::classify::{
     TaskClassification, WarmContextValue, WorkloadTier, classify_heuristically,
 };
 use super::session::{Continuation, Destination, RoutingMoment, TaskRequirements};
+pub use inference_gateway::routing::request::TaskClass;
 
 // ---------------------------------------------------------------------------
 // Bounds. Named, so a test can bracket them (practice §80 case 6) and a reader
@@ -440,91 +441,6 @@ fn yes_no(value: bool) -> &'static str {
 // The answer.
 // ---------------------------------------------------------------------------
 
-/// Line 1457's *task class*, derived from the classification's own signal
-/// fields the way [`TaskClassification::hard_capabilities`] is — one place,
-/// never a second field that could disagree with the signals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskClass {
-    /// A question needing no repository.
-    Question,
-    /// Reading this repository without changing it.
-    Investigation,
-    /// Writing or changing code.
-    CodeModification,
-    /// Running something.
-    ShellWork,
-    /// Driving a browser.
-    BrowserWork,
-}
-
-impl TaskClass {
-    /// Most demanding signal first, so a task that both edits and runs is
-    /// classed by the thing a harness must be wired for.
-    pub fn derived_from(classification: &TaskClassification) -> Self {
-        if classification.needs_browser_interaction() {
-            Self::BrowserWork
-        } else if classification.needs_shell_execution() {
-            Self::ShellWork
-        } else if classification.needs_code_modification() {
-            Self::CodeModification
-        } else if classification.needs_repo_context() {
-            Self::Investigation
-        } else {
-            Self::Question
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Question => "question",
-            Self::Investigation => "investigation",
-            Self::CodeModification => "code modification",
-            Self::ShellWork => "shell work",
-            Self::BrowserWork => "browser work",
-        }
-    }
-
-    /// The inverse of [`TaskClass::as_str`], for
-    /// `routing_observations.task_class` (`crate::database` migration 23).
-    ///
-    /// `None` for anything this build does not recognise — and that is a
-    /// deliberate difference from
-    /// [`crate::routing::evidence::FailureClass::from_stored`], whose caller
-    /// turns an unknown word into an error. See migration 23's own doc
-    /// comment: a class is a bucketing input to an average, so a row this
-    /// build cannot bucket is one more request of no class it counts, never
-    /// a reason to fail the row.
-    ///
-    /// Every variant round-trips, pinned by
-    /// `every_task_class_round_trips_through_its_stored_word`.
-    pub fn from_stored(text: &str) -> Option<Self> {
-        match text {
-            "question" => Some(Self::Question),
-            "investigation" => Some(Self::Investigation),
-            "code modification" => Some(Self::CodeModification),
-            "shell work" => Some(Self::ShellWork),
-            "browser work" => Some(Self::BrowserWork),
-            _ => None,
-        }
-    }
-
-    /// Every variant, for a reader that must bucket by all of them and for
-    /// the round-trip test. Ordered as declared.
-    pub const ALL: [Self; 5] = [
-        Self::Question,
-        Self::Investigation,
-        Self::CodeModification,
-        Self::ShellWork,
-        Self::BrowserWork,
-    ];
-}
-
-impl fmt::Display for TaskClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// Why deterministic heuristics answered instead of a routing model. Every
 /// sentence here is one this repository wrote — never provider text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,7 +556,7 @@ impl RouterAnswer {
     }
 
     pub fn task_class(&self) -> TaskClass {
-        TaskClass::derived_from(&self.classification)
+        task_class_from(&self.classification)
     }
 
     /// The tier a decision uses — [`TaskClassification::conservative_workload_tier`].
@@ -1156,6 +1072,25 @@ impl CachedClassification {
         }
         let age = now_unix.saturating_sub(self.recorded_at_unix);
         (0..=CLASSIFICATION_CACHE_WINDOW_SECONDS).contains(&age)
+    }
+}
+
+/// The class of task a classification implies -- most demanding signal
+/// first. On the host side because only the host classifies; the gateway
+/// records the word it is told.
+/// Most demanding signal first, so a task that both edits and runs is
+/// classed by the thing a harness must be wired for.
+pub fn task_class_from(classification: &TaskClassification) -> TaskClass {
+    if classification.needs_browser_interaction() {
+        TaskClass::BrowserWork
+    } else if classification.needs_shell_execution() {
+        TaskClass::ShellWork
+    } else if classification.needs_code_modification() {
+        TaskClass::CodeModification
+    } else if classification.needs_repo_context() {
+        TaskClass::Investigation
+    } else {
+        TaskClass::Question
     }
 }
 

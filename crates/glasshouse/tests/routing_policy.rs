@@ -808,8 +808,10 @@ mod doc_comment_claims {
     /// beside `between`, computing the same verdict a different way.
     #[test]
     fn cache_locality_between_is_the_only_place_that_constructs_a_cache_loss_reason() {
-        let interactive = production_code(include_str!("../src/routing/interactive/mod.rs"));
-        let free = production_code(include_str!("../src/routing/free.rs"));
+        let interactive = production_code(include_str!(
+            "../../inference-gateway/src/routing/interactive/mod.rs"
+        ));
+        let free = production_code(include_str!("../../inference-gateway/src/routing/free.rs"));
         // `disposable.rs` became a directory in Phase 59; the scan must read
         // every production file of it, or it silently checks a third of what
         // it used to.
@@ -836,7 +838,8 @@ mod doc_comment_claims {
         }
         // The claim holds: mod.rs is verified to construct it exactly where
         // documented, in `between`'s own body.
-        let mod_source = production_code(include_str!("../src/routing/mod.rs"));
+        let mod_source =
+            production_code(include_str!("../../inference-gateway/src/routing/mod.rs"));
         assert!(
             mod_source.contains("CacheLossReason::ProviderChanged")
                 && mod_source.contains("CacheLossReason::ModelChanged"),
@@ -852,7 +855,7 @@ mod doc_comment_claims {
     /// only caller of) or `FreePool::observe` itself.
     #[test]
     fn free_pool_observe_is_the_only_public_entry_point_that_changes_health() {
-        let free = production_code(include_str!("../src/routing/free.rs"));
+        let free = production_code(include_str!("../../inference-gateway/src/routing/free.rs"));
 
         // `pub fn` signatures on FreePool that are not `observe`, `new`, or a
         // read-only accessor (`allowance`, `health`, `is_available`,
@@ -916,9 +919,12 @@ mod doc_comment_claims {
             ("mod.rs", include_str!("../src/routing/mod.rs")),
             (
                 "interactive.rs",
-                include_str!("../src/routing/interactive/mod.rs"),
+                include_str!("../../inference-gateway/src/routing/interactive/mod.rs"),
             ),
-            ("free.rs", include_str!("../src/routing/free.rs")),
+            (
+                "free.rs",
+                include_str!("../../inference-gateway/src/routing/free.rs"),
+            ),
             ("disposable.rs", disposable_source.as_str()),
         ];
         let forbidden = [

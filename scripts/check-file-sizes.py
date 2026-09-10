@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 59's size ratchet: no production file grows, and the large ones shrink.
 
-Counts *production* lines per Rust source file under `crates/glasshouse/src`
+Counts *production* lines per Rust source file under every `crates/*/src`
 — everything before the file's inline `mod tests` — and fails when a file is
 over the ceiling unless the baseline lists it at a size it has not exceeded.
 The baseline is the ratchet: a decomposition package lowers its entries (or
@@ -25,7 +25,11 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(REPO, "crates", "glasshouse", "src")
+import glob
+
+# Every crate in the workspace, so a file that moves between crates (the
+# 2026-09-10 gateway extraction) stays under the same ceiling it left.
+SRCS = sorted(glob.glob(os.path.join(REPO, "crates", "*", "src")))
 BASELINE = os.path.join(REPO, "scripts", "file-size-baseline.txt")
 CEILING = 2500
 TESTS_RE = re.compile(r"^(pub(\(crate\))?\s+)?mod tests\b")
@@ -49,7 +53,8 @@ def is_test_file(path):
     punish exactly the move it exists to reward (GH-DECOMP-DATABASE found it:
     `database/tests.rs` at 3,379 lines was read as a production file).
     """
-    rel = os.path.relpath(path, SRC).split(os.sep)
+    src = next(s for s in SRCS if path.startswith(s + os.sep))
+    rel = os.path.relpath(path, src).split(os.sep)
     if rel[-1] == "tests.rs" or "tests" in rel[:-1]:
         return True
     with open(path, encoding="utf-8") as fh:
@@ -63,7 +68,7 @@ def is_test_file(path):
 
 def measure():
     sizes = {}
-    for root, _, files in os.walk(SRC):
+    for root, _, files in (entry for src in SRCS for entry in os.walk(src)):
         for name in files:
             if name.endswith(".rs"):
                 path = os.path.join(root, name)

@@ -390,11 +390,13 @@ fn resolve_resume_overlay(
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths().data_dir(),
         )),
-        evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
             runtime.paths().data_dir(),
         )),
-        Some(degrade_sink),
+        glasshouse::routing::evidence::optional_observation_sink(
+            evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
+            Some(degrade_sink),
+        ),
         // Line 1851, on the resume path too: a resumed session's gateway
         // fails over exactly as a launched one's does, and counting only the
         // launched ones would make the denominator a subset nobody stated.
@@ -886,6 +888,10 @@ impl DegradeRelay {
             glasshouse::gateway::Observation::Degraded { resource, reason } => {
                 relay.report(&resource, reason.into());
             }
+            // Recorded by the evidence ledger's sink ahead of this relay
+            // (`routing::evidence::observation_sink`); the relay carries
+            // degradations only.
+            glasshouse::gateway::Observation::Routed { .. } => {}
         })
     }
 

@@ -261,24 +261,21 @@ mod readers;
 mod signals;
 #[cfg(test)]
 mod tests;
-mod vocabulary;
 
+pub use inference_gateway::routing::evidence::*;
 pub use joins::{
-    EffortShadow, EffortShadowRow, HeadroomBand, HeadroomBasis, HeadroomReplayCounts,
-    LONG_SIGNAL_HORIZON_SECONDS, LongWindowPressure, MIN_LEARNED_RESET_RECOVERIES,
-    OutputEstimateAccuracy, RECENT_SIGNAL_HORIZON_SECONDS, ResetBasis, RouteResponsiveness,
-    SeparationMeasure, SeparationReport, SubscriptionHeadroomEstimate,
-    estimate_subscription_headroom,
+    EffortShadow, EffortShadowRow, HeadroomReplayCounts, LONG_SIGNAL_HORIZON_SECONDS,
+    MIN_LEARNED_RESET_RECOVERIES, OutputEstimateAccuracy, RECENT_SIGNAL_HORIZON_SECONDS,
+    RouteResponsiveness, SeparationMeasure, SeparationReport, estimate_subscription_headroom,
 };
+pub use ledger::{observation_sink, optional_observation_sink};
 pub use readers::{
     ClassificationRecord, HarnessRequestStats, LatencyRecord, ObservationQuery,
     ObservedEvidenceSource, ObservedIdentity, PurposeConsumption, RoutingOverhead, RoutingSummary,
     SessionTranslationSavings, TranslationSavings, WallClockSummary,
 };
 pub use signals::{
-    CorrelationVerdict, CredentialCost, CredentialSpend, CredentialThrottles, RouteCorrelation,
-    RouteCorrelations, RouteIdentity, ThrottleScope, ThrottleScopes, classify_throttle_scope,
+    CredentialSpend, CredentialThrottles, ThrottleScope, ThrottleScopes, classify_throttle_scope,
     classify_throttle_scopes, correlate_routes, estimated_context_tokens, recent_credential_cost,
     recent_credential_spend, recent_credential_throttles,
 };
-pub use vocabulary::*;

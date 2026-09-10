@@ -286,7 +286,8 @@ pub(crate) fn routing_destinations(
     // `[entitlements]` tables stops the routing decision, exactly as the
     // per-destination lookup it replaces did — but a provider several
     // entries back is not a contradiction any more: it is line 1953's axis.
-    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
+    let model_cache =
+        glasshouse::provider::cache::ModelCache::new(&runtime.paths().provider_cache_dir());
     // Two reads from one handle, opened and dropped here (practice §65).
     // `observations_in_window` is the outcome-carrying set 56A's facets
     // classify; `consumption_in_window` is every row, which is what a burn
@@ -1120,9 +1121,9 @@ fn destination_capacity(
     use glasshouse::routing::pressure::CapacityFacts;
 
     let kind = match &profile.backend {
-        BackendResource::Native => ResourceKind::NativeSubscription {
-            harness: profile.harness,
-        },
+        BackendResource::Native => {
+            glasshouse::provider::registry::native_subscription(profile.harness)
+        }
         BackendResource::DirectProvider { provider } => {
             ResourceKind::from_direct_provider(provider.clone())
         }

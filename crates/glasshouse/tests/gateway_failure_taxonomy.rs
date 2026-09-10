@@ -293,11 +293,12 @@ fn gateway_over(
 ) -> Gateway {
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
-    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
+    let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         &[profile.backend_demand()],
         || Ok(upstream),
         quota_cache,
-        ledger,
+        None,
+        ledger.map(|ledger| glasshouse::routing::evidence::observation_sink(ledger, None)),
         None,
     )
     .expect("loopback is bindable")
@@ -936,11 +937,13 @@ fn a_relayed_body_is_never_read_and_never_leaks_into_the_ledger_or_logs() {
     let relay = [
         (
             "gateway/ingress.rs",
-            production_code(include_str!("../src/gateway/ingress.rs")),
+            production_code(include_str!(
+                "../../inference-gateway/src/gateway/ingress.rs"
+            )),
         ),
         (
             "gateway/usage.rs",
-            production_code(include_str!("../src/gateway/usage.rs")),
+            production_code(include_str!("../../inference-gateway/src/gateway/usage.rs")),
         ),
     ];
     assert!(

@@ -19,6 +19,7 @@
 //! *less* trust — the same fail-closed shape [`super::Cost::Metered`] uses.
 // History: design-decisions.md, "Trims: routing module docs", routing/classify.rs module doc.
 
+pub use inference_gateway::routing::tier::WorkloadTier;
 use std::fmt;
 
 /// Coarse complexity estimate — Phase 35's "estimate task complexity on a
@@ -57,66 +58,13 @@ impl fmt::Display for Complexity {
 /// router, rather than one merged scale — the same reason
 /// [`super::AssignedModel`] keeps "no model" and "a named model" apart.
 ///
-/// [`Self::Deterministic`] (Tier 0) and [`Self::Frontier`] (Tier 4) have no
+/// `Self::Deterministic` (Tier 0) and `Self::Frontier` (Tier 4) have no
 /// producer yet — this project adds a variant when its producer lands, never
 /// in advance (`src/evaluation/mod.rs:89` states the same rule for its own
 /// enum) — and every consumer must stay exhaustive over all five so a missed
 /// call site is a compile error, not a silent wrong decision, the day one
 /// does land.
 // History: design-decisions.md, "Trims: routing module docs", routing/classify.rs `WorkloadTier` doc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorkloadTier {
-    /// Tier 0: deterministic or trivial work that should not require an LLM
-    /// when simple rules are sufficient (line 1396).
-    Deterministic,
-    /// Tier 1: lightweight classification, extraction, reranking,
-    /// formatting, and simple factual codebase lookup (line 1397). A
-    /// disposable, free, or local model is expected to be sufficient.
-    Leaf,
-    /// Tier 2: routine coding, bounded debugging, focused review, and small
-    /// multi-file changes (line 1398). An ordinary interactive model.
-    Standard,
-    /// Tier 3: difficult debugging, architecture-sensitive changes, broad
-    /// refactors, and work requiring strong reasoning or long-lived
-    /// repository context (line 1399). The strongest configured model the
-    /// session has, short of a Tier 4 need.
-    Heavy,
-    /// Tier 4: frontier work where failure cost or reasoning difficulty
-    /// justifies the strongest available model or a warm premium session
-    /// (line 1400).
-    Frontier,
-}
-
-impl WorkloadTier {
-    /// One step more capable, or unchanged at the top. Never a step down —
-    /// there is no direction in which escalating a workload tier should make
-    /// it cheaper.
-    pub fn escalate(self) -> Self {
-        match self {
-            Self::Deterministic => Self::Leaf,
-            Self::Leaf => Self::Standard,
-            Self::Standard => Self::Heavy,
-            Self::Heavy | Self::Frontier => Self::Frontier,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Deterministic => "deterministic",
-            Self::Leaf => "leaf",
-            Self::Standard => "standard",
-            Self::Heavy => "heavy",
-            Self::Frontier => "frontier",
-        }
-    }
-}
-
-impl fmt::Display for WorkloadTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// How much a policy should trust this classification — Phase 35's "return
 /// classification confidence so uncertain tier assignments can be escalated
 /// conservatively".

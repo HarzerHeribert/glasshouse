@@ -1907,7 +1907,7 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     // **Phase 9D line 3, and the whole of it.** Reads the model catalogue off
     // disk — no fetch, no expiry check, no network fallback on a miss. The
     // type that does this cannot make a request at all.
-    let model_cache = ModelCache::new(runtime.paths());
+    let model_cache = ModelCache::new(&runtime.paths().provider_cache_dir());
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
@@ -2114,7 +2114,7 @@ fn spawn_provider_probe(
         return;
     };
 
-    let cache = ModelCache::new(runtime.paths());
+    let cache = ModelCache::new(&runtime.paths().provider_cache_dir());
     let results = results.clone();
     let wake = wake.clone();
 

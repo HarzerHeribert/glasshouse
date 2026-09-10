@@ -619,10 +619,8 @@ fn nothing_the_registry_can_describe_reports_a_capacity_number_it_could_not_have
 /// resources it must leave alone.
 #[test]
 fn a_subscription_a_local_server_and_a_metered_account_give_three_different_unknowns() {
-    let subscription = ResourceKind::NativeSubscription {
-        harness: IntegrationId::ClaudeCode,
-    }
-    .capacity();
+    let subscription =
+        glasshouse::provider::registry::native_subscription(IntegrationId::ClaudeCode).capacity();
     let local = ResourceKind::from_direct_provider("ollama").capacity();
     let metered = ResourceKind::from_direct_provider("openrouter").capacity();
 

@@ -4,7 +4,7 @@
 
 use super::*;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -119,5 +119,46 @@ impl EvidenceLedger {
         )
         .map_err(sql_err("record a routing observation"))?;
         Ok(conn.last_insert_rowid())
+    }
+}
+
+/// The sink a gateway started by Glasshouse itself reports through.
+///
+/// A routing observation lands in this ledger; anything else is handed to
+/// `next` (the degradation relay). The gateway runs as its own process in the
+/// standalone case and this closure cannot reach it there -- it exists only
+/// for the in-process gateway Glasshouse starts, which is why it lives on the
+/// host side, next to the ledger it writes, and not in the gateway crate.
+pub fn observation_sink(
+    ledger: Arc<EvidenceLedger>,
+    next: Option<inference_gateway::gateway::ObservationSink>,
+) -> inference_gateway::gateway::ObservationSink {
+    Arc::new(move |observation| match observation {
+        inference_gateway::gateway::Observation::Routed {
+            observation,
+            observed_at_unix,
+        } => {
+            if let Err(err) = ledger.record(*observation, observed_at_unix) {
+                tracing::warn!(%err, "routing observation not recorded");
+            }
+        }
+        other => {
+            if let Some(next) = &next {
+                next(other);
+            }
+        }
+    })
+}
+
+/// [`observation_sink`] for a ledger that may not have opened: the sink the
+/// gateway door takes, or `next` alone when there is no ledger to write —
+/// never a sink that drops routed observations silently while looking armed.
+pub fn optional_observation_sink(
+    ledger: Option<Arc<EvidenceLedger>>,
+    next: Option<inference_gateway::gateway::ObservationSink>,
+) -> Option<inference_gateway::gateway::ObservationSink> {
+    match ledger {
+        Some(ledger) => Some(observation_sink(ledger, next)),
+        None => next,
     }
 }

@@ -8,52 +8,6 @@ use super::*;
 
 use crate::provider::pricing::PriceTable;
 
-/// One route as [`correlate_routes`] tells routes apart: the `provider` and
-/// `model` already on every [`RoutingObservation`] — capability map line
-/// 1373's "provider metadata", and nothing fetched from anywhere.
-///
-/// `model` is part of the identity because line 1373 asks for
-/// *model-specific* 5xx events: two providers whose `claude-x` both fail at
-/// once may share an upstream for that model and nothing else, and a
-/// correlation keyed on provider alone would carry that pair's evidence to
-/// models it was never observed on. The ledger's `route` column (the wire
-/// protocol) is deliberately **not** part of it: the question is whether two
-/// front doors lead to one room, and the protocol spoken at the door does
-/// not change what is behind it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RouteIdentity {
-    pub provider: String,
-    pub model: String,
-}
-
-impl RouteIdentity {
-    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: model.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for RouteIdentity {
-    /// `provider/model` — what every explanation and report prints.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.provider, self.model)
-    }
-}
-
-/// What [`RouteCorrelation::verdict`] answers — capability map line 1376.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CorrelationVerdict {
-    /// Fewer than [`MIN_CORRELATION_SAMPLE`] informative events — line
-    /// 1376's refusal, carrying the count so a reader prints *2 of 5* rather
-    /// than *unknown*. **A consumer treats this exactly as no correlation.**
-    InsufficientEvidence { sample_size: usize, required: usize },
-    /// Enough events to say something, and what they say: the share of them
-    /// in which the other route failed the same way at the same moment.
-    Measured { confidence: f64, sample_size: usize },
-}
-
 /// What this project's ledger has observed about whether two routes fail
 /// together — capability map lines 1370, 1373, 1374 and 1376, as one value.
 ///
@@ -73,109 +27,6 @@ pub enum CorrelationVerdict {
 /// the rows on every read and never persisted, because the rows are the
 /// claim and the rows keep arriving.
 // History: design-decisions.md, "Trims: routing module docs", routing/evidence/signals.rs `struct RouteCorrelation` doc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteCorrelation {
-    routes: (RouteIdentity, RouteIdentity),
-    overlaps: usize,
-    lone: usize,
-}
-
-impl RouteCorrelation {
-    /// A pair nothing has been observed about — zero events, which
-    /// [`Self::verdict`] reports as insufficient with a count of zero.
-    pub fn unmeasured(a: RouteIdentity, b: RouteIdentity) -> Self {
-        let routes = if a <= b { (a, b) } else { (b, a) };
-        Self {
-            routes,
-            overlaps: 0,
-            lone: 0,
-        }
-    }
-
-    /// The two routes, in a fixed order so `(a, b)` and `(b, a)` are the
-    /// same pair.
-    pub fn routes(&self) -> (&RouteIdentity, &RouteIdentity) {
-        (&self.routes.0, &self.routes.1)
-    }
-
-    /// Failure events the other route failed the same way during.
-    pub fn overlaps(&self) -> usize {
-        self.overlaps
-    }
-
-    /// Failure events the other route was observed during and did not
-    /// fail the same way.
-    pub fn lone(&self) -> usize {
-        self.lone
-    }
-
-    /// Every informative failure event — the denominator, and the count
-    /// line 1376 requires beside any confidence.
-    pub fn sample_size(&self) -> usize {
-        self.overlaps + self.lone
-    }
-
-    /// Line 1376: a confidence only once [`MIN_CORRELATION_SAMPLE`] events
-    /// exist, and otherwise the count that fell short.
-    pub fn verdict(&self) -> CorrelationVerdict {
-        let sample_size = self.sample_size();
-        if sample_size < MIN_CORRELATION_SAMPLE {
-            return CorrelationVerdict::InsufficientEvidence {
-                sample_size,
-                required: MIN_CORRELATION_SAMPLE,
-            };
-        }
-        CorrelationVerdict::Measured {
-            confidence: self.overlaps as f64 / sample_size as f64,
-            sample_size,
-        }
-    }
-
-    /// [`Self::verdict`]'s confidence, or `None` below the minimum — the
-    /// shape a consumer composes with, where absent contributes nothing.
-    pub fn confidence(&self) -> Option<f64> {
-        match self.verdict() {
-            CorrelationVerdict::Measured { confidence, .. } => Some(confidence),
-            CorrelationVerdict::InsufficientEvidence { .. } => None,
-        }
-    }
-}
-
-/// Every pair of routes [`correlate_routes`] found anything about, looked
-/// up by either ordering of the pair. [`Default`] is the empty set — every
-/// pair unmeasured — which is what a caller with no ledger passes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteCorrelations {
-    pairs: std::collections::BTreeMap<(RouteIdentity, RouteIdentity), RouteCorrelation>,
-}
-
-impl RouteCorrelations {
-    /// What is known about `a` and `b` failing together — never `None`: a
-    /// pair with no rows is [`RouteCorrelation::unmeasured`], so "nothing
-    /// observed" and "too little observed" reach a consumer as the same
-    /// verdict rather than as two shapes to handle.
-    pub fn between(&self, a: &RouteIdentity, b: &RouteIdentity) -> RouteCorrelation {
-        let key = if a <= b {
-            (a.clone(), b.clone())
-        } else {
-            (b.clone(), a.clone())
-        };
-        self.pairs
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| RouteCorrelation::unmeasured(key.0, key.1))
-    }
-
-    /// Every pair with at least one informative event, in route order.
-    pub fn iter(&self) -> impl Iterator<Item = &RouteCorrelation> {
-        self.pairs.values()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
-    }
-}
-
 /// Whether two windows touch, or come within `tolerance` seconds of it.
 fn overlaps_within(a: (i64, i64), b: (i64, i64), tolerance: i64) -> bool {
     a.0 <= b.1.saturating_add(tolerance) && b.0 <= a.1.saturating_add(tolerance)
@@ -660,45 +511,6 @@ pub fn recent_credential_spend(
         account_narrowed,
         sample_count,
     }
-}
-
-/// Map line 1519's own reader, beside [`recent_credential_spend`]: what a
-/// **provider's own money budget** costs, in the currency it is actually
-/// stated in, rather than in tokens.
-///
-/// # Why this reader may answer in money and [`recent_credential_spend`] may
-/// not
-///
-/// [`recent_credential_spend`]'s own doc explains why a *ceiling* is stated
-/// in tokens: `routing_observations.cost_micro_usd` has almost no producer,
-/// so a reader keyed on that column would answer `None` for nearly every
-/// window. This reader does not read that column at all — it multiplies the
-/// same token counts by [`PriceTable::price_for`], the user's own
-/// `pricing.toml`, exactly as `routing::session::expected_marginal_cost`
-/// already does to price one decision. A row this table has no price for is
-/// not silently zero; see [`CredentialCost::unpriced_rows`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CredentialCost {
-    /// The priced rows' cost, summed in micro-USD. `None` exactly when
-    /// [`Self::priced_rows`] is `0` — *nothing could be priced*, which is not
-    /// the same claim as *nothing was spent*, and a caller may judge a
-    /// budget exhausted only against `Some`.
-    pub micro_usd: Option<u64>,
-    /// How many rows contributed to `micro_usd` — carried a token count
-    /// **and** matched a `pricing.toml` entry.
-    pub priced_rows: usize,
-    /// How many rows carried no token count at all — a relayed exchange, or
-    /// one written before token counts existed. Not priced, and not the same
-    /// gap as [`Self::unpriced_rows`].
-    pub unread_rows: usize,
-    /// How many rows carried a token count with no matching `pricing.toml`
-    /// entry — `PriceTable::price_for` answered `None`. Not priced, and not
-    /// the same gap as [`Self::unread_rows`].
-    pub unpriced_rows: usize,
-    /// Whether the rows behind `micro_usd` are the named credential's own
-    /// spend rather than the provider-wide total — [`recent_credential_spend`]'s
-    /// own narrowing rule, applied verbatim.
-    pub account_narrowed: bool,
 }
 
 /// See [`CredentialCost`]. `credential_label` and the narrowing rule are

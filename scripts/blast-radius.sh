@@ -906,7 +906,7 @@ fi
 echo
 printf '\033[1m=== cargo doc --no-deps (rustdoc) ===\033[0m\n'
 doc_out="$(mktemp)"
-if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p glasshouse >"$doc_out" 2>&1; then
+if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p glasshouse -p inference-gateway >"$doc_out" 2>&1; then
   echo "  rustdoc: clean"
 else
   rc=1

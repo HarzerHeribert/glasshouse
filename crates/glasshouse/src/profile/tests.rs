@@ -3240,3 +3240,97 @@ fn the_gateways_own_name_and_this_modules_slug_for_it_agree() {
         crate::gateway::LOCAL_GATEWAY_RESOURCE
     );
 }
+
+// --- came from inference-gateway/src/secret/native.rs with the extraction: the
+// store is the crate's, the overlay it must reach is this crate's -------------
+
+/// **Acceptance 1, end to end.** A credential stored in the OS store
+/// resolves through a [`SecretStore`] and reaches a launch overlay's
+/// environment — the actual thing a user is trying to do, not just a
+/// round trip through this module.
+///
+/// Goes through `crate::profile::resolve` unchanged: that function asks
+/// a store with a [`SecretRef::Environment`] reference and knows nothing
+/// about keychains, which is exactly the point of "a reference names a
+/// credential; the store decides where it lives".
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_native_store_credential_reaches_a_launch_overlays_environment() {
+    use inference_gateway::secret::SecretRef;
+    use inference_gateway::secret::native::fixtures::{KeychainItem, os_cli_sees, test_account};
+    use inference_gateway::secret::native::{NativeSecretStore, PreferNativeSecretStore, SERVICE};
+
+    const STORED: &str = "sk-into-a-launch-overlay-0123456789abcdef";
+
+    let native = match NativeSecretStore::detect() {
+        Ok(native) => native,
+        Err(refusal) => {
+            eprintln!(
+                "SKIPPED: the native secure store would not open in this session: {}",
+                refusal.reason()
+            );
+            return;
+        }
+    };
+
+    let account = test_account("OVERLAY");
+    let reference = SecretRef::Environment {
+        var: account.clone(),
+    };
+    let _item = KeychainItem::stored(&native, reference.clone(), STORED);
+
+    // The mapping itself, witnessed from outside Glasshouse. Storing and
+    // reading through the same `entry_name` would agree with each other
+    // whatever that function did; the platform's own CLI agrees with
+    // nothing but the platform's store, so this is what pins an
+    // `Environment` reference to the service and account a user is told
+    // to look under. Found by mutation: redirecting the `Environment`
+    // arm to another account left every other assertion in this test
+    // passing.
+    assert!(
+        os_cli_sees(&account),
+        "an `Environment` reference must be filed under service `{SERVICE}` with the \
+         variable's own name as the account"
+    );
+
+    let mut provider = crate::provider::template("openrouter").expect("a built-in template exists");
+    provider.name = "keychain-router".to_owned();
+    provider.credential_env = vec![account.clone()];
+
+    let adapter = crate::harness::adapter_for(crate::integrations::IntegrationId::ClaudeCode)
+        .expect("claude code has an adapter");
+    let mut profile = LaunchProfile::native(crate::integrations::IntegrationId::ClaudeCode);
+    profile.name = "keychain".to_owned();
+    profile.backend = BackendResource::DirectProvider {
+        provider: provider.name.clone(),
+    };
+
+    let secrets = PreferNativeSecretStore::detect();
+    let outcome = resolve(
+        &profile,
+        &Resolution {
+            adapter,
+            acknowledged_bypass: false,
+            provider: Some(&provider),
+            secrets: &secrets,
+        },
+    );
+
+    let overlay = outcome.expect("a direct-provider profile with a resolvable credential");
+    let carried = overlay
+        .env()
+        .iter()
+        .any(|(_, value)| value.to_string_lossy() == STORED);
+    assert!(
+        carried,
+        "the credential stored in the native store never reached the overlay's environment"
+    );
+
+    // ... and nothing else about the overlay carries it in a form that
+    // could be printed: the mechanism notes and args are names only.
+    let described = format!("{:?} {:?}", overlay.args(), overlay.mechanisms());
+    assert!(
+        !described.contains(STORED),
+        "a credential appeared outside the overlay's environment: {described}"
+    );
+}

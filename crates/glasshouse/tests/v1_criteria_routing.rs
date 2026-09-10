@@ -19,7 +19,6 @@ use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::quota::{self, CapacityBand, ReserveDecisionInputs};
-use glasshouse::provider::registry::ResourceKind;
 use glasshouse::provider::telemetry::GatewayHealthCache;
 use glasshouse::routing::classify::WorkloadTier;
 use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
@@ -241,10 +240,8 @@ fn line_1931_a_fixture_providers_quota_headers_render_in_native_units_not_a_bare
 /// (`docs/product/evidence/phase-32a.md`).
 #[test]
 fn line_1932_an_opaque_subscriptions_capacity_is_unknown_and_never_fabricated() {
-    let subscription = ResourceKind::NativeSubscription {
-        harness: IntegrationId::ClaudeCode,
-    }
-    .capacity();
+    let subscription =
+        glasshouse::provider::registry::native_subscription(IntegrationId::ClaudeCode).capacity();
 
     let remaining = subscription.tokens().combined().remaining();
     assert!(
@@ -1111,12 +1108,16 @@ fn line_1937_a_gateway_backed_route_records_a_success_and_a_failure_and_route_ci
 
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
-    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
+    let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        Some(ledger.clone()),
         Some(health_cache),
+        Some(glasshouse::routing::evidence::observation_sink(
+            ledger.clone(),
+            None,
+        )),
+        None,
     )
     .expect("loopback is bindable")
     .expect("a gateway-backed profile requires a gateway");

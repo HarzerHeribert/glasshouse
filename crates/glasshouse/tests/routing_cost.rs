@@ -571,11 +571,15 @@ fn gateway_to_stub(
 
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
-    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
+    let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        Some(evidence_ledger),
+        None,
+        Some(glasshouse::routing::evidence::observation_sink(
+            evidence_ledger,
+            None,
+        )),
         None,
     )
     .expect("loopback is bindable")

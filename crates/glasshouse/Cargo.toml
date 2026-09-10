@@ -17,6 +17,7 @@ name = "glasshouse"
 path = "src/lib.rs"
 
 [dependencies]
+inference-gateway = { path = "../inference-gateway" }
 anyhow.workspace = true
 thiserror.workspace = true
 clap.workspace = true
@@ -96,6 +97,7 @@ libc.workspace = true
 dbus-secret-service.workspace = true
 
 [dev-dependencies]
+inference-gateway = { path = "../inference-gateway", features = ["fixtures"] }
 tempfile.workspace = true
 
 [lints]

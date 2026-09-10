@@ -27,7 +27,8 @@ pub(crate) fn entitlement_pool_with_telemetry(
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let quota_cache =
         glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir());
-    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
+    let model_cache =
+        glasshouse::provider::cache::ModelCache::new(&runtime.paths().provider_cache_dir());
     let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
         .and_then(|ledger| {
             Ok(ledger.observations_in_window(
@@ -465,7 +466,7 @@ fn refresh_missing_catalogues(
     use glasshouse::provider::cache::{ModelCache, ModelCatalogue};
     use glasshouse::provider::discovery::{self, ModelFetch, ProbeRequest, ProbeTarget};
     use glasshouse::secret::SecretStore;
-    let cache = ModelCache::new(runtime.paths());
+    let cache = ModelCache::new(&runtime.paths().provider_cache_dir());
     let entries = entitlement_pool_with_telemetry(runtime, effective)?;
     let mut providers = std::collections::BTreeMap::new();
     let mut broker_accounts = Vec::new();

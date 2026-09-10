@@ -554,7 +554,7 @@ mod settings_persistence_tests {
 
         // A catalogue already on disk, as a previous run's refresh would
         // have left it.
-        let cache = ModelCache::new(runtime.paths());
+        let cache = ModelCache::new(&runtime.paths().provider_cache_dir());
         cache
             .store(&ModelCatalogue::new(
                 "router",
@@ -673,7 +673,7 @@ mod settings_persistence_tests {
 
         // A stale catalogue, so this proves a replacement rather than a
         // first write.
-        let cache = ModelCache::new(runtime.paths());
+        let cache = ModelCache::new(&runtime.paths().provider_cache_dir());
         cache
             .store(&ModelCatalogue::new(
                 "router",
@@ -982,7 +982,7 @@ mod settings_persistence_tests {
         );
 
         // The cache file on disk, byte for byte.
-        let path = ModelCache::new(runtime.paths()).path_for("router");
+        let path = ModelCache::new(&runtime.paths().provider_cache_dir()).path_for("router");
         let bytes = std::fs::read(&path).expect("the refresh wrote a cache file");
         assert!(
             !bytes.is_empty(),

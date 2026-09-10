@@ -1,0 +1,111 @@
+[package]
+name = "inference-gateway"
+description = "Provider-facing inference gateway: credentials, entitlements, quota, failover and protocol translation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lib]
+name = "inference_gateway"
+path = "src/lib.rs"
+
+# The standalone gateway process. Pane spawns this binary, reads one ready
+# line from its stdout, and points its existing HTTP inference path at the
+# address that line carries -- see `src/main.rs` for the whole contract.
+[[bin]]
+name = "inference-gateway"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+# `clap` and `ctrlc` are the binary's alone -- the argument surface and the
+# termination handler. Cargo cannot scope a dependency to one target of a
+# crate, and a feature only the bin would ever enable buys nothing, so they
+# are declared plainly and the library simply does not name them.
+clap.workspace = true
+ctrlc.workspace = true
+# `directories` and `toml` belong to `src/config.rs`, which is where this
+# crate resolves a platform location and parses a file. Nothing below it
+# does either: `BrokerPaths` takes already-decided directories and the relay
+# files may not name a deserializer at all.
+directories.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# `keyring` is declared **per platform, and only where its backend feature is
+# declared with it**. Two consequences, both deliberate: nothing can link
+# keyring's in-process **mock** store and report it as secure, and no
+# platform's build grows a dependency for a capability its evidence ledger
+# does not claim. `apple-native` and `windows-native` are 3.x's feature names
+# for the Security-framework and Credential-Manager backends — 4.x's `v1` is a
+# different crate line and does not apply here.
+#
+# `tests/secret_native.rs` reads this file and fails if a `keyring` line ever
+# appears outside such a section or without such a feature, because the mock is
+# a silent failure rather than a loud one — see `src/secret/native.rs`.
+#
+# **Linux is present, and deliberately not through `keyring`.** keyring 3.6.3's
+# Secret Service backend reaches the bus through `SecretService::connect`,
+# which leaves `dbus-secret-service`'s prompt timeout unset; that crate then
+# defaults an unanswered unlock prompt to `ONE_YEAR_SECONDS` and blocks the
+# calling thread for it, one second at a time. It also unlocks a locked
+# collection on the way to reading an item, so a locked keyring would freeze a
+# launch — the exact defect `SecKeychainSetUserInteractionAllowed(0)` exists to
+# prevent on macOS.
+#
+# `dbus-secret-service` is the crate underneath that backend, and it *does*
+# expose the equivalent: `connect_with_max_prompt_timeout(_, 0)`, which its
+# documentation defines as "prevent the prompt from appearing at all: the
+# operation will immediately be canceled". keyring never calls it and gives a
+# caller no way to, so Glasshouse depends on it directly instead — see
+# `src/secret/native.rs`, "Which platforms, and how the third one refuses".
+# Every one of its D-Bus calls also carries a 2-second reply timeout
+# (`dbus-secret-service-4.1.0/src/proxy/mod.rs:17`), so the Linux probe is
+# bounded whatever the far end does.
+#
+# **The build-host cost, stated rather than discovered:** this adds
+# `libdbus-sys`, whose build script requires `libdbus-1-dev` and `pkg-config`
+# and panics without them. Every Linux build host and CI cell needs both. That
+# cost was accepted by the user on 2026-09-05
+# (`.agent-runtime/answers/linux-keyring-buildhost`) in exchange for a keyring
+# integration that can refuse rather than wait.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+windows-sys.workspace = true
+# The calendar-month start of a money budget (`provider/telemetry.rs`) reads the
+# C runtime's local time through the same `libc` bindings the Unix arm uses;
+# the UCRT exports `_localtime64_s` and `_mktime64`, and `libc` binds the
+# first for Windows. Found by the Windows VM leg on 2026-09-02: the arm
+# type-checked against libc's Windows bindings in isolation and then could not
+# name `libc` at all in a crate that only depended on it under `cfg(unix)`.
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service.workspace = true
+
+[features]
+fixtures = []
+
+[dev-dependencies]
+clap.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

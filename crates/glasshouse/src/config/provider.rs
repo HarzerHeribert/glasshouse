@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+pub use inference_gateway::provider::budget::BudgetPeriod;
 
 /// A [`crate::routing::classify::WorkloadTier`] as it is written in a
 /// configuration file, and the only place this crate turns a spelling back
@@ -358,22 +359,6 @@ impl From<QuotaStaleAfterSeconds> for u32 {
 /// either yet — see [`MonetaryBudget`] — but a ceiling recorded without its
 /// period is a number that cannot be checked, and this project does not store
 /// those.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BudgetPeriod {
-    /// Resets at the start of each calendar month.
-    CalendarMonth,
-    /// A trailing thirty days that never fully resets.
-    RollingThirtyDays,
-}
-impl BudgetPeriod {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BudgetPeriod::CalendarMonth => "calendar month",
-            BudgetPeriod::RollingThirtyDays => "rolling thirty days",
-        }
-    }
-}
 /// A spending ceiling the user set for one metered provider — capability map
 /// line 1203.
 ///

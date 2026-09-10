@@ -332,9 +332,10 @@ fn start_gateway(upstream: Upstream, ledger: Arc<EvidenceLedger>, protocol: &str
         &[profile.backend_demand()],
         || Ok(upstream),
         None,
-        Some(ledger),
         None,
-        None,
+        Some(glasshouse::routing::evidence::observation_sink(
+            ledger, None,
+        )),
         None,
     )
     .expect("loopback is bindable")

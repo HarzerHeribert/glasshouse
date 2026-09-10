@@ -220,7 +220,10 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
         // the gateway becomes its own process this closure is what an IPC
         // receiver calls, unchanged.
         Arc::new(move |observation: Observation| {
-            let Observation::Degraded { resource, reason } = observation;
+            let Observation::Degraded { resource, reason } = observation else {
+                // A routed observation is the evidence ledger's, not a degradation.
+                return;
+            };
             let reason = GatewayFailure::from(reason);
             calls.lock().unwrap().push((resource.clone(), reason));
             degrade_resource(&bus, &records, &resource, reason);
@@ -232,7 +235,6 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         &[profile.backend_demand()],
         || Ok(unreachable_upstream()),
-        None,
         None,
         None,
         Some(sink),

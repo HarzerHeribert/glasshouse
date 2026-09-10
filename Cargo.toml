@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/glasshouse", "crates/pane"]
+members = ["crates/glasshouse", "crates/inference-gateway", "crates/pane"]
 # `pane` is a workspace member so its own gate job can build and test it, but
 # it must never ride along on a bare `cargo build`/`test`/`run` at the root --
 # it will carry an embedded V8 and a tokio stack, and `glasshouse` deliberately

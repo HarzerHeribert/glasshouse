@@ -939,6 +939,7 @@ dependencies = [
  "directories",
  "getrandom 0.4.3",
  "hex",
+ "inference-gateway",
  "keyring",
  "libc",
  "portable-pty",
@@ -1146,6 +1147,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "inference-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "dbus-secret-service",
+ "directories",
+ "getrandom 0.4.3",
+ "hex",
+ "keyring",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The Linux `backend::probe` in `crates/glasshouse/src/secret/native.rs`
+# The Linux `backend::probe` in `crates/inference-gateway/src/secret/native.rs`
 # refuses rather than waits, and `tests/secret_native.rs`'s round trips
 # skip loudly whenever `detect()` refuses -- which it always did before this
 # file, because neither the Linux container nor a hosted runner has ever had

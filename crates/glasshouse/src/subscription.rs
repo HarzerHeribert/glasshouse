@@ -23,7 +23,7 @@
 //! TUI's job is to name the command, which is what [`connect_command`] and
 //! [`disconnect_command`] are for.
 
-pub mod connect;
+pub use inference_gateway::subscription::connect;
 
 use std::path::Path;
 

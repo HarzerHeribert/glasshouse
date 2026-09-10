@@ -3,7 +3,7 @@
 //! and the facets it derives from its own evidence ledger.
 //!
 //! The client-neutral half — what an account *is*, how it authenticates, what
-//! it can serve — lives in [`super::entitlement_catalogue`] and is re-exported
+//! it can serve — lives in `super::inference_gateway::entitlement` and is re-exported
 //! below, so every path that named one of those items here before the split
 //! still resolves. The dependency runs one way: policy reads catalogue, and
 //! the catalogue names nothing in this file.
@@ -17,14 +17,14 @@ use crate::secret::SecretRef;
 
 use super::*;
 
-pub use super::entitlement_catalogue::{
+pub use inference_gateway::entitlement::{
     AccountEntry, EntitlementCredential, EntitlementKind, EntitlementModels,
     EntitlementSpendReading, EntitlementThrottleReading, EntitlementVendor, ResolvedAccount,
     SubscriptionBroker, TelemetryScope,
 };
 // Not public, and re-exported at exactly the visibility it had before the
 // move: `config::provider`'s `credential_env` names it through `use super::*`.
-pub(super) use super::entitlement_catalogue::deserialize_credential_env_names;
+pub(super) use inference_gateway::entitlement::deserialize_credential_env_names;
 
 // ---------------------------------------------------------------------------
 // Phase 56/56A — `[entitlements.<name>]`: an entitlement — a specific

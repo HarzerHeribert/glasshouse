@@ -240,7 +240,6 @@ fn gateway_to_stub(
         || Ok(upstream),
         Some(quota_cache),
         None,
-        None,
     )
     .expect("loopback is bindable")
     .expect("a gateway-backed profile requires a gateway");

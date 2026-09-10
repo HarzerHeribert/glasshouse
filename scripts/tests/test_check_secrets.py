@@ -26,15 +26,15 @@ spec.loader.exec_module(check_secrets)
 # number). These must pass through the REAL fingerprint allowlist
 # (scripts/check-secrets-allow.txt) with no edit to any of them.
 NAMED_FIXTURES = [
-    ("crates/glasshouse/src/gateway/conformance.rs", 64),
-    ("crates/glasshouse/src/gateway/ingress.rs", 1311),
-    ("crates/glasshouse/src/gateway/tests.rs", 222),
+    ("crates/inference-gateway/src/gateway/conformance.rs", 63),
+    ("crates/inference-gateway/src/gateway/ingress.rs", 1311),
+    ("crates/inference-gateway/src/gateway/tests.rs", 228),
     ("crates/glasshouse/src/integrations/providers.rs", 202),
-    ("crates/glasshouse/src/secret/mod.rs", 413),
-    ("crates/glasshouse/src/secret/mod.rs", 634),
-    ("crates/glasshouse/src/secret/mod.rs", 638),
-    ("crates/glasshouse/src/secret/mod.rs", 642),
-    ("crates/glasshouse/src/secret/mod.rs", 691),
+    ("crates/inference-gateway/src/secret/mod.rs", 413),
+    ("crates/inference-gateway/src/secret/mod.rs", 634),
+    ("crates/inference-gateway/src/secret/mod.rs", 638),
+    ("crates/inference-gateway/src/secret/mod.rs", 642),
+    ("crates/inference-gateway/src/secret/mod.rs", 691),
     ("crates/glasshouse/tests/entitlement_pool.rs", 267),
     ("crates/glasshouse/tests/gateway_translate_cache.rs", 61),
     ("crates/glasshouse/tests/tracked_knowledge.rs", 362),
