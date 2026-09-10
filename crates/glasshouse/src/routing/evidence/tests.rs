@@ -8,6 +8,10 @@
 use super::*;
 use crate::config::pairing::ObservationSource;
 use crate::provider::pricing::PriceTable;
+// Named here rather than reached through `use super::*`: `AggregateReading`
+// moved to `vocabulary.rs` with its own private import of this enum, so
+// `mod.rs` no longer holds the binding these tests used to glob.
+use crate::provider::quota::Confidence;
 use crate::routing::pairing::EvidenceKey;
 use crate::{Cli, Runtime};
 use clap::Parser;
@@ -2577,5 +2581,54 @@ mod credential_cost_tests {
         let cost = recent_credential_cost(&rows, "alpha", None, &prices, 1_000);
         assert_eq!(cost.priced_rows, 1);
         assert_eq!(cost.micro_usd, Some(3_000_000));
+    }
+}
+
+/// `vocabulary.rs` holds the value types the evidence ledger speaks in, and it
+/// must stay free of the database underneath them: the gateway produces these
+/// observations and is being extracted into a crate that has no SQLite, no
+/// `crate::database` and no ledger at all. A `use` or a bare type name is what
+/// would quietly re-couple the two halves, so this reads the file's production
+/// text rather than trusting the split that created it.
+mod vocabulary_holds_no_database {
+    /// Everything before the first `#[cfg(test)]`, with `//` lines dropped —
+    /// so a forbidden name in a doc comment is prose, and a forbidden name in
+    /// code is a failure. Mirrors `gateway/tests.rs`'s helper of the same name
+    /// rather than importing it: each scan owns the definition of "production
+    /// text" it asserts against.
+    fn production_code(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_vocabulary_names_neither_rusqlite_nor_the_database_nor_the_ledger() {
+        let code = production_code(include_str!("vocabulary.rs"));
+
+        // The slice is only worth asserting on if it kept the file:
+        // `vocabulary.rs` has no `#[cfg(test)]` today, and every check below
+        // passes vacuously against an empty string.
+        assert!(
+            code.contains("pub struct NewObservation"),
+            "the scan must cover vocabulary.rs's production text, and it kept \
+             only {} bytes",
+            code.len()
+        );
+
+        for forbidden in ["rusqlite", "crate::database", "EvidenceLedger"] {
+            assert!(
+                !code.contains(forbidden),
+                "vocabulary.rs must not name `{forbidden}`: it is the half of \
+                 routing::evidence that leaves for a crate with no database. \
+                 The database half belongs in mod.rs, joins.rs, readers.rs or \
+                 signals.rs."
+            );
+        }
     }
 }
