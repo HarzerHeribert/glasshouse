@@ -1,121 +1,333 @@
-# Pane Tool ABI — Provider-Familiar Tool Shapes over Pane Execution
+# Pane Tool ABI and Adaptive Capability Execution
 
-Status: proposed implementation spec
+Status: implementation spec
 
 ## Thesis
 
-Pane should separate the interface presented to a model from the mechanism used to execute that interface.
+Pane should let a model work with the coding tools and interaction shapes it already knows, while compiling those familiar calls into a substantially stronger Pane execution substrate.
 
-A provider may see familiar coding-agent tools such as `read_file`, `edit_file`, `grep`, `glob`, `run_command`, and `run_tests`, while Pane compiles those calls into a canonical internal intent and decides how to execute them using Pane primitives, cells, deterministic projections, reducers, and the event ledger.
+The provider-facing tool is an ABI. It is not the execution plan.
 
-The model-facing tool schema is an ABI. It is not the execution plan.
+The defining idea is:
+
+> **Pane makes provider-familiar tools composable as code, then executes them through one deterministic-first capability kernel that can escalate to bounded Little Helpers only when semantic work has a clear advantage.**
+
+The model should feel as though it is using unusually good versions of familiar tools. It should not need to learn a second Pane-specific tool universe merely to access Pane's stronger runtime semantics.
 
 ```text
-Provider-visible tool call
-        │
-        ▼
-Provider Tool ABI
-        │
-        ▼
-Canonical Pane Intent
-        │
-        ▼
-Deterministic Router
-        │
-        ├── primitive
-        ├── composed cell
-        ├── deterministic projection
-        └── execution + reducer
-        │
-        ▼
-Pane runtime
-        │
-        ▼
-Event ledger + evidence
-        │
-        ▼
-Provider-shaped result
+                     PROVIDER MODEL
+                           │
+                  learned tool prior
+                           │
+             ┌─────────────┴─────────────┐
+             │                           │
+       familiar direct tools        execute_cell
+       cheap / conventional         programmable composition
+             │                           │
+             └─────────────┬─────────────┘
+                           ▼
+                    CAPABILITY ABI
+                           │
+                    canonical intent
+                           │
+                           ▼
+                      CELL IR
+               universal execution form
+                           │
+                           ▼
+                 PANE EXECUTION KERNEL
+          ┌────────────────┼────────────────┐
+          │                │                │
+   deterministic       composed         bounded
+     primitives          logic       Little Helpers
+          │                │                │
+          └────────────────┼────────────────┘
+                           ▼
+                  artifacts / handles
+                           ▼
+                        ledger
+                           ▼
+                       verifier
 ```
-
-The goal is:
-
-> Exploit learned tool-use priors at the model boundary while preserving Pane's deterministic execution, composition, evidence, validation, and reduction semantics underneath.
-
-## Why this exists
-
-Modern coding models have post-training priors around familiar tool interfaces and loops: tool names, argument structures, call sequencing, read-before-edit behavior, search patterns, command failure recovery, filesystem errors, and stopping behavior.
-
-Pane's cell model has different strengths: composition, fewer inference round trips, local control flow, deterministic transformation, validation, and batching.
-
-These are complementary. Pane should not force every provider to learn a novel execution API when the provider already has useful learned priors for conventional coding tools.
 
 The desired property is:
 
-> Familiar to the model; native to Pane underneath.
+> **Familiar to the model; Pane-grade underneath.**
 
-## Governing invariants
+---
 
-1. **The provider-visible tool is a semantic request, not an implementation choice.**
-2. **Provider-specific schemas must compile into provider-neutral Pane intents.**
-3. **Routine routing must be deterministic and based on mechanically observable facts.**
-4. **Execution semantics and presentation semantics are separate.**
-5. **Exact evidence, bounded exact evidence, and derived content must never be conflated.**
-6. **A reducer must never masquerade as an exact primitive result.**
-7. **Every model-visible tool invocation must be represented in the Pane event ledger.**
-8. **Completion checks must use observed execution evidence, not the model's narrative about what happened.**
-9. **Cells remain first-class; provider-shaped tools are an additional front end, not a replacement.**
-10. **Correctness must not depend on a learned router. Learned routing may optimize later, but the deterministic path remains authoritative.**
+## 1. One architecture, multiple invocation forms
 
-## Architecture
+Pane MUST NOT implement a native-tool executor beside a cell executor.
 
-### 1. Provider Tool ABI
+There is one capability system and one execution path.
 
-Each provider adapter may expose tool schemas aligned with the model family's familiar interaction shape.
-
-Examples:
+A provider-native tool call and a model-authored TypeScript cell are merely two ways to produce work for the same capability kernel.
 
 ```text
-Claude adapter
-GPT adapter
-Gemini adapter
-Generic adapter
+native provider tool call
+          │
+          └────── compile ──────┐
+                                ▼
+model-authored TypeScript ──> CELL IR ──> one executor
 ```
 
-Adapters may differ in:
-
-- tool names;
-- parameter names;
-- descriptions;
-- optional parameters;
-- result formatting;
-- error formatting.
-
-They must not create provider-specific execution semantics.
-
-Example:
+A direct call such as:
 
 ```text
-Claude-shaped edit ─┐
-GPT-shaped patch   ─┼──> EditArtifact
-Generic replace   ─┘
+Read({ file_path: "src/runtime.rs" })
 ```
 
-### 2. Canonical Pane Intent IR
+may internally be represented as the equivalent single-operation cell program:
 
-All provider calls compile into a small, stable internal representation.
+```ts
+const result = await Read({ file_path: "src/runtime.rs" });
+return result;
+```
 
-Illustrative shape:
+A composed operation may instead be authored explicitly by the parent model:
+
+```ts
+const config = await Read({ file_path: "src/config.ts" });
+
+if (config.content.includes("legacyAuth")) {
+  const hits = await Grep({
+    pattern: "legacyAuth",
+    path: "src"
+  });
+
+  if (hits.count > 20) {
+    return await Bash({ command: "cargo test auth" });
+  }
+}
+
+return config;
+```
+
+Both forms MUST reach the same capability implementation, the same event ledger, the same evidence system, and the same policy controls.
+
+There must never be a situation where `Read` called directly behaves according to one implementation while `Read` inside a cell behaves according to another.
+
+---
+
+## 2. Hybrid is the product target
+
+The target Pane interface is hybrid from the beginning.
+
+The parent model SHOULD receive:
+
+- provider-familiar direct tools for single-intent operations; and
+- `execute_cell` as Pane's composition primitive for dependent work, branching, loops, batching, speculative local execution, local transformations, and custom TypeScript logic.
+
+The distinction is semantic:
+
+```text
+simple single intent
+    → direct familiar tool
+
+dependent or composed intent
+    → execute_cell
+```
+
+`execute_cell` is not a legacy escape hatch and MUST NOT be de-emphasized. It is Pane's programmable composition surface.
+
+The model can therefore use familiar operations directly:
+
+```text
+Read
+Grep
+Edit
+Bash
+```
+
+or compose those same operations in TypeScript:
+
+```ts
+const files = await Glob({ pattern: "src/**/*.ts" });
+
+for (const file of files.paths) {
+  const source = await Read({ file_path: file });
+
+  if (source.content.includes("oldApi")) {
+    await Edit({ /* exact edit intent */ });
+  }
+}
+
+return await RunTests({ scope: "project" });
+```
+
+The provider should not need to learn different semantic names merely because it moved from a direct call into a cell.
+
+---
+
+## 3. Runtime interface modes are visibility policies only
+
+Pane MAY expose runtime modes for benchmarking, compatibility, diagnostics, and ablation tests:
+
+```text
+--interface=cells
+--interface=tools
+--interface=hybrid
+```
+
+These modes MUST NOT select different execution architectures.
+
+### `--interface=cells`
+
+The parent sees only `execute_cell`.
+
+The cell runtime still exposes the provider dialect's familiar capability bindings.
+
+### `--interface=tools`
+
+The parent sees only provider-familiar direct tools.
+
+Each call still compiles into the same Cell IR / capability kernel.
+
+### `--interface=hybrid`
+
+The parent sees both provider-familiar tools and `execute_cell`.
+
+This is the intended product mode and SHOULD become the default once proven stable.
+
+The runtime flag changes only which entry points are visible to the parent model.
+
+It must not fork execution semantics.
+
+---
+
+## 4. Capability descriptors are the single source of truth
+
+Pane SHOULD define each capability once and generate all model-facing forms from the same descriptor.
+
+Illustrative form:
+
+```ts
+interface CapabilityDescriptor<Intent, Result> {
+  id: string;
+
+  providerShapes: {
+    anthropic?: ProviderToolShape;
+    openai?: ProviderToolShape;
+    generic?: ProviderToolShape;
+  };
+
+  decodeProviderInput(provider: Provider, input: unknown): Intent;
+  encodeProviderResult(provider: Provider, result: Result): unknown;
+
+  cellBinding: CellBindingDescriptor;
+  validate(intent: Intent): ValidationResult;
+  execute(intent: Intent, ctx: ExecutionContext): Promise<Result>;
+}
+```
+
+From one descriptor Pane should be able to derive:
+
+```text
+provider-native JSON/tool schema
+TypeScript declaration
+cell callable binding
+argument validation
+canonical intent decoding
+result encoding
+error encoding
+documentation/help text
+ledger capability identity
+```
+
+There MUST NOT be separately maintained native-tool semantics and cell-tool semantics.
+
+---
+
+## 5. Provider dialects
+
+Pane should deliberately present different familiar façades to different provider families when doing so aligns with their learned tool-use prior.
+
+The internal capabilities remain provider-neutral.
+
+```text
+                         Pane capabilities
+
+     ReadArtifact   Search   Edit   Execute   Check   List
+          │            │       │       │        │      │
+          ├────────────┴───────┴───────┴────────┴──────┤
+          │                                             │
+   Anthropic dialect                               OpenAI dialect
+          │                                             │
+       Read / Grep                                  shell-like
+       Glob / Edit                                  apply_patch-like
+       Write / Bash                                 provider-familiar forms
+```
+
+The exact provider shape should follow the public provider protocol and the shapes current models are known to handle well. Pane should not invent gratuitous symmetry between providers.
+
+The provider adapters are skins over the same capabilities, not provider-specific backends.
+
+### Anthropic / Claude-oriented initial dialect
+
+The first-class local coding surface SHOULD cover familiar concepts equivalent to:
+
+```text
+Read
+Grep
+Glob
+Edit
+Write
+Bash
+RunTests / Check where Pane can expose a useful explicit verification capability
+execute_cell
+```
+
+### OpenAI / Codex-oriented initial dialect
+
+The first-class surface SHOULD preserve familiar shell and patch semantics where those are the model's stronger learned interface:
+
+```text
+shell
+apply_patch
+explicit Pane verification/check capability where beneficial
+execute_cell
+```
+
+Read/search/list operations MAY be expressed through the provider-familiar shell shape when that better matches the model prior, while still being recognized and lowered to canonical Pane capabilities when mechanically safe.
+
+For example:
+
+```text
+shell: rg "SessionManager" crates/
+        │
+        ▼
+mechanically recognized safe command shape
+        │
+        ▼
+SearchRepository intent
+```
+
+A complex or unrecognized shell expression MUST fall back to normal sandboxed process execution rather than being heuristically reinterpreted.
+
+Rule:
+
+> **Translate when semantics are mechanically provable; otherwise execute the requested generic capability faithfully.**
+
+---
+
+## 6. Canonical Pane Intent IR
+
+All provider-facing forms and all cell bindings compile to provider-neutral semantic intents.
+
+Illustrative set:
 
 ```ts
 type Intent =
   | ReadArtifact
   | SearchRepository
+  | ListArtifacts
   | EditArtifact
+  | WriteArtifact
+  | ApplyPatch
   | ExecuteCommand
   | RunCheck
-  | ListArtifacts
-  | InspectProcess
-  | ComposeOperations;
+  | InspectProcess;
 ```
 
 Example:
@@ -129,51 +341,132 @@ interface ReadArtifact {
 }
 ```
 
-The IR is Pane's internal contract. Provider schemas may change without changing execution. Execution strategies may change without changing provider schemas.
+The canonical IR is Pane's stable semantic contract.
 
-### 3. Deterministic execution router
+Provider schemas may change without changing execution.
 
-Pane chooses the execution strategy from canonical intent plus facts available to the host.
+Execution strategies may improve without changing provider schemas.
 
-Valid routing inputs include:
+---
 
-- file size;
-- line count;
-- match count;
-- requested range;
-- command class;
-- output size;
-- exit status;
-- artifact type;
-- cache state;
-- process state;
-- dependency structure;
-- previous execution evidence;
-- provider context/output limits;
-- configured thresholds.
+## 7. Cell IR is the universal execution substrate
 
-Do not route on vague concepts such as "this looks complicated" unless a semantic operation explicitly requires model reasoning.
+All executable work SHOULD lower into the same Cell IR or equivalent existing Pane execution representation before reaching the kernel.
 
-Example:
+The IR must support at least:
+
+- sequential dependency;
+- parallel independent operations;
+- `if` / `else` branching;
+- loops;
+- local variables;
+- local deterministic transformation;
+- capability invocation;
+- assertions / checks;
+- artifact handles;
+- bounded helper invocation through capabilities;
+- early return;
+- structured errors;
+- execution budgets.
+
+This is how Pane retains the advantage that ordinary provider tool calling cannot offer for dependent operations inside one parent inference turn.
+
+Native parallel tool calls can express independent work. Cells can additionally express dependent control flow:
 
 ```text
-ReadArtifact
-    │
-    ├── small file
-    │      └── exact primitive
-    │
-    ├── medium file
-    │      └── bounded exact projection + continuation handle
-    │
-    └── very large file
-           └── exact artifact handle + deterministic projection/index
+Read A
+  ↓
+if result contains X
+  ├── yes → Search B → maybe Edit C
+  └── no  → Run D
 ```
 
-The router should optimize execution and context use without changing the semantic contract requested by the model.
+without requiring the parent model to receive an intermediate observation after each edge.
 
-## Critical separation: execution vs presentation
+---
 
-Pane must distinguish:
+## 8. Three execution tiers
+
+Each capability should follow a deterministic-first escalation model.
+
+```text
+Tier 0 — deterministic primitive
+Tier 1 — deterministic composed execution / projection
+Tier 2 — bounded semantic Little Helper
+```
+
+The preference order is:
+
+```text
+L0 → L1 → L2
+```
+
+not the reverse.
+
+Normative rule:
+
+> **Pane MUST prefer deterministic execution whenever it can satisfy the requested semantic contract adequately. Helper inference MUST require an identifiable expected advantage.**
+
+A Little Helper is escalation, not default behavior.
+
+Valid reasons to escalate include:
+
+- output is too large for useful direct parent consumption;
+- semantic relevance cannot be obtained adequately through deterministic projection;
+- ambiguous failures require interpretation;
+- structured semantic grouping materially reduces parent work;
+- the capability contract explicitly requests semantic interpretation.
+
+Invalid reasons include:
+
+- "an LLM might make this nicer";
+- arbitrary aesthetic preference;
+- replacing cheap exact operations with semantic guesses;
+- silently repairing mutation intent.
+
+---
+
+## 9. Little Helpers remain bounded semantic functions
+
+Pane's existing Little Helper / reducer mechanism is a core architectural feature and SHOULD be part of the complete Tool ABI implementation.
+
+Helpers run out-of-turn relative to the parent and may be called from inside capability execution, including while a model-authored cell is running.
+
+They MUST remain bounded to their assigned semantic task and existing anti-scope-creep controls MUST continue to apply.
+
+Conceptually:
+
+```ts
+interface HelperInvocation {
+  intent: HelperIntent;
+  sourceArtifacts: ArtifactRef[];
+  requestedOutputSchema: Schema;
+  tokenBudget: number;
+  wallTimeBudget: number;
+  evidenceScope: EvidenceScope;
+}
+```
+
+A helper result is always derived evidence:
+
+```ts
+interface HelperResult<T> {
+  source: "derived";
+  result: T;
+  basedOn: ArtifactRef[];
+  helperExecutionId: string;
+}
+```
+
+A helper may interpret evidence. It does not become ground truth merely because it was invoked inside a tool.
+
+The parent must always be able to distinguish exact evidence from helper interpretation.
+
+---
+
+## 10. Execution and presentation are separate
+
+Pane MUST distinguish:
 
 ```text
 what happened
@@ -185,9 +478,9 @@ from:
 what was shown to the model
 ```
 
-Example: `run_tests` produces 20 MB of exact stdout.
+Example: `RunTests` may execute a command that produces 20 MB of stdout.
 
-Pane may execute the command exactly, retain the full artifact, and present only the failure-relevant portion to the model.
+Pane can retain the exact stdout artifact while presenting a much smaller useful view.
 
 ```ts
 {
@@ -212,19 +505,21 @@ EXACT EXECUTION
       ├──────────────> ledger / artifact store
       │
       ▼
-derived presentation
+projection / helper interpretation
       │
       ▼
 model
 ```
 
-The reducer changes the model's view. It must not rewrite history about what Pane observed.
+The reduction changes the parent working set. It MUST NOT rewrite what Pane actually observed.
 
-## Provenance contract
+---
 
-Every non-trivial result must expose machine-readable provenance.
+## 11. Provenance contract
 
-Minimum classes:
+Every non-trivial result MUST expose machine-readable provenance.
+
+Minimum evidence classes:
 
 ```ts
 type EvidenceClass =
@@ -235,15 +530,25 @@ type EvidenceClass =
 
 ### `exact`
 
-The returned content directly represents the observed result.
+The returned content directly represents the complete observed result within the requested semantic scope.
 
 ### `bounded_exact`
 
-The returned content is an exact subset of a larger observed result, for example a line range, byte range, or first N matches. Omitted data remains addressable through a handle or continuation.
+The returned content is an exact subset of a larger observation, such as a line range, byte range, or subset of exact search matches.
+
+Omitted data remains addressable through a handle or continuation.
 
 ### `derived`
 
-A semantic transformation occurred, for example summarization, classification, grouping, explanation, or model-generated reduction.
+A semantic transformation occurred, including:
+
+- summarization;
+- clustering;
+- classification;
+- diagnosis;
+- explanation;
+- relevance ranking requiring model judgment;
+- any Little Helper output.
 
 Example envelope:
 
@@ -259,203 +564,492 @@ Example envelope:
 }
 ```
 
-The model must always be able to distinguish ground truth from derived interpretation.
+A derived result MUST NOT be accepted as proof of a stronger exact-content claim without supporting exact or sufficiently bounded exact evidence.
 
-## Reducer invariant
+---
 
-A reducer must never silently satisfy a stronger semantic request with weaker evidence.
+## 12. Artifact handles
 
-Invalid:
+The Tool ABI MUST preserve Pane's handle/context-efficiency advantage.
 
-```text
-Model: read_file("architecture.md")
-Pane:  <LLM-generated summary presented as file contents>
+Large results should not be forced inline merely because they originated from a provider-native tool call.
+
+A direct tool result may return:
+
+- useful inline exact or bounded exact content;
+- provenance metadata; and
+- a stable artifact reference to the complete underlying observation.
+
+The artifact identifier is not a fabricated model-local variable name.
+
+The model may later bind it inside a cell explicitly:
+
+```ts
+const log = await Artifact.open("artifact://exec/82/stdout");
 ```
 
-Valid:
+or use the existing Pane handle mechanism that best fits current runtime contracts.
+
+Pane MUST reconcile this with the existing no-server-invented-model-identifier rule rather than creating a parallel naming system.
+
+---
+
+## 13. Tool behavior under the hood
+
+The implementation should build the complete core behavior of each supported tool, not a translation-only façade.
+
+The following contracts describe the intended behavior.
+
+### 13.1 Read / ReadArtifact
+
+Ground truth: artifact bytes / text.
+
+Deterministic path:
+
+1. resolve target safely;
+2. inspect mechanical size/type facts;
+3. read exact requested range or complete artifact where reasonable;
+4. retain a handle for larger content;
+5. return `exact` or `bounded_exact` data;
+6. preserve continuation/addressability for omitted exact content.
+
+Helper escalation MAY add a derived semantic view when there is a clear advantage, especially for very large structured text or logs.
+
+The helper MUST NOT replace exact evidence invisibly.
+
+A huge file may therefore produce:
 
 ```text
-Model: read_file("architecture.md")
-Pane:  source=derived
-       exact artifact=artifact://f19
-       representation=<semantic reduction>
+exact artifact retained
++ bounded_exact excerpt/index
++ optional derived helper interpretation
 ```
 
-Prefer bounded exact data where it preserves the requested semantics:
+not:
 
 ```text
-source=bounded_exact
-lines=1-500
-continuation=artifact://f19#501
+LLM summary pretending to be file contents
 ```
 
-Semantic reduction should be used only when it provides material value and its provenance remains explicit.
+### 13.2 Grep / SearchRepository
 
-## Cells remain first-class
+Ground truth: exact search matches.
 
-Provider-shaped tools must not replace `execute_cell` or equivalent Pane composition.
+Deterministic path:
 
-Tool-shaped mode optimizes for:
+1. select the strongest mechanically appropriate search implementation available (`rg`, index, AST-backed lookup, or equivalent);
+2. retain complete exact match evidence when result volume exceeds parent presentation limits;
+3. return exact or bounded exact matches plus a handle;
+4. expose match count and truncation/projection metadata.
 
-- learned provider familiarity;
-- low instruction burden;
-- conventional error recovery;
-- simple routine actions.
+Helper escalation is especially valuable for very large or semantically noisy result sets.
 
-Cell mode optimizes for:
+A helper MAY:
 
-- composition;
-- local branching/control flow;
-- fewer inference round trips;
-- deterministic transformation;
-- multi-operation execution.
+- cluster matches by semantic role;
+- rank likely implementation relevance;
+- separate generated/vendor/test/documentation noise;
+- summarize families of matches.
 
-The intended architecture is a superset:
+Those outputs MUST be marked `derived` and linked to the exact match artifact.
+
+### 13.3 Glob / ListArtifacts
+
+Ground truth: exact path set for the requested search semantics.
+
+Deterministic path:
+
+- filesystem/index lookup;
+- exact path filtering;
+- bounded exact presentation when large;
+- stable handle to full path set.
+
+Helper escalation should be rare and only used when a huge result set requires semantic grouping or task-relevance classification.
+
+### 13.4 Edit / EditArtifact
+
+Ground truth: requested mutation and observed resulting diff.
+
+Deterministic path:
+
+1. validate target and expected old state;
+2. reject stale or ambiguous mutation requests;
+3. apply exact requested edit atomically where possible;
+4. observe resulting filesystem state/diff;
+5. record mutation evidence in the ledger.
+
+A Little Helper MUST NOT silently alter mutation intent.
+
+If an exact edit fails, a helper MAY provide a `derived` repair candidate or diagnosis, but applying a materially different mutation requires a new explicit intent from the parent/model-authored cell logic according to current Pane safety rules.
+
+### 13.5 Write / WriteArtifact
+
+Ground truth: requested content and resulting file state.
+
+Deterministic path:
+
+- validate location/policy;
+- perform explicit write;
+- observe resulting content/metadata;
+- record exact mutation evidence.
+
+Helpers should generally not rewrite requested content behind the parent's back.
+
+### 13.6 apply_patch / ApplyPatch
+
+Ground truth: supplied patch plus observed repository mutation.
+
+Deterministic path:
+
+- parse patch;
+- validate target state;
+- apply or reject;
+- capture exact resulting diff;
+- preserve failure diagnostics.
+
+A helper MAY interpret a rejected patch and produce bounded repair advice, but MUST NOT silently mutate the patch into a different change.
+
+### 13.7 Bash / shell / ExecuteCommand
+
+Ground truth: actual process execution, exit status, stdout/stderr, and process metadata.
+
+Deterministic path:
+
+1. apply sandbox/policy controls;
+2. recognize mechanically provable specialized command forms where beneficial;
+3. lower recognized operations into canonical Pane capabilities when semantics are preserved exactly;
+4. otherwise execute the requested command faithfully in the sandbox;
+5. retain stdout/stderr artifacts;
+6. return useful exact/bounded exact output and execution metadata.
+
+Large or ambiguous failure output is a prime helper candidate.
+
+A helper MAY diagnose failures or group errors. Its interpretation remains `derived` while exit code/stdout/stderr remain exact evidence.
+
+### 13.8 RunTests / RunCheck
+
+Ground truth: observed checker/test execution and its results.
+
+Pane SHOULD integrate with the existing checker/evidence system rather than creating a second test runner.
+
+The result must preserve at least:
 
 ```text
-provider-familiar tools + Pane cells
+requested
+executed
+fresh vs reused
+exit/result status
+observed evidence
+artifact references
+presentation provenance
 ```
 
-not one or the other.
-
-## Tool-call fusion
-
-Pane should eventually separate model interaction granularity from runtime execution granularity.
-
-If a provider emits several independent conventional tool calls:
+The parent must continue to distinguish:
 
 ```text
-read_file(A)
-read_file(B)
-grep(C)
+executed=true, reused=false
 ```
 
-Pane may compile them into one internal execution unit where the provider protocol and dependency graph permit it:
+from:
 
 ```text
-Cell 814
- ├── read(A)
- ├── read(B)
- └── grep(C)
+executed=false, reused=true
 ```
 
-This preserves familiar interaction while recovering cell-level efficiency.
+Large test logs MAY invoke helpers for diagnosis, while the exact execution record remains authoritative.
 
-Fusion is an optimization. It must preserve ordering, dependency, error, and evidence semantics.
+### 13.9 execute_cell
 
-## Adaptive execution examples
+`execute_cell` is the composition primitive over the same capabilities.
 
-A stable model-facing capability may use different native mechanisms underneath.
+It MUST support provider-familiar capability bindings inside TypeScript and preserve:
+
+- dependent control flow;
+- branching;
+- loops;
+- batching;
+- local data transformation;
+- parallel independent calls;
+- helper-capable nested capability execution;
+- ledger visibility for every nested operation;
+- execution/helper budgets.
+
+A cell is allowed to be significantly more expressive than provider-native tool calling. That is the point.
+
+---
+
+## 14. Direct tools and cells share the same familiar vocabulary
+
+Where practical, the provider dialect should be available inside the TypeScript cell using the same semantic names and argument shapes the parent sees directly.
+
+Example for an Anthropic-oriented dialect:
 
 ```text
-SearchRepository
-       │
-       ├── literal symbol
-       │      └── rg
-       │
-       ├── language symbol
-       │      └── AST / language index
-       │
-       ├── filename query
-       │      └── fd / index
-       │
-       └── huge ambiguous result
-              └── exact search artifact + reduction
+Direct:
+Read({ file_path: "src/foo.ts" })
+
+Cell:
+await Read({ file_path: "src/foo.ts" })
 ```
 
-The provider sees a stable search capability. Pane is free to improve implementation underneath it.
+The cell adds ordinary programming constructs without changing the conceptual tools:
 
-## Event ledger requirements
+```text
+if / else
+for / while
+Promise.all
+variables
+map/filter/reduce
+local parsing
+assertions
+custom deterministic transformations
+```
 
-Every provider-visible tool invocation must correspond to ledger events sufficient to establish what really happened.
+This turns familiar tools into a programmable tool language instead of forcing the model to learn a separate Pane-specific API for composition.
+
+---
+
+## 15. Little Helpers inside cells
+
+A capability invoked from a cell MAY itself escalate to a Little Helper when the deterministic-first policy permits it.
+
+Example:
+
+```text
+Parent inference
+      │
+      ▼
+execute_cell
+      │
+      ├── deterministic Read
+      ├── deterministic Grep
+      ├── local if/else
+      ├── deterministic Edit
+      └── RunTests
+              │
+              └── huge ambiguous failure log
+                       ↓
+                  Little Helper
+                       ↓
+              bounded derived diagnosis
+      │
+      ▼
+Parent inference continues
+```
+
+This is nested inference inside deterministic control flow without forcing every intermediate result back through the parent model.
+
+Existing helper scope/budget controls MUST apply equally whether the capability was called directly or from a cell.
+
+---
+
+## 16. Helper budgets and recursion controls
+
+Because cells can invoke helper-capable capabilities in loops, helper execution MUST remain explicitly budgeted.
+
+The existing controls should be reused where available and extended only where necessary to cover at least:
+
+```text
+max helper calls per cell / execution frame
+max helper token budget
+max helper wall time
+max helper concurrency
+max nested helper depth
+scope restrictions
+artifact/evidence visibility restrictions
+```
+
+A construct such as:
+
+```ts
+for (const file of files) {
+  await Read({ file_path: file });
+}
+```
+
+must not accidentally trigger hundreds of uncontrolled LLM calls merely because each read is individually helper-eligible.
+
+Routing should account for aggregate execution context and remaining helper budget.
+
+---
+
+## 17. Deterministic router
+
+Routing decisions should use mechanically observable facts first.
+
+Valid inputs include:
+
+- file size;
+- line count;
+- match count;
+- requested range;
+- command shape;
+- output size;
+- exit status;
+- artifact type;
+- cache state;
+- process state;
+- dependency structure;
+- prior exact evidence;
+- provider context limits;
+- configured thresholds;
+- remaining cell/helper budget.
+
+Routine routing MUST NOT require an LLM.
+
+A learned router may later optimize cost or relevance, but MUST NOT be necessary for correctness and MUST NOT erase provenance.
+
+Illustrative policy:
+
+```text
+Can deterministic primitive satisfy semantic contract adequately?
+    yes → use it
+    no  ↓
+
+Can deterministic composition/projection satisfy it adequately?
+    yes → use it
+    no  ↓
+
+Is there a clear semantic advantage to bounded helper inference?
+    yes → invoke helper with explicit budget and derived provenance
+    no  → expose exact handle / pagination / explicit limitation
+```
+
+---
+
+## 18. Tool-call fusion and speculative execution
+
+Pane SHOULD preserve and extend its advantage in reducing parent inference round trips.
+
+Two forms must be distinguished.
+
+### Parallel speculation
+
+Several independent operations can execute together without seeing one another's results.
+
+Native provider tool calling may already express some of this.
+
+### Dependent local control flow
+
+Later operations depend on earlier results:
+
+```text
+Read A
+  ↓
+if X
+  ├── Search B
+  │      ↓
+  │   if Y → Edit C
+  └── else → Run D
+```
+
+This requires a programmable execution context and is a core purpose of cells.
+
+Pane MAY also fuse independent direct provider calls into one internal execution frame where protocol semantics allow, provided ordering, dependency, error, and evidence semantics remain unchanged.
+
+The model interaction granularity and runtime execution granularity are not required to be identical.
+
+---
+
+## 19. TUI model
+
+The TUI may continue to render all execution using Pane's existing cell-style visual language.
+
+However, UI representation must not imply that every direct provider call was literally authored as JavaScript by the model.
+
+Pane should treat the visual unit as an execution frame/cell card with an origin such as:
+
+```text
+direct_tool
+authored_cell
+little_helper
+```
+
+A direct call may render as:
+
+```text
+╭─ 42 · Read ─────────────────────────────
+│ src/runtime.rs
+│ exact · 18.3 KB · 312 lines
+╰──────────────────────────────────────────
+```
+
+A composed cell may render as:
+
+```text
+╭─ 43 · Cell ─────────────────────────────
+│ Read × 3
+│ Grep × 1
+│ branch × 1
+│ 4 operations · 1 helper · 0 failures
+╰──────────────────────────────────────────
+```
+
+Expanded views SHOULD expose nested capability/helper execution and provenance where useful.
+
+This preserves Pane's coherent TUI without creating separate UI architecture for direct tools.
+
+---
+
+## 20. Event ledger requirements
+
+Every provider-visible call and every nested cell capability invocation MUST produce sufficient ledger evidence to establish what actually happened.
 
 Illustrative sequence:
 
 ```text
-ToolRequestReceived
+ToolRequestReceived / CellStarted
 IntentCompiled
 ExecutionStrategySelected
 ExecutionStarted
 ArtifactObserved
-ReductionApplied        # optional
+HelperInvoked          # optional
+ReductionApplied       # optional
 ToolResultReturned
+CellCompleted
 ```
 
-The ledger must make it possible to distinguish at least:
+The ledger must distinguish at least:
 
 - requested vs executed;
+- direct vs cell-authored origin;
 - fresh execution vs reused evidence;
-- exact vs bounded vs derived output;
-- successful execution vs presentation success;
-- execution failure vs adapter/serialization failure.
+- exact vs bounded exact vs derived result;
+- primitive vs composed vs helper execution;
+- successful execution vs successful presentation;
+- execution failure vs adapter/serialization failure;
+- helper scope/budget use;
+- underlying exact artifact references for derived views.
 
-The model's claim that a tool ran is never authoritative evidence that it ran.
+The model's narrative about a tool run is never authoritative evidence that the run occurred.
 
-## Provider-aware façades
+---
 
-Pane may expose different façades per model family:
+## 21. Trust ordering
 
-```text
-                    Pane Capability ABI
-                           │
-             ┌─────────────┼──────────────┐
-             │             │              │
-         Claude ABI      GPT ABI       Generic ABI
-             │             │              │
-          Claude          GPT-X         Any model
-```
-
-All must compile into the same canonical Pane IR.
-
-Provider adapters should remain thin. Provider-specific behavior belongs at the boundary, not inside core execution.
-
-## Capability negotiation
-
-Pane should expose only capabilities that are actually available in the current runtime.
-
-Conceptually:
+Pane MUST preserve:
 
 ```text
-Runtime capabilities
-        +
-Provider adapter
-        +
-Policy
-        =
-Model-visible schema
+observed execution evidence
+        >
+deterministic checks
+        >
+derived helper analysis
+        >
+model claims
 ```
 
-Example native capability set:
+Familiar tool ergonomics must never weaken this hierarchy.
 
-```text
-filesystem.read
-filesystem.edit
-repo.search
-process.exec
-checks.run
-```
+A helper result can be excellent analysis and still remain derived.
 
-The generated provider schema should be derived from this set rather than maintained as a separate universal prompt contract.
+---
 
-## Tool schemas as prompt compression
+## 22. Errors
 
-Operational knowledge expressible as typed schemas should not be repeated as natural-language folklore in the system prompt.
+Errors should be canonical internally and provider-familiar at the boundary.
 
-A provider-aligned tool schema can provide both:
-
-```text
-explicit structural guidance
-+
-learned behavioral prior
-```
-
-while consuming far fewer prompt tokens than prose instructions describing the same calling convention.
-
-## Error semantics
-
-Errors should be canonical internally and may be rendered in a provider-familiar form at the boundary.
-
-Canonical example:
+Example canonical error:
 
 ```ts
 {
@@ -465,218 +1059,198 @@ Canonical example:
 }
 ```
 
-Adapters may format this differently, but the underlying fact and ledger evidence remain identical.
+The Anthropic and OpenAI dialects may render this differently if that improves model recovery, but the fact and ledger evidence remain identical.
 
-This matters because provider post-training may include recovery behavior for familiar failure classes, not only successful tool calls.
+This allows Pane to exploit learned provider error-recovery behavior without forking execution semantics.
 
-## Trust ordering
+---
 
-Pane must preserve this authority order:
+## 23. Tool schemas as prompt compression
 
-```text
-observed execution evidence
-        >
-deterministic checks
-        >
-derived analysis
-        >
-model claims
-```
+Operational rules that can be represented by schemas, types, validators, runtime state, or capability behavior SHOULD be removed from prompt folklore when practical.
 
-Provider familiarity must never weaken this hierarchy.
-
-## Non-goal
-
-Pane is not attempting to impersonate another product's undocumented implementation.
-
-The objective is not:
+A provider-aligned schema can provide:
 
 ```text
-pretend to be Claude Code / Codex / another harness
+explicit structural guidance
++
+learned behavioral prior
 ```
 
-The objective is:
+without repeatedly spending prompt tokens explaining a novel API.
+
+Pane's governing rule remains:
+
+> **A rule belongs outside the prompt whenever Pane can enforce or infer it mechanically.**
+
+The Tool ABI extends that principle by also taking advantage of knowledge already embedded in model weights through familiar tool shapes.
+
+---
+
+## 24. Non-goals
+
+Pane is not trying to clone undocumented internals of Claude Code, Codex, or another harness.
+
+It is not trying to make every provider expose identical visible tools.
+
+It is not trying to replace exact execution with helper inference.
+
+It is not trying to infer multi-step parent intent from a simple direct tool call.
+
+For example, if the parent calls `Read`, Pane may satisfy that read intelligently, but it must not invent a subsequent search/edit/test workflow because it guesses that might be useful.
+
+The parent owns composition intent. Pane owns execution quality within the requested capability contract.
+
+---
+
+## 25. Complete implementation scope
+
+This work should not stop at a minimal translation-layer demo.
+
+The first shippable hybrid implementation should include the complete core semantics necessary for the supported tools to be meaningfully comparable to existing Pane cells:
+
+- hybrid parent exposure;
+- provider-specific façades;
+- one capability descriptor system;
+- direct-tool and TypeScript-cell bindings generated from the same capability definitions;
+- canonical intent lowering;
+- universal Cell IR / existing equivalent execution substrate;
+- deterministic-first routing;
+- exact / bounded exact / derived provenance;
+- artifact handles for large results;
+- existing Little Helper/reducer integration;
+- helper scope and budget enforcement;
+- direct and nested ledger evidence;
+- mutation safety and observed diffs;
+- checker reuse/freshness semantics;
+- TUI rendering for direct and composed execution;
+- benchmark/ablation runtime modes with one execution architecture.
+
+The supported core tool set should be completed coherently rather than shipping one nominal tool whose behavior is not representative of the final architecture.
+
+However, completeness has a boundary: this does **not** require solving every future search backend, every provider in existence, or every conceivable model failure before the architecture can ship.
+
+The initial complete scope should target the currently supported Anthropic and OpenAI provider families and the local coding capabilities listed in this document.
+
+---
+
+## 26. Implementation order without architectural staging
+
+Implementation may proceed internally in dependency order, but intermediate steps are not separate product architectures.
+
+Recommended order:
+
+1. inventory current Pane primitive/cell/helper/checker/ledger boundaries;
+2. define provider-neutral capability descriptors and canonical intents;
+3. make descriptors generate both provider tool schemas and cell bindings;
+4. lower both direct tools and authored cells into the same existing execution substrate;
+5. implement full read/search/list behavior with handles and provenance;
+6. implement full mutation/patch behavior with exact validation and observed diffs;
+7. implement shell/process behavior and mechanically safe specialized lowering;
+8. integrate checks/tests and freshness/reuse evidence;
+9. integrate Little Helpers under deterministic-first routing for every capability where they have a justified use;
+10. enforce helper aggregate budgets and scope inside cells;
+11. integrate TUI execution-frame rendering;
+12. implement `cells`, `tools`, and `hybrid` visibility modes over the same kernel;
+13. run full existing Pane gates plus dedicated cross-interface contract tests;
+14. benchmark cells-only, tools-only, and hybrid behavior on representative tasks.
+
+No intermediate step should create a second executor intended to be removed later.
+
+---
+
+## 27. Benchmark design
+
+The benchmark should test the actual complete architecture rather than a crippled translation-only mode.
+
+At minimum compare:
 
 ```text
-present stable, recognizable capability schemas
-while compiling them into Pane semantics
+A — cells-only
+B — provider-familiar tools-only
+C — hybrid direct tools + cells
 ```
 
-The architecture must remain valid even when no provider-specific learned prior exists.
+Because Little Helpers are a core Pane mechanism, the main product comparison SHOULD leave adaptive helper execution enabled under the same deterministic-first policy in all modes where the relevant capability is available.
 
-## Example end-to-end flow
-
-Model emits:
-
-```json
-{
-  "name": "read_file",
-  "input": {
-    "path": "target/test.log"
-  }
-}
-```
-
-Provider adapter compiles:
+For architectural attribution, additionally support ablations such as:
 
 ```text
-ProviderReadFile
-      ↓
-ReadArtifact(path=target/test.log, semantics=exact)
+hybrid + helpers enabled
+hybrid + helpers disabled
 ```
 
-Router observes:
+and, where useful:
 
 ```text
-size = 18.4 MB
-kind = textual log
-direct display limit = 128 KB
+tools-only + mechanical execution
+tools-only + adaptive helper execution
 ```
 
-Execution obtains the exact artifact:
+These are benchmark switches, not product forks.
 
-```text
-artifact://93
-```
-
-Presentation policy may then choose:
-
-```text
-exact artifact retained
-+ deterministic failure extraction
-+ semantic reducer only if needed
-```
-
-The model receives, for example:
-
-```text
-source: derived
-underlying: artifact://93
-size: 18.4 MB
-representation: 21 relevant failures with surrounding context
-```
-
-The ledger records the exact observation and the fact that the visible representation was derived.
-
-If the model later claims "the full log contains only those 21 failures", Pane can mark that claim unsupported because the model did not inspect exhaustive exact evidence.
-
-## Routing policy
-
-Initial routing should remain simple and deterministic:
-
-```text
-IF result <= direct_limit:
-    exact
-ELSE IF bounded exact projection preserves requested semantics:
-    bounded_exact
-ELSE IF operation naturally produces large output:
-    exact execution
-    + persistent artifact
-    + deterministic reduction
-ELSE IF semantic reduction was explicitly requested:
-    derived reducer
-ELSE:
-    expose handle / pagination
-```
-
-A learned router may later optimize routing, but must not be required for correctness.
-
-## MVP
-
-Implement the smallest falsifiable version first.
-
-Expose six familiar capabilities:
-
-```text
-read_file
-edit_file
-grep
-glob
-run_command
-run_tests
-```
-
-Implement only:
-
-```text
-Provider ABI
-    ↓
-Canonical Intent IR
-    ↓
-Existing Pane primitives/cells
-    ↓
-Event ledger
-    ↓
-Provider-shaped result
-```
-
-For the first experiment, do **not** add a semantic router. The purpose of MVP is to isolate whether familiar tool shapes themselves reduce invalid calls, repair turns, and instruction cost.
-
-Then add, separately and measurably:
-
-1. bounded exact results;
-2. artifact handles;
-3. deterministic projections/reduction;
-4. semantic reduction with provenance;
-5. tool-call fusion;
-6. provider-specific façades beyond the first adapter.
-
-Each step should have evidence independent of the previous one.
-
-## Benchmark hypothesis
-
-Primary hypothesis:
-
-> Provider-familiar tool façades reduce invalid calls, repair turns, and instruction tokens compared with Pane-native cells alone, while preserving Pane's execution and evidence guarantees.
-
-Compare at least:
-
-```text
-A — Pane cells only
-B — provider-shaped tools only
-C — hybrid provider tools + cells
-D — hybrid + adaptive presentation/reduction
-```
-
-Measure:
+Measure at least:
 
 - task success;
 - provider requests;
 - total input/output tokens;
-- instruction/system tokens where observable;
-- failed calls;
+- parent inference turns;
+- Little Helper calls and tokens;
+- failed capability calls;
 - repair turns;
-- tool calls;
-- cells executed;
-- operations per inference turn;
+- direct tool calls;
+- authored cells;
+- operations per parent inference;
 - wall time;
 - human intervention;
 - unsupported completion claims;
-- reducer use;
-- exact vs derived evidence consumption.
+- helper/reducer use;
+- exact vs derived evidence consumption;
+- repeated observations;
+- mutation failures/staleness;
+- verification freshness/reuse correctness.
 
-The likely target architecture is C or D, not B.
+Where possible, compare the same underlying model and task across interface modes to isolate harness/interface effects from base model quality.
 
-Where possible, compare the same underlying model with and without the provider-familiar Pane ABI so the harness effect is isolated from model quality.
+Do not claim efficiency superiority without a measured before/after baseline.
 
-## Acceptance criteria for the first implementation slice
+---
 
-The MVP is complete only when all of the following are demonstrated:
+## 28. Acceptance criteria
 
-1. A provider-facing `read_file` call compiles to a canonical Pane read intent and executes through the existing runtime.
-2. At least one mutating tool (`edit_file`) compiles through the same boundary without introducing a second execution path.
-3. At least one process/check tool (`run_tests` or `run_command`) records request, execution, result, and provenance in the event ledger.
-4. Provider-specific schema code does not leak into core Pane execution logic.
-5. Existing cell execution remains available and unchanged as a first-class path.
-6. The parent can distinguish fresh execution from reused evidence.
-7. The parent can distinguish exact, bounded exact, and derived results.
-8. A derived result cannot be accepted as proof of an exact-content claim without additional evidence.
-9. Existing Pane gates remain green.
-10. A recorded comparison exists between cells-only and hybrid mode on at least the current independent oracle/fixture suite, with provider requests, tokens, failures, and wall time captured.
+The hybrid architecture is complete only when all of the following hold for the supported provider families and core capabilities:
 
-## Implementation guidance for Claude Code
+1. `--interface=hybrid` exposes provider-familiar direct tools and `execute_cell` simultaneously.
+2. `--interface=cells` and `--interface=tools` alter visibility only and do not select separate execution engines.
+3. Direct tool calls and cell-bound calls compile through the same capability descriptor and canonical intent.
+4. Direct tool calls lower into the same Cell IR / existing Pane execution substrate as authored cells.
+5. Provider-specific schema/result/error code remains confined to thin adapter/dialect boundaries.
+6. Anthropic-oriented and OpenAI-oriented façades can differ without changing canonical execution semantics.
+7. Familiar capability names/shapes are available inside cells where practical, so the model can compose known tools with TypeScript control flow.
+8. Read/search/list operations preserve exact ground truth, bounded exact views, and stable access to omitted content.
+9. Large provider-native tool results retain Pane's artifact/handle context-efficiency advantage.
+10. `exact`, `bounded_exact`, and `derived` are real production states, not test-only types.
+11. Existing Little Helpers/reducers can be invoked from capability execution when deterministic execution is inadequate and a clear semantic advantage exists.
+12. Helper outputs are always marked derived and linked to source evidence.
+13. Helper scope, token, call-count, wall-time, concurrency, and nesting controls prevent runaway nested inference.
+14. Mutation tools never silently use helpers to change requested mutation intent.
+15. Shell/Bash execution mechanically lowers recognizable safe operations where semantics are exact and faithfully falls back to sandboxed process execution otherwise.
+16. Test/check capabilities preserve fresh-vs-reused evidence semantics and parent interpretation remains independent of checker prose.
+17. Every direct tool, nested cell capability, helper call, artifact observation, mutation, and check produces sufficient ledger evidence for completion verification.
+18. The TUI can render direct tool execution and authored cells coherently without requiring separate UI stacks.
+19. Existing Pane gates remain green.
+20. Dedicated tests prove semantic equivalence between direct and cell invocation of the same capability.
+21. Dedicated tests prove dependent multi-operation logic works inside one parent-authored cell, including branching on earlier capability results.
+22. Dedicated tests prove helper-capable operations can run inside a cell without escaping scope/budget boundaries.
+23. Dedicated tests prove a derived result cannot substantiate an exact-content claim by itself.
+24. A recorded benchmark exists for cells-only, tools-only, and hybrid modes using the same execution kernel.
+25. Benchmark reporting separates parent-model tokens/turns from out-of-turn Little Helper tokens/calls.
 
-Treat this document as a design constraint, not permission for a broad rewrite.
+---
+
+## 29. Implementation guidance for Claude Code
+
+Treat this document as the target architecture, not as permission to create a parallel tool runtime.
 
 Before implementation:
 
@@ -685,22 +1259,63 @@ Before implementation:
 3. Read `docs/product/pane/runtime-contract.md`.
 4. Read `docs/product/pane/events-contract.md`.
 5. Read `docs/product/pane/improvement-register.md`.
-6. Locate the current provider adapter boundary, cell execution entry point, primitive dispatch, checker/evidence path, and event ledger implementation.
-7. Reconcile this spec with existing contracts. Prefer the smallest extension that preserves current semantics.
+6. Read `docs/product/pane/little-helpers.md`.
+7. Read the current checker/evidence and handle contracts relevant to fresh/reused execution and artifact identity.
+8. Locate the existing provider adapter boundary, cell execution entry point, primitive dispatch, Little Helper/reducer path, checker/evidence path, artifact/handle layer, event ledger, and TUI cell rendering.
+9. Reconcile this spec with those existing contracts before changing code.
 
 Implementation rules:
 
-- do not build a second execution engine for familiar tools;
-- compile provider calls onto existing Pane capabilities;
-- keep the canonical IR provider-neutral;
-- keep provider adapters thin;
-- do not silently summarize or reduce exact reads;
-- do not let a reducer's prose become evidence;
-- keep exact artifacts reachable when a derived view is returned;
-- route from mechanical facts first;
-- preserve cell composition;
-- add tests at the contract boundary, not only unit tests of helper functions;
-- record benchmark evidence before claiming efficiency improvement;
-- if existing architecture already provides an equivalent abstraction, adapt this spec to it rather than duplicating it.
+- **Do not create a native-tool executor beside the cell executor.**
+- **Do not implement direct tools as a temporary path intended to be rewritten later.**
+- Direct tool calls and cell capability calls must converge immediately onto one canonical execution path.
+- Treat `hybrid` as the target product interface, not a later optional experiment.
+- Preserve `cells` and `tools` as ablation/compatibility visibility modes only.
+- Generate native tool schemas and TypeScript cell bindings from the same capability definitions where feasible.
+- Preserve provider-specific familiar shapes at the boundary rather than forcing artificial cross-provider symmetry.
+- Keep provider adapters thin.
+- Prefer deterministic primitives and deterministic composition/projection.
+- Invoke Little Helpers only when there is an explicit semantic advantage.
+- Reuse Pane's existing Little Helper implementation and scope controls; do not build a second nested-agent mechanism.
+- Never let helper analysis masquerade as exact evidence.
+- Never let a helper silently rewrite mutation intent.
+- Keep exact artifacts reachable whenever a bounded or derived view is returned.
+- Preserve handle efficiency for provider-native results.
+- Keep every nested capability/helper call observable in the ledger.
+- Preserve existing verifier authority over model claims.
+- Preserve cell composition and dependent control flow as a first-class Pane capability.
+- Reuse current primitives, handles, reducers, checkers, event contracts, and TUI abstractions where they already satisfy this design.
+- If an existing abstraction already represents `CapabilityDescriptor`, `Cell IR`, or an execution frame under another name, extend it rather than duplicating it.
+- Complete the core tool behavior coherently before treating the feature as benchmark-ready.
+- Do not wait for every future provider or edge case before shipping the supported coherent architecture.
+- Record evidence before claiming correctness or efficiency improvements.
 
-The first implementation should optimize for proving or falsifying the architecture, not completing every provider adapter or every optimization in this document.
+The implementation is successful when the parent model can work in its familiar coding-tool dialect, compose those same tools as TypeScript when it needs dependent logic, receive smarter bounded responses when Pane's Little Helpers have a justified advantage, and still have every operation execute through one observable Pane kernel.
+
+---
+
+## 30. Product summary
+
+Pane's value is not that it renames ordinary tool calls.
+
+The model gets familiar tools, but Pane upgrades what those tools mean operationally:
+
+```text
+familiar provider ergonomics
+        +
+programmable TypeScript composition
+        +
+deterministic-first execution
+        +
+bounded Little Helper intelligence
+        +
+lazy artifact/handle materialization
+        +
+execution ledger
+        +
+claim/evidence verification
+```
+
+A conventional harness gives the model a tool.
+
+Pane should give it the same familiar handle to a much stronger machine.
