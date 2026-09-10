@@ -501,9 +501,18 @@ pub fn run(
     let started = Instant::now();
     let prepared = crate::helper_context::HelperRole::from_helper_name(spec.name)
         .map(|role| crate::helper_context::prepare(role, input, profile, token));
-    let request = prepared
-        .as_ref()
-        .map(|packet| format!("{}\n\nOriginal helper request:\n{}", packet.rendered, input));
+    // The appended original is bounded by the same limit the preparation
+    // uses. Sending it whole would contradict the omission the packet already
+    // recorded, and on a log large enough to be worth reducing it would
+    // overflow the helper model's own context window -- so the reduction
+    // would stop working exactly when it matters most.
+    let request = prepared.as_ref().map(|packet| {
+        format!(
+            "{}\n\nOriginal helper request:\n{}",
+            packet.rendered,
+            crate::helper_context::bounded_string(input, crate::helper_context::MAX_INPUT_BYTES)
+        )
+    });
     let mut call = run_unprepared(
         spec,
         model,

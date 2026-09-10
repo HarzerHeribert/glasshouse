@@ -16,7 +16,14 @@ use crate::tools::invoke::CancellationToken;
 
 const MAX_RENDER_BYTES: usize = 32 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 48 * 1024;
-const MAX_INPUT_BYTES: usize = 64 * 1024;
+/// The most of a caller's own text a helper request carries.
+///
+/// It bounds the prepared evidence **and** the original request appended
+/// after it: a helper that was told its input was truncated and then handed
+/// the whole thing would be reading a request that contradicts its own
+/// omission notice, and a large enough log would not fit the helper model's
+/// window at all — which is exactly the log worth reducing.
+pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_FILE_READ_BYTES: usize = 8 * 1024;
 const MAX_FILE_SIZE: u64 = 256 * 1024;
 const MAX_NODES: usize = 1_024;
@@ -1072,7 +1079,7 @@ fn display_relative(path: &Path) -> String {
     }
 }
 
-fn bounded_string(text: &str, max: usize) -> String {
+pub fn bounded_string(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }

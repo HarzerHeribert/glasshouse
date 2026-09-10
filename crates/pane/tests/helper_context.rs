@@ -196,6 +196,33 @@ fn unreadable_ignore_semantics_never_turn_into_unfiltered_discovery() {
     );
 }
 
+/// A helper request never carries more of the caller's text than the packet
+/// says it does.
+///
+/// The packet records an omission when the input is over the bound; appending
+/// the whole original after it would make that notice false, and on a log
+/// large enough to be worth reducing it would not fit the helper model's own
+/// window — so the reduction would fail precisely on the biggest inputs.
+#[test]
+fn a_request_never_carries_more_of_the_original_than_the_bound_allows() {
+    let bounded = pane::helper_context::bounded_string(
+        &"x".repeat(pane::helper_context::MAX_INPUT_BYTES * 4),
+        pane::helper_context::MAX_INPUT_BYTES,
+    );
+    assert_eq!(bounded.len(), pane::helper_context::MAX_INPUT_BYTES);
+
+    // And `helpers::run` is what applies it to the appended original.
+    const SOURCE: &str = include_str!("../src/helpers.rs");
+    let after = SOURCE
+        .split_once("Original helper request:")
+        .expect("the appended-original format string must still exist")
+        .1;
+    assert!(
+        after.contains("bounded_string(input"),
+        "the original appended to a prepared packet must be bounded"
+    );
+}
+
 #[test]
 fn discovery_does_not_derive_search_terms_beyond_the_input_byte_bound() {
     let fixture = Fixture::new("bounded-input");
