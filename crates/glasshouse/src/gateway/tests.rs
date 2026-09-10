@@ -31,6 +31,44 @@ fn production_code(source: &str) -> String {
         .join("\n")
 }
 
+/// The same thing, cut at the file's inline test **module** rather than at
+/// the first `#[cfg(test)]` attribute anywhere in it.
+///
+/// [`production_code`] stops at the first `#[cfg(test)]` it finds, which is
+/// right for a file whose only one introduces `mod tests` and silently
+/// wrong for a file carrying a test-only `use` or helper higher up.
+/// `gateway/session.rs` has `#[cfg(test)] use super::ingress::Tokens;` on
+/// line 45 of 1050, so the import scan below was reading **4%** of the file
+/// it most needed to read — and reading it clean. Measured 2026-09-10;
+/// `gateway/upstream.rs` is the other one, cut at 42% by a
+/// `#[cfg(test)] pub(super) fn for_test`.
+///
+/// Only the import scan uses this. The relay's no-deserialization scan and
+/// the token scan still read [`production_code`] and still carry the same
+/// blind spot: widening the rule being extended here is in scope, and
+/// changing what every scan in this file sees is not.
+fn production_code_to_test_module(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut cut = lines.len();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains("#[cfg(test)]") {
+            continue;
+        }
+        let follows = lines.get(index + 1).map(|next| next.trim_start());
+        if follows.is_some_and(|next| next.starts_with("mod tests") || next.contains(" mod tests"))
+        {
+            cut = index;
+            break;
+        }
+    }
+    lines[..cut]
+        .iter()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Every production source file in this directory, for the scans below.
 ///
 /// Listed rather than walked: `include_str!` needs a literal, and a list
@@ -925,10 +963,20 @@ fn dropping_the_gateway_releases_its_port() {
 ///
 /// Every file in this directory, not just this one: the ingress is where
 /// a "just look up which session this belongs to" would be written.
+///
+/// `crate::events` joined the list when the gateway got its own
+/// [`super::Observation`]: the gateway is being extracted into a crate that
+/// links without Glasshouse present, so a host's event vocabulary is as
+/// unreachable from here as the session model is. It reports outward;
+/// Glasshouse maps what it reports, on Glasshouse's side.
+///
+/// Reads [`production_code_to_test_module`] and not [`production_code`],
+/// because the latter was reading 4% of `gateway/session.rs`. See that
+/// function.
 #[test]
 fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
     for (name, source) in gateway_sources() {
-        let code = production_code(source);
+        let code = production_code_to_test_module(source);
         for forbidden in [
             "crate::session",
             "crate::shell",
@@ -940,7 +988,22 @@ fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
             // states about it (`crate::routing::pairing::RouteAffinity`) and
             // on what this side can measure, never on which client is asking.
             "crate::integrations",
+            "crate::events",
         ] {
+            // The one file the `crate::events` half does not hold yet, and
+            // it is named here rather than left out of the list:
+            // `session.rs`'s `gateway_failure` still classifies an exchange
+            // into `crate::events::GatewayFailure`, and `gateway/session/**`
+            // was another worker's tree when this landed. Everything
+            // downstream of it already speaks `DegradeReason` — `mod.rs`
+            // converts at the sink — so the remaining change is that one
+            // function's return type.
+            // `the_only_gateway_file_still_naming_the_host_event_module`
+            // below fails the day it lands, which is what deletes these
+            // three lines.
+            if forbidden == "crate::events" && name == "gateway/session.rs" {
+                continue;
+            }
             assert!(
                 !code.contains(forbidden),
                 "{name} names `{forbidden}` in production code: the gateway has become \
@@ -950,6 +1013,133 @@ fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
             );
         }
     }
+}
+
+/// A ratchet on the exception above, so that it cannot outlive its reason.
+///
+/// An exception nobody is forced to revisit is how a rule becomes decorative.
+/// This fails the moment `gateway/session.rs` stops naming `crate::events`,
+/// and the failure is the instruction: delete the exception, delete this
+/// test, and the gateway names no host type anywhere.
+#[test]
+fn the_only_gateway_file_still_naming_the_host_event_module() {
+    let offenders: Vec<&str> = gateway_sources()
+        .into_iter()
+        .filter(|(_, source)| production_code_to_test_module(source).contains("crate::events"))
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        offenders,
+        vec!["gateway/session.rs"],
+        "the set of gateway files naming `crate::events` has changed. If it shrank to \
+         nothing, delete the `crate::events` exception in \
+         `the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness` and \
+         delete this test with it. If it grew, the extraction just lost ground"
+    );
+}
+
+/// An upstream whose only backend is a port nothing listens on, so a real
+/// exchange through it ends in `Outcome::Unreachable` — the one outcome
+/// `session::gateway_failure` turns into an observation.
+fn unreachable_upstream() -> Upstream {
+    anthropic_upstream_to("http://127.0.0.1:1")
+}
+
+/// What the gateway hands its sink is its **own** vocabulary: a resource
+/// slug it minted and one of its own [`super::DegradeReason`]s. Nothing in
+/// the payload is a host type, which is the whole reason the extraction can
+/// take this directory and leave Glasshouse behind.
+///
+/// In this crate rather than only in `tests/gateway_degrade.rs` because the
+/// production step it watches — `accept_loop` building the `Observation` —
+/// is private to this module, and a mutation to it has to be killable from
+/// here.
+#[test]
+fn the_sink_is_handed_the_gateways_own_words_for_what_it_saw() {
+    let observed: Arc<Mutex<Vec<Observation>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink: ObservationSink = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |observation| observed.lock().unwrap().push(observation))
+    };
+    let gateway = Gateway::start_with_degrade_sink(
+        unreachable_upstream(),
+        None,
+        None,
+        None,
+        Some(sink),
+        None,
+    )
+    .expect("loopback is bindable");
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{\"model\":\"probe\"}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 502"),
+        "an unreachable upstream is reported to the harness as a gateway error: {response}"
+    );
+
+    // The sink runs on the connection thread *after* the response socket has
+    // been closed, so the read above is not proof it has been called yet.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while observed.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![Observation::Degraded {
+            resource: LOCAL_GATEWAY_RESOURCE.to_owned(),
+            reason: DegradeReason::Unreachable,
+        }],
+        "the gateway must report exactly one observation, naming the resource it minted \
+         and its own reason for the failure"
+    );
+}
+
+/// [`super::null_sink`] is a choice, and this is what makes it one: a
+/// gateway with no host anywhere serves the harness exactly as a hosted one
+/// does, and everything it observes goes nowhere on purpose.
+///
+/// The standalone case is the extracted crate's normal case, not an edge:
+/// there is no Glasshouse to report to, and "nobody is listening" has to be
+/// a sink somebody named rather than a `None` nobody noticed.
+#[test]
+fn a_gateway_with_no_host_serves_the_harness_and_drops_what_it_observes() {
+    let gateway = Gateway::start_with_degrade_sink(
+        unreachable_upstream(),
+        None,
+        None,
+        None,
+        Some(null_sink()),
+        None,
+    )
+    .expect("loopback is bindable");
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{\"model\":\"probe\"}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 502"),
+        "a gateway with no host must answer the harness exactly as a hosted one does: \
+         {response}"
+    );
+
+    // Nothing to assert about where the observation went, because there is
+    // nowhere for it to go — the assertion is that dropping it neither
+    // panics the connection thread nor changes what the harness saw. A
+    // second exchange proves the first one's dropped observation left the
+    // accept loop able to serve.
+    let again = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{\"model\":\"probe\"}"),
+    ));
+    assert!(
+        again.starts_with("HTTP/1.1 502"),
+        "the gateway must keep serving after dropping an observation: {again}"
+    );
 }
 
 /// The scan above is only worth having if it can fail — and here, more
@@ -970,6 +1160,23 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
     // ... nor on a mention inside a test.
     let tested = "fn start() {}\n#[cfg(test)]\nmod tests { use crate::session::SessionLifecycle; }";
     assert!(!production_code(tested).contains("crate::session"));
+    // ... and the same three readings hold for the host event module, the
+    // path added when the gateway got its own `Observation`.
+    let host_event = "fn sink() -> crate::events::GatewayFailure { todo!() }";
+    assert!(production_code_to_test_module(host_event).contains("crate::events"));
+    let host_event_documented = "/// Never names `crate::events`.\nfn sink() {}";
+    assert!(!production_code_to_test_module(host_event_documented).contains("crate::events"));
+    // ... and the widened slice reads past a test-only `use` that
+    // `production_code` stops dead at — the defect that made this scan read
+    // 4% of `gateway/session.rs` while reporting it clean.
+    let early_test_use = "#[cfg(test)]\nuse super::Tokens;\nfn sink() -> crate::events::GatewayFailure { todo!() }\n#[cfg(test)]\nmod tests;";
+    assert!(!production_code(early_test_use).contains("crate::events"));
+    assert!(production_code_to_test_module(early_test_use).contains("crate::events"));
+    // ... and still stops at the inline test module itself, so a forbidden
+    // path a test legitimately names is not a violation.
+    let inline_tests =
+        "fn sink() {}\n#[cfg(test)]\nmod tests {\n    use crate::events::GatewayFailure;\n}";
+    assert!(!production_code_to_test_module(inline_tests).contains("crate::events"));
     // ... and the file list it runs over is not empty, which would make
     // every assertion in it vacuous.
     assert_eq!(gateway_sources().len(), 14);

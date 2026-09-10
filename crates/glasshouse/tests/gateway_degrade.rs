@@ -6,7 +6,7 @@
 //! exchange; `events::degrade_resource` (already shipped, previously called
 //! from nowhere but its own tests) publishes `GatewayUnhealthy` for every
 //! session bound to the failing resource, and only those. The seam between
-//! them is `gateway::DegradeSink`, invoked from `gateway::mod`'s real
+//! them is `gateway::ObservationSink`, invoked from `gateway::mod`'s real
 //! `accept_loop` — the same function every gateway-backed request in this
 //! binary goes through — via `gateway::start_if_required_with_degrade_sink`.
 //!
@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use glasshouse::events::{EventBus, GatewayFailure, LifecycleEvent, degrade_resource};
-use glasshouse::gateway::{DegradeSink, Route, Upstream, UpstreamBackend};
+use glasshouse::gateway::{Observation, ObservationSink, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::routing::{Cost, CredentialId};
@@ -209,13 +209,21 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
     // test controls. Building it here is what makes this a *seam* test — see
     // this file's header, and the binary-level tests below.
     let calls: Arc<Mutex<Vec<(String, GatewayFailure)>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink: DegradeSink = {
+    let sink: ObservationSink = {
         let bus = bus.clone();
         let records = records.clone();
         let calls = Arc::clone(&calls);
-        Arc::new(move |resource: &str, reason: GatewayFailure| {
-            calls.lock().unwrap().push((resource.to_owned(), reason));
-            degrade_resource(&bus, &records, resource, reason);
+        // The host's half of the boundary, and the reason it is spelled out
+        // here rather than hidden: the gateway hands over an `Observation` in
+        // its own vocabulary, and turning a `DegradeReason` into a
+        // `GatewayFailure` is Glasshouse's job, on Glasshouse's side. When
+        // the gateway becomes its own process this closure is what an IPC
+        // receiver calls, unchanged.
+        Arc::new(move |observation: Observation| {
+            let Observation::Degraded { resource, reason } = observation;
+            let reason = GatewayFailure::from(reason);
+            calls.lock().unwrap().push((resource.clone(), reason));
+            degrade_resource(&bus, &records, &resource, reason);
         })
     };
 

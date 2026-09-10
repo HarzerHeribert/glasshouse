@@ -331,6 +331,46 @@ impl std::fmt::Display for GatewayFailure {
     }
 }
 
+/// The gateway's word for a degradation, in Glasshouse's.
+///
+/// Total and lossless: [`crate::gateway::DegradeReason`] has the same three
+/// variants with the same meanings, so neither direction can drop a reason
+/// or invent one. That is the property that lets the gateway report in its
+/// own vocabulary without a host losing anything by it.
+///
+/// **Here and not in `crate::gateway`, and that is the whole point.** The
+/// gateway is being extracted into a crate that will have no Glasshouse to
+/// name, so every mention of a Glasshouse type in this conversion has to sit
+/// on this side of the boundary. `gateway::tests::the_gateway_imports_none_\
+/// of_the_modules_that_would_make_it_a_harness` is what keeps it here.
+impl From<crate::gateway::DegradeReason> for GatewayFailure {
+    fn from(reason: crate::gateway::DegradeReason) -> Self {
+        match reason {
+            crate::gateway::DegradeReason::Unreachable => Self::Unreachable,
+            crate::gateway::DegradeReason::TimedOut => Self::TimedOut,
+            crate::gateway::DegradeReason::Rejected => Self::Rejected,
+        }
+    }
+}
+
+/// The same mapping the other way, for the one place that still needs it.
+///
+/// `gateway::session::gateway_failure` classifies an exchange's outcome and
+/// still answers in *this* module's vocabulary, so the gateway's own accept
+/// loop converts at the point it builds an observation. This impl is what
+/// lets it do that without naming `crate::events` — and it is temporary in
+/// the exact sense that it disappears the day that function answers in
+/// [`crate::gateway::DegradeReason`] directly.
+impl From<GatewayFailure> for crate::gateway::DegradeReason {
+    fn from(failure: GatewayFailure) -> Self {
+        match failure {
+            GatewayFailure::Unreachable => Self::Unreachable,
+            GatewayFailure::TimedOut => Self::TimedOut,
+            GatewayFailure::Rejected => Self::Rejected,
+        }
+    }
+}
+
 /// What an adapter saw, before translation.
 ///
 /// Kept for troubleshooting only: when a harness reports something this build

@@ -58,7 +58,7 @@ pub struct SessionRouting {
 /// failover the gateway takes — capability map line 1851's write side.
 ///
 /// **A sink rather than a ledger handle**, exactly like
-/// [`super::DegradeSink`] one module up and for practice §65's reason: the
+/// [`super::ObservationSink`] one module up and for practice §65's reason: the
 /// gateway holds this for its whole life, and an open SQLite connection held
 /// for the life of a session is free on the developer's machine and billed
 /// on Windows. The sink's own body opens, writes and drops a handle at the

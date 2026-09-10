@@ -66,7 +66,7 @@ pub enum BackendDemand {
     LocalGateway,
 }
 
-/// The name this gateway reports *itself* under to a [`DegradeSink`].
+/// The name this gateway reports *itself* under to an [`ObservationSink`].
 ///
 /// The gateway is one resource among the several a caller may be moving a
 /// client between, and a sink is told which of them failed. This is the
@@ -80,22 +80,105 @@ pub enum BackendDemand {
 /// two spellings still agree.
 pub const LOCAL_GATEWAY_RESOURCE: &str = "glasshouse-gateway";
 
-/// Told once per exchange whose outcome says the gateway's own upstream
-/// failed — map line 1735, "detect gateway failure separately from harness
-/// process failure" — with the failing resource's name, which for this
-/// gateway is always [`LOCAL_GATEWAY_RESOURCE`], and which kind of failure
-/// it was.
+/// Why a resource the gateway serves stopped being usable.
 ///
-/// A closure rather than a direct call to [`crate::events::degrade_resource`]
-/// from inside this module, because that function's
-/// `records: &[crate::session::SessionRecord]` parameter would require
-/// naming `crate::session` here — exactly the import
+/// Three variants because three is what an exchange's outcome can actually
+/// distinguish: nothing answered, something answered too late, something
+/// answered badly. They are deliberately the same three a host records, so
+/// the mapping across the boundary is total in both directions and cannot
+/// lose or invent a reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradeReason {
+    /// Nothing is listening, or the connection was refused.
+    Unreachable,
+    /// It accepted the request and never answered within the bound.
+    TimedOut,
+    /// It answered, and the answer was an error.
+    Rejected,
+}
+
+impl DegradeReason {
+    /// The reason in words — the spelling that crosses the process
+    /// boundary, and the same three strings the host's own vocabulary uses.
+    ///
+    /// A method and deliberately **not** a `std::fmt` impl:
+    /// `tests::a_gateway_token_has_no_display_no_deref_and_no_asref` forbids
+    /// that trait's name anywhere in this file's production code, because
+    /// [`GatewayToken`] lives here and a printable credential is how one
+    /// reaches a log by accident. The rule costs this enum nothing.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::TimedOut => "timed out",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// What the gateway saw, stated in its own vocabulary so a host can act on
+/// it without the gateway knowing what the host is.
+///
+/// Every field is something this directory already knows on its own: a
+/// resource is the slug the gateway itself minted, a reason is one of this
+/// module's own [`DegradeReason`]s. Nothing here is a host type, and nothing
+/// may become one — see [`ObservationSink`].
+///
+/// One variant, because one is what a production caller produces today. A
+/// second is added when something in this directory actually observes it,
+/// never in anticipation: a variant nobody emits is a shape every host has
+/// to handle for no reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observation {
+    /// A resource the gateway serves has become unusable — map line 1735,
+    /// "detect gateway failure separately from harness process failure".
+    Degraded {
+        /// [`LOCAL_GATEWAY_RESOURCE`] for this gateway -- the name it
+        /// mints for itself, owned rather than borrowed.
+        resource: String,
+        /// Which of the three failures it was.
+        reason: DegradeReason,
+    },
+}
+
+/// Where the gateway reports what it observed — one call per
+/// [`Observation`], from the connection thread that observed it.
+///
+/// **The gateway runs as its own process, and a Rust closure cannot cross
+/// that boundary.** This type is therefore the inside of the boundary, never
+/// the transport across it. When a host is present, the closure the host
+/// installs is an IPC emitter — a local socket, an HTTP post, an event
+/// stream — that serialises the [`Observation`] and sends it; when no host is
+/// present the sink is [`null_sink`], which drops everything. Those are the
+/// only two shapes, and both are choices somebody made.
+///
+/// **The gateway must never import host types.** That is why an
+/// [`Observation`] carries only this directory's own vocabulary, and why the
+/// mapping into whatever a host records happens on the host's side of the
+/// wire.
 /// `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
-/// exists to make impossible (see this module's header). The caller that
-/// builds one closes over an [`crate::events::EventBus`] and a live session
-/// list; this module only ever calls it with a resource name and a
-/// [`crate::events::GatewayFailure`].
-pub type DegradeSink = Arc<dyn Fn(&str, crate::events::GatewayFailure) + Send + Sync>;
+/// is what keeps it that way rather than a promise.
+///
+/// **The obvious "fix" is the defect.** Embedding the gateway back inside
+/// the host process so this closure can call host code directly compiles,
+/// passes, and silently undoes the separation the extraction exists for. It
+/// is not a simplification of the IPC hop; it is the removal of the process
+/// boundary that made the hop necessary.
+///
+/// A closure rather than a trait, which is what its predecessor
+/// (`DegradeSink`) was and for the same reason: one call, no state, and
+/// nothing an implementor would need that `Fn` does not already give.
+pub type ObservationSink = Arc<dyn Fn(Observation) + Send + Sync>;
+
+/// The sink a gateway with no host uses: every observation is dropped.
+///
+/// A first-class, named choice rather than the absence of one. A standalone
+/// gateway — the extracted crate with no Glasshouse anywhere — observes
+/// exactly what a hosted one observes; it simply has nowhere to report it,
+/// and saying so with a sink keeps "nobody is listening" something somebody
+/// decided rather than a `None` nobody noticed.
+pub fn null_sink() -> ObservationSink {
+    Arc::new(|_observation| {})
+}
 
 /// The only interface a Glasshouse gateway ever binds.
 ///
@@ -302,7 +385,7 @@ impl Gateway {
         )
     }
 
-    /// [`Self::start_with_telemetry`], with a [`DegradeSink`] told about every
+    /// [`Self::start_with_telemetry`], with an [`ObservationSink`] told about every
     /// exchange whose outcome is a genuine gateway failure — map line 1735.
     ///
     /// `None` reproduces [`Self::start_with_telemetry`] exactly, the same
@@ -324,7 +407,7 @@ impl Gateway {
         quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
         evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
         health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
-        degrade_sink: Option<DegradeSink>,
+        degrade_sink: Option<ObservationSink>,
         prevention_sink: Option<session::FailoverPreventionSink>,
     ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
@@ -509,7 +592,7 @@ fn accept_loop(
     quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<Arc<crate::provider::telemetry::GatewayHealthCache>>,
-    degrade_sink: Option<DegradeSink>,
+    degrade_sink: Option<ObservationSink>,
     prevention_sink: Option<session::FailoverPreventionSink>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
@@ -615,10 +698,25 @@ fn accept_loop(
                         // itself unhealthy" — and answered without touching
                         // any session's lifecycle, because nothing here calls
                         // anything that could.
+                        //
+                        // `.into()` and not a `match`: `session::gateway_failure`
+                        // still answers in the host's vocabulary, and the
+                        // conversion into this module's own [`DegradeReason`]
+                        // is defined on the host's side of the boundary so
+                        // that no line here has to name the host type. That
+                        // hop disappears when `session::gateway_failure`
+                        // answers in [`DegradeReason`] directly — the one
+                        // file in this directory still naming `crate::events`,
+                        // and the exception
+                        // `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
+                        // records against itself.
                         if let Some(reason) = session::gateway_failure(&exchange)
                             && let Some(sink) = &degrade_sink
                         {
-                            sink(LOCAL_GATEWAY_RESOURCE, reason);
+                            sink(Observation::Degraded {
+                                resource: LOCAL_GATEWAY_RESOURCE.to_owned(),
+                                reason: reason.into(),
+                            });
                         }
                         // Phase 33A's production producer — see
                         // `crate::gateway::session::SessionRouting::record_routing_observation`
@@ -863,7 +961,7 @@ pub fn start_if_required_with_telemetry(
     Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger, health_cache).map(Some)
 }
 
-/// [`start_if_required_with_telemetry`], with a [`DegradeSink`] a started
+/// [`start_if_required_with_telemetry`], with an [`ObservationSink`] a started
 /// gateway calls once per exchange whose outcome is a genuine gateway
 /// failure — map line 1735.
 ///
@@ -886,7 +984,7 @@ pub fn start_if_required_with_degrade_sink(
     quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
-    degrade_sink: Option<DegradeSink>,
+    degrade_sink: Option<ObservationSink>,
     // Told what the failure-domain term did to each failover this gateway
     // takes — capability map line 1851. `None` reproduces the behaviour this
     // door had before that line's producer landed, exactly as `degrade_sink`

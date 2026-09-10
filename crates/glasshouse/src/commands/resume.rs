@@ -322,7 +322,7 @@ fn resolve_resume_overlay(
     // Map line 1735. Built by `resume_session`, which is where the recorder
     // this eventually writes into is opened; this function only starts the
     // gateway, so it is a parameter rather than something resolved here.
-    degrade_sink: glasshouse::gateway::DegradeSink,
+    degrade_sink: glasshouse::gateway::ObservationSink,
 ) -> anyhow::Result<(
     glasshouse::profile::LaunchProfile,
     glasshouse::profile::LaunchOverlay,
@@ -830,7 +830,7 @@ impl EventRecorder {
 const EARLY_GATEWAY_FAILURES: usize = 32;
 
 /// Where a gateway failure is recorded, given that the recorder does not
-/// exist yet when the gateway starts. [`glasshouse::gateway::DegradeSink`]
+/// exist yet when the gateway starts. [`glasshouse::gateway::ObservationSink`]
 /// must be handed to the gateway before either of this binary's two gateway
 /// starts has an [`EventRecorder`] or even a `SessionRecord` to close over,
 /// so this is the handle created first and filled by [`Self::install`] once
@@ -870,9 +870,23 @@ impl DegradeRelay {
     }
 
     /// The sink to start a gateway with.
-    pub(crate) fn sink(self: &Arc<Self>) -> glasshouse::gateway::DegradeSink {
+    ///
+    /// **This is where the gateway's vocabulary becomes Glasshouse's, and it
+    /// is on this side on purpose.** The gateway reports a
+    /// [`glasshouse::gateway::Observation`], which names no Glasshouse type
+    /// at all, because it is being extracted into a crate that will have
+    /// none to name; the host is what knows that a
+    /// [`glasshouse::gateway::DegradeReason`] is a
+    /// [`glasshouse::events::GatewayFailure`]. When the gateway is its own
+    /// process this closure becomes the receiving end of an IPC message
+    /// rather than a closure the gateway calls, and nothing below it changes.
+    pub(crate) fn sink(self: &Arc<Self>) -> glasshouse::gateway::ObservationSink {
         let relay = Arc::clone(self);
-        Arc::new(move |resource: &str, reason| relay.report(resource, reason))
+        Arc::new(move |observation| match observation {
+            glasshouse::gateway::Observation::Degraded { resource, reason } => {
+                relay.report(&resource, reason.into());
+            }
+        })
     }
 
     /// Called by the gateway's own connection thread, once per exchange whose
