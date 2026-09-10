@@ -1,5 +1,12 @@
-//! Entitlement resolution: which plan an integration/harness runs under, and the tiers, job kinds and headroom it allows.
+//! Entitlement **policy**: which harnesses and job kinds an account is for,
+//! how Glasshouse layers the `[entitlements]` tables into one resolved list,
+//! and the facets it derives from its own evidence ledger.
 //!
+//! The client-neutral half — what an account *is*, how it authenticates, what
+//! it can serve — lives in [`super::entitlement_catalogue`] and is re-exported
+//! below, so every path that named one of those items here before the split
+//! still resolves. The dependency runs one way: policy reads catalogue, and
+//! the catalogue names nothing in this file.
 
 use std::collections::BTreeMap;
 
@@ -10,275 +17,20 @@ use crate::secret::SecretRef;
 
 use super::*;
 
+pub use super::entitlement_catalogue::{
+    AccountEntry, EntitlementCredential, EntitlementKind, EntitlementModels,
+    EntitlementSpendReading, EntitlementThrottleReading, EntitlementVendor, ResolvedAccount,
+    SubscriptionBroker, TelemetryScope,
+};
+// Not public, and re-exported at exactly the visibility it had before the
+// move: `config::provider`'s `credential_env` names it through `use super::*`.
+pub(super) use super::entitlement_catalogue::deserialize_credential_env_names;
+
 // ---------------------------------------------------------------------------
 // Phase 56/56A — `[entitlements.<name>]`: an entitlement — a specific
 // subscription or API-credit account — as the configured unit of capacity,
 // with rules of its own (map lines 1946, 1947, 1954, 1962, 1963, 1973).
 // ---------------------------------------------------------------------------
-/// Which plan an entitlement is — map line 1946's four: *"a Claude,
-/// ChatGPT/Codex, or Gemini plan, or an API key"*.
-///
-/// Descriptive, and read by exactly one consumer: the launch announcement
-/// that says which entitlement will serve a session. No rule depends on it —
-/// [`EntitlementConfig`]'s rules are about harnesses, tiers and job kinds,
-/// never about what kind of plan is paying — so a wrong `kind` misdescribes
-/// an entitlement and never misroutes one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum EntitlementKind {
-    Claude,
-    #[serde(rename = "chatgpt")]
-    ChatGpt,
-    Gemini,
-    ApiKey,
-}
-impl EntitlementKind {
-    /// The spelling a configuration file uses.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::ChatGpt => "chatgpt",
-            Self::Gemini => "gemini",
-            Self::ApiKey => "api-key",
-        }
-    }
-
-    /// How the announcement names the plan.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude plan",
-            Self::ChatGpt => "ChatGPT plan",
-            Self::Gemini => "Gemini plan",
-            Self::ApiKey => "API key",
-        }
-    }
-}
-/// The billing vendor behind an entitlement — map line 1962's *"distinct
-/// from the vendor"*: the account that pays is one fact, who bills it is
-/// another, and two entitlements of one vendor are still two accounts.
-///
-/// Descriptive, like [`EntitlementKind`], and read by the same one consumer:
-/// the launch announcement ([`ResolvedEntitlement::describe`]). **No rule and
-/// no resolution step keys on it** — map line 1963's coexistence is the point,
-/// and nothing anywhere dedupes entitlements by vendor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum EntitlementVendor {
-    Claude,
-    #[serde(rename = "openai")]
-    OpenAi,
-    Google,
-    #[serde(rename = "openrouter")]
-    OpenRouter,
-    /// Any vendor the four names above do not cover — a self-hosted router,
-    /// a reseller, an employer's own gateway.
-    Custom,
-}
-impl EntitlementVendor {
-    /// The spelling a configuration file uses.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::OpenAi => "openai",
-            Self::Google => "google",
-            Self::OpenRouter => "openrouter",
-            Self::Custom => "custom",
-        }
-    }
-}
-/// A local broker that turns one subscription account into a loopback
-/// inference endpoint. The value is a broker *kind*, never a URL, token, auth
-/// directory, command, or credential. Those runtime details remain owned by
-/// the broker process boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum SubscriptionBroker {
-    /// The pinned CLIProxyAPI sidecar supported by the first implementation.
-    #[serde(rename = "cliproxyapi")]
-    CliProxyApi,
-}
-impl SubscriptionBroker {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CliProxyApi => "cliproxyapi",
-        }
-    }
-}
-/// An entitlement's own authentication — map lines 1962 and 1973: **a
-/// reference, never a value**, in exactly [`crate::secret::SecretRef`]'s two
-/// shapes.
-///
-/// ```toml
-/// credential = { env = "CLAUDE_A_OAUTH_TOKEN" }            # an environment variable NAME
-/// credential = { service = "glasshouse", account = "a" }   # an OS-credential reference
-/// ```
-///
-/// The `Deserialize` impl is manual so that nothing else can ever parse: a
-/// bare string is refused with a sentence naming the rule — and deliberately
-/// **without echoing what was written**, because the one thing a value-shaped
-/// mistake must not do is copy the value into an error message — and a map
-/// carrying any other key (`value`, `token`, `key`, …) is refused by that
-/// key's name. This is the config-file side of Phase 9E's boundary; the
-/// serde impls live here and not on [`SecretRef`] itself because
-/// `crate::secret`'s own tests hold that module to naming no serde at all.
-#[derive(Clone, PartialEq, Eq)]
-pub struct EntitlementCredential(SecretRef);
-impl EntitlementCredential {
-    pub fn environment(var: impl Into<String>) -> Self {
-        Self(SecretRef::Environment { var: var.into() })
-    }
-
-    pub fn os_credential(service: impl Into<String>, account: impl Into<String>) -> Self {
-        Self(SecretRef::OsCredential {
-            service: service.into(),
-            account: account.into(),
-        })
-    }
-
-    /// The reference this credential names. A caller resolves it through a
-    /// [`crate::secret::SecretStore`] at the moment of use, never earlier.
-    pub fn secret_ref(&self) -> &SecretRef {
-        &self.0
-    }
-}
-/// Names only — the variable's, the service's, the account's — exactly what
-/// [`SecretRef`]'s own `Debug` prints. Manual so the shape is pinned by
-/// `tests/entitlement_pool.rs` rather than drifting with a derive.
-impl std::fmt::Debug for EntitlementCredential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            SecretRef::Environment { var } => write!(f, "environment variable `{var}`"),
-            SecretRef::OsCredential { service, account } => {
-                write!(f, "OS credential `{service}`/`{account}`")
-            }
-        }
-    }
-}
-/// The sentence every value-shaped mistake gets. One spelling, no echo.
-const CREDENTIAL_IS_A_REFERENCE: &str = "an entitlement credential is a reference, never a value: \
-     write `credential = { env = \"VAR_NAME\" }` for an environment variable, or `credential = \
-     { service = \"...\", account = \"...\" }` for the operating system's credential store. A \
-     secret does not belong in a configuration file, so what was written here is not repeated";
-/// The sentence a value pasted into the `env` slot gets — the same mistake
-/// as a bare string, one nesting level deeper, and refused the same way:
-/// by the rule's name, never by repeating what was written.
-const ENV_NAME_IS_NOT_A_VALUE: &str = "an entitlement credential's `env` is the NAME of an \
-     environment variable, not its value: a name may use letters, digits and `_` only and may \
-     not start with a digit, and what was written here is neither a name nor repeated";
-/// Whether `name` can be an environment variable name at all.
-///
-/// The portable (POSIX) character set, deliberately narrower than what
-/// `std::env::var_os` would accept: every credential shape
-/// [`crate::secret::redact`] knows about — `sk-`, `sk-or-v1-`, `ghp_` with
-/// its dots, a JWT's `.` and `=` — carries a character this refuses, so a
-/// value pasted where a name belongs is caught by shape rather than by
-/// guessing at prefixes.
-fn is_environment_variable_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-/// Deserializes [`ProviderConfig::credential_env`], refusing any entry that
-/// cannot be an environment variable name — the same shape check
-/// [`EntitlementCredential`]'s `env` applies, and the same hole: this field
-/// is documented as "names only — never a value" but nothing enforced it, so
-/// a pasted key would be stored verbatim and later copied wherever this list
-/// is rendered.
-pub(super) fn deserialize_credential_env_names<'de, D>(
-    deserializer: D,
-) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error as _;
-    let names: Vec<String> = Vec::deserialize(deserializer)?;
-    for name in &names {
-        if !is_environment_variable_name(name) {
-            return Err(D::Error::custom(ENV_NAME_IS_NOT_A_VALUE));
-        }
-    }
-    Ok(names)
-}
-impl Serialize for EntitlementCredential {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        match &self.0 {
-            SecretRef::Environment { var } => {
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("env", var)?;
-                map.end()
-            }
-            SecretRef::OsCredential { service, account } => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("service", service)?;
-                map.serialize_entry("account", account)?;
-                map.end()
-            }
-        }
-    }
-}
-impl<'de> Deserialize<'de> for EntitlementCredential {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct ReferenceOnly;
-
-        impl<'de> serde::de::Visitor<'de> for ReferenceOnly {
-            type Value = EntitlementCredential;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(CREDENTIAL_IS_A_REFERENCE)
-            }
-
-            // Every non-map shape lands in one of these, and none of them
-            // repeats what it was handed.
-            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-                Err(E::custom(CREDENTIAL_IS_A_REFERENCE))
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut access: A,
-            ) -> Result<Self::Value, A::Error> {
-                use serde::de::Error as _;
-                let mut env: Option<String> = None;
-                let mut service: Option<String> = None;
-                let mut account: Option<String> = None;
-                while let Some(key) = access.next_key::<String>()? {
-                    match key.as_str() {
-                        "env" => env = Some(access.next_value()?),
-                        "service" => service = Some(access.next_value()?),
-                        "account" => account = Some(access.next_value()?),
-                        other => {
-                            return Err(A::Error::custom(format!(
-                                "an entitlement credential does not take a key named \
-                                 `{other}` — {CREDENTIAL_IS_A_REFERENCE}"
-                            )));
-                        }
-                    }
-                }
-                match (env, service, account) {
-                    (Some(var), None, None) => {
-                        if !is_environment_variable_name(&var) {
-                            return Err(A::Error::custom(ENV_NAME_IS_NOT_A_VALUE));
-                        }
-                        Ok(EntitlementCredential::environment(var))
-                    }
-                    (None, Some(service), Some(account)) => {
-                        Ok(EntitlementCredential::os_credential(service, account))
-                    }
-                    (Some(_), _, _) => Err(A::Error::custom(
-                        "an entitlement credential names `env` alone, or `service` and \
-                         `account` together — not both shapes at once",
-                    )),
-                    (None, _, _) => Err(A::Error::custom(
-                        "an entitlement credential names `env` alone, or `service` and \
-                         `account` together",
-                    )),
-                }
-            }
-        }
-
-        deserializer.deserialize_any(ReferenceOnly)
-    }
-}
 /// A harness as it is written in a `[entitlements]` rule — the
 /// [`IntegrationId::slug`], parsed against the **harnesses** this build
 /// knows. A local inference runtime (`ollama`, `llama-cpp`) or the terminal
@@ -746,6 +498,27 @@ impl EntitlementConfig {
             .with_spend_ceiling_tokens(self.spend_ceiling_tokens)
     }
 
+    /// This entry's catalogue half — the six keys that say what the account
+    /// is and what it can serve, with nothing about who may use it. The
+    /// shape a gateway reads from its own configuration file; see
+    /// [`AccountEntry`].
+    ///
+    /// A projection, not a view: the policy table above stays the one thing
+    /// `[entitlements.<name>]` deserialises into, so the file's parse
+    /// behaviour — `deny_unknown_fields` included — is untouched by the
+    /// split.
+    pub fn account(&self) -> AccountEntry {
+        let mut entry = AccountEntry::default();
+        entry
+            .set_kind(self.kind)
+            .set_vendor(self.vendor)
+            .set_credential(self.credential.clone())
+            .set_subscription_broker(self.subscription_broker)
+            .set_provider(self.provider.clone())
+            .set_spend_ceiling_tokens(self.spend_ceiling_tokens);
+        entry
+    }
+
     /// The resolved value, named `name` — the key this entry was stored
     /// under — and attributed to `layer`.
     pub fn to_resolved(
@@ -753,10 +526,15 @@ impl EntitlementConfig {
         name: &str,
         layer: Layer,
     ) -> Result<ResolvedEntitlement, EntitlementLookupError> {
+        // The backing is the one decision that reads both halves: the
+        // catalogue says which provider or broker serves the account, and
+        // `native_harness` — a harness identity, and so policy — says
+        // whether the harness's own sign-in is a route to it.
+        let account = self.account();
         let backing = match (
             self.native_harness,
-            self.subscription_broker,
-            &self.provider,
+            account.subscription_broker(),
+            account.provider().map(str::to_owned),
         ) {
             (Some(_), _, Some(_)) | (None, Some(_), Some(_)) => {
                 return Err(EntitlementLookupError::TwoBackings {
@@ -772,7 +550,7 @@ impl EntitlementConfig {
                 native_harness: None,
             },
             (Some(harness), None, None) => EntitlementBacking::NativeHarness(harness.id()),
-            (None, None, Some(provider)) => EntitlementBacking::Provider(provider.clone()),
+            (None, None, Some(provider)) => EntitlementBacking::Provider(provider),
             (None, None, None) => EntitlementBacking::Unstated,
         };
         // A harness's own sign-in authenticates through the harness itself;
@@ -795,19 +573,10 @@ impl EntitlementConfig {
             );
         }
         Ok(ResolvedEntitlement {
-            name: name.to_owned(),
-            kind: self.kind,
-            vendor: self.vendor,
-            credential: self.credential.as_ref().map(|c| c.secret_ref().clone()),
+            account: ResolvedAccount::resolve(name, &account),
             backing,
             rules: self.rules(),
             layer,
-            remaining_capacity: None,
-            seconds_until_reset: None,
-            capacity_scope: None,
-            throttling: None,
-            models: None,
-            spend: None,
             headroom_estimate: None,
             headroom_override: self.headroom_override(),
             disable_headroom_estimate: self.disable_headroom_estimate,
@@ -924,45 +693,19 @@ impl EntitlementBacking {
 /// `f64` once 56A package 2 populates it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedEntitlement {
-    pub(super) name: String,
-    pub(super) kind: Option<EntitlementKind>,
-    pub(super) vendor: Option<EntitlementVendor>,
-    /// This account's own authentication — a **reference**, never a value.
-    /// Safe to hold and to `Debug` because every field of a [`SecretRef`] is
-    /// a name.
-    pub(super) credential: Option<SecretRef>,
+    /// The catalogue half — the account's name, plan, billing vendor and
+    /// credential reference, and the telemetry facets read back against it.
+    /// Every one of those is a fact about the account itself, so they live
+    /// in [`ResolvedAccount`], which names nothing Glasshouse-side; this
+    /// struct adds the policy the account is used *under*.
+    ///
+    /// [`Self::with_telemetry`] is the resolver that fills the facets in,
+    /// and it stays here rather than moving with them because what it reads
+    /// — the routing evidence ledger — is Glasshouse's own.
+    pub(super) account: ResolvedAccount,
     pub(super) backing: EntitlementBacking,
     pub(super) rules: crate::routing::EntitlementRules,
     pub(super) layer: Layer,
-    /// Map line 1963's remaining-capacity slot — map line 1965's producer is
-    /// [`Self::with_telemetry`], which populates it from a gateway-captured
-    /// per-provider reading. `None` until that resolver runs, and `None`
-    /// thereafter for an entitlement whose provider exposes nothing: an
-    /// entitlement nothing has read is *unknown*, never full and never
-    /// empty.
-    pub(super) remaining_capacity: Option<crate::provider::quota::RemainingCapacityScore>,
-    /// Map line 1963's reset-time slot, in seconds. Same contract as
-    /// `remaining_capacity`: [`Self::with_telemetry`] populates it, `None`
-    /// is unknown.
-    pub(super) seconds_until_reset: Option<i64>,
-    /// Whose reading `remaining_capacity` and `seconds_until_reset` are —
-    /// `Some` exactly when either slot is populated. One scope for the pair,
-    /// because both come from the same cached provider reading.
-    pub(super) capacity_scope: Option<TelemetryScope>,
-    /// Map line 1965's recent-throttling facet. `None` until
-    /// [`Self::with_telemetry`] runs with the ledger's rows in hand —
-    /// *unknown*, never "none observed": an absence may only be reported by
-    /// a resolver that actually looked.
-    pub(super) throttling: Option<EntitlementThrottleReading>,
-    /// Map line 1965's models facet. `None` is unknown, same rule as above.
-    pub(super) models: Option<EntitlementModels>,
-    /// Map line 1971's observed-spend facet, against which this entry's own
-    /// [`crate::routing::EntitlementRules::spend_ceiling_tokens`] is
-    /// compared. Same contract as the four facets above: `None` until
-    /// [`Self::with_telemetry`] runs with the ledger's rows in hand, and
-    /// `None` thereafter when no row carried a token count — *unknown*,
-    /// never "nothing spent".
-    pub(super) spend: Option<EntitlementSpendReading>,
     /// Map lines 1244/1245/1246/1250/1251/1254's subscription-headroom
     /// estimate — [`Self::populate_provider_facets`]'s own producer,
     /// [`crate::routing::evidence::estimate_subscription_headroom`]. `None`
@@ -990,16 +733,23 @@ pub struct ResolvedEntitlement {
     pub(super) context_firewall: firewall::ContextFirewallOverride,
 }
 impl ResolvedEntitlement {
+    /// The catalogue half on its own — what this account is and what
+    /// telemetry has read back against it, with none of the policy below.
+    /// The value a gateway would be handed.
+    pub fn account(&self) -> &ResolvedAccount {
+        &self.account
+    }
+
     pub fn name(&self) -> &str {
-        &self.name
+        self.account.name()
     }
 
     pub fn kind(&self) -> Option<EntitlementKind> {
-        self.kind
+        self.account.kind()
     }
 
     pub fn vendor(&self) -> Option<EntitlementVendor> {
-        self.vendor
+        self.account.vendor()
     }
 
     /// Map line 2024's explicit override — see the field's own doc.
@@ -1012,7 +762,7 @@ impl ResolvedEntitlement {
     /// [`crate::secret::SecretStore`], at the moment of use, by whatever
     /// launches against this account — never here.
     pub fn credential(&self) -> Option<&SecretRef> {
-        self.credential.as_ref()
+        self.account.credential()
     }
 
     /// Remaining capacity, when telemetry has read one — `None` until
@@ -1020,13 +770,13 @@ impl ResolvedEntitlement {
     /// entitlement whose provider exposes nothing. Unknown, never
     /// fabricated.
     pub fn remaining_capacity(&self) -> Option<&crate::provider::quota::RemainingCapacityScore> {
-        self.remaining_capacity.as_ref()
+        self.account.remaining_capacity()
     }
 
     /// Seconds until this account's allowance resets, when telemetry has
     /// read one — the same contract as [`Self::remaining_capacity`].
     pub fn seconds_until_reset(&self) -> Option<i64> {
-        self.seconds_until_reset
+        self.account.seconds_until_reset()
     }
 
     /// Whose reading the capacity and reset slots carry — `Some` exactly
@@ -1034,25 +784,25 @@ impl ResolvedEntitlement {
     /// for every reading this build can take: the gateway's quota cache is
     /// keyed by provider, so both entitlements of one provider share it.
     pub fn capacity_scope(&self) -> Option<TelemetryScope> {
-        self.capacity_scope
+        self.account.capacity_scope()
     }
 
     /// Map line 1965's recent-throttling facet — `None` means *unknown*
     /// (nothing consulted the ledger for this entry), never "none observed".
     pub fn throttling(&self) -> Option<&EntitlementThrottleReading> {
-        self.throttling.as_ref()
+        self.account.throttling()
     }
 
     /// Map line 1965's models facet — `None` means *unknown*.
     pub fn models(&self) -> Option<&EntitlementModels> {
-        self.models.as_ref()
+        self.account.models()
     }
 
     /// Map line 1971's observed-spend facet — `None` means *unknown*
     /// (nothing consulted the ledger, or no row it holds carried a token
     /// count), never "nothing spent".
     pub fn spend(&self) -> Option<&EntitlementSpendReading> {
-        self.spend.as_ref()
+        self.account.spend()
     }
 
     /// Map lines 1244/1245/1246/1250/1251/1254's subscription-headroom
@@ -1089,7 +839,8 @@ impl ResolvedEntitlement {
         let EntitlementBacking::Provider(provider) = &self.backing else {
             return None;
         };
-        self.credential
+        self.account
+            .credential
             .as_ref()
             .map(|reference| crate::routing::CredentialId::new(provider, reference.clone()).label())
     }
@@ -1116,16 +867,16 @@ impl ResolvedEntitlement {
                 self.populate_provider_facets(&provider, telemetry);
             }
             EntitlementBacking::NativeHarness(_) => {
-                self.models = Some(EntitlementModels::HarnessDecided);
+                self.account.models = Some(EntitlementModels::HarnessDecided);
             }
             EntitlementBacking::SubscriptionBroker { native_harness, .. } => {
                 // Broker telemetry is account-scoped by entitlement name. A
                 // native route can additionally let the harness decide its
                 // model when no broker catalogue has been observed yet.
-                let telemetry_key = self.name.clone();
+                let telemetry_key = self.account.name.clone();
                 self.populate_provider_facets(&telemetry_key, telemetry);
-                if self.models.is_none() && native_harness.is_some() {
-                    self.models = Some(EntitlementModels::HarnessDecided);
+                if self.account.models.is_none() && native_harness.is_some() {
+                    self.account.models = Some(EntitlementModels::HarnessDecided);
                 }
             }
             EntitlementBacking::Unstated => {}
@@ -1145,10 +896,12 @@ impl ResolvedEntitlement {
                 crate::provider::quota::CapacityState::for_resource(&kind),
                 observed_at_unix,
             );
-            self.remaining_capacity = state.remaining_capacity_score();
-            self.seconds_until_reset = state.seconds_until_reset(telemetry.now_unix);
-            if self.remaining_capacity.is_some() || self.seconds_until_reset.is_some() {
-                self.capacity_scope = Some(TelemetryScope::ProviderWide);
+            self.account.remaining_capacity = state.remaining_capacity_score();
+            self.account.seconds_until_reset = state.seconds_until_reset(telemetry.now_unix);
+            if self.account.remaining_capacity.is_some()
+                || self.account.seconds_until_reset.is_some()
+            {
+                self.account.capacity_scope = Some(TelemetryScope::ProviderWide);
             }
         }
 
@@ -1159,14 +912,14 @@ impl ResolvedEntitlement {
                 provider,
                 label.as_deref(),
             );
-            self.throttling = Some(EntitlementThrottleReading {
-                throttled: counted.throttled,
-                scope: if counted.account_narrowed {
+            self.account.throttling = Some(EntitlementThrottleReading::new(
+                counted.throttled,
+                if counted.account_narrowed {
                     TelemetryScope::PerAccount
                 } else {
                     TelemetryScope::ProviderWide
                 },
-            });
+            ));
         }
 
         if let Some(observations) = telemetry.observations {
@@ -1181,13 +934,15 @@ impl ResolvedEntitlement {
                 provider,
                 label.as_deref(),
             );
-            self.spend = counted.tokens.map(|tokens| EntitlementSpendReading {
-                tokens,
-                scope: if counted.account_narrowed {
-                    TelemetryScope::PerAccount
-                } else {
-                    TelemetryScope::ProviderWide
-                },
+            self.account.spend = counted.tokens.map(|tokens| {
+                EntitlementSpendReading::new(
+                    tokens,
+                    if counted.account_narrowed {
+                        TelemetryScope::PerAccount
+                    } else {
+                        TelemetryScope::ProviderWide
+                    },
+                )
             });
         }
 
@@ -1208,11 +963,11 @@ impl ResolvedEntitlement {
         // this runs, so disabling touches nothing but this one facet.
         if self.disable_headroom_estimate {
             self.headroom_estimate = None;
-        } else if self.capacity_scope != Some(TelemetryScope::PerAccount) {
+        } else if self.account.capacity_scope != Some(TelemetryScope::PerAccount) {
             let label = self.credential_label();
             let session_count = telemetry
                 .session_counts
-                .and_then(|counts| counts.get(self.name.as_str()))
+                .and_then(|counts| counts.get(self.account.name.as_str()))
                 .copied();
             // Map line 1247's reachable half: re-calibrating the estimator
             // when the quota regime changes is one floor at this, its only
@@ -1244,7 +999,7 @@ impl ResolvedEntitlement {
                 provider,
                 label.as_deref(),
                 telemetry.now_unix,
-                self.seconds_until_reset,
+                self.account.seconds_until_reset,
                 session_count,
             )
             .map(|mut estimate| {
@@ -1254,16 +1009,17 @@ impl ResolvedEntitlement {
         }
 
         if let Some(catalogues) = telemetry.model_catalogues {
-            self.models = catalogues
-                .load(provider)
-                .map(|catalogue| EntitlementModels::Declared {
-                    models: catalogue
-                        .models()
-                        .iter()
-                        .map(|model| model.id().to_owned())
-                        .collect(),
-                    scope: TelemetryScope::ProviderWide,
-                });
+            self.account.models =
+                catalogues
+                    .load(provider)
+                    .map(|catalogue| EntitlementModels::Declared {
+                        models: catalogue
+                            .models()
+                            .iter()
+                            .map(|model| model.id().to_owned())
+                            .collect(),
+                        scope: TelemetryScope::ProviderWide,
+                    });
         }
     }
 
@@ -1288,7 +1044,7 @@ impl ResolvedEntitlement {
     /// carry is derived against the user's own thresholds, which this
     /// method does not hold.
     pub fn to_routing(&self) -> crate::routing::Entitlement {
-        crate::routing::Entitlement::new(self.name.clone(), self.rules.clone())
+        crate::routing::Entitlement::new(self.account.name.clone(), self.rules.clone())
             .with_configured(self.layer != Layer::Default)
             // Map line 1970's work item 1, and the two facets that need no
             // threshold to derive, so they are carried **here** rather than
@@ -1298,10 +1054,10 @@ impl ResolvedEntitlement {
             // for the reason above — a band is derived against the user's
             // own thresholds, which this method does not hold.
             .with_source(self.backing.source())
-            .with_spend(self.spend.map(|reading| {
+            .with_spend(self.account.spend.map(|reading| {
                 crate::routing::EntitlementSpendFacet::new(
-                    reading.tokens,
-                    reading.scope == TelemetryScope::PerAccount,
+                    reading.tokens(),
+                    reading.scope() == TelemetryScope::PerAccount,
                 )
             }))
             // The headroom estimate needs no threshold either — unlike the
@@ -1334,99 +1090,15 @@ impl ResolvedEntitlement {
             EntitlementBacking::Unstated => "no backing stated".to_owned(),
         };
         let mut parts = Vec::new();
-        if let Some(kind) = self.kind {
+        if let Some(kind) = self.account.kind {
             parts.push(kind.describe().to_owned());
         }
-        if let Some(vendor) = self.vendor {
+        if let Some(vendor) = self.account.vendor {
             parts.push(format!("vendor `{}`", vendor.as_str()));
         }
         parts.push(backing);
         parts.join(", ")
     }
-}
-/// Whose reading a telemetry facet is — map line 1965's scope discipline:
-/// telemetry keyed by this account's own credential is one thing, telemetry
-/// the whole provider shares is another, and a display that showed the
-/// second as the first would be claiming per-account knowledge nothing
-/// measured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TelemetryScope {
-    /// Keyed by this entitlement's own credential — the reading is about
-    /// this account and no other.
-    PerAccount,
-    /// Keyed by the provider — every entitlement of that provider shares
-    /// this same reading.
-    ProviderWide,
-}
-impl TelemetryScope {
-    /// The display's scope word.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TelemetryScope::PerAccount => "this account",
-            TelemetryScope::ProviderWide => "provider-wide",
-        }
-    }
-}
-/// Map line 1965's recent-throttling facet: how many informative throttles
-/// the evidence window records against this entitlement, and whose count it
-/// is. A count of zero from a resolver that looked is "none observed" — a
-/// different fact from the `None` an unresolved entry carries, which is
-/// *unknown*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntitlementThrottleReading {
-    throttled: usize,
-    scope: TelemetryScope,
-}
-impl EntitlementThrottleReading {
-    /// Informative throttles in the window — this account's own when
-    /// [`Self::scope`] is [`TelemetryScope::PerAccount`], the provider's
-    /// total otherwise.
-    pub fn throttled(&self) -> usize {
-        self.throttled
-    }
-
-    pub fn scope(&self) -> TelemetryScope {
-        self.scope
-    }
-}
-/// Map line 1971's observed-spend facet: how many tokens the evidence
-/// window recorded against this entitlement, and whose reading that is.
-///
-/// **Tokens, not money** — see
-/// [`EntitlementConfig::spend_ceiling_tokens`] and
-/// [`crate::routing::evidence::CredentialSpend`] for why the only currency
-/// this ledger holds is the one a ceiling can be checked against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntitlementSpendReading {
-    tokens: u64,
-    scope: TelemetryScope,
-}
-impl EntitlementSpendReading {
-    /// Input plus output tokens in the window — this account's own when
-    /// [`Self::scope`] is [`TelemetryScope::PerAccount`], the provider's
-    /// total otherwise.
-    pub fn tokens(&self) -> u64 {
-        self.tokens
-    }
-
-    pub fn scope(&self) -> TelemetryScope {
-        self.scope
-    }
-}
-/// Map line 1965's models facet: which models this entitlement can serve,
-/// from what its backing actually declares — never an invented list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EntitlementModels {
-    /// The provider's own declared model list — the fetched
-    /// [`crate::provider::cache::ModelCatalogue`], which is per provider,
-    /// so the scope is stated on the value.
-    Declared {
-        models: Vec<String>,
-        scope: TelemetryScope,
-    },
-    /// A native sign-in: the harness picks its own models, and Glasshouse
-    /// does not know the plan's list — an answer, not an absence.
-    HarnessDecided,
 }
 /// The telemetry sources [`ResolvedEntitlement::with_telemetry`] reads —
 /// each one optional and each one already opened or loaded by the caller,
@@ -1702,5 +1374,79 @@ mod subscription_broker_tests {
             Some(EntitlementModels::Declared { models, .. })
                 if models == &["gpt-account-model".to_owned()]
         ));
+    }
+}
+
+#[cfg(test)]
+mod catalogue_projection_tests {
+    use super::*;
+
+    /// **The catalogue projection carries every serving fact and no policy.**
+    /// [`EntitlementConfig::account`] is hand-written, so a field silently
+    /// dropped from it would leave the gateway-side view of an account
+    /// missing a key that the Glasshouse-side table plainly states. Written
+    /// against a table that sets all six catalogue keys *and* four policy
+    /// ones, so the test fails both ways: on a lost serving fact, and on a
+    /// harness rule leaking across the boundary.
+    #[test]
+    fn account_carries_every_serving_fact_and_no_policy() {
+        let config: EntitlementConfig = toml::from_str(
+            "kind = \"claude\"\nvendor = \"claude\"\n\
+             credential = { env = \"CLAUDE_A_TOKEN\" }\n\
+             provider = \"alpha-probe\"\nspend_ceiling_tokens = 250000\n\
+             allow_harnesses = [\"codex\"]\ndeny_job_kinds = [\"reranking\"]\n\
+             headroom_override = \"low\"\ndisable_headroom_estimate = true\n",
+        )
+        .expect("a table stating both halves parses");
+
+        let account = config.account();
+        assert_eq!(account.kind(), Some(EntitlementKind::Claude));
+        assert_eq!(account.vendor(), Some(EntitlementVendor::Claude));
+        assert_eq!(
+            account.credential(),
+            Some(&EntitlementCredential::environment("CLAUDE_A_TOKEN"))
+        );
+        assert_eq!(account.provider(), Some("alpha-probe"));
+        assert_eq!(account.subscription_broker(), None);
+        assert_eq!(account.spend_ceiling_tokens(), Some(250_000));
+
+        // The written form is the gateway's own file: the six serving keys,
+        // and not one of the four policy keys the same table stated.
+        let written = toml::to_string(&account).expect("the catalogue entry serialises");
+        for serving in [
+            "kind",
+            "vendor",
+            "credential",
+            "provider",
+            "spend_ceiling_tokens",
+        ] {
+            assert!(
+                written.contains(serving),
+                "{serving} missing from:\n{written}"
+            );
+        }
+        for policy in [
+            "allow_harnesses",
+            "deny_job_kinds",
+            "headroom_override",
+            "disable_headroom_estimate",
+        ] {
+            assert!(
+                !written.contains(policy),
+                "{policy} is policy and must not cross into the catalogue:\n{written}"
+            );
+        }
+
+        // And the resolved catalogue value is that entry under its name,
+        // with every telemetry facet still unknown.
+        let resolved = config
+            .to_resolved("claude-a", Layer::User)
+            .expect("a provider-backed entry with its own credential resolves");
+        assert_eq!(resolved.account().name(), "claude-a");
+        assert_eq!(resolved.account().kind(), Some(EntitlementKind::Claude));
+        assert!(resolved.account().credential().is_some());
+        assert!(resolved.account().remaining_capacity().is_none());
+        assert!(resolved.account().models().is_none());
+        assert!(resolved.account().spend().is_none());
     }
 }

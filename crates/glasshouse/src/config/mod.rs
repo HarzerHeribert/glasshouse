@@ -17,11 +17,16 @@
 //! Phase 59 split this directory by concern: [`hooks`], [`profile`],
 //! [`provider`], [`entitlement`], [`routing_policy`], [`loading`] and
 //! [`effective`]; this file keeps only wiring, [`ConfigError`], re-exports.
+//! [`entitlement`] is split again along the gateway boundary:
+//! [`entitlement_catalogue`] holds what an account *is* and can serve —
+//! client-neutral, naming no harness, job kind or session — and
+//! [`entitlement`] holds the Glasshouse-side policy that consumes it.
 // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/mod.rs module doc.
 
 pub mod capability;
 pub mod effective;
 pub mod entitlement;
+pub mod entitlement_catalogue;
 pub mod firewall;
 pub mod hooks;
 pub mod loading;
@@ -49,6 +54,7 @@ pub use entitlement::{
     EntitlementLookupError, EntitlementModels, EntitlementTelemetry, EntitlementVendor,
     ResolvedEntitlement, SubscriptionBroker, TelemetryScope,
 };
+pub use entitlement_catalogue::{AccountEntry, ResolvedAccount};
 pub use hooks::{IntegrationConfig, IntegrationTable};
 pub use loading::{
     Layer, Layered, ProjectConfig, UserConfig, load_project_config,

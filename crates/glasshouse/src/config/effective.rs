@@ -1038,7 +1038,7 @@ impl<'a> EffectiveConfig<'a> {
             let sharers: Vec<String> = resolved[index..]
                 .iter()
                 .filter(|other| other.credential() == Some(reference))
-                .map(|other| other.name.clone())
+                .map(|other| other.account.name.clone())
                 .collect();
             if sharers.len() > 1 {
                 return Err(EntitlementLookupError::SharedCredential {
@@ -1064,26 +1064,24 @@ impl<'a> EffectiveConfig<'a> {
             if claimed {
                 continue;
             }
-            if let Some(taken) = resolved.iter().find(|entry| entry.name == harness.slug()) {
+            if let Some(taken) = resolved
+                .iter()
+                .find(|entry| entry.account.name == harness.slug())
+            {
                 return Err(EntitlementLookupError::NameReservedForHarness {
-                    name: taken.name.clone(),
+                    name: taken.account.name.clone(),
                     harness,
                 });
             }
             resolved.push(ResolvedEntitlement {
-                name: harness.slug().to_owned(),
-                kind: None,
-                vendor: None,
-                credential: None,
+                // A synthesised default states nothing about the account
+                // itself — no plan, no vendor, no credential of its own —
+                // so its catalogue half is an empty entry under the
+                // harness's slug.
+                account: ResolvedAccount::resolve(harness.slug(), &AccountEntry::default()),
                 backing: EntitlementBacking::NativeHarness(harness),
                 rules: crate::routing::EntitlementRules::UNRESTRICTED,
                 layer: Layer::Default,
-                remaining_capacity: None,
-                seconds_until_reset: None,
-                capacity_scope: None,
-                throttling: None,
-                models: None,
-                spend: None,
                 headroom_estimate: None,
                 headroom_override: None,
                 disable_headroom_estimate: false,
@@ -1139,7 +1137,11 @@ impl<'a> EffectiveConfig<'a> {
         Ok(self
             .configured_entitlements()?
             .into_iter()
-            .map(|entry| crate::provider::registry::ResourceKind::Entitlement { name: entry.name })
+            .map(
+                |entry| crate::provider::registry::ResourceKind::Entitlement {
+                    name: entry.account.name,
+                },
+            )
             .collect())
     }
 
@@ -1182,7 +1184,10 @@ impl<'a> EffectiveConfig<'a> {
             0 => Ok(None),
             1 => Ok(matching.pop()),
             _ => {
-                let names = matching.into_iter().map(|entry| entry.name).collect();
+                let names = matching
+                    .into_iter()
+                    .map(|entry| entry.account.name)
+                    .collect();
                 Err(match wanted {
                     EntitlementBacking::NativeHarness(harness) => {
                         EntitlementLookupError::AmbiguousNativeHarness { harness, names }
