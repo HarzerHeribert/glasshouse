@@ -41,6 +41,7 @@ pub mod pairing;
 pub mod pressure;
 pub mod request;
 pub mod session;
+pub mod wire;
 
 use crate::provider::quota::CapacityBand;
 use crate::routing::evidence::SubscriptionHeadroomEstimate;
