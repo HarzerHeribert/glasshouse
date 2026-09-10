@@ -44,13 +44,9 @@ struct Account {
 }
 
 pub(super) fn models(session: &Session<'_>) {
-    let root = session.project.root.to_string_lossy();
     let catalogue = session
-        .glasshouse
-        .run(
-            &["--scope", &root, "entitlements", "--json", "--refresh"],
-            None,
-        )
+        .gateway
+        .run(&["entitlements", "--json", "--refresh"], None)
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
     show(session, model_panel(catalogue, tier_models(session)));
 }
@@ -139,7 +135,7 @@ pub(super) fn assign_model(
 
 /// Connects a subscription account without leaving the session.
 ///
-/// Glasshouse owns the credential from end to end. What crosses this boundary
+/// The gateway owns the credential from end to end. What crosses this boundary
 /// is the authorization URL, a countdown and an outcome — never a token —
 /// which is exactly what lets the flow be rendered here instead of handing the
 /// terminal to a child process.
@@ -147,16 +143,18 @@ pub(super) fn assign_model(
 /// With no account named it lists the ones that could be connected, so
 /// `/login` is discoverable on its own and not only from the model picker.
 pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
-    let root = session.project.root.to_string_lossy();
     let catalogue = session
-        .glasshouse
-        .run(&["--scope", &root, "entitlements", "--json"], None)
+        .gateway
+        .run(&["entitlements", "--json"], None)
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
 
     let Some(catalogue) = catalogue else {
         show(
             session,
-            Panel::text("Connect an account", "Glasshouse is not reachable."),
+            Panel::text(
+                "Connect an account",
+                "The inference gateway is not reachable.",
+            ),
         );
         return;
     };
@@ -221,7 +219,7 @@ fn connectable_panel(catalogue: &Catalogue) -> Panel {
     Panel::rows("Connect an account", rows)
 }
 
-/// Runs the flow, showing each line Glasshouse reports as it arrives.
+/// Runs the flow, showing each line the gateway reports as it arrives.
 ///
 /// Streamed rather than awaited because the first line is the URL a person
 /// must open and the last arrives minutes later: a caller that waited for the
@@ -230,18 +228,18 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
-    let Some(binary) = session.glasshouse.executable() else {
+    let Some(binary) = session.gateway.executable() else {
         show(
             session,
-            Panel::text("Connect an account", "Glasshouse is not reachable."),
+            Panel::text(
+                "Connect an account",
+                "The inference gateway is not reachable.",
+            ),
         );
         return;
     };
-    let root = session.project.root.to_string_lossy().into_owned();
     let spawned = Command::new(binary)
         .args([
-            "--scope",
-            &root,
             "subscriptions",
             "connect",
             provider,
@@ -256,7 +254,10 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
     let Ok(mut child) = spawned else {
         show(
             session,
-            Panel::text("Connect an account", "Glasshouse could not be started."),
+            Panel::text(
+                "Connect an account",
+                "The inference gateway could not be started.",
+            ),
         );
         return;
     };
@@ -805,6 +806,9 @@ mod tests {
         let glasshouse = Glasshouse::Command {
             glasshouse: root.join("absent"),
         };
+        let gateway = crate::gateway::Gateway::Command {
+            gateway: root.join("absent-gateway"),
+        };
         let id = SessionId::new("permission-test");
         let memory = LocalMemory::new(&root);
         let interrupt = Interrupter::new(id.clone());
@@ -823,6 +827,7 @@ mod tests {
             interrupt: &interrupt,
             profile: &profile,
             glasshouse: &glasshouse,
+            gateway: &gateway,
             id: &id,
             memory: &memory,
             rollbacks: RefCell::new(Vec::new()),
@@ -856,6 +861,9 @@ mod tests {
         let glasshouse = Glasshouse::Command {
             glasshouse: root.join("absent"),
         };
+        let gateway = crate::gateway::Gateway::Command {
+            gateway: root.join("absent-gateway"),
+        };
         let id = SessionId::new("tier-test");
         let memory = LocalMemory::new(root);
         let interrupt = Interrupter::new(id.clone());
@@ -874,6 +882,7 @@ mod tests {
             interrupt: &interrupt,
             profile: &profile,
             glasshouse: &glasshouse,
+            gateway: &gateway,
             id: &id,
             memory: &memory,
             rollbacks: RefCell::new(Vec::new()),

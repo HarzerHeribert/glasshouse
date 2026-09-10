@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod contract;
 pub mod events;
+pub mod gateway;
 pub mod glasshouse;
 pub mod helper_context;
 pub mod helpers;

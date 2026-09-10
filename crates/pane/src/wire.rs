@@ -1733,9 +1733,11 @@ mod effort_tests {
             .unwrap();
             assert_eq!(claude["output_config"]["effort"], effort.name());
 
-            let translated: serde_json::Value = serde_json::from_slice(
-                &request_body_configured(&conversation, "deepseek-v4-flash", effort),
-            )
+            let translated: serde_json::Value = serde_json::from_slice(&request_body_configured(
+                &conversation,
+                "deepseek-v4-flash",
+                effort,
+            ))
             .unwrap();
             assert_eq!(translated["output_config"]["effort"], effort.name());
             budgets.push(translated["thinking"]["budget_tokens"].as_u64().unwrap());
@@ -1749,6 +1751,9 @@ mod effort_tests {
             budgets.len(),
             "two levels collapsed onto one budget: {budgets:?}"
         );
-        assert_eq!(ascending, budgets, "a higher level must not buy less: {budgets:?}");
+        assert_eq!(
+            ascending, budgets,
+            "a higher level must not buy less: {budgets:?}"
+        );
     }
 }

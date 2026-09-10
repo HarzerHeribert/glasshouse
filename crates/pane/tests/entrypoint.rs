@@ -31,11 +31,17 @@ impl Drop for Scratch {
 fn pane() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
     command
-        .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
+        // **Set, so these tests stay about the entry point.** A session with
+        // no base URL starts an `inference-gateway` and refuses when it
+        // cannot (`gateway::start_or_attach`); a set URL is the attach half,
+        // and needs no binary. Port 1 is never dialled -- no input here is a
+        // turn -- and could only refuse locally if it were.
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
         // Lifecycle reporting degrades when Glasshouse is absent. Keeping it
-        // absent makes these tests independent of the developer's install.
+        // absent makes these tests independent of the developer's install --
+        // and proves a session needs no `glasshouse` on `PATH` at all.
         .env("PATH", "");
     command
 }

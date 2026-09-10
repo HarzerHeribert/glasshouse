@@ -24,6 +24,7 @@ use crate::config::PaneConfig;
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
 use crate::events::batch::Batch;
 use crate::events::window::{Window, WindowConfig};
+use crate::gateway::{self, Gateway};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
 use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
@@ -447,6 +448,16 @@ pub struct SessionArgs {
     /// its own fake script so no test performs a real `PATH` lookup.
     #[arg(long)]
     pub glasshouse: Option<PathBuf>,
+
+    /// The `inference-gateway` executable this session's provider traffic and
+    /// its entitlement, subscription and routing-cost controls go through.
+    ///
+    /// Bare `"inference-gateway"`, absent this flag, resolves through `PATH`.
+    /// **It is only spawned when `ANTHROPIC_BASE_URL` is unset**: a set URL
+    /// means a gateway is already serving and pane attaches to it
+    /// (`gateway::start_or_attach`).
+    #[arg(long)]
+    pub gateway: Option<PathBuf>,
 
     /// Grant the whole project root and every command line, ignoring
     /// `.claude/settings.json`.
@@ -932,6 +943,33 @@ fn run(args: SessionArgs) -> Result<(), String> {
             glasshouse: PathBuf::from("glasshouse"),
         },
     };
+    let gateway = match &args.gateway {
+        Some(path) => Gateway::Command {
+            gateway: path.clone(),
+        },
+        None => Gateway::Command {
+            gateway: PathBuf::from("inference-gateway"),
+        },
+    };
+    // Held for the whole session: dropping it kills the gateway pane started.
+    // `None` means pane attached to one already serving and owns no process.
+    // Before the interrupt thread and the live UI on purpose -- it writes the
+    // process environment, which is only sound while single-threaded.
+    let _serving = match gateway::start_or_attach(&gateway) {
+        Ok(serving) => serving,
+        // Not installed, and nobody asked for it by path: the session talks
+        // to the provider directly, exactly as pane did before the gateway
+        // existed, and says so once where the user can see it. A named
+        // `--gateway` that fails stays the refusal it is.
+        Err(gateway::ServeError::NotInstalled(_)) if args.gateway.is_none() => {
+            eprintln!(
+                "pane: no `inference-gateway` on PATH -- talking to the provider directly \
+                 (install it, or pass --gateway <path>)"
+            );
+            None
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
     let resuming = rollout_path.exists();
     let (conversation, provider_checkpoint, provider_start) = if resuming {
@@ -1046,6 +1084,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         config: &config,
         profile: &profile,
         glasshouse: &glasshouse,
+        gateway: &gateway,
         id: &session_id,
         memory: &memory,
         interrupt: &interrupt,
@@ -1107,7 +1146,12 @@ struct Session<'a> {
     /// and asks it to forget the interrupt a cancelled call has delivered.
     interrupt: &'a Interrupter,
     profile: &'a Profile,
+    /// Memory and hooks only, and optional: a session runs with no
+    /// `glasshouse` binary anywhere.
     glasshouse: &'a Glasshouse,
+    /// Entitlements, subscriptions and routing cost -- the controls that
+    /// moved off Glasshouse and onto the standalone gateway.
+    gateway: &'a Gateway,
     id: &'a SessionId,
     memory: &'a LocalMemory,
     /// Exact before/after snapshots for cells that changed project files.
@@ -1590,7 +1634,7 @@ fn run_task_inner(
         }
         let (turn, elapsed_ms) = timed_send_task_turn(&request, session, task)
             .map_err(|e| format!("request failed: {e}"))?;
-        let served = glasshouse::served_by(session.glasshouse, since);
+        let served = gateway::served_by(session.gateway, since);
         record_request(
             &mut transcript.notebook,
             RequestMeasurement::from_response(
@@ -1661,7 +1705,7 @@ fn run_task_inner(
         let (turn, elapsed_ms) =
             send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
         let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
-        let served = glasshouse::served_by(session.glasshouse, since);
+        let served = gateway::served_by(session.gateway, since);
         record_request(
             &mut transcript.notebook,
             RequestMeasurement::from_response(

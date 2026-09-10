@@ -1,8 +1,12 @@
-//! The three seams between `pane` and Glasshouse -- memory and checkpoints
-//! (map line 2446), the harness hook protocol (2447), and which entitlement
-//! served a request and what it cost (2451) -- and the one mechanism behind
-//! all of them: find the `glasshouse` binary, run it, parse what it says, and
-//! fall back to a working local default when it is not there.
+//! The two seams between `pane` and Glasshouse -- memory and checkpoints
+//! (map line 2446) and the harness hook protocol (2447) -- and the one
+//! mechanism behind both: find the `glasshouse` binary, run it, parse what it
+//! says, and fall back to a working local default when it is not there.
+//!
+//! **Glasshouse is optional here and nothing in a session depends on it.**
+//! The entitlement, subscription and routing-cost controls moved to
+//! [`crate::gateway`], which reaches the standalone `inference-gateway`
+//! binary instead; what is left is memory and hooks, and both fall back.
 //!
 //! **"Reachable" is decided in exactly one place**, [`Glasshouse::run`]: the
 //! executable was found, it was spawned, and it exited 0. Every seam below
@@ -15,24 +19,16 @@
 //! harness crosses (`crates/pane/src/lib.rs`'s own doc comment). Map line
 //! 2440 is why: `pane` gains no compile-time dependency on the `glasshouse`
 //! crate.
-//!
-//! Two gaps are established at the packet level, not discovered here, and
-//! are recorded rather than worked around. The gateway adds no
-//! `x-glasshouse-*` response header, so nothing identifying a request
-//! reaches `pane` on the HTTP response -- [`served_by`] builds only the
-//! ledger half of map line 2451. And the `routing-cost` readout carries no
-//! `cost_micro_usd`, so cost is reported in tokens only.
 
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::contract::{ServedBy, SessionId};
+use crate::contract::SessionId;
 
 /// How this module reaches Glasshouse. `None` means every seam takes its
 /// local-default path unconditionally -- no command is ever attempted.
@@ -296,78 +292,4 @@ pub fn emit_tool_result(glasshouse: &Glasshouse, session: &SessionId, payload: &
         &["context-firewall", "hook", "--session", session.as_str()],
         Some(payload.as_bytes()),
     );
-}
-
-// ---------------------------------------------------------------------
-// 2451 -- which entitlement served each request, and what it cost
-// ---------------------------------------------------------------------
-
-/// One row of `glasshouse routing-cost --json`, the same producer and wire
-/// shape `ruler::meter::Meter` already reads. Only the columns this module
-/// needs are declared; every other key is ignored by `serde_json` without
-/// any attribute here.
-#[derive(Debug, Deserialize)]
-struct ObservationRow {
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    route: Option<String>,
-    #[serde(default)]
-    quota_context: Option<String>,
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-    #[serde(default)]
-    cached_input_tokens: Option<u64>,
-}
-
-/// Fills a [`ServedBy`] from `glasshouse routing-cost --json --since
-/// <since>`. **The row used is the last model observation printed** (excluding local
-/// context-firewall bookkeeping): rows arrive ascending
-/// by `observed_at`, and the last row at or after `since` is the one closest
-/// to the request this call is answering for.
-///
-/// Absent is not zero here either: no meter, a launch failure, a non-zero
-/// exit, or an empty window all produce [`ServedBy::default`], whose
-/// `is_known` is `false` -- never a `ServedBy` with token fields defaulted
-/// to zero.
-pub fn served_by(glasshouse: &Glasshouse, since: SystemTime) -> ServedBy {
-    let since_secs = unix_secs(since).to_string();
-    let Some(stdout) = glasshouse.run(&["routing-cost", "--json", "--since", &since_secs], None)
-    else {
-        return ServedBy::default();
-    };
-
-    let text = String::from_utf8_lossy(&stdout);
-    let row = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<ObservationRow>(line.trim()).ok())
-        // Tool/firewall bookkeeping is not a model request or an entitlement.
-        .rfind(|row| {
-            !(row.provider.as_deref() == Some("glasshouse")
-                && row.model.as_deref() == Some("context-firewall"))
-        });
-
-    match row {
-        Some(row) => ServedBy {
-            provider: row.provider,
-            model: row.model,
-            route: row.route,
-            quota_context: row.quota_context,
-            input_tokens: row.input_tokens,
-            output_tokens: row.output_tokens,
-            cached_input_tokens: row.cached_input_tokens,
-        },
-        None => ServedBy::default(),
-    }
-}
-
-fn unix_secs(t: SystemTime) -> i64 {
-    match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(e) => -(e.duration().as_secs() as i64),
-    }
 }

@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use pane::contract::SessionId;
+use pane::gateway::{Gateway, served_by};
 use pane::glasshouse::{
     Glasshouse, LifecycleEvent, LocalMemory, checkpoint, emit_lifecycle, emit_tool_result,
-    search_memory, served_by,
+    search_memory,
 };
 
 fn scratch_dir(label: &str) -> PathBuf {
@@ -134,9 +135,9 @@ fn a_dropped_hook_does_not_stop_the_turn() {
 
 #[test]
 fn an_unmetered_request_is_unknown_not_free() {
-    let glasshouse = Glasshouse::None;
+    let gateway = Gateway::None;
 
-    let served = served_by(&glasshouse, UNIX_EPOCH);
+    let served = served_by(&gateway, UNIX_EPOCH);
 
     assert!(!served.is_known());
     assert_eq!(served.provider, None);
@@ -153,9 +154,9 @@ fn the_entitlement_comes_from_quota_context() {
         &dir,
         r#"{"observed_at":100,"quota_context":"team-alpha","input_tokens":5,"output_tokens":2}"#,
     );
-    let glasshouse = Glasshouse::Command { glasshouse: script };
+    let gateway = Gateway::Command { gateway: script };
 
-    let served = served_by(&glasshouse, UNIX_EPOCH);
+    let served = served_by(&gateway, UNIX_EPOCH);
 
     assert_eq!(served.quota_context.as_deref(), Some("team-alpha"));
     assert!(served.is_known());
@@ -168,7 +169,7 @@ fn local_firewall_bookkeeping_does_not_become_the_serving_model() {
         &dir,
         "{\"provider\":\"real\",\"model\":\"deepseek-v4-flash\",\"quota_context\":\"account\",\"input_tokens\":5}\n{\"provider\":\"glasshouse\",\"model\":\"context-firewall\",\"quota_context\":\"bash\",\"route\":\"unconfirmed-exit\"}",
     );
-    let served = served_by(&Glasshouse::Command { glasshouse: script }, UNIX_EPOCH);
+    let served = served_by(&Gateway::Command { gateway: script }, UNIX_EPOCH);
     assert_eq!(served.model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(served.quota_context.as_deref(), Some("account"));
 }
