@@ -1,5 +1,9 @@
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
+// Gated like its only callers: every test that builds a runtime here is
+// macOS/Linux, and on Windows an unused import is an error under
+// `[workspace.lints.rust]`'s denied warnings.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use pane::runtime::isolate::Runtime;
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::{CancellationToken, ToolContext};

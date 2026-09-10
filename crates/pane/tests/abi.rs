@@ -12,14 +12,26 @@
 //! spawn rather than running unconfined, so a "the tool ran" assertion would
 //! fail there for a reason that has nothing to do with the ABI.
 
-use pane::abi::dialect::{self, Dialect, Target};
-use pane::abi::{EvidenceClass, Interface, Presentation, Provenance, Router, encode_result, lower};
-use pane::contract::SessionId;
-use pane::glasshouse::Glasshouse;
-use pane::runtime::isolate::Runtime;
-use pane::runtime::outcome::{CellOutcome, CellRecord};
-use pane::sandbox::profile::Profile;
+use pane::abi::dialect::{self, Target};
+use pane::abi::{EvidenceClass, Interface, Presentation, Provenance, Router, encode_result};
 use serde_json::json;
+
+// Gated like their only callers. The tests that build a runtime and run a
+// capability are macOS/Linux, because `tools::invoke` refuses to spawn on
+// Windows rather than running unconfined; on Windows these names would be
+// unused, which is an error under denied warnings.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::abi::{Dialect, lower};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::contract::SessionId;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::glasshouse::Glasshouse;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::runtime::isolate::Runtime;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::runtime::outcome::{CellOutcome, CellRecord};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::sandbox::profile::Profile;
 
 /// Criterion 1 and 2: hybrid shows both entry points, and the ablation modes
 /// change visibility without choosing an architecture.
@@ -141,6 +153,7 @@ fn the_router_produces_exact_and_bounded_from_mechanical_facts_alone() {
     assert_eq!(bounded.provenance.exact_bytes, Some(40 * 1024));
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn record_of(outcome: &CellOutcome) -> &CellRecord {
     match outcome {
         CellOutcome::Yielded { turn }
