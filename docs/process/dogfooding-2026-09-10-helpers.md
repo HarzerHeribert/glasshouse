@@ -231,3 +231,81 @@ Desktop control later began returning `cgWindowNotFound` for cmux, including
 after a controller reset. The primary requested the second window be brought
 forward and continued independent work. Installation and a real scripted CLI
 trial can proceed; a new live desktop observation remains pending availability.
+
+
+### Installed rerun: autonomous contract completion
+
+Installed `c010eea` (`v0.1.0-pre.1-127-gc010eea`) completed the fresh v2
+expense repair in a real PTY through `subscription-openai-pane`, without
+`--yolo` or an operator correction. The frozen task ran from 23:50:22 to
+23:56:24 UTC on September 9 (361.704 seconds including launcher lifecycle),
+using 13 cells. All five original tests remain intact; four meaningful cases
+were added. The primary reran all nine tests and the separately frozen 16-case
+black-box oracle: all pass. README, permission/helper configuration and launch
+wrapper are unchanged. The actual September EUR fixture returns 1,029 cents,
+three transactions, food 1,000 and `travel, train` 29.
+
+The live ledger now separates requested identities: Sol has 13 harness-turn
+requests, 118,751 input / 8,773 output tokens, with 46,336 cached input reported;
+Luna has six helper requests, 20,329 input / 2,492 output, with 5,120 cached
+input reported. All monetary cost fields are unavailable. These are provider
+reports and requested model labels, not verified backend identities or an
+invoice. They establish that helper attribution works; they do not establish
+a two-thirds delegation ratio or a cost advantage from an unmatched trial.
+
+Observed behavior: no automatic preflight preceded the task. Explicit find,
+reduce (on a real syntax failure), and check executed; the checker received the
+original contract and actual implementation. Five independent source contexts
+were batched in one cell. A later cell applied the related implementation and
+regression edits and ran the reusable verifier. After a self-corrected missing
+comma in a new test, later cells called the same `verifyActual` identifier for
+fresh commands, rather than regenerating its body.
+
+There were recoverable harness/model inefficiencies. The 96-character nested
+console string cap hid the README command and most helper evidence, causing
+several recovery cells and an unadmitted `python3` guess before the model printed
+the original contract directly. A block-local reducer binding was incorrectly
+referenced in a later cell and recovered; verification was repeated after no
+new edits. An unadmitted final Git status command was refused and honestly
+reported. The model still completed without operator steering. The nested
+console evidence defect is being fixed in a separate bounded Sol packet.
+
+Artifacts: `.agent-runtime/input-fixes/helpers-v2-{run,ledger}.json`,
+`helpers-v2-oracle-final.log`, and the demo's `.pane/installed-repair.jsonl`.
+This is installed functional PTY evidence. The desktop controller still returns
+`cgWindowNotFound`, so it does not prove new cmux mouse/focus behavior.
+
+
+Independent Sol review accepts the completed v2 artifact and confirms the
+original tests were preserved byte-for-byte. It also bounds the review claim:
+`helper.check` received the behavioral contract but its README slice omitted
+the configuration-preservation line and documented command. Independent Git
+inspection and actual command records supply that evidence. The orientation
+helper used four provider turns and nine inspections for this small repository;
+this run does not establish that every delegation was economically worthwhile.
+
+
+### Follow-up formatter and telemetry audit
+
+A Sol high editor and independent Sol reviewer replace the nested 96-character
+cap with the existing shared 24,576-character argument inspection budget. The
+actual structured excerpt shape preserves all README text/metadata alongside
+helper and command output. Traversal stops with an unvisited-member count;
+a review-found exhausted-key recursion path was fixed before acceptance. The
+final rendered cap marks its omission and true suffix instead of silently
+cutting a prefix. All 13 bounded-excerpt tests and the aggregate console-cap
+regression pass; independent review accepts. The complete integrated Pane suite
+passes all 894 tests across 54 targets, with one ignored measurement. Formatting
+and diff checks pass; focused Clippy passes with warnings denied. An inherited limit remains: V8 enumerates
+ordinary-object property names before applying the display key limit, so this
+is not a claim that every enumeration allocation is bounded.
+
+A separate Sol read-only audit reconciles usage: 173,860 is the parent Sol
+UI meter, including its separately reported cached input; 27,941 belongs to
+Luna helpers. The full run is 201,801 reported tokens across 19 requests. The
+Anthropic-compatible route normalizes input as excluding cached input, so this
+addition does not double-count cache. The UI currently excludes helper spend:
+one-shot helper usage is discarded and multi-turn helper totals are not
+propagated into `TaskSpend`. This is an existing open Phase 64 telemetry item,
+now backed by a concrete trial; it is not fixed in the console patch. No dollar
+cost or billing savings can be established from these fields.

@@ -318,3 +318,105 @@ fn console_truncation_is_visible_and_keeps_the_true_unicode_tail() {
     );
     assert!(preview::estimate_tokens(&turn.stdout_tail) <= STDOUT_TOKEN_CAP);
 }
+
+#[test]
+fn structured_readme_helper_and_command_evidence_fit_without_leaf_truncation() {
+    let fixture = Fixture::new();
+    let readme = (1..=32)
+        .map(|line| {
+            format!(
+                "README-{line:02} | installation and verification evidence {}",
+                "r".repeat(28)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!((1_500..4_000).contains(&readme.len()), "{}", readme.len());
+    std::fs::write(fixture.root.join("README.md"), &readme).unwrap();
+    let helper = format!("HELPER-BEGIN|{}|HELPER-END", "h".repeat(700));
+    let stdout = format!("STDOUT-BEGIN|{}|STDOUT-END", "s".repeat(700));
+    let mut runtime = fixture.runtime();
+
+    let outcome = runtime.run_cell(&format!(
+        "const readme = await read({{path: 'README.md'}});\n\
+         console.log({{readme: readme.excerpt(), helper: {{answer: {helper}}}, command: {{stdout: {stdout}, stderr: ''}}}});\n",
+        helper = serde_json::to_string(&helper).unwrap(),
+        stdout = serde_json::to_string(&stdout).unwrap(),
+    ));
+    let shown = &outcome.turn().stdout_tail;
+    let value = json_from(&outcome);
+    let numbered = readme
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>2} | {line}\n", index + 1))
+        .collect::<String>();
+    let expected_excerpt = format!("[lines 1-32 of 32]\n{numbered}[end of file]\n");
+    assert_eq!(value["readme"]["text"], expected_excerpt, "{shown}");
+    assert_eq!(value["readme"]["start"], 1);
+    assert_eq!(value["readme"]["end"], 32);
+    assert_eq!(value["readme"]["lineCount"], 32);
+    assert_eq!(value["readme"]["next"], Value::Null);
+    assert_eq!(value["readme"]["truncatedLines"], 0);
+    assert_eq!(value["helper"]["answer"], helper, "{shown}");
+    assert_eq!(value["command"]["stdout"], stdout, "{shown}");
+    assert_eq!(value["command"]["stderr"], "", "{shown}");
+    assert!(!shown.contains("omitted; showing true suffix"), "{shown}");
+    assert_eq!(outcome.turn().stdout_dropped_tokens, 0);
+    assert!(preview::estimate_tokens(shown) <= STDOUT_TOKEN_CAP);
+}
+
+#[test]
+fn hostile_nested_console_values_are_bounded_with_a_true_omission_marker() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.runtime();
+    let outcome = runtime.run_cell(
+        "console.log({payload: 'HOSTILE-BEGIN|' + '🙂'.repeat(40000) + '|HOSTILE-TRUE-END', after: 'unvisited'});\n",
+    );
+    let shown = &outcome.turn().stdout_tail;
+
+    assert!(shown.contains("omitted; showing true suffix"), "{shown}");
+    assert!(shown.contains("HOSTILE-TRUE-END"), "{shown}");
+    assert!(!shown.contains("HOSTILE-BEGIN"), "{shown}");
+    assert!(
+        shown.contains("1 more"),
+        "unvisited member was not named: {shown}"
+    );
+    assert!(shown.chars().count() <= 24 * 1024 + 1, "{}", shown.len());
+    assert!(preview::estimate_tokens(shown) <= STDOUT_TOKEN_CAP);
+}
+
+#[test]
+fn structured_console_inspection_does_not_invoke_getters_or_proxy_traps() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.runtime();
+    let outcome = runtime.run_cell(
+        "(() => {\n\
+           let consoleHits = 0;\n\
+           const hostileProxy = new Proxy({}, {ownKeys() { consoleHits++; throw new Error('trap'); }});\n\
+           const evidence = {get secret() { consoleHits++; throw new Error('getter'); }, hostileProxy};\n\
+           console.log(evidence);\n\
+           console.log('console-hits=' + consoleHits);\n\
+         })();\n",
+    );
+    let shown = &outcome.turn().stdout_tail;
+
+    assert!(shown.contains("[Getter]"), "{shown}");
+    assert!(shown.contains("[Proxy]"), "{shown}");
+    assert!(shown.contains("console-hits=0"), "{shown}");
+}
+
+#[test]
+fn a_key_that_exhausts_the_budget_does_not_descend_into_its_object_value() {
+    let fixture = Fixture::new();
+    let mut runtime = fixture.runtime();
+    let outcome = runtime.run_cell(
+        "const nested = {shouldNeverBeInspected: 'value'};\n\
+         const evidence = {[('k'.repeat(30000))]: nested};\n\
+         console.log(evidence);\n",
+    );
+    let shown = &outcome.turn().stdout_tail;
+
+    assert!(shown.contains("1 more"), "{shown}");
+    assert!(!shown.contains("shouldNeverBeInspected"), "{shown}");
+    assert!(preview::estimate_tokens(shown) <= STDOUT_TOKEN_CAP);
+}

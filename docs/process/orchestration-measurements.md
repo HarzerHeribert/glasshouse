@@ -5647,3 +5647,31 @@ compile stopped on a missing upstream V8 artifact before Pane compilation; no
 new Windows proof is claimed. A broad staging command was refused by the repo
 guard; the primary then named every reviewed file explicitly, without bypassing
 the guard or requesting user approval.
+
+
+**Installed rerun:** `c010eea` completed the fresh expense repair autonomously
+in 13 cells / 361.7 seconds, with nine self-tests and all 16 frozen independent
+cases passing. Model-request attribution separates Sol (13 task requests,
+118,751 input / 8,773 output, 46,336 cached input reported) from Luna (six helper
+requests, 20,329 input / 2,492 output, 5,120 cached input reported). No monetary
+usage is available. Setup and prompt differ from the old trial, so neither
+relative speed nor cost savings are established. A follow-up Sol high console
+formatter editor and Sol medium independent result reviewer run concurrently
+with primary live evaluation; this addresses a measured 96-character nested
+string cap that hid requirements, not a speculative prompt expansion.
+
+
+**Accounting audit (Sol high, read-only):** the live UI's 173,860 tokens are
+parent Sol usage including cache; Luna helpers add 27,941, for 201,801 reported
+tokens overall. Cached input is disjoint on this normalized route. The task
+meter currently drops helper usage (existing open Phase 64 item), so UI-only
+comparison would undercount delegated work. Helper share is about 13.8% of
+these reported tokens, not the user's aspirational two-thirds; monetary cost
+is unavailable. This is evidence for measuring model/cache-weighted cost per
+correct completed task, not minimizing or concealing total work.
+
+**Console follow-up (Sol high editor, Sol medium reviewer):** the observed
+96-character nested cap was repaired with a shared argument budget. The reviewer
+caught post-key exhaustion recursing into a child; the editor corrected it and
+all 13 focused tests pass independently. Primary integration and installed
+replay follow. No capability boxes close in this bounded repair.

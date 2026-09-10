@@ -94,9 +94,16 @@ firewall never report two different sizes for the same bytes:
 
 A program's `console.log` output has a shared per-cell budget of 8,192
 estimated tokens (32,768 characters). Each top-level string is bounded to
-24,576 Unicode scalar values. Truncation retains a true tail and states what
-was omitted. Source inspection has a separate bounded `File.excerpt` cursor,
+24,576 Unicode scalar values. Nested strings share that argument inspection
+budget rather than a separate tiny leaf cap, so ordinary structured README,
+helper and command evidence remains intact. Inspection stops when its shared
+budget is exhausted and identifies unvisited members. Escaped rendered output
+is bounded again with an explicit omission marker. Truncation retains a true
+tail of the string or rendered argument and states what was omitted. Source inspection has a separate bounded `File.excerpt` cursor,
 so larger source files remain inspectable without re-reading the file.
+These output limits are not a total allocation guarantee: the existing V8
+own-property enumeration can enumerate a wide object before the key display
+limit applies. Getters and proxy traps are not invoked by console inspection.
 
 The console budget must accommodate useful source inspection, not merely
 minimize one response. The earlier 512-token tail fragmented ordinary source
