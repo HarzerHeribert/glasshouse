@@ -1,7 +1,8 @@
 # Deterministic helper preparation and usability repairs
 
-Status: implementation in progress. Primary integration, installation and real
-subscription evidence are still required. No capability boxes are closed.
+Status: installed and verified on macOS. Both binaries are built from
+`6d0cbe3` and installed as `v0.1.0-pre.1-131-g6d0cbe3`. The real repair and
+follow-up review pass independent acceptance. No capability boxes are closed.
 
 ## User objective and target state
 
@@ -255,3 +256,52 @@ scoped gate includes formatting, docs, size, scripts and Glasshouse Rust1.88
 MSRV. Its nested Glasshouse Windows-GNU compile check passed; no Pane Windows
 compile or Windows execution is claimed. The earlier full Glasshouse workspace
 remains the unmodified-host behavior evidence. No push performed.
+
+## Final installed review: v4
+
+Both installed binary hashes match the 6d0cbe3 manifest. The primary launched
+Glasshouse in `/Users/eneas/projects/glasshouse-helper-review-v4` and selected
+subscription-openai-pane through the visible picker. The completed session
+`f0309c0ddd27` remains in cmux workspace:234 / surface:255, titled Pane checker
+replay, in the dedicated test window. The original user window was not used.
+
+This real Sol/Luna review completes in four cells without thrown cells or
+operator corrections. It executes the named test once, observes explicit reuse
+on the second call and again during host checker preparation, and runs the
+actual September EUR CLI successfully. Luna assesses current source and the
+README and returns holds in one model request. Sol then interprets that result
+in a later turn, corrects the helper's claim that reuse scope was absent and
+clarifies that extra declared CSV columns are allowed. It discloses the missing
+historical baseline instead of claiming certainty about pre-review preservation.
+No source, test or configuration files were edited. All 16 frozen independent cases pass again.
+
+The live model deliberately yielded after the checker; this proves later parent
+interpretation, not that the new guard forcibly fired in this particular run.
+The forced same-cell return path is established by the scripted direct-agent and
+actual session-path regression tests, including uncertain checker outcomes.
+Both evidence paths are retained without conflating them.
+
+Final screen text is `helpers-v4-final-screen.txt`; the oracle log is
+`helpers-v4-oracle-final.log`. Desktop screenshot reconnection later encountered
+`cgWindowNotFound` again; cmux API observation remained usable. The prior actual
+click/fullscreen and standalone input probes retain their separate evidence.
+
+Remaining limitations are recorded rather than inferred away: broad parent
+glob can still include generated paths; the coding trial recovered from two
+model-authored JavaScript errors and one denied command; cache classes and
+monetary cost are not fully reported; Shift-drag/clipboard and unrestricted
+native-terminal UI behavior remain unverified. Web crawling remains deferred.
+This batch does not establish parity with Codex/Claude Code or close a map box.
+
+Independent Sol review accepts the final replay and accounting. All 13 baseline
+file hashes match. The single 903-byte transported prompt matches its fixture
+except the removed trailing LF; four other user-role rows are runtime feedback.
+Elapsed time is 154.297 s in the rollout (UI 154.3 s, provider span 154 s). Known
+usage is 38,280 parent + 11,741 Luna = 50,021 across five requests. Input/output
+coverage is 5/5; cache coverage is 2/5 and all price fields are absent. UI 50.0k
+total/38.3k parent/11.7k helper matches those known sums. Report:
+`helpers-v4-independent-review.md`; raw summary: `helpers-v4-summary.json`.
+
+The implementation, release installation, real task acceptance and independent
+audit are complete for this bounded batch. All worker reports were consumed
+and acknowledged. Capability boxes remain unchanged.

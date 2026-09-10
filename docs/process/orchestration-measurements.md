@@ -5734,3 +5734,20 @@ detected through disjoint-file status, corrected by extracting only the seed
 worker's patch into its own worktree, and left main untouched. No worker was
 discarded or silently reset. These are process correction counts, not hidden
 operator corrections to the native coding task. Final integration/replay pending.
+
+**Installed completion correction:** 6d0cbe3 passes the full 925-execution Pane
+run (one ignored), scoped local gate and all-target Clippy, and is installed for
+both binaries. Real v4 review uses four cells with no error or operator correction;
+Sol interprets Luna in a later turn and corrects two overbroad helper statements
+before reporting readiness with explicit history limits. All 16 independent
+cases remain green and no fixture files change. The live model yielded, so
+forced-return deferral evidence comes from its two scripted regression paths,
+not an invented claim about this live trial.
+
+**Final v4 audit accepted:** 154.297 s, four Sol requests + one Luna request;
+38,280 parent + 11,741 helper = 50,021 known tokens. Input/output 5/5, cache 2/5
+coverage; no prices. All 13 baseline hashes unchanged. Fresh/reused/automatic
+checker observations reconcile, as do UI and ledger. The parent corrects helper
+overstatement before its verdict. This answers the batch's open question with
+observed evidence: cheap helper output needs a parent interpretation boundary;
+low token count and a passing local test alone are not completion assurance.
