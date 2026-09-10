@@ -18,8 +18,7 @@ use serde_json::{Map, Value, json};
 
 use super::canonical::{
     Block, BlockStart, Delta, EffortLevel, EffortRequest, ImageSource, Message, Request, Response,
-    Role,
-    StopReason, StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
+    Role, StopReason, StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
