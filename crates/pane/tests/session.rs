@@ -3839,17 +3839,21 @@ fn slash_model_changes_the_slug_the_next_request_carries() {
 fn model_picker_names_the_active_slug_without_calling_the_provider() {
     let root = scratch_dir("model-report-root");
     let rollout = root.join("rollout.jsonl");
-    let record = root.join("gateway-argv.txt");
+    let record = root.join("glasshouse-argv.txt");
     let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
-    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
+    // Handed a loopback base URL, the session is hosted: its catalogue is
+    // Glasshouse's, so the fake goes in as `--glasshouse` and nothing on the
+    // developer's PATH can answer instead.
+    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &record);
 
-    let output = run_session_stdin_with_gateway(
+    let output = run_session_stdin(
         &root,
         &rollout,
         "sess-model-report",
         &["/model"],
-        Some(&base_url),
-        &gateway,
+        &base_url,
+        Some(&glasshouse),
+        false,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
