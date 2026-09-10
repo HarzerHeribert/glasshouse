@@ -101,6 +101,12 @@ pub enum EffortLevel {
     Low,
     Medium,
     High,
+    /// Above [`Self::High`], and reachable only from a harness that states
+    /// its word: no token budget maps here, because Anthropic publishes no
+    /// waypoint above 32k to cut at.
+    Xhigh,
+    /// The top of the ladder, on the same terms as [`Self::Xhigh`].
+    Max,
 }
 
 impl EffortLevel {
@@ -113,6 +119,8 @@ impl EffortLevel {
             EffortLevel::Low => "low",
             EffortLevel::Medium => "medium",
             EffortLevel::High => "high",
+            EffortLevel::Xhigh => "xhigh",
+            EffortLevel::Max => "max",
         }
     }
 }
@@ -250,16 +258,18 @@ impl From<EffortLevel> for crate::routing::evidence::EffortLevel {
     /// The wire ladder's word, as the ledger stores it — `crate::database`
     /// migration 24's `effort_level`.
     ///
-    /// An exhaustive match on purpose: a fifth [`EffortLevel`] must not
+    /// An exhaustive match on purpose: a seventh [`EffortLevel`] must not
     /// compile until somebody has decided what the ledger stores for it, and
     /// `every_wire_effort_level_stores_and_reads_back_as_the_same_word`
-    /// below pins the four spellings themselves in lockstep.
+    /// below pins the six spellings themselves in lockstep.
     fn from(level: EffortLevel) -> Self {
         match level {
             EffortLevel::Minimal => Self::Minimal,
             EffortLevel::Low => Self::Low,
             EffortLevel::Medium => Self::Medium,
             EffortLevel::High => Self::High,
+            EffortLevel::Xhigh => Self::Xhigh,
+            EffortLevel::Max => Self::Max,
         }
     }
 }
@@ -1039,8 +1049,8 @@ pub(super) mod tests {
     ///
     /// The `for` list is exhaustive by construction: the `match` in
     /// `From<EffortLevel> for evidence::EffortLevel` fails to compile if a
-    /// fifth variant appears, and this test fails if that fifth variant is
-    /// then given a spelling the ledger cannot read back.
+    /// seventh variant appears, and this test fails if that variant is then
+    /// given a spelling the ledger cannot read back.
     #[test]
     fn every_wire_effort_level_stores_and_reads_back_as_the_same_word() {
         use crate::routing::evidence::EffortLevel as Stored;
@@ -1050,6 +1060,8 @@ pub(super) mod tests {
             EffortLevel::Low,
             EffortLevel::Medium,
             EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
         ] {
             let stored = Stored::from(level);
             assert_eq!(

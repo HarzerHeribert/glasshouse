@@ -302,15 +302,24 @@ fn configure_effort(body: Vec<u8>, model: &str, effort: Effort) -> Vec<u8> {
         return body;
     }
     let mut value: serde_json::Value = serde_json::from_slice(&body).expect("serialized request");
-    if model.contains("claude") {
-        value["output_config"] = serde_json::json!({"effort": effort.name()});
-    } else {
-        // Glasshouse's Anthropic-to-provider codec maps these budgets to low,
-        // medium and high; leave response space above the thinking allocation.
+    // The word, always. It is the only form that distinguishes all five
+    // levels: a token budget saturates, so `high`, `xhigh` and `max` used to
+    // arrive as one thing and two of the three the user picked did not exist
+    // on the wire at all.
+    value["output_config"] = serde_json::json!({"effort": effort.name()});
+    if !model.contains("claude") {
+        // A budget as well, for the Anthropic-shaped leg that reads one --
+        // Glasshouse's codec keeps both and gives each target the form it
+        // uses. Leave response space above the thinking allocation.
         let budget = match effort {
             Effort::Low => 4096,
             Effort::Medium => 16384,
-            _ => 32769,
+            Effort::High => 32769,
+            Effort::Xhigh => 49152,
+            // `Auto` returned above; this arm is `Max` and the compiler
+            // cannot see that, so it is spelled rather than a wildcard that
+            // would silently absorb a sixth level.
+            Effort::Max | Effort::Auto => 65536,
         };
         value["thinking"] = serde_json::json!({"type":"enabled", "budget_tokens":budget});
         value["max_tokens"] = serde_json::json!(budget + MAX_TOKENS);
@@ -1689,5 +1698,57 @@ mod effort_tests {
         .unwrap();
         assert_eq!(translated["thinking"]["budget_tokens"], 16384);
         assert!(translated["max_tokens"].as_u64().unwrap() > 16384);
+        // The word rides along on the translated leg too, because a budget
+        // saturates and cannot say `xhigh` or `max`.
+        assert_eq!(translated["output_config"]["effort"], "medium");
+    }
+
+    /// Five levels a person can pick must be five things on the wire.
+    ///
+    /// They were not: `high`, `xhigh` and `max` all became one token budget
+    /// on a translated model, and on top of that `xhigh` and `max` were
+    /// silently reset to `auto` whenever the model was not a Claude one --
+    /// so two of the five could not be used at all.
+    #[test]
+    fn every_effort_level_is_a_distinct_thing_on_the_wire() {
+        let conversation = Conversation {
+            system: "system".into(),
+            messages: vec![],
+        };
+        let levels = [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ];
+
+        let mut budgets = Vec::new();
+        for effort in levels {
+            let claude: serde_json::Value = serde_json::from_slice(&request_body_configured(
+                &conversation,
+                "claude-opus-5",
+                effort,
+            ))
+            .unwrap();
+            assert_eq!(claude["output_config"]["effort"], effort.name());
+
+            let translated: serde_json::Value = serde_json::from_slice(
+                &request_body_configured(&conversation, "deepseek-v4-flash", effort),
+            )
+            .unwrap();
+            assert_eq!(translated["output_config"]["effort"], effort.name());
+            budgets.push(translated["thinking"]["budget_tokens"].as_u64().unwrap());
+        }
+
+        let mut ascending = budgets.clone();
+        ascending.sort_unstable();
+        ascending.dedup();
+        assert_eq!(
+            ascending.len(),
+            budgets.len(),
+            "two levels collapsed onto one budget: {budgets:?}"
+        );
+        assert_eq!(ascending, budgets, "a higher level must not buy less: {budgets:?}");
     }
 }

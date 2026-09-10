@@ -322,6 +322,8 @@ pub enum EffortLevel {
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
 }
 
 impl EffortLevel {
@@ -331,6 +333,8 @@ impl EffortLevel {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -340,6 +344,8 @@ impl EffortLevel {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }

@@ -237,7 +237,12 @@ fn thinking_budget(effort: &EffortRequest) -> u64 {
                 EffortLevel::Minimal => 0.10,
                 EffortLevel::Low => 0.25,
                 EffortLevel::Medium => 0.50,
-                EffortLevel::High => 1.0,
+                // This wire has a hard ceiling, so there is nothing above
+                // the whole of it to ask for. `xhigh` and `max` are not
+                // dropped -- they arrive here as the most this target can
+                // spend, which is the honest translation of "more than high"
+                // onto a budget that stops.
+                EffortLevel::High | EffortLevel::Xhigh | EffortLevel::Max => 1.0,
             };
             (GEMINI_THINKING_BUDGET_MAX as f64 * fraction) as u64
         }

@@ -2791,17 +2791,10 @@ fn answer_command(
             // the failure is reported beside a change that still happened.
             let remembered = controls::assign_model(session, tier, model);
             *session.model.borrow_mut() = model.into();
-            if !model.contains("claude")
-                && matches!(
-                    session.effort.get(),
-                    wire::Effort::Xhigh | wire::Effort::Max
-                )
-            {
-                session.effort.set(wire::Effort::Auto);
-                if let Some(ui) = session.ui {
-                    ui.effort(wire::Effort::Auto);
-                }
-            }
+            // The effort a person chose survives a model change now. It used
+            // to be silently reset to `auto` on a non-Claude model, because
+            // `xhigh` and `max` had no wire form there; they do, so taking
+            // the choice away would be taking away a level that works.
             if let Some(ui) = session.ui {
                 ui.model(model);
             }

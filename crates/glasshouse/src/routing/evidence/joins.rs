@@ -31,7 +31,9 @@ fn effort_level_rank(effort_level: Option<EffortLevel>) -> i8 {
         Some(EffortLevel::Low) => 1,
         Some(EffortLevel::Medium) => 2,
         Some(EffortLevel::High) => 3,
-        None => 4,
+        Some(EffortLevel::Xhigh) => 4,
+        Some(EffortLevel::Max) => 5,
+        None => 6,
     }
 }
 

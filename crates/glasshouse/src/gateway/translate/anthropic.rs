@@ -17,7 +17,8 @@
 use serde_json::{Map, Value, json};
 
 use super::canonical::{
-    Block, BlockStart, Delta, EffortRequest, ImageSource, Message, Request, Response, Role,
+    Block, BlockStart, Delta, EffortLevel, EffortRequest, ImageSource, Message, Request, Response,
+    Role,
     StopReason, StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
 };
 use super::fields::{Fields, element};
@@ -287,7 +288,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         }
     };
 
-    let effort = decode_thinking(&mut top)?;
+    // Two seams, one canonical field: `thinking` states a token budget and
+    // `output_config` states a word. A word is the stronger reading -- it is
+    // the only form that can express `xhigh` or `max`, which no budget maps
+    // onto -- so it wins where both are present.
+    let effort = merge_effort(decode_thinking(&mut top)?, decode_output_config(&mut top)?);
     top.refuse_if_present("service_tier", reason("service_tier"))?;
     // Carried (2014), not refused: no home on this wire's own top level in
     // practice (a real Claude Code request never sets it here — every
@@ -351,6 +356,65 @@ fn decode_thinking(top: &mut Fields) -> Result<Option<EffortRequest>, Unsupporte
             thinking.at("type"),
             format!("the thinking mode `{other}` is not one this codec carries"),
         )),
+    }
+}
+
+/// `output_config.effort` -- the word Pane and Claude Code state directly.
+///
+/// It was previously refused by [`Fields::finish`] as an unknown top-level
+/// field, so a harness that set any effort at all had its request rejected on
+/// a translated route rather than merely flattened. Carried now, on the same
+/// terms as `thinking`: a shape this codec does not know is refused by name.
+fn decode_output_config(top: &mut Fields) -> Result<Option<EffortLevel>, Unsupported> {
+    let Some(mut config) = top.take_object("output_config")? else {
+        return Ok(None);
+    };
+    let level = match config.take_string("effort")? {
+        None => None,
+        Some(word) => Some(effort_word(&word).ok_or_else(|| {
+            Unsupported::new(
+                config.at("effort"),
+                format!("the effort `{word}` is not one this codec carries"),
+            )
+        })?),
+    };
+    config.finish()?;
+    Ok(level)
+}
+
+/// The ladder's own spellings, and nothing else.
+fn effort_word(word: &str) -> Option<EffortLevel> {
+    match word {
+        "minimal" => Some(EffortLevel::Minimal),
+        "low" => Some(EffortLevel::Low),
+        "medium" => Some(EffortLevel::Medium),
+        "high" => Some(EffortLevel::High),
+        "xhigh" => Some(EffortLevel::Xhigh),
+        "max" => Some(EffortLevel::Max),
+        _ => None,
+    }
+}
+
+/// One [`EffortRequest`] from the two seams that can carry effort.
+///
+/// A budget alone, a word alone, or both -- and both is not a conflict: the
+/// budget is what an Anthropic target should receive and the word is what
+/// every other target should, so each is kept for the leg that can use it.
+fn merge_effort(
+    from_thinking: Option<EffortRequest>,
+    word: Option<EffortLevel>,
+) -> Option<EffortRequest> {
+    match (from_thinking, word) {
+        (None, None) => None,
+        (Some(request), None) => Some(request),
+        (None, Some(level)) => Some(EffortRequest {
+            budget_tokens: None,
+            level: Some(level),
+        }),
+        (Some(request), Some(level)) => Some(EffortRequest {
+            budget_tokens: request.budget_tokens,
+            level: Some(level),
+        }),
     }
 }
 
@@ -1401,6 +1465,52 @@ pub(super) mod tests {
             "thinking": {"type": "enabled"}}"#;
         let refusal = decode_request(wire).expect_err("a budget is required when enabled");
         assert_eq!(refusal.field, "thinking.budget_tokens");
+    }
+
+    /// `output_config.effort` is the seam a harness states a word on, and it
+    /// used to be refused as an unknown top-level field -- so setting any
+    /// effort at all failed a translated request rather than flattening it.
+    #[test]
+    fn a_stated_effort_word_is_carried_rather_than_refused() {
+        let body = br#"{"model":"m","max_tokens":1,"messages":[],
+            "output_config":{"effort":"xhigh"}}"#;
+        let request = decode_request(body).expect("output_config must be accepted");
+        assert_eq!(
+            request.effort,
+            Some(EffortRequest {
+                budget_tokens: None,
+                level: Some(EffortLevel::Xhigh),
+            }),
+            "a word no token budget can express must survive decoding"
+        );
+    }
+
+    /// Both seams at once is not a conflict: each target leg reads the form
+    /// it can use, so both are kept and the word decides the level.
+    #[test]
+    fn a_word_and_a_budget_are_both_kept_and_the_word_names_the_level() {
+        let body = br#"{"model":"m","max_tokens":1,"messages":[],
+            "thinking":{"type":"enabled","budget_tokens":4096},
+            "output_config":{"effort":"max"}}"#;
+        let effort = decode_request(body).expect("both seams decode").effort;
+        let effort = effort.expect("effort carried");
+        assert_eq!(effort.budget_tokens, Some(4096));
+        assert_eq!(effort.level, Some(EffortLevel::Max));
+        assert_eq!(
+            effort.level(),
+            EffortLevel::Max,
+            "the word wins: a budget saturates at `high` and cannot say `max`"
+        );
+    }
+
+    /// Refused by name, never silently dropped -- the same rule the rest of
+    /// this codec follows.
+    #[test]
+    fn an_effort_word_this_codec_does_not_know_is_refused_by_name() {
+        let body = br#"{"model":"m","max_tokens":1,"messages":[],
+            "output_config":{"effort":"ludicrous"}}"#;
+        let refusal = decode_request(body).expect_err("an unknown word must refuse");
+        assert_eq!(refusal.field, "output_config.effort");
     }
 
     #[test]
