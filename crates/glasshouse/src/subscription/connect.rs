@@ -37,45 +37,57 @@ pub const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OauthClient {
     pub provider: &'static str,
+    /// The client's public identifier. It travels in every authorize URL and
+    /// is not a secret — but it is the field a vendor rotates, so an operator
+    /// can override it without waiting for a release. glasshouse:not-a-secret
+    pub client_id: &'static str,
     pub authorize_url: &'static str,
     pub token_url: &'static str,
     pub redirect_port: u16,
     pub redirect_path: &'static str,
     pub scope: &'static str,
+    /// Parameters this provider's client sends beyond the standard set,
+    /// already encoded as `key=value` pairs.
+    pub extra_params: &'static [&'static str],
 }
 
 /// The providers Glasshouse can connect itself.
 ///
-/// Endpoints and redirect ports are recorded from the subscription broker's
-/// own build, which is the only authority available for a client that no
-/// vendor documents. **A `client_id` is deliberately absent here**: it is the
-/// one value that must be configured rather than compiled in, because it is
-/// the field vendors rotate and a stale constant would fail every login with
-/// no way to fix it short of a release.
+/// Endpoints, redirect ports, scopes and client identifiers are the ones the
+/// first-party clients use. A client id is public by construction — it is in
+/// every authorize URL — so these are defaults rather than secrets, and
+/// `GLASSHOUSE_OAUTH_CLIENT_ID_<PROVIDER>` overrides one the day a vendor
+/// rotates it, without waiting for a release. glasshouse:not-a-secret
 pub static CLIENTS: &[OauthClient] = &[
     OauthClient {
         provider: "anthropic",
+        client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
         authorize_url: "https://claude.ai/oauth/authorize",
         token_url: "https://platform.claude.com/v1/oauth/token",
         redirect_port: 54545,
         redirect_path: "/callback",
-        scope: "org:create_api_key user:profile user:inference",
+        scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+        extra_params: &[],
     },
     OauthClient {
         provider: "openai",
+        client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
         authorize_url: "https://auth.openai.com/oauth/authorize",
         token_url: "https://auth.openai.com/oauth/token",
         redirect_port: 1455,
         redirect_path: "/auth/callback",
         scope: "openid profile email offline_access",
+        extra_params: &["codex_cli_simplified_flow=true", "originator=codex_cli_rs"],
     },
     OauthClient {
         provider: "google",
+        client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
         authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
         redirect_port: 8085,
         redirect_path: "/oauth2callback",
         scope: "https://www.googleapis.com/auth/cloud-platform openid email profile",
+        extra_params: &["access_type=offline", "prompt=consent"],
     },
 ];
 
@@ -190,14 +202,19 @@ pub fn authorize_url(
         "http://localhost:{}{}",
         client.redirect_port, client.redirect_path
     );
-    format!(
+    let mut url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={challenge}\
          &code_challenge_method=S256&state={state}",
         client.authorize_url,
         percent_encode(client_id),
         percent_encode(&redirect),
         percent_encode(client.scope),
-    )
+    );
+    for extra in client.extra_params {
+        url.push('&');
+        url.push_str(extra);
+    }
+    url
 }
 
 /// Minimal percent-encoding for a query value.
@@ -340,6 +357,162 @@ pub fn await_callback(
     bail!("nothing arrived on the redirect within {timeout:?}")
 }
 
+/// A fresh anti-forgery `state` value.
+pub fn random_state() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("could not read randomness for an OAuth state")?;
+    Ok(base64_url(&bytes))
+}
+
+/// Exchanges the code for tokens and writes the credential.
+///
+/// The tokens are written and never returned: the only thing a caller learns
+/// is the account label the provider gave, which is what a person needs to see
+/// to know which account they just connected.
+pub fn exchange_and_store(
+    client: &OauthClient,
+    client_id: &str,
+    pkce: &Pkce,
+    code: &str,
+    auth_dir: &Path,
+) -> Result<Option<String>> {
+    let redirect = format!(
+        "http://localhost:{}{}",
+        client.redirect_port, client.redirect_path
+    );
+    let form = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
+        percent_encode(code),
+        percent_encode(&redirect),
+        percent_encode(client_id),
+        percent_encode(pkce.verifier()),
+    );
+    let mut response = ureq::post(client.token_url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .send(&form)
+        .map_err(|error| anyhow::anyhow!("the token exchange did not answer: {error}"))?;
+    if !response.status().is_success() {
+        // The provider's own body may echo the code back, so the status is
+        // reported and the body is not.
+        bail!(
+            "the token exchange was refused with status {}",
+            response.status()
+        );
+    }
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .context("the token exchange response was unreadable")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).context("the token exchange response was not JSON")?;
+
+    let account = parsed
+        .get("account_id")
+        .or_else(|| parsed.get("email"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let credential = to_broker_credential(&parsed, client.provider, account.as_deref());
+
+    std::fs::create_dir_all(auth_dir)
+        .with_context(|| format!("could not create {}", auth_dir.display()))?;
+    let path = credential_path(
+        auth_dir,
+        client.provider,
+        account.as_deref().unwrap_or("account"),
+    );
+    write_private(&path, &serde_json::to_vec_pretty(&credential)?)?;
+    Ok(account)
+}
+
+/// The credential in the shape the subscription broker already reads.
+///
+/// Written to the broker's own format on purpose: a login Glasshouse performed
+/// must be indistinguishable to the request path from one the broker
+/// performed, which is what lets login move first and the request path move
+/// later.
+fn to_broker_credential(
+    tokens: &serde_json::Value,
+    provider: &str,
+    account: Option<&str>,
+) -> serde_json::Value {
+    let string = |key: &str| {
+        tokens
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let expires_in = tokens
+        .get("expires_in")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let now = std::time::SystemTime::now();
+    let expired = now + Duration::from_secs(expires_in.max(0) as u64);
+    serde_json::json!({
+        "type": provider,
+        "access_token": string("access_token"),
+        "refresh_token": string("refresh_token"),
+        "id_token": string("id_token"),
+        "account_id": account.unwrap_or_default(),
+        "email": string("email"),
+        "expired": rfc3339(expired),
+        "last_refresh": rfc3339(now),
+        "disabled": false,
+    })
+}
+
+/// A timestamp in the shape the broker's own files use.
+fn rfc3339(at: std::time::SystemTime) -> String {
+    let seconds = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    // Civil time from a Unix second, without pulling in a date library for
+    // one field the broker only ever reads back as an opaque marker.
+    let days = seconds / 86_400;
+    let rest = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        (rest % 3600) / 60,
+        rest % 60
+    )
+}
+
+/// Howard Hinnant's `civil_from_days`, which is exact for every day this will
+/// ever see and needs no table.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
+/// Writes a credential so that only its owner can read it.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("could not write {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok(())
+}
+
 /// Where a connected account's credential is written.
 ///
 /// The subscription broker's own auth directory, in its own file naming, so
@@ -435,12 +608,20 @@ mod tests {
     fn the_authorize_url_carries_the_challenge_and_never_the_verifier() {
         let client = client_for("anthropic").unwrap();
         let pkce = Pkce::generate().unwrap();
-        let url = authorize_url(client, "client-123", &pkce.challenge, "state-abc");
+        let url = authorize_url(client, client.client_id, &pkce.challenge, "state-abc");
         assert!(url.contains(&pkce.challenge));
         assert!(!url.contains(pkce.verifier()));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=state-abc"));
         assert!(url.contains("localhost%3A54545%2Fcallback"));
+        assert!(url.contains(client.client_id));
+
+        // A provider that needs extra parameters gets them, and one that does
+        // not is not given any.
+        let openai = client_for("openai").unwrap();
+        let with_extras = authorize_url(openai, openai.client_id, "c", "s");
+        assert!(with_extras.contains("originator=codex_cli_rs"));
+        assert!(with_extras.contains("codex_cli_simplified_flow=true"));
     }
 
     /// The redirect port is registered with the provider, so it is part of the
@@ -456,6 +637,13 @@ mod tests {
         assert_eq!(client_for("anthropic").unwrap().redirect_port, 54545);
         assert_eq!(client_for("openai").unwrap().redirect_port, 1455);
         assert!(client_for("nobody").is_none());
+
+        // Every client carries the identifier it is registered under, so a
+        // login works without configuration and configuration only overrides.
+        for client in CLIENTS {
+            assert!(!client.client_id.is_empty(), "{}", client.provider);
+            assert!(!client.scope.is_empty(), "{}", client.provider);
+        }
     }
 
     #[test]

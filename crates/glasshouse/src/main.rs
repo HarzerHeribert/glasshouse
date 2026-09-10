@@ -94,6 +94,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     crate::commands::subscriptions::login(&runtime, *provider, entitlement,)?
                 );
             }
+            SubscriptionsCommand::Connect {
+                provider,
+                entitlement,
+                json,
+            } => {
+                crate::commands::subscriptions::connect(&runtime, *provider, entitlement, *json)?;
+            }
             SubscriptionsCommand::Logout {
                 provider,
                 entitlement,

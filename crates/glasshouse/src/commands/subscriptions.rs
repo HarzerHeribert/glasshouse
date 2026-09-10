@@ -89,6 +89,125 @@ pub(crate) fn login(
     Ok(format!("{}\t{entitlement}\tpresent\n", provider.as_str()))
 }
 
+/// The environment variable carrying one provider's OAuth client id.
+///
+/// A client id is public — it travels in every authorize URL — so this is
+/// configuration rather than a secret. It is not compiled in because it is the
+/// field a vendor rotates, and a constant would need a release to fix.
+#[must_use]
+pub(crate) fn client_id_variable(provider: SubscriptionProvider) -> String {
+    format!(
+        "GLASSHOUSE_OAUTH_CLIENT_ID_{}",
+        provider.as_str().to_ascii_uppercase()
+    )
+}
+
+/// Connects one entitlement with Glasshouse's own flow, reporting progress.
+///
+/// Every line written here is safe to show and to forward: the authorization
+/// URL, a countdown, a success or a failure. Nothing else crosses, which is
+/// what lets another program render this without ever holding a credential.
+pub(crate) fn connect(
+    runtime: &Runtime,
+    provider: SubscriptionProvider,
+    entitlement: &str,
+    json: bool,
+) -> Result<()> {
+    use glasshouse::subscription::connect as flow;
+    use std::io::Write;
+
+    let mut out = std::io::stdout();
+    let mut emit = |progress: &flow::Progress| {
+        let line = if json {
+            serde_json::to_string(progress).unwrap_or_else(|_| "{}".to_string())
+        } else {
+            match progress {
+                flow::Progress::Opened { authorize_url } => {
+                    format!("open this to continue:\n{authorize_url}")
+                }
+                flow::Progress::Waiting { seconds_remaining } => {
+                    format!("waiting for the browser ({seconds_remaining}s left)")
+                }
+                flow::Progress::Connected { account } => format!(
+                    "connected{}",
+                    account
+                        .as_deref()
+                        .map(|a| format!(" as {a}"))
+                        .unwrap_or_default()
+                ),
+                flow::Progress::Failed { reason } => format!("failed: {reason}"),
+            }
+        };
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    };
+
+    validate_entitlement(runtime, provider, entitlement)?;
+    validate_account_ancestors(runtime.paths(), entitlement)?;
+
+    let Some(client) = flow::client_for(provider.as_str()) else {
+        let reason = format!("no OAuth client is recorded for `{}`", provider.as_str());
+        emit(&flow::Progress::Failed {
+            reason: reason.clone(),
+        });
+        bail!(reason);
+    };
+    let variable = client_id_variable(provider);
+    // The recorded client, unless an operator overrode it because the vendor
+    // rotated one.
+    let client_id = std::env::var(&variable)
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| client.client_id.to_string());
+
+    let pkce = flow::Pkce::generate()?;
+    let state = flow::random_state()?;
+    emit(&flow::Progress::Opened {
+        authorize_url: flow::authorize_url(client, &client_id, &pkce.challenge, &state),
+    });
+
+    let mut last_reported = u64::MAX;
+    let callback = flow::await_callback(client, &state, flow::AUTHORIZE_TIMEOUT, |progress| {
+        // One line a second at most: a countdown that printed twice a second
+        // would be the whole of what a reader saw.
+        if let flow::Progress::Waiting { seconds_remaining } = &progress {
+            if *seconds_remaining == last_reported {
+                return;
+            }
+            last_reported = *seconds_remaining;
+        }
+        emit(&progress);
+    });
+    let callback = match callback {
+        Ok(callback) => callback,
+        Err(error) => {
+            let reason = error.to_string();
+            emit(&flow::Progress::Failed {
+                reason: reason.clone(),
+            });
+            bail!(reason);
+        }
+    };
+
+    let auth_dir = runtime.paths().subscription_broker_auth_dir(entitlement);
+    match flow::exchange_and_store(client, &client_id, &pkce, &callback.code, &auth_dir) {
+        Ok(account) => {
+            emit(&flow::Progress::Connected {
+                account: account.clone(),
+            });
+            Ok(())
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            emit(&flow::Progress::Failed {
+                reason: reason.clone(),
+            });
+            bail!(reason)
+        }
+    }
+}
+
 fn login_flag(provider: SubscriptionProvider) -> &'static str {
     match provider {
         SubscriptionProvider::Google => "-antigravity-login",

@@ -1099,6 +1099,21 @@ pub enum SubscriptionsCommand {
         #[arg(long, value_name = "NAME")]
         entitlement: String,
     },
+    /// Connect one entitlement with Glasshouse's own OAuth flow, reporting
+    /// progress as one JSON object per line.
+    ///
+    /// Unlike `login`, no child process takes the terminal: what a caller
+    /// receives is the URL to open and then a state, which is what lets a
+    /// harness drive this inside its own interface.
+    Connect {
+        #[arg(value_enum)]
+        provider: SubscriptionProvider,
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+        /// One JSON object per line instead of sentences.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove the broker credentials for one configured entitlement.
     Logout {
         #[arg(value_enum)]
