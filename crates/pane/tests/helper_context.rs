@@ -196,29 +196,69 @@ fn unreadable_ignore_semantics_never_turn_into_unfiltered_discovery() {
     );
 }
 
-/// A helper request never carries more of the caller's text than the packet
-/// says it does.
+/// The reducer is the helper whose input *is* the work, so it is not bounded
+/// to the size of a question.
 ///
-/// The packet records an omission when the input is over the bound; appending
-/// the whole original after it would make that notice false, and on a log
-/// large enough to be worth reducing it would not fit the helper model's own
-/// window — so the reduction would fail precisely on the biggest inputs.
+/// Bounding it to the term-extraction limit would leave the one helper chosen
+/// for absorbing bulk unable to see the log it was called on.
 #[test]
-fn a_request_never_carries_more_of_the_original_than_the_bound_allows() {
-    let bounded = pane::helper_context::bounded_string(
-        &"x".repeat(pane::helper_context::MAX_INPUT_BYTES * 4),
-        pane::helper_context::MAX_INPUT_BYTES,
+fn a_reducer_may_read_far_more_than_a_question_sized_input() {
+    use pane::helper_context::{HelperRole, MAX_INPUT_BYTES, payload_bound};
+    assert_eq!(payload_bound(HelperRole::Scout), MAX_INPUT_BYTES);
+    assert_eq!(payload_bound(HelperRole::Checker), MAX_INPUT_BYTES);
+    assert!(
+        payload_bound(HelperRole::Reducer) > MAX_INPUT_BYTES * 4,
+        "a reducer bounded to a question's size cannot do its job"
     );
-    assert_eq!(bounded.len(), pane::helper_context::MAX_INPUT_BYTES);
+}
 
-    // And `helpers::run` is what applies it to the appended original.
+/// An over-long payload keeps both ends: a log's verdict is at the end, and a
+/// head-only cut throws away the half that says what failed.
+#[test]
+fn an_oversized_payload_keeps_the_verdict_at_the_end() {
+    use pane::helper_context::bounded_payload;
+    let log = format!(
+        "FIRST-ERROR at the top\n{}\nFAILED (failures=2) at the very end\n",
+        "noise noise noise\n".repeat(60_000)
+    );
+    let bound = 16 * 1024;
+    let bounded = bounded_payload(&log, bound);
+
+    assert!(bounded.len() <= bound, "the bound holds: {}", bounded.len());
+    assert!(
+        bounded.contains("FIRST-ERROR at the top"),
+        "the first failure survives"
+    );
+    assert!(
+        bounded.contains("FAILED (failures=2) at the very end"),
+        "the verdict survives, which a head-only cut would have dropped"
+    );
+    assert!(
+        bounded.contains("omitted from the middle"),
+        "and the cut says what it dropped"
+    );
+}
+
+/// Under the bound nothing is touched at all.
+#[test]
+fn a_payload_within_the_bound_is_passed_through_whole() {
+    use pane::helper_context::bounded_payload;
+    let log = "error: one thing went wrong\n";
+    assert_eq!(bounded_payload(log, 64 * 1024), log);
+}
+
+/// And `helpers::run` is what applies the role's bound to the appended
+/// original, rather than sending it whole beneath an omission notice that
+/// says otherwise.
+#[test]
+fn a_request_bounds_the_original_it_appends() {
     const SOURCE: &str = include_str!("../src/helpers.rs");
     let after = SOURCE
         .split_once("Original helper request:")
         .expect("the appended-original format string must still exist")
         .1;
     assert!(
-        after.contains("bounded_string(input"),
+        after.contains("bounded_payload(input"),
         "the original appended to a prepared packet must be bounded"
     );
 }

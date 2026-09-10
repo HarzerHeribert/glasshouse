@@ -16,14 +16,32 @@ use crate::tools::invoke::CancellationToken;
 
 const MAX_RENDER_BYTES: usize = 32 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 48 * 1024;
-/// The most of a caller's own text a helper request carries.
+/// How much of a caller's text is scanned to derive search terms.
 ///
-/// It bounds the prepared evidence **and** the original request appended
-/// after it: a helper that was told its input was truncated and then handed
-/// the whole thing would be reading a request that contradicts its own
-/// omission notice, and a large enough log would not fit the helper model's
-/// window at all — which is exactly the log worth reducing.
+/// This bounds **term extraction**, not the payload: deriving search terms
+/// from a megabyte would spend the walk on text nobody asked about. It is not
+/// a statement about how much a helper may read.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
+
+/// How much of the caller's own text the helper request carries, by role.
+///
+/// The distinction this exists to make: for a Scout or a Checker the input is
+/// a **question**, and 64 KiB of question is already generous. For a Reducer
+/// the input **is the work** — bounding it to a question's size would leave
+/// the one helper whose job is absorbing bulk unable to see the log it was
+/// called on.
+///
+/// The reducer's figure is derived rather than picked: it is what fits beside
+/// the prepared packet and the reply inside the smallest window a helper model
+/// is likely to have. It is deliberately conservative, because a request that
+/// overflows fails and reduces nothing.
+#[must_use]
+pub fn payload_bound(role: HelperRole) -> usize {
+    match role {
+        HelperRole::Scout | HelperRole::Checker => MAX_INPUT_BYTES,
+        HelperRole::Reducer => 512 * 1024,
+    }
+}
 const MAX_FILE_READ_BYTES: usize = 8 * 1024;
 const MAX_FILE_SIZE: u64 = 256 * 1024;
 const MAX_NODES: usize = 1_024;
@@ -1088,6 +1106,38 @@ pub fn bounded_string(text: &str, max: usize) -> String {
     }
     let end = floor_char_boundary(text, max.saturating_sub(3));
     format!("{}…", &text[..end])
+}
+
+/// Bounds a payload while keeping both ends of it.
+///
+/// A build or test log puts its summary at the **end** — the failure counts,
+/// the final verdict — and its first error near the beginning. A head-only cut
+/// throws away the half that says what actually failed, so an over-long
+/// payload keeps a head and a tail with an explicit marker naming what was
+/// dropped between them.
+#[must_use]
+pub fn bounded_payload(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let omitted = text.len() - max;
+    let marker = format!("\n… {omitted} bytes omitted from the middle …\n");
+    let Some(budget) = max.checked_sub(marker.len()) else {
+        return bounded_string(text, max);
+    };
+    let head_bytes = budget / 2;
+    let head_end = floor_char_boundary(text, head_bytes);
+    let tail_start = ceil_char_boundary(text, text.len() - (budget - head_end));
+    format!("{}{marker}{}", &text[..head_end], &text[tail_start..])
+}
+
+/// The smallest index at or above `min` that does not split a character.
+fn ceil_char_boundary(text: &str, min: usize) -> usize {
+    let mut start = min.min(text.len());
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
 }
 
 fn floor_char_boundary(text: &str, max: usize) -> usize {
