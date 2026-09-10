@@ -37,7 +37,10 @@ type WriteResult = {path: string};
 
 type CommandInput = {command: string};
 // `ok` is exit_code === 0, decided by pane rather than by reading stdout.
-type CommandResult = Bounded & {stdout: string; stderr: string; exit_code: number | null; ok: boolean};
+// `reduced` is a summary of a large output. `reduction_error` means one was
+// attempted and could not be made: stdout and stderr are still complete, and
+// narrowing what the command prints is what makes a summary possible.
+type CommandResult = Bounded & {stdout: string; stderr: string; exit_code: number | null; ok: boolean; reduced?: string; reduction_error?: string};
 
 type CheckInput = {name: string; force?: boolean};
 // `executed` and `reused` are never both true; a reused observation does not
@@ -115,6 +118,15 @@ mod tests {
     fn a_command_result_says_ok_rather_than_asking_for_stdout_to_be_read() {
         assert!(PRELUDE.contains("ok: boolean"));
         assert!(PRELUDE.contains("exit_code: number | null"));
+    }
+
+    /// A failed summary is a state of its own in the type, because "no
+    /// summary was needed" and "a summary could not be made" are opposite
+    /// instructions to the model and an absent key cannot say which.
+    #[test]
+    fn a_command_result_distinguishes_a_missing_summary_from_a_failed_one() {
+        assert!(PRELUDE.contains("reduced?: string"));
+        assert!(PRELUDE.contains("reduction_error?: string"));
     }
 
     #[test]

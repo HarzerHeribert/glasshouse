@@ -196,19 +196,22 @@ fn unreadable_ignore_semantics_never_turn_into_unfiltered_discovery() {
     );
 }
 
-/// The reducer is the helper whose input *is* the work, so it is not bounded
-/// to the size of a question.
+/// A reducer's input is never truncated — user ruling, 2026-09-10.
 ///
-/// Bounding it to the term-extraction limit would leave the one helper chosen
-/// for absorbing bulk unable to see the log it was called on.
+/// A truncated log makes it answer about the part that survived, which can be
+/// "no failures" when the failures were in the omitted middle. Sending the
+/// whole thing lets an oversized input fail the request out loud instead, and
+/// that failure is true information: the output needed filtering before it
+/// reached a reducer at all.
 #[test]
-fn a_reducer_may_read_far_more_than_a_question_sized_input() {
+fn a_reducer_is_never_truncated_and_a_question_is() {
     use pane::helper_context::{HelperRole, MAX_INPUT_BYTES, payload_bound};
-    assert_eq!(payload_bound(HelperRole::Scout), MAX_INPUT_BYTES);
-    assert_eq!(payload_bound(HelperRole::Checker), MAX_INPUT_BYTES);
-    assert!(
-        payload_bound(HelperRole::Reducer) > MAX_INPUT_BYTES * 4,
-        "a reducer bounded to a question's size cannot do its job"
+    assert_eq!(payload_bound(HelperRole::Scout), Some(MAX_INPUT_BYTES));
+    assert_eq!(payload_bound(HelperRole::Checker), Some(MAX_INPUT_BYTES));
+    assert_eq!(
+        payload_bound(HelperRole::Reducer),
+        None,
+        "a truncated reduction is a quiet wrong answer; a failed one is a true signal"
     );
 }
 
@@ -258,8 +261,13 @@ fn a_request_bounds_the_original_it_appends() {
         .expect("the appended-original format string must still exist")
         .1;
     assert!(
-        after.contains("bounded_payload(input"),
-        "the original appended to a prepared packet must be bounded"
+        after.contains("carried"),
+        "the appended original goes through the role's bound, not raw"
+    );
+    assert!(
+        SOURCE.contains("payload_bound(role)")
+            || SOURCE.contains("and_then(crate::helper_context::payload_bound)"),
+        "the bound applied must be the role's"
     );
 }
 

@@ -510,6 +510,12 @@ impl Runtime {
     /// leaves helpers off, which is the same answer an unset `[helpers]
     /// model` gives: a runtime nobody configured spends nothing.
     #[must_use]
+    /// The default model a delegated goal runs on when the cell names none.
+    pub fn with_agents(self, agents: crate::config::AgentsConfig) -> Self {
+        self.state.set_agents(agents);
+        self
+    }
+
     pub fn with_helpers(self, helpers: crate::config::HelpersConfig) -> Self {
         self.state.set_helpers(helpers);
         self

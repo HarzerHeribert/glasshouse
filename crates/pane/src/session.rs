@@ -1610,7 +1610,8 @@ fn run_task_inner(
     )
     .with_response_byte_cap(session.config.limits.response_bytes)
     .with_instruction_context()
-    .with_helpers(session.config.helpers.clone());
+    .with_helpers(session.config.helpers.clone())
+    .with_agents(session.config.agents.clone());
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are

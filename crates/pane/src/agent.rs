@@ -202,10 +202,10 @@ pub(crate) fn run_narrowed_metered(
         // reads `[helpers]` from the project itself; a file that will not
         // parse leaves helpers off, which is the same fail-closed answer as an
         // unset model.
-        let helpers = crate::config::PaneConfig::load(profile.root())
-            .unwrap_or_default()
-            .helpers;
-        runtime = runtime.with_helpers(helpers);
+        let config = crate::config::PaneConfig::load(profile.root()).unwrap_or_default();
+        runtime = runtime
+            .with_helpers(config.helpers)
+            .with_agents(config.agents);
     }
     let mut tokens = 0u64;
     let mut trajectory: Vec<String> = Vec::new();

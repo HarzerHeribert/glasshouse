@@ -501,22 +501,19 @@ pub fn run(
     let started = Instant::now();
     let prepared = crate::helper_context::HelperRole::from_helper_name(spec.name)
         .map(|role| crate::helper_context::prepare(role, input, profile, token));
-    // The appended original is bounded by the **role's** payload bound, not by
-    // the term-extraction limit. A Scout's input is a question; a Reducer's
-    // input is the work, and capping it to a question's size would leave the
-    // one helper whose job is absorbing bulk unable to see its own log. Over
-    // the bound the payload keeps both ends, because a log's verdict is at the
-    // end and a head-only cut discards it.
+    // The appended original is bounded by the **role's** bound, and a Reducer
+    // has none: truncating the log it was called on would make it answer about
+    // the part that survived. A question is bounded, and when it is, both ends
+    // are kept rather than a prefix.
     let role = crate::helper_context::HelperRole::from_helper_name(spec.name);
     let request = prepared.as_ref().map(|packet| {
-        let bound = role.map_or(crate::helper_context::MAX_INPUT_BYTES, |role| {
-            crate::helper_context::payload_bound(role)
-        });
-        format!(
-            "{}\n\nOriginal helper request:\n{}",
-            packet.rendered,
-            crate::helper_context::bounded_payload(input, bound)
-        )
+        let carried = role
+            .and_then(crate::helper_context::payload_bound)
+            .map_or_else(
+                || input.to_string(),
+                |bound| crate::helper_context::bounded_payload(input, bound),
+            );
+        format!("{}\n\nOriginal helper request:\n{carried}", packet.rendered)
     });
     let mut call = run_unprepared(
         spec,

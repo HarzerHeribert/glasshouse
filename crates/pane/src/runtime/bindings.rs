@@ -1033,7 +1033,7 @@ fn typed_result<'s>(
         }
         _ => {
             let reduction = reduce_oversized(result, state);
-            let (value, preview) = build_bash(scope, result, reduction.as_deref());
+            let (value, preview) = build_bash(scope, result, &reduction);
             (value, preview, "Bash.Result")
         }
     };
@@ -1522,15 +1522,36 @@ fn build_glob<'s>(
 /// cap, no spec serving this site, helpers unconfigured or off, the cell's
 /// ceiling spent, or a call that failed. **A helper failing here is never
 /// fatal** — the program gets the result it would have got anyway.
-fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<String> {
+/// What became of a pushed reduction, for a caller that must tell "not needed"
+/// from "attempted and failed".
+///
+/// The distinction is the whole point (user ruling, 2026-09-10): a reducer is
+/// never handed a truncated log, so an output too large for the helper model
+/// fails the request — and a parent that cannot see that failure cannot do the
+/// one thing that fixes it, which is narrow the command and run it again. An
+/// absent key used to mean both "small enough to read yourself" and "we tried
+/// and could not", which are opposite instructions.
+enum Reduction {
+    /// Under the cap, or no helper configured: nothing was attempted.
+    NotAttempted,
+    Made(String),
+    /// Attempted and failed, with the one sentence the parent needs.
+    Failed(String),
+}
+
+fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction {
     if estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr) <= STDOUT_TOKEN_CAP {
-        return None;
+        return Reduction::NotAttempted;
     }
-    let spec = crate::helpers::HELPERS.iter().find(|spec| {
+    let Some(spec) = crate::helpers::HELPERS.iter().find(|spec| {
         spec.call_sites
             .contains(&crate::helpers::CallSite::PostResult)
-    })?;
-    let model = state.helper_model().ok()?;
+    }) else {
+        return Reduction::NotAttempted;
+    };
+    let Ok(model) = state.helper_model() else {
+        return Reduction::NotAttempted;
+    };
 
     // Both streams, because a build writes its failures to whichever it
     // likes and the reduction is of the output, not of one pipe.
@@ -1539,11 +1560,13 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<Str
     use sha2::{Digest, Sha256};
     let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
     if let Some(reduction) = state.reduction_of(&digest) {
-        return Some(reduction);
+        return Reduction::Made(reduction);
     }
     // After the cache and before the call: a served reduction spends neither
     // a request nor a slot, and a claimed slot is always a request made.
-    state.claim_pushed_helper_call().ok()?;
+    if state.claim_pushed_helper_call().is_err() {
+        return Reduction::NotAttempted;
+    }
 
     let asked = asked_summary(&text);
     let slot = state.begin_helper(crate::helpers::HelperRecord {
@@ -1567,19 +1590,27 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Option<Str
     let reduction = call.outcome.text.clone();
     state.finish_helper(slot, call);
     if cancelled {
-        return None;
+        return Reduction::NotAttempted;
     }
     if !ok {
-        return None;
+        // The exact output is untouched and still on the result; what the
+        // parent is being told is that it will not get a summary of it unless
+        // it narrows what the command prints.
+        return Reduction::Failed(format!(
+            "This output was too large to summarise and no summary was made \
+             ({reduction}). `stdout` and `stderr` are complete and unchanged. \
+             Narrow what the command prints, or select the part you need, \
+             before relying on a summary."
+        ));
     }
     state.remember_reduction(digest, reduction.clone());
-    Some(reduction)
+    Reduction::Made(reduction)
 }
 
 fn build_bash<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: &ToolResult,
-    reduced: Option<&str>,
+    reduction: &Reduction,
 ) -> (v8::Local<'s, v8::Value>, Value) {
     let object = v8::Object::new(scope);
     let stdout = js_string(scope, &result.stdout);
@@ -1606,12 +1637,21 @@ fn build_bash<'s>(
                 .map_or(Value::Null, |code| Value::Number(f64::from(code))),
         ),
     ];
-    // Present only when a reduction was actually made, so an absent key is
-    // the honest signal that this result was never summarised.
-    if let Some(reduced) = reduced {
-        let value = js_string(scope, reduced);
-        set_key(scope, object, "reduced", value);
-        entries.push(("reduced".to_string(), Value::string(reduced)));
+    // `reduced` when one was made, `reduction_error` when one was attempted
+    // and failed, and neither when none was needed. Three states, because an
+    // absent key alone cannot say which of the other two happened.
+    match reduction {
+        Reduction::NotAttempted => {}
+        Reduction::Made(reduced) => {
+            let value = js_string(scope, reduced);
+            set_key(scope, object, "reduced", value);
+            entries.push(("reduced".to_string(), Value::string(reduced)));
+        }
+        Reduction::Failed(why) => {
+            let value = js_string(scope, why);
+            set_key(scope, object, "reduction_error", value);
+            entries.push(("reduction_error".to_string(), Value::string(why)));
+        }
     }
     (object.into(), Value::object(entries))
 }
@@ -2286,7 +2326,13 @@ fn agent_run_callback(
 
     let options = crate::agent::AgentOptions {
         turns: turns.clamp(1, crate::agent::MAX_TURNS),
-        model: asked_model.unwrap_or_else(|| state.model.borrow().clone()),
+        // The cell's own choice first, then `[agents] model`, then the
+        // parent's. Without the middle step a session on a frontier model
+        // pays frontier rates for every goal it delegates, which is the
+        // opposite of why delegation exists.
+        model: asked_model
+            .or_else(|| state.agent_model())
+            .unwrap_or_else(|| state.model.borrow().clone()),
         effort: crate::wire::Effort::default(),
     };
     let handle = crate::bg::agent(

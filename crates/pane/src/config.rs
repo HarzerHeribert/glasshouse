@@ -112,6 +112,18 @@ pub struct PaneConfig {
     pub limits: Limits,
     pub supervisor: SupervisorConfig,
     pub helpers: HelpersConfig,
+    pub agents: AgentsConfig,
+}
+
+/// `[agents]` -- what a subagent runs on when the cell does not say.
+///
+/// Without this a delegated goal inherits the **parent's** model, so a session
+/// driven by a frontier model pays frontier rates for every investigation it
+/// hands off, unless the model remembers to name a cheaper one each time.
+/// A model the cell names still wins: this is a default, not a ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentsConfig {
+    pub model: Option<String>,
 }
 
 /// One integer key's valid range, spelled once so the refusal sentence and
@@ -175,14 +187,15 @@ impl PaneConfig {
     fn parse(text: &str) -> Result<Self, String> {
         let value: toml::Value = toml::from_str(text).map_err(|e| format!("pane.toml: {e}"))?;
         let table = value.as_table().ok_or_else(|| {
-            "pane.toml: must be a table of [limits], [supervisor] and [helpers]".to_string()
+            "pane.toml: must be a table of [limits], [supervisor], [helpers] and [agents]"
+                .to_string()
         })?;
 
         for key in table.keys() {
-            if key != "limits" && key != "supervisor" && key != "helpers" {
+            if key != "limits" && key != "supervisor" && key != "helpers" && key != "agents" {
                 return Err(format!(
-                    "pane.toml: unknown table `[{key}]`; only [limits], [supervisor] and [helpers] are \
-                     recognised"
+                    "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers] and \
+                     [agents] are recognised"
                 ));
             }
         }
@@ -201,12 +214,41 @@ impl PaneConfig {
             None => HelpersConfig::default(),
         };
 
+        let agents = match table.get("agents") {
+            Some(value) => parse_agents(value)?,
+            None => AgentsConfig::default(),
+        };
+
         Ok(Self {
             limits,
             supervisor,
             helpers,
+            agents,
         })
     }
+}
+
+/// `[agents] model` -- one optional key, refusing anything else so a typo is
+/// a startup error rather than a silently ignored preference.
+fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
+    let table = table_of(value, "agents")?;
+    for key in table.keys() {
+        if key != "model" {
+            return Err(format!(
+                "pane.toml: unknown key `{key}` in [agents]; only `model` is recognised"
+            ));
+        }
+    }
+    let model = match table.get("model") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `model` must be a string".to_string())?
+                .to_string(),
+        ),
+    };
+    Ok(AgentsConfig { model })
 }
 
 fn table_of<'a>(value: &'a toml::Value, name: &str) -> Result<&'a toml::value::Table, String> {

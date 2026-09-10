@@ -23,23 +23,25 @@ const MAX_EVIDENCE_BYTES: usize = 48 * 1024;
 /// a statement about how much a helper may read.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 
-/// How much of the caller's own text the helper request carries, by role.
+/// How much of the caller's own text the helper request carries, by role, or
+/// `None` for a role that is never truncated.
 ///
-/// The distinction this exists to make: for a Scout or a Checker the input is
-/// a **question**, and 64 KiB of question is already generous. For a Reducer
-/// the input **is the work** — bounding it to a question's size would leave
-/// the one helper whose job is absorbing bulk unable to see the log it was
-/// called on.
+/// For a Scout or a Checker the input is a **question**, and 64 KiB of
+/// question is already generous.
 ///
-/// The reducer's figure is derived rather than picked: it is what fits beside
-/// the prepared packet and the reply inside the smallest window a helper model
-/// is likely to have. It is deliberately conservative, because a request that
-/// overflows fails and reduces nothing.
+/// **A Reducer is never bounded, and that is a decision rather than an
+/// oversight** (user ruling, 2026-09-10). Its input *is* the work. A truncated
+/// log makes it answer about the part that survived — reporting no failures
+/// because the failures were in the omitted middle — which is a quiet wrong
+/// answer. Sending the whole thing means an input too large for the helper
+/// model fails the request out loud instead, and a request that fails that way
+/// is telling you something true: the output needed filtering before it ever
+/// reached a reducer.
 #[must_use]
-pub fn payload_bound(role: HelperRole) -> usize {
+pub fn payload_bound(role: HelperRole) -> Option<usize> {
     match role {
-        HelperRole::Scout | HelperRole::Checker => MAX_INPUT_BYTES,
-        HelperRole::Reducer => 512 * 1024,
+        HelperRole::Scout | HelperRole::Checker => Some(MAX_INPUT_BYTES),
+        HelperRole::Reducer => None,
     }
 }
 const MAX_FILE_READ_BYTES: usize = 8 * 1024;

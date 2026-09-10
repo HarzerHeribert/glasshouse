@@ -223,6 +223,9 @@ pub(crate) struct RuntimeState {
     /// which is helpers **off**: a runtime nobody configured spends nothing
     /// on the user's behalf.
     helpers: RefCell<HelpersConfig>,
+    /// `[agents]` as the session read it: what a delegated goal runs on when
+    /// the cell does not name a model.
+    agents: RefCell<crate::config::AgentsConfig>,
     /// What `CallSite::PostResult` has already reduced this task, keyed by
     /// the SHA-256 of the text it reduced.
     ///
@@ -272,6 +275,7 @@ impl RuntimeState {
             model: RefCell::new(crate::wire::MODEL.to_string()),
             instructions: RefCell::new(InstructionContext::default()),
             helpers: RefCell::new(HelpersConfig::default()),
+            agents: RefCell::new(crate::config::AgentsConfig::default()),
             reductions: RefCell::new(Vec::new()),
             visible_sources: RefCell::new(HashMap::new()),
             pending_sources: RefCell::new(Vec::new()),
@@ -354,6 +358,15 @@ impl RuntimeState {
     /// unset is off, exactly as `[supervisor] model` unset is, because a
     /// helper spends money on the user's behalf and the fail-closed direction
     /// is *not configured, not run*.
+    /// The configured default model for a delegated goal, if there is one.
+    pub(crate) fn agent_model(&self) -> Option<String> {
+        self.agents.borrow().model.clone()
+    }
+
+    pub(crate) fn set_agents(&self, agents: crate::config::AgentsConfig) {
+        *self.agents.borrow_mut() = agents;
+    }
+
     pub(crate) fn helper_model(&self) -> Result<String, String> {
         let helpers = self.helpers.borrow();
         if !helpers.enabled {

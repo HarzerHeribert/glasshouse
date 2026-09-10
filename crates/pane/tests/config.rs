@@ -165,3 +165,51 @@ fn a_third_completion_style_is_refused_with_one_sentence() {
     assert!(err.contains("completion"), "{err}");
     assert_eq!(err.lines().count(), 1, "refused with one sentence: {err}");
 }
+
+/// The three-tier plumbing: a frontier parent, a cheap helper, and a
+/// separately chosen model for delegated goals.
+///
+/// Without `[agents] model` a subagent inherits the parent's model, so a
+/// session driven by a frontier model pays frontier rates for every goal it
+/// hands off unless the model remembers to name a cheaper one each time.
+#[test]
+fn agents_take_their_own_model_from_configuration() {
+    let root = std::env::temp_dir().join(format!("pane-agents-config-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    std::fs::write(
+        root.join(".glasshouse/pane.toml"),
+        "[helpers]\nmodel = \"gpt-5.6-luna\"\n\n[agents]\nmodel = \"claude-sonnet-5\"\n",
+    )
+    .unwrap();
+
+    let config = pane::config::PaneConfig::load(&root).expect("the file parses");
+    assert_eq!(config.helpers.model.as_deref(), Some("gpt-5.6-luna"));
+    assert_eq!(config.agents.model.as_deref(), Some("claude-sonnet-5"));
+}
+
+/// A project that configures nothing gets no agent default, which is the
+/// previous behaviour exactly: the subagent inherits the parent.
+#[test]
+fn an_unconfigured_project_names_no_agent_model() {
+    let root = std::env::temp_dir().join(format!("pane-agents-none-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let config = pane::config::PaneConfig::load(&root).expect("a missing file is the default");
+    assert_eq!(config.agents.model, None);
+}
+
+/// A typo in the table is a startup error, not a silently ignored preference.
+#[test]
+fn an_unknown_agents_key_is_refused_by_name() {
+    let root = std::env::temp_dir().join(format!("pane-agents-typo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    std::fs::write(
+        root.join(".glasshouse/pane.toml"),
+        "[agents]\nmodle = \"claude-sonnet-5\"\n",
+    )
+    .unwrap();
+    let error = pane::config::PaneConfig::load(&root).unwrap_err();
+    assert!(error.contains("modle"), "{error}");
+}
