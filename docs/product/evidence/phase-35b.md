@@ -162,6 +162,15 @@ Regression evidence:
 - `routing::interactive::tests::score_candidate_does_not_let_a_thin_sample_outrank_an_established_one`
 - Pre-existing: `tests/pairing_prior.rs::the_prior_contribution_decays_to_zero_as_observations_accumulate`.
 
+**2026-09-10, gateway extraction:** the two ledger-backed tests above are retired —
+the gateway no longer reads the evidence ledger during failover (design-decisions,
+*The inference gateway is its own crate and process*, decision 1). Line 1548's
+discount is still exercised where it is computed: `inference_gateway::routing::pairing`'s
+tests of `decay_factor`, `evidence_signal` and `native_pairing_prior_contribution`, plus
+`score_candidate_does_not_let_a_thin_sample_outrank_an_established_one`. The stale-window
+discount in `ObservedEvidenceSource::observed` has no production caller until the
+successor named there lands.
+
 **The new tests use a real ledger rather than the pre-existing hand-built
 `ObservationSource` doubles**, which matters here more than usual: the doubles
 can express counts and rates the shipped ledger can never produce, and one of

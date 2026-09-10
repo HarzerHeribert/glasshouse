@@ -16663,6 +16663,8 @@ package's whole job rather than a constraint on the fixups (the lead's correctio
 
 ### `crates/glasshouse/src/config/pairing.rs` — `native_pairing_prior_contribution`
 
+*(2026-09-10: now `crates/inference-gateway/src/routing/pairing.rs`, taking a caller-stated `RouteAffinity` — see *The inference gateway is its own crate and process*.)*
+
 /// Line 566 through 575, as one function: what the native-pairing prior and
 /// the local evidence for `key` contribute to routing `candidate`.
 ///
@@ -20380,3 +20382,113 @@ unproven. Named verification reuse remains honest within its declared scope,
 with original timestamp and explicit executed/reused fields. A missing fresh
 execution inside the helper is not itself an evidence failure. The bounded
 follow-up replay must validate both behaviors before this correction is done.
+
+## The inference gateway is its own crate and process; Glasshouse is optional — the user, 2026-09-10
+
+**The ruling.** Three components, the gateway at the bottom, neither of the
+other two depending on the other: *Pane → Gateway → Providers*, *Pane →
+Glasshouse*. Pane sends model, effort, request and fallback policy. The
+gateway may choose provider, account and entitlement; it may not change model
+or effort unless the caller's fallback policy explicitly permits it. Glasshouse
+is *completely optional* and its task is project management — sessions,
+memory, decisions, observability, cost visibility, human steering — not model
+routing and not choosing a subscription. No new AI observer, no new memory
+feature, no routing redesign inside this work. Two refinements given at plan
+approval: `ObservationSink` is an internal gateway abstraction (standalone →
+a null sink; Glasshouse-connected → a sink that carries observations *outward*
+in the gateway's own vocabulary; the gateway never imports a Glasshouse type),
+and same-model failover works standalone while intelligence-index-based
+cross-model migration stays out of this milestone (if enabled later the
+gateway receives catalogue data or a resolved policy, never a Glasshouse
+dependency). And the cut that made the move possible, given the same day:
+*remove harness/integration identity from the gateway; Pane owns harness-aware
+pairing policy and supplies only client-neutral serving requirements;
+the gateway ranks same-model resources on compatibility, entitlement/cost,
+quota, health, cache locality, stickiness and failure domain; Glasshouse must
+not participate in this path.*
+
+**The shape.** `crates/inference-gateway` (library and the `inference-gateway`
+binary; 42 production files) holds what was `gateway/` (translate, ingress,
+upstream, usage, request model, session assignment and failover, the
+subscription broker), `secret/` including the OS keychain, `subscription/
+connect.rs` (PKCE/loopback OAuth), the entitlement catalogue that was
+`config/entitlement.rs`, `routing/{interactive,free,domain,wire,pairing,
+request,tier}`, the evidence *vocabulary* (`routing/evidence/vocabulary.rs`,
+no database), and `provider/{cache,discovery,quota,telemetry,registry,
+budget,fixture}`. Glasshouse depends on the crate (`pub use` re-exports keep
+every old path valid — `glasshouse::gateway`, `::secret`, `::routing::*`,
+`::provider::*`); Pane depends on nothing but the binary's CLI. The direction
+is enforced, not documented: `gateway/tests.rs` scans all 42 files for
+`crate::{harness,integrations,session,profile,config,paths,events,memory,
+firewall,…}` and for the literal `glasshouse::` and `rusqlite`, and
+`main.rs` carries the same scan for the binary's own files. Seven preparatory
+cuts landed on `main` first (`c744891`, `0512425`, `b171365`, `76611df`,
+`89b6593`, `f44d02a`, `744cec0`), each file-disjoint and green, so the move
+itself was a replayed rename with no conflicts.
+
+**What the host keeps, and the two seams.** The SQLite evidence ledger, the
+24-axis session scorer, the classifier, the Artificial Analysis catalogue,
+harness adapters and `IntegrationId`, launch profiles, and the policy types
+that need them (`routing/entitlement_policy.rs`: `Entitlement`,
+`EntitlementRules`, `HardConstraint`, `UseReason`; the harness-aware pairing
+classification in `harness/pairing.rs`, which now *produces*
+`PairingAffinities` for the gateway instead of being read by it). Seam one:
+`gateway::ObservationSink = Arc<dyn Fn(Observation)>` with
+`Observation::{Degraded{resource, reason}, Routed{observation, observed_at_unix}}`;
+the host's `routing::evidence::observation_sink(ledger, next)` writes the
+ledger and forwards the rest, and both launch doors compose it through
+`optional_observation_sink`. Seam two: `BackendDemand::{Direct, LocalGateway}`
+replaces `LaunchProfile` at the gateway's door, and `BrokerPaths` replaces
+`RuntimePaths`.
+
+**The standalone process.** `inference-gateway serve [--listen 127.0.0.1:0]
+[--config <path>] [--data-dir <path>]` prints one stdout line
+`{"listening":"http://127.0.0.1:<port>","token":"<bearer>"}` and serves until
+stdin reaches EOF or SIGTERM/SIGINT/SIGHUP; a fixed port is refused by name
+rather than silently ignored. `entitlements --json [--refresh]`,
+`subscriptions connect <provider> --entitlement <name> --json` (the same
+`Progress` NDJSON), `routing-cost --json --since <unix>` (empty, exit 0 — no
+ledger standalone). Its config is `gateway.toml` under the platform config
+directory: `[accounts.<name>]` in the entitlement catalogue's own shape and a
+`[providers.<name>]` table (`base_url` + `protocol`, or a `protocols` map;
+`credential_env` names, never values). Pane spawns it (`--gateway <path>`, or
+`inference-gateway` on `PATH`), points `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN` at it, and attaches instead when a base URL is already
+set — which is what Glasshouse does when it launches Pane on a gateway-backed
+profile, so a Glasshouse-launched session reaches Glasshouse's in-process
+gateway and its ledger exactly as before.
+
+**Decisions taken while cutting, for the user to overrule.**
+1. *The ledger-read side of failover ranking is gone from every deployment.*
+   The Phase 9J observed-evidence prior and Phase 33C's route correlations were
+   read out of the host's SQLite ledger inside `observe_exchange`; the ruling
+   above names neither among the gateway's ranking inputs and forbids
+   Glasshouse a seat in the path, so the gateway now passes `NoObservations`
+   and `RouteCorrelations::default()` (the documented pre-33C ranking). The
+   pure scoring functions and their unit tests moved with them; the two
+   ledger-backed regression tests (`on_provider_failure_prior_decays_as_real_
+   recorded_evidence_accumulates`, `…discounts_a_stale_observation_window`)
+   and split A's three are retired, and `routing::evidence::ObservedEvidenceSource`
+   is a host reader with no production caller. **Successor, one line, not a
+   package now:** a gateway-owned in-memory evidence store fed by its own
+   `Routed` observations, keyed by the opaque client slug — which is what the
+   approved plan meant by "local observed evidence stays in the gateway".
+2. *Pane without a gateway talks to the provider directly, once, out loud.*
+   No `--gateway`, no `inference-gateway` on `PATH`, no `ANTHROPIC_BASE_URL`:
+   the session starts in direct mode with one stderr line naming both fixes
+   (`glasshouse launch` of the native `pane` profile is exactly this case). A
+   `--gateway <path>` that fails is still a refusal.
+3. *The standalone gateway marks every account `Cost::Metered` and
+   `selectable`,* and only refreshes broker-backed catalogues; a session pin
+   and provider-side model discovery are host concerns it does not reproduce.
+
+**Residuals.** The IPC-backed sink for a gateway *Pane* spawned is not built:
+Glasshouse observes the in-process gateway it starts itself, and a
+Pane-spawned gateway's observations go to the null sink. `profile/mod.rs`
+still carries the host's copy of the pool glue that `pool.rs` lifted;
+`ResourceKind::GlasshouseGateway` keeps its name. Historical sections of this
+file and the evidence entries name the old `crates/glasshouse/src/…` paths;
+the rename map is `git log --follow` and this section, not a rewrite of the
+record. `scripts/check-file-sizes.py` now walks every `crates/*/src`, which
+put three Pane files into the baseline at their current size; they may only
+shrink.

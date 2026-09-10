@@ -334,6 +334,7 @@ the semantic vocabulary `assurance-economics.md` defines:
   `routing_policy.rs::order_dependence::…`, a **pre-existing, author-independent**
   test from `lead-route`'s adversarial suite. Stronger than a self-written kill.
 - `accept-stale-state` on `resolve_harness` — killed.
+  *(2026-09-10: `resolve_harness` and `unrecognised_harness_explanation` were deleted by the gateway extraction's cut 1 — the unrecognised case is an empty `PairingAffinities` now; the classification lives in `harness::pairing::{route_affinity, candidate_affinities}` on the host side. The row stays as the record of what was proven then.)*
 - `bypass-fallback` on the accept loop's own wiring — killed, and **re-run
   independently by the integrator**: replacing `evidence_ledger.as_deref()` with
   `None` turns the real-socket test red.

@@ -370,6 +370,8 @@ Regression evidence:
 - `secret::native::tests::a_credential_stored_in_the_native_store_resolves_and_deletes`, `the_native_store_is_preferred_over_the_environment`, `a_native_store_credential_reaches_a_launch_overlays_environment` — ran on the VM, 10/10, not skipped
 - `secret::native::tests::an_unreachable_stores_reason_carries_the_platforms_own_status` (new), `a_store_error_never_carries_anything_the_store_returned` (extended to the carried status)
 
+*2026-09-10, gateway extraction:* `secret::native` is `inference_gateway::secret::native`; the same test names run under `cargo test -p inference-gateway`, except `a_native_store_credential_reaches_a_launch_overlays_environment`, which crosses into the host's `profile::resolve` and now lives in `glasshouse::profile::tests` (the keychain aids it needs are `secret::native::fixtures`, behind the crate's `fixtures` feature).
+
 | mutation | vocabulary | result | killed by |
 |---|---|---|---|
 | `PreferNativeSecretStore::detect`: `native: NativeSecretStore::detect(),` → `native: Err(Unavailable::UnsupportedPlatform),` — compiled and run **on the Windows ARM64 VM** under the interactive logon | `m1` (drop-the-native-store) | **killed** | `secret_native::a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment`; also `secret::native::tests::the_native_store_is_preferred_over_the_environment`, `a_native_store_credential_reaches_a_launch_overlays_environment` |
