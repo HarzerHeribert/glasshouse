@@ -20467,11 +20467,13 @@ host never moved off a dead account. A session nobody bound now binds itself
 from its first exchange (`gateway/session/mod.rs`, `UNBOUND_CLIENT`), proven at
 the library (`observe_exchange_binds_itself_from_the_first_exchange_when_nobody_bound_it`)
 and at the process (`tests/bin.rs::serve_fails_over_to_the_next_account_when_the_first_is_unreachable`:
-two accounts, the first at a dead port, the second request served). Also
-changed on their findings: a backend that declares a catalogue is a failover
+two accounts, the first at a dead port, the second request served; mutation
+`self-bind-disabled` KILLED by the library test). Also changed on their
+findings: a backend that declares a catalogue is a failover
 candidate only for the models it lists (`UpstreamBackend::can_serve`; every
 broker-backed subscription carries all four protocols, so without it a session
-failed over into a model-not-found it then read as `Served`); the inline test
+failed over into a model-not-found it then read as `Served`; mutation
+`can-serve-admits-all` KILLED by `observe_exchange_skips_a_candidate_whose_catalogue_omits_the_model`); the inline test
 module that hid 630 lines of `routing/pairing.rs` from the boundary scans moved
 to the file's end; two runtime messages that assumed a Glasshouse-only world
 were reworded; the effort notes now say `xhigh`/`max` travel when stated.
