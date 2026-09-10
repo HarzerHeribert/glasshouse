@@ -279,6 +279,28 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
         set_fixed_key(scope, global, name, function.into());
     }
 
+    // The dialect spellings, bound to the same `tool_callback` with the same
+    // registry name in their data slot — `tool-abi.md` §14. `Read` is not a
+    // wrapper around `read`; the two names reach one callback, so acceptance
+    // criterion 20's semantic equivalence is structural. The gate is asked of
+    // the **registry** name, so an alias can never carry a capability a
+    // helper's spec withheld.
+    for (alias, tool) in crate::abi::dialect::tool_aliases() {
+        if !globals.binds_tool(tool) {
+            continue;
+        }
+        // The data slot carries the **alias**, not the registry name: it is
+        // how the one callback learns which spelling it was reached by, and
+        // therefore which parameter names to rename. Binding the registry
+        // name here instead compiles, dispatches to the right capability,
+        // and silently skips the rename.
+        let data = js_string(scope, alias);
+        let Some(function) = v8::Function::builder(tool_callback).data(data).build(scope) else {
+            continue;
+        };
+        set_fixed_key(scope, global, alias, function.into());
+    }
+
     if globals.installs("send")
         && let Some(function) = v8::Function::builder(send_callback).build(scope)
     {
@@ -335,6 +357,7 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
 
     if globals.installs("checks") {
         crate::runtime::checks::install(scope, global);
+        crate::runtime::checks::install_aliases(scope, global);
     }
 
     // Little helpers (`little-helpers.md`, *Pulled*), installed from the
@@ -559,7 +582,16 @@ fn tool_callback(
     args: v8::FunctionCallbackArguments,
     mut retval: v8::ReturnValue,
 ) {
-    let name = args.data().to_rust_string_lossy(scope);
+    let bound_name = args.data().to_rust_string_lossy(scope);
+    // A dialect spelling resolves to its own capability and its own
+    // parameter names, so `Read({file_path})` in a cell is the call
+    // `Read({file_path})` is as a direct tool — `tool-abi.md` §14. The
+    // rename below is the entire difference between the two spellings; the
+    // dispatch beneath it is one path.
+    let shape = crate::abi::dialect::lookup_any(&bound_name);
+    let name = shape.map_or(bound_name.clone(), |shape| {
+        shape.target.callee().to_string()
+    });
     let Some(requested_tool) = registry::lookup(&name) else {
         // Unreachable through `install`, which binds only registered names,
         // and a refusal rather than a panic if it ever is reached.
@@ -581,6 +613,11 @@ fn tool_callback(
             return;
         }
     };
+    if let Some(shape) = shape {
+        for param in shape.params {
+            call_args = call_args.rename(param.provider, param.canonical);
+        }
+    }
     let state = state(scope);
     let tool = if requested_tool.name() == "read" {
         call_args

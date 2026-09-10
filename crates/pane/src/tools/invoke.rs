@@ -152,6 +152,26 @@ impl Args {
         }
     }
 
+    /// Moves the value at `from` to `to`, keeping its form.
+    ///
+    /// The whole of a dialect adapter's work for most rows: a provider
+    /// family that learned `file_path` is shown `file_path`, and the tool
+    /// that has always taken `path` receives `path`
+    /// (`tool-abi.md` §5). The `Lines` form survives the move, because
+    /// `Write`'s literal content is exactly the argument a rename must not
+    /// flatten. Renaming onto an occupied name is a no-op, so an explicit
+    /// canonical argument always wins over an aliased one.
+    #[must_use]
+    pub fn rename(mut self, from: &str, to: &str) -> Self {
+        if from == to || self.0.contains_key(to) {
+            return self;
+        }
+        if let Some(value) = self.0.remove(from) {
+            self.0.insert(to.to_string(), value);
+        }
+        self
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(String::as_str)
     }

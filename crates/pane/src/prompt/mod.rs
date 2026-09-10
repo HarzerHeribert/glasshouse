@@ -4,6 +4,7 @@
 
 pub mod declarations;
 
+use crate::abi::{self, types};
 use crate::contract::{Block, Conversation};
 use crate::runtime::bindings::HostGlobals;
 use crate::runtime::outcome::PlanItem;
@@ -219,10 +220,55 @@ pub fn render_system_for(
 ) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     format!(
-        "{PREAMBLE}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{instructions}",
+        "{PREAMBLE}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{}\n\n{instructions}",
         rendered.join("\n\n"),
         render_runtime_for(globals),
+        render_abi_for(globals),
         render_session_facts(facts)
+    )
+}
+
+/// §1's *Familiar tools* block: the ABI's own types and declarations.
+///
+/// The invariant is the Runtime block's, for the same reason: **a name the
+/// isolate binds is a name this block declares.** `runtime_cells.rs`'s
+/// enumeration test fails on a bound-but-undeclared global, and every
+/// dialect spelling is one.
+///
+/// What is deliberately *not* here is any explanation of how a cell reaches a
+/// capability. `tool-abi.md` §23 and the `improvement-register.md` prompt
+/// boundary both say a rule expressible as a type does not belong in prose,
+/// and the completeness fields in [`types::PRELUDE`] are that rule.
+pub fn render_abi_for(globals: HostGlobals) -> String {
+    let mut declarations = Vec::new();
+    for dialect in abi::dialect::ALL {
+        for shape in dialect.shapes() {
+            let bound = match shape.target {
+                abi::Target::Tool(name) => globals.binds_tool(name),
+                abi::Target::HostCall(_) => globals.installs("checks"),
+            };
+            if !bound
+                || declarations
+                    .iter()
+                    .any(|(name, _)| *name == shape.provider_name)
+            {
+                continue;
+            }
+            declarations.push((
+                shape.provider_name,
+                format!("{}\n// {}", shape.declaration(), shape.description),
+            ));
+        }
+    }
+    if declarations.is_empty() {
+        return String::new();
+    }
+    let bodies: Vec<String> = declarations.into_iter().map(|(_, body)| body).collect();
+    format!(
+        "## Familiar tools\n\n{}\n\n{}\n\n{}",
+        types::PRELUDE,
+        bodies.join("\n\n"),
+        types::GUIDANCE
     )
 }
 

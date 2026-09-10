@@ -120,7 +120,7 @@ impl<'a> RequestBody<'a> {
         model: &'a str,
         max_tokens: u32,
         conversation: &'a Conversation,
-        native_cell: bool,
+        tools: Vec<serde_json::Value>,
     ) -> Self {
         Self {
             model,
@@ -135,12 +135,7 @@ impl<'a> RequestBody<'a> {
                 }]
             },
             messages: conversation.messages.iter().map(to_wire_message).collect(),
-            tools: native_cell.then(|| vec![serde_json::json!({
-                "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
-                "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
-                "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
-                "cache_control": {"type": "ephemeral"}
-            })]),
+            tools: (!tools.is_empty()).then_some(tools),
             stream: None,
         }
     }
@@ -189,13 +184,97 @@ pub fn request_body_on_model(conversation: &Conversation, model: &str) -> Vec<u8
     request_body_configured(conversation, model, Effort::Auto)
 }
 
+/// Which tool definitions a request carries — `tool-abi.md` §3.
+///
+/// A visibility choice and nothing else. Every variant reaches the same
+/// kernel, so this type decides what the model is *shown* and never how the
+/// work runs — which is what makes an interface benchmark measure the
+/// interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// A supervisor look: no tools at all, so it cannot act.
+    TextOnly,
+    /// A request that may act, and the façade it acts through.
+    Acting {
+        interface: crate::abi::Interface,
+        dialect: crate::abi::Dialect,
+    },
+}
+
+impl Surface {
+    /// `execute_cell` and nothing else.
+    ///
+    /// The surface for every narrowed context — a helper or a subagent —
+    /// because a dialect row advertises a capability such a context may not
+    /// bind, and a declared-but-absent tool is the one failure the
+    /// narrowing exists to avoid.
+    #[must_use]
+    pub fn cells() -> Self {
+        Self::Acting {
+            interface: crate::abi::Interface::Cells,
+            dialect: crate::abi::Dialect::Anthropic,
+        }
+    }
+
+    /// The tool definitions this surface declares, in declaration order.
+    ///
+    /// The cache breakpoint sits on the **last** definition so the whole
+    /// tool prefix is one cacheable block (`model-contract.md` §8). With a
+    /// cells-only surface that is `execute_cell`, exactly as before.
+    #[must_use]
+    pub fn tool_definitions(self) -> Vec<serde_json::Value> {
+        let Self::Acting { interface, dialect } = self else {
+            return Vec::new();
+        };
+        let mut tools = Vec::new();
+        if interface.declares_cell() {
+            tools.push(serde_json::json!({
+                "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
+                "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+                "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
+            }));
+        }
+        if interface.declares_direct_tools() {
+            tools.extend(
+                dialect
+                    .shapes()
+                    .iter()
+                    .map(super::abi::Shape::tool_definition),
+            );
+        }
+        if let Some(last) = tools.last_mut()
+            && let Some(object) = last.as_object_mut()
+        {
+            object.insert(
+                "cache_control".into(),
+                serde_json::json!({"type": "ephemeral"}),
+            );
+        }
+        tools
+    }
+}
+
 pub fn request_body_configured(
     conversation: &Conversation,
     model: &str,
     effort: Effort,
 ) -> Vec<u8> {
+    request_body_for_surface(conversation, model, effort, Surface::cells())
+}
+
+/// [`request_body_configured`] for a caller that knows its own tool surface.
+///
+/// The task path passes the session's; helpers and subagents keep
+/// [`Surface::cells`], because a narrowed context binds fewer capabilities
+/// than a dialect row would advertise.
+pub fn request_body_for_surface(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    surface: Surface,
+) -> Vec<u8> {
     configure_effort(
-        build_request_body(model, MAX_TOKENS, conversation, true),
+        build_request_body(model, MAX_TOKENS, conversation, surface),
         model,
         effort,
     )
@@ -532,8 +611,27 @@ pub fn send_turn_bounded_with(
     timeout: Option<std::time::Duration>,
     extra_header: Option<(&str, &str)>,
 ) -> Result<Turn, WireError> {
+    send_turn_bounded_on(
+        conversation,
+        model,
+        effort,
+        timeout,
+        extra_header,
+        Surface::cells(),
+    )
+}
+
+/// [`send_turn_bounded_with`] for a caller that knows its own tool surface.
+pub fn send_turn_bounded_on(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    timeout: Option<std::time::Duration>,
+    extra_header: Option<(&str, &str)>,
+    surface: Surface,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = request_body_configured(conversation, model, effort);
+    let body = request_body_for_surface(conversation, model, effort, surface);
 
     let mut builder = ureq::post(&url).config().http_status_as_error(false);
     if let Some(timeout) = timeout {
@@ -606,7 +704,7 @@ pub fn send_turn_with_usage(
     extra_header: Option<(&str, &str)>,
 ) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = build_request_body(model, max_tokens, conversation, false);
+    let body = build_request_body(model, max_tokens, conversation, Surface::TextOnly);
 
     let mut request = ureq::post(&url)
         .config()
@@ -644,9 +742,9 @@ fn build_request_body(
     model: &str,
     max_tokens: u32,
     conversation: &Conversation,
-    native_cell: bool,
+    surface: Surface,
 ) -> Vec<u8> {
-    let body = RequestBody::new(model, max_tokens, conversation, native_cell);
+    let body = RequestBody::new(model, max_tokens, conversation, surface.tool_definitions());
     serde_json::to_vec(&body).expect("Conversation has no non-serialisable field")
 }
 
@@ -1030,10 +1128,24 @@ pub fn send_turn_streaming_configured(
     effort: Effort,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
+    send_turn_streaming_on(conversation, model, effort, Surface::cells(), on_delta)
+}
+
+/// [`send_turn_streaming_configured`] for a caller that knows its own tool
+/// surface. `model-contract.md` §8 requires the streamed body to use the same
+/// serializer and the same cache boundaries as the whole-response one, so the
+/// surface reaches both through the same [`Surface::tool_definitions`].
+pub fn send_turn_streaming_on(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    surface: Surface,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<Turn, WireError> {
     use std::io::{BufRead, BufReader};
 
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let mut body = RequestBody::new(model, MAX_TOKENS, conversation, true);
+    let mut body = RequestBody::new(model, MAX_TOKENS, conversation, surface.tool_definitions());
     body.stream = Some(true);
     let body = configure_effort(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
@@ -1117,7 +1229,12 @@ mod tests {
     #[test]
     fn send_turn_with_names_the_model_it_is_given() {
         let conversation = sample_conversation();
-        let body = build_request_body("cheap-model-for-the-test", 200, &conversation, false);
+        let body = build_request_body(
+            "cheap-model-for-the-test",
+            200,
+            &conversation,
+            Surface::TextOnly,
+        );
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["model"], "cheap-model-for-the-test");
         assert_eq!(value["max_tokens"], 200);
@@ -1210,8 +1327,13 @@ mod tests {
         let conversation = sample_conversation();
         let body = String::from_utf8(request_body(&conversation)).unwrap();
         assert!(!body.contains("stream"), "{body}");
-        let supervisor =
-            String::from_utf8(build_request_body("m", 200, &conversation, false)).unwrap();
+        let supervisor = String::from_utf8(build_request_body(
+            "m",
+            200,
+            &conversation,
+            Surface::TextOnly,
+        ))
+        .unwrap();
         assert!(!supervisor.contains("stream"), "{supervisor}");
     }
 

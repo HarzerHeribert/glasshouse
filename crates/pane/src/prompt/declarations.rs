@@ -343,4 +343,8 @@ pub const LANGUAGE_CONSTANTS: [&str; 3] = ["undefined", "NaN", "Infinity"];
 pub fn declares_global(name: &str) -> bool {
     ENTRIES.iter().any(|entry| entry.name == name)
         || RUNTIME.iter().any(|binding| binding.global == name)
+        // The dialect spellings, declared by `prompt::render_abi_for` from
+        // the same table `bindings::install` binds them from — so a row
+        // added to a dialect is declared and bound together or neither.
+        || crate::abi::dialect::is_dialect_name(name)
 }

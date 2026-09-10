@@ -41,6 +41,29 @@ pub(crate) fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     );
 }
 
+/// Binds the dialect spellings of `checks.run` to the very same callback.
+///
+/// The invariant: `RunTests` is not a wrapper around `checks.run`, it *is*
+/// `checks.run` under another name, so there is no second freshness-and-reuse
+/// implementation for the two spellings to disagree about
+/// (`tool-abi.md` §13.8).
+pub(crate) fn install_aliases(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    for alias in crate::abi::dialect::host_call_aliases("checks.run") {
+        let Some(function) = v8::Function::builder(run).build(scope) else {
+            continue;
+        };
+        let Some(key) = v8::String::new(scope, alias) else {
+            continue;
+        };
+        global.define_own_property(
+            scope,
+            key.into(),
+            function.into(),
+            v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+        );
+    }
+}
+
 fn throw(scope: &mut v8::PinScope, error: &str) {
     bindings::throw_tool_error(scope, error);
 }

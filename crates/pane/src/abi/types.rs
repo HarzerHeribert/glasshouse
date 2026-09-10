@@ -1,0 +1,137 @@
+//! The TypeScript the model is given instead of prose about how pane works.
+//!
+//! The governing rule, and the reason this file exists rather than a longer
+//! preamble: **a fact the model must act on belongs in a type it can read,
+//! not in a sentence it must remember.** The load-bearing instance is
+//! `complete` — pane may hold ten thousand exact matches and put a hundred in
+//! the working set, so a result that were a bare array would teach a model
+//! that iterating it covers everything. It is an object with `count` and
+//! `complete`, and the guard writes itself.
+
+/// The shared result vocabulary, declared once ahead of the capabilities.
+///
+/// `ArtifactRef` is a name, never content: it is how a bounded or derived
+/// view keeps its complete observation reachable (`tool-abi.md` §12).
+pub const PRELUDE: &str = "\
+type ArtifactRef = string;
+type Evidence = \"exact\" | \"bounded_exact\" | \"derived\";
+// `complete` is false when pane holds more of this observation than the value
+// carries. `artifact` then names the whole, and `source` says what this is.
+type Bounded = {count: number; complete: boolean; source: Evidence; artifact?: ArtifactRef};
+
+type ReadInput = {file_path: string};
+type ReadResult = Bounded & {path: string; text: string; bytes: number; lineCount: number};
+
+type SearchInput = {pattern: string; path?: string};
+type SearchMatch = {path: string; line: number; text: string};
+type SearchResult = Bounded & {matches: SearchMatch[]};
+
+type GlobInput = {pattern: string};
+type GlobResult = Bounded & {paths: string[]};
+
+type EditInput = {file_path: string; old_string: string; new_string: string};
+type EditResult = {path: string; before_sha256: string; after_sha256: string};
+
+type WriteInput = {file_path: string; content?: string; lines?: string[]};
+type WriteResult = {path: string};
+
+type CommandInput = {command: string};
+// `ok` is exit_code === 0, decided by pane rather than by reading stdout.
+type CommandResult = Bounded & {stdout: string; stderr: string; exit_code: number | null; ok: boolean};
+
+type CheckInput = {name: string; force?: boolean};
+// `executed` and `reused` are never both true; a reused observation does not
+// claim a fresh run.
+type CheckResult = {name: string; command: string; stdout: string; stderr: string; exit_code: number | null; executed: boolean; reused: boolean; reuse_scope: string};";
+
+/// The whole conceptual contract, in the words the model needs and no more.
+///
+/// Everything the model does not need to know to act correctly — lowering,
+/// the intent IR, routing tiers, helper escalation, the artifact store, the
+/// ledger — is deliberately absent. Those are pane's business, and a model
+/// that reproduced them would be doing pane's job with worse information.
+pub const GUIDANCE: &str = "\
+The familiar tools above are available directly and inside `execute_cell`.
+Use a direct call for a simple or independent operation. Use `execute_cell`
+when a later operation depends on an earlier result, or when loops, branching,
+batching or local transformation would otherwise cost extra turns. Inside a
+cell the same tools are the same typed async functions, with the same
+arguments and the same result semantics as their direct forms. Prefer ordinary
+tool calls unless composition gives a concrete advantage, and write the
+smallest cell that expresses the dependency or control flow you need.
+
+Pane decides execution strategy, output sizing, evidence storage and helper
+escalation. Do not reproduce those mechanisms yourself.
+
+    const tests = await Bash({ command: \"cargo test\" });
+    if (!tests.ok) {
+      const files = await Grep({ pattern: \"SomeError\", path: \"src\" });
+      return { tests, files };
+    }
+    return tests;";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_bounded_result_can_be_guarded_before_it_is_iterated() {
+        // The property the type exists for: a model can decide from the value
+        // alone whether iterating it covers the whole observation.
+        for name in ["ReadResult", "SearchResult", "GlobResult", "CommandResult"] {
+            assert!(PRELUDE.contains(&format!("type {name} = Bounded &")));
+        }
+        assert!(PRELUDE.contains("complete: boolean"));
+        assert!(PRELUDE.contains("artifact?: ArtifactRef"));
+    }
+
+    #[test]
+    fn the_iterable_field_is_never_a_bare_array_result() {
+        // A bare array would be iterable with no way to know it is partial.
+        assert!(PRELUDE.contains("matches: SearchMatch[]"));
+        assert!(PRELUDE.contains("paths: string[]"));
+        assert!(!PRELUDE.contains("type SearchResult = SearchMatch[]"));
+    }
+
+    #[test]
+    fn a_command_result_says_ok_rather_than_asking_for_stdout_to_be_read() {
+        assert!(PRELUDE.contains("ok: boolean"));
+        assert!(PRELUDE.contains("exit_code: number | null"));
+    }
+
+    #[test]
+    fn a_check_result_keeps_fresh_and_reused_distinguishable() {
+        assert!(PRELUDE.contains("executed: boolean"));
+        assert!(PRELUDE.contains("reused: boolean"));
+    }
+
+    /// The guidance stays a conceptual contract, not an architecture lecture:
+    /// the implementation vocabulary must not appear in it at all.
+    #[test]
+    fn the_guidance_never_explains_the_implementation() {
+        for leaked in [
+            "Cell IR",
+            "lowering",
+            "canonical intent",
+            "reducer",
+            "Little Helper",
+            "ledger",
+            "artifact store",
+            "router",
+        ] {
+            assert!(
+                !GUIDANCE.contains(leaked),
+                "the model prompt explains `{leaked}`, which is pane's business"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guidance_stays_short() {
+        // The budget this file exists to defend. Prose is the fallback for
+        // knowledge that could not be typed, so it is capped rather than
+        // trusted.
+        let words = GUIDANCE.split_whitespace().count();
+        assert!(words < 200, "the guidance is {words} words");
+    }
+}

@@ -3,6 +3,7 @@
 //! a protocol boundary, never a compile-time dependency on the `glasshouse`
 //! crate. It builds and tests independently of the rest of the workspace.
 
+pub mod abi;
 pub mod agent;
 pub mod approval;
 pub mod bg;

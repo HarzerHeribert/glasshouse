@@ -81,7 +81,9 @@ const NON_TOOL_HOST_FUNCTIONS: [&str; 10] = [
 /// compiled, ran the whole cell, and told the model afterwards that its
 /// `globalThis` was frozen.
 pub fn is_host_function(name: &str) -> bool {
-    registry::lookup(name).is_some() || NON_TOOL_HOST_FUNCTIONS.contains(&name)
+    registry::lookup(name).is_some()
+        || NON_TOOL_HOST_FUNCTIONS.contains(&name)
+        || crate::abi::dialect::is_dialect_name(name)
 }
 
 /// The one runtime binding a generated cell carries: the host object whose
