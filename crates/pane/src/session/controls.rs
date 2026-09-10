@@ -75,10 +75,11 @@ fn tier_models(session: &Session<'_>) -> TierModels {
 
 /// Assigns a model to one tier, and persists the two that outlive the session.
 ///
-/// The parent stays in memory, which is what `/model` has always done. A
-/// helper or subagent model is written to `.glasshouse/pane.toml`, because
-/// `agent.rs` loads that file itself when a delegated goal starts: a choice
-/// held only here would be one a subagent could not see.
+/// All three are written to `.glasshouse/pane.toml`. The parent is there for
+/// the plainest reason -- a session that forgets which model you chose makes
+/// you choose it again every time -- and the other two because `agent.rs`
+/// loads that file itself when a delegated goal starts, so a choice held only
+/// in memory would be one a subagent could not see.
 ///
 /// SAFETY OF THE EDIT: the text is proved to load with [`PaneConfig::parse`]
 /// **before** it replaces the file, so a rejected model name -- a path, a
@@ -89,10 +90,10 @@ pub(super) fn assign_model(
     tier: Tier,
     value: &str,
 ) -> Result<String, String> {
-    let (section, key_removed) = match tier {
-        Tier::Parent => return Err("the parent model is set by `/model <id>`".into()),
-        Tier::Helpers => ("helpers", value == "off"),
-        Tier::Subagents => ("agents", value == "inherit"),
+    let (section, key, key_removed) = match tier {
+        Tier::Parent => ("model", "parent", false),
+        Tier::Helpers => ("helpers", "model", value == "off"),
+        Tier::Subagents => ("agents", "model", value == "inherit"),
     };
     let path = session.project.root.join(".glasshouse").join("pane.toml");
     let text = match fs::read_to_string(&path) {
@@ -113,9 +114,9 @@ pub(super) fn assign_model(
         .as_table_mut()
         .ok_or_else(|| format!("pane.toml: `[{section}]` must be a table"))?;
     if key_removed {
-        table.remove("model");
+        table.remove(key);
     } else {
-        table.insert("model".into(), toml::Value::String(value.into()));
+        table.insert(key.into(), toml::Value::String(value.into()));
         // Choosing a helper model in a panel IS the opt-in the fail-closed
         // default asks for, so an earlier `enabled = false` must not silently
         // swallow the choice a person just made.
@@ -932,8 +933,13 @@ mod tests {
             assert!(assign_model(session, Tier::Helpers, "../etc/passwd").is_err());
             assert_eq!(fs::read_to_string(&file).unwrap(), before);
 
-            // The parent is not this function's to set.
-            assert!(assign_model(session, Tier::Parent, "opus-5").is_err());
+            // The parent is remembered too: the tier a person changes most
+            // was the only one that used to forget.
+            assign_model(session, Tier::Parent, "claude-opus-4-8").unwrap();
+            assert_eq!(
+                PaneConfig::load(&root).unwrap().model.parent.as_deref(),
+                Some("claude-opus-4-8")
+            );
         });
         fs::remove_dir_all(&root).unwrap();
     }

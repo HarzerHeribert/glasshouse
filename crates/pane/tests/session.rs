@@ -3834,6 +3834,61 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
     );
 }
 
+/// The model you chose last is the model the next session starts on.
+///
+/// Without this every session begins on the built-in default, so a person
+/// re-picks their model each time and the choice never means anything.
+#[test]
+fn a_project_starts_on_the_model_it_was_last_left_on() {
+    let root = scratch_dir("model-remembered-root");
+    std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    let rollout = root.join("rollout.jsonl");
+
+    let (base_url, _bodies) = start_fake_provider(vec![ending_reply()]);
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-model-remember",
+        &["/model claude-opus-4-8"],
+        &base_url,
+        None,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("model changed to claude-opus-4-8"),
+        "{stdout}"
+    );
+    let saved = std::fs::read_to_string(root.join(".glasshouse").join("pane.toml")).unwrap();
+    assert!(
+        saved.contains("claude-opus-4-8"),
+        "the choice was not written: {saved}"
+    );
+
+    // A second session, told nothing on its command line, starts there.
+    let (second_url, bodies) = start_fake_provider(vec![ending_reply()]);
+    run_session_stdin(
+        &root,
+        &rollout,
+        "sess-model-remember-2",
+        &["do the thing"],
+        &second_url,
+        None,
+        false,
+    );
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        request["model"], "claude-opus-4-8",
+        "a fresh session ignored the remembered model"
+    );
+    assert_ne!(
+        request["model"].as_str().unwrap(),
+        pane::wire::MODEL,
+        "the fixture must differ from the default, or it proves nothing"
+    );
+}
+
 /// A slug carrying a space is a typo, not a model, and taking it would send
 /// a request that can only 404 — so it is refused and the active slug stands.
 #[test]

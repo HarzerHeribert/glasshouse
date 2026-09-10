@@ -76,8 +76,13 @@ impl Effort {
     }
 }
 
-/// The model pane asks for absent an explicit choice.
-pub const MODEL: &str = "claude-sonnet-5";
+/// The model pane asks for absent an explicit choice and a remembered one.
+///
+/// A frontier model, deliberately. The parent tier is the one a person is
+/// talking to and the one whose mistakes cost a whole task; the cheap tiers
+/// are `[helpers]` and `[agents]`, and they are chosen on purpose rather than
+/// inherited from a timid default.
+pub const MODEL: &str = "claude-opus-5";
 
 /// The `max_tokens` pane asks for on every turn.
 pub const MAX_TOKENS: u32 = 8192;

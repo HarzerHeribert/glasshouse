@@ -896,6 +896,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // the next cell's runtime must be built from the choice just made, not
     // from what the file said at startup.
     let config = RefCell::new(PaneConfig::load(&args.root)?);
+    // An explicit `--model` wins; then the model this project was last left
+    // on; then the built-in default. Without the middle term every session
+    // starts over, which is what `[model] parent` exists to stop.
+    let started_on = args
+        .model
+        .clone()
+        .or_else(|| config.borrow().model.parent.clone())
+        .unwrap_or_else(|| wire::MODEL.to_string());
     if config.borrow().supervisor.model.is_none() {
         session_println!("supervisor: off (no model)");
     }
@@ -994,7 +1002,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         if args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
             Some(ui::LiveUi::start(
                 tui::ScreenState {
-                    model: Some(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
+                    model: Some(started_on.clone()),
                     compact: true,
                     pretty: true,
                     project: Some(
@@ -1042,13 +1050,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
         memory: &memory,
         interrupt: &interrupt,
         ui: interactive.as_ref(),
-        model: RefCell::new(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
-        context_window: args.context_window_tokens.map(|cap| {
-            (
-                args.model.clone().unwrap_or_else(|| wire::MODEL.into()),
-                cap,
-            )
-        }),
+        model: RefCell::new(started_on.clone()),
+        context_window: args
+            .context_window_tokens
+            .map(|cap| (started_on.clone(), cap)),
         mode: Cell::new(tui::Mode::Execute),
         effort: Cell::new(wire::Effort::Auto),
         interface: Cell::new(args.interface.unwrap_or_default()),
@@ -2781,6 +2786,10 @@ fn answer_command(
                 }
                 return;
             }
+            // The parent is remembered too -- but a project that cannot be
+            // written must not cost the person the model change itself, so
+            // the failure is reported beside a change that still happened.
+            let remembered = controls::assign_model(session, tier, model);
             *session.model.borrow_mut() = model.into();
             if !model.contains("claude")
                 && matches!(
@@ -2796,7 +2805,12 @@ fn answer_command(
             if let Some(ui) = session.ui {
                 ui.model(model);
             }
-            session_println!("model changed to {model}");
+            match remembered {
+                Ok(_) => session_println!("model changed to {model}"),
+                Err(reason) => {
+                    session_println!("model changed to {model} — not remembered: {reason}");
+                }
+            }
         } else {
             controls::models(session);
         }

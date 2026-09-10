@@ -113,6 +113,17 @@ pub struct PaneConfig {
     pub supervisor: SupervisorConfig,
     pub helpers: HelpersConfig,
     pub agents: AgentsConfig,
+    pub model: ModelConfig,
+}
+
+/// `[model]` -- the parent tier, the one the person talks to.
+///
+/// It is here for the same reason `[helpers] model` and `[agents] model` are:
+/// a session is three models, and the one you chose last should not be the
+/// only one that forgets. Unset falls back to [`crate::wire::MODEL`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelConfig {
+    pub parent: Option<String>,
 }
 
 /// `[agents]` -- what a subagent runs on when the cell does not say.
@@ -199,10 +210,10 @@ impl PaneConfig {
         })?;
 
         for key in table.keys() {
-            if key != "limits" && key != "supervisor" && key != "helpers" && key != "agents" {
+            if !["limits", "supervisor", "helpers", "agents", "model"].contains(&key.as_str()) {
                 return Err(format!(
-                    "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers] and \
-                     [agents] are recognised"
+                    "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
+                     [agents] and [model] are recognised"
                 ));
             }
         }
@@ -226,11 +237,17 @@ impl PaneConfig {
             None => AgentsConfig::default(),
         };
 
+        let model = match table.get("model") {
+            Some(value) => parse_model(value)?,
+            None => ModelConfig::default(),
+        };
+
         Ok(Self {
             limits,
             supervisor,
             helpers,
             agents,
+            model,
         })
     }
 }
@@ -256,6 +273,29 @@ fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
         ),
     };
     Ok(AgentsConfig { model })
+}
+
+/// `[model] parent` -- one optional key, refused the same way the other two
+/// tiers' model names are, so one validator covers all three.
+fn parse_model(value: &toml::Value) -> Result<ModelConfig, String> {
+    let table = table_of(value, "model")?;
+    for key in table.keys() {
+        if key != "parent" {
+            return Err(format!(
+                "pane.toml: unknown key `{key}` in [model]; only `parent` is recognised"
+            ));
+        }
+    }
+    let parent = match table.get("parent") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `parent` must be a string".to_string())?
+                .to_string(),
+        ),
+    };
+    Ok(ModelConfig { parent })
 }
 
 fn table_of<'a>(value: &'a toml::Value, name: &str) -> Result<&'a toml::value::Table, String> {
