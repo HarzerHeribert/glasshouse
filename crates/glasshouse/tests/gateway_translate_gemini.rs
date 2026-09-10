@@ -1307,7 +1307,7 @@ fn a_gemini_shaped_request_at_the_ingress_is_refused_by_name_and_nothing_is_open
         "the refusal names the pair: {message}"
     );
     assert!(
-        message.contains("T3b") && message.contains("no installed harness speaks"),
+        message.contains("T3b") && message.contains("no supported client speaks"),
         "the refusal carries the reason that is TRUE — a missing adapter, not a missing test: \
          {message}"
     );
