@@ -76,7 +76,8 @@ impl Interface {
 /// The ledger and the TUI both need this and neither may infer it: a frame
 /// pane lowered from a direct call contains TypeScript no model wrote, and
 /// presenting that as authored would misreport what happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Origin {
     /// A model-authored `execute_cell` program.
     #[default]

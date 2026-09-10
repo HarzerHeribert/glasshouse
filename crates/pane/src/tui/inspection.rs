@@ -184,8 +184,17 @@ fn content(conversation: &Conversation, notebook: &Notebook, cell: usize) -> Vec
         .executed_source
         .clone()
         .or_else(|| cell_message(conversation, notebook, cell).map(input_region));
+    // The heading says who wrote what is shown. A lowered frame's source is
+    // pane's spelling of the model's own direct calls, and calling it the
+    // model's original source would be the screen misreporting the turn
+    // (`tool-abi.md` §19).
+    let heading = match view.origin {
+        crate::abi::Origin::DirectTool => "CODE · lowered from direct tool calls",
+        crate::abi::Origin::LittleHelper => "CODE · helper request",
+        crate::abi::Origin::AuthoredCell => "CODE · original source",
+    };
     let mut lines = vec![Line::styled(
-        "CODE · original source",
+        heading,
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
     if let Some(source) = source {

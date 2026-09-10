@@ -429,6 +429,14 @@ pub struct CellView {
     pub helpers: Vec<crate::helpers::HelperRecord>,
     /// Corrected source for an executed pane-edit; display only, never another model message.
     pub executed_source: Option<String>,
+    /// Who authored the frame this view shows.
+    ///
+    /// The screen may not imply that a direct provider call was written as
+    /// JavaScript by the model (`tool-abi.md` §19): the source of a lowered
+    /// frame is pane's spelling of the call, and labelling it the model's own
+    /// would misreport what happened. A rollout written before this field
+    /// existed deserializes as an authored cell, which is what it was.
+    pub origin: crate::abi::Origin,
     pub repaired_from: Option<u64>,
     /// Local before/after file diff. Never included in model context.
     pub changes: Option<String>,

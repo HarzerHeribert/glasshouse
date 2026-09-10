@@ -648,6 +648,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,
@@ -711,6 +712,7 @@ fn a_throw_renders_as_the_cells_error_region() {
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,
@@ -775,6 +777,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,
@@ -825,6 +828,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,
@@ -879,6 +883,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,
@@ -897,6 +902,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
         CellView {
             helpers: Vec::new(),
             executed_source: None,
+            origin: pane::abi::Origin::AuthoredCell,
             repaired_from: None,
             changes: None,
             stdout: None,

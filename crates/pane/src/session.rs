@@ -2338,6 +2338,11 @@ fn act_on(
         helpers: runtime.helper_records(),
         executed_source: (native.is_some() || repaired_from.is_some() || lowered.is_some())
             .then(|| source.clone()),
+        origin: if lowered.is_some() {
+            crate::abi::Origin::DirectTool
+        } else {
+            crate::abi::Origin::AuthoredCell
+        },
         repaired_from,
         changes,
         call_count: Some(record.calls.len()),
@@ -3082,6 +3087,23 @@ mod tests {
         let record = step.record.expect("a direct frame records its cell");
         assert_eq!(record.calls.len(), 1);
         assert_eq!(record.calls[0].tool, "read");
+
+        // The screen must not present pane's own spelling of the call as
+        // source the model wrote.
+        assert_eq!(step.view.origin, crate::abi::Origin::DirectTool);
+    }
+
+    /// The other half of the same rule: a real cell is still the model's own.
+    #[test]
+    fn an_authored_cell_is_still_reported_as_the_models_own_source() {
+        let (root, profile) = abi_fixture("authored");
+        let assistant = direct_call(
+            "call-1",
+            "execute_cell",
+            serde_json::json!({"code": "return \"done\";"}),
+        );
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+        assert_eq!(step.view.origin, crate::abi::Origin::AuthoredCell);
     }
 
     /// Several independent familiar calls in one turn become one frame, and
