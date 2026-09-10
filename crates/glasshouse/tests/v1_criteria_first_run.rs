@@ -1053,12 +1053,12 @@ fn v1_1905_two_concurrent_gateways_get_different_ports_and_reject_each_others_cr
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
 
-    let gateway_a = glasshouse::gateway::start_if_required(&[profile.clone()], || {
+    let gateway_a = glasshouse::gateway::start_if_required(&[profile.backend_demand()], || {
         Ok(Upstream::with_failover(vec![backend("a", &upstream_a)]).unwrap())
     })
     .expect("loopback is bindable")
     .expect("a gateway-backed profile requires a gateway");
-    let gateway_b = glasshouse::gateway::start_if_required(&[profile], || {
+    let gateway_b = glasshouse::gateway::start_if_required(&[profile.backend_demand()], || {
         Ok(Upstream::with_failover(vec![backend("b", &upstream_b)]).unwrap())
     })
     .expect("loopback is bindable")

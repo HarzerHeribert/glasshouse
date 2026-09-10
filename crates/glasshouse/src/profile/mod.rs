@@ -268,6 +268,31 @@ impl LaunchProfile {
             BackendResource::GlasshouseGateway => ProfileClass::GlasshouseGateway,
         }
     }
+
+    /// What a harness launched from this profile asks of
+    /// [`crate::gateway`] — the argument its start doors take.
+    ///
+    /// The translation lives here, on the Glasshouse side, and never in
+    /// `crate::gateway`: the gateway serves any HTTP client and must not be
+    /// able to see a *launch* profile, a harness or a session. This is the
+    /// one place where "which backend did the user configure" becomes
+    /// "must a listener exist", and it is the reason a `Native` or
+    /// `DirectProvider` profile can never bind a socket.
+    pub fn backend_demand(&self) -> crate::gateway::BackendDemand {
+        match &self.backend {
+            BackendResource::Native | BackendResource::DirectProvider { .. } => {
+                crate::gateway::BackendDemand::Direct
+            }
+            BackendResource::GlasshouseGateway => crate::gateway::BackendDemand::LocalGateway,
+        }
+    }
+}
+
+/// [`LaunchProfile::backend_demand`] for a whole set of profiles, in order —
+/// what a caller holding several hands [`crate::gateway::gateway_is_required`]
+/// or one of its start doors.
+pub fn backend_demands(profiles: &[LaunchProfile]) -> Vec<crate::gateway::BackendDemand> {
+    profiles.iter().map(LaunchProfile::backend_demand).collect()
 }
 
 /// One resolved mechanism, for diagnostics. Carries key *names* only — never

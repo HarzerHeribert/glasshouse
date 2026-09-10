@@ -1112,7 +1112,7 @@ fn line_1937_a_gateway_backed_route_records_a_success_and_a_failure_and_route_ci
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
     let gateway = glasshouse::gateway::start_if_required_with_telemetry(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(upstream),
         None,
         Some(ledger.clone()),

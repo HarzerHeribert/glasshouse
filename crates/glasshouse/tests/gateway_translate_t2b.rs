@@ -455,7 +455,7 @@ fn start_gateway(harness: IntegrationId, upstream: Upstream) -> Gateway {
     let mut profile = LaunchProfile::native(harness);
     profile.backend = BackendResource::GlasshouseGateway;
     glasshouse::gateway::start_if_required_with_degrade_sink(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(upstream),
         None,
         None,

@@ -236,7 +236,7 @@ fn gateway_to_stub(
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
     let gateway = glasshouse::gateway::start_if_required_with_telemetry(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(upstream),
         Some(quota_cache),
         None,

@@ -533,7 +533,7 @@ fn gateway_serving(protocols: &[WireProtocol]) -> crate::gateway::Gateway {
         profile.backend = BackendResource::GlasshouseGateway;
         profile
     }];
-    crate::gateway::start_if_required(&profiles, || {
+    crate::gateway::start_if_required(&backend_demands(&profiles), || {
         Ok(Upstream::new(
             "fixture".to_owned(),
             protocols
@@ -3163,4 +3163,80 @@ fn a_capability_probes_credential_never_reaches_this_modules_own_renderings() {
     assert!(!debug.contains(PLANTED_CREDENTIAL), "{debug}");
     assert!(debug.contains(crate::secret::REDACTED), "{debug}");
     assert!(!request.url().contains(PLANTED_CREDENTIAL));
+}
+
+// --- what a profile asks the gateway for ------------------------------
+
+/// The translation from "which backend did the user configure" to "must a
+/// listener exist" lives here, on the Glasshouse side of
+/// [`crate::gateway`]'s door, so this is where it is proved.
+///
+/// The half that matters is the negative one: a profile that reaches its
+/// backend directly must never cause a socket to be bound, and the gateway
+/// cannot check that itself — by construction it can no longer see a launch
+/// profile at all.
+#[test]
+fn a_profile_demands_the_gateway_only_when_the_gateway_backs_it() {
+    let mut profile = profile_for(IntegrationId::ClaudeCode);
+
+    profile.backend = BackendResource::Native;
+    assert_eq!(
+        profile.backend_demand(),
+        crate::gateway::BackendDemand::Direct
+    );
+
+    profile.backend = BackendResource::DirectProvider {
+        provider: "openrouter".to_owned(),
+    };
+    assert_eq!(
+        profile.backend_demand(),
+        crate::gateway::BackendDemand::Direct
+    );
+
+    profile.backend = BackendResource::GlasshouseGateway;
+    assert_eq!(
+        profile.backend_demand(),
+        crate::gateway::BackendDemand::LocalGateway
+    );
+}
+
+/// [`backend_demands`] keeps order and length, so that "at least one of
+/// these clients needs a gateway" is asked of exactly the profiles the
+/// caller passed.
+#[test]
+fn every_profile_contributes_one_demand_in_order() {
+    let mut native = profile_for(IntegrationId::ClaudeCode);
+    native.backend = BackendResource::Native;
+    let mut gatewayed = profile_for(IntegrationId::ClaudeCode);
+    gatewayed.backend = BackendResource::GlasshouseGateway;
+
+    assert_eq!(
+        backend_demands(&[]),
+        Vec::<crate::gateway::BackendDemand>::new()
+    );
+    assert_eq!(
+        backend_demands(&[native, gatewayed]),
+        vec![
+            crate::gateway::BackendDemand::Direct,
+            crate::gateway::BackendDemand::LocalGateway,
+        ]
+    );
+}
+
+/// The gateway names itself to a degrade sink with its own
+/// [`crate::gateway::LOCAL_GATEWAY_RESOURCE`]; a session record names the
+/// same thing with [`BackendResource::slug`]. They have to be the same
+/// string or a failure would be recorded against a resource nothing else
+/// in Glasshouse refers to — and since the gateway may no longer import
+/// this module, only an assertion on this side can hold them together.
+#[test]
+fn the_gateways_own_name_and_this_modules_slug_for_it_agree() {
+    assert_eq!(
+        BackendResource::GlasshouseGateway.slug(),
+        crate::gateway::LOCAL_GATEWAY_RESOURCE
+    );
+    assert_eq!(
+        GATEWAY_PROVIDER_NAME,
+        crate::gateway::LOCAL_GATEWAY_RESOURCE
+    );
 }

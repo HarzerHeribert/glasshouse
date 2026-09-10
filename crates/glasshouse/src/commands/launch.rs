@@ -1252,7 +1252,7 @@ pub(crate) fn launch_session(
     // event recorder are both real.
     let degrade_relay = crate::commands::resume::DegradeRelay::new();
     let gateway = match glasshouse::gateway::start_if_required_with_degrade_sink(
-        std::slice::from_ref(&launch_profile),
+        &[launch_profile.backend_demand()],
         || {
             crate::commands::resume::gateway_upstream(
                 &user,

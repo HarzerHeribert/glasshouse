@@ -986,7 +986,7 @@ fn preventions_after_a_failover(
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(upstream),
         None,
         None,

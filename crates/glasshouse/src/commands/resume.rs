@@ -280,7 +280,7 @@ pub(crate) fn evidence_ledger(
     runtime: &glasshouse::Runtime,
     profiles: &[glasshouse::profile::LaunchProfile],
 ) -> Option<std::sync::Arc<glasshouse::routing::evidence::EvidenceLedger>> {
-    if !glasshouse::gateway::gateway_is_required(profiles) {
+    if !glasshouse::gateway::gateway_is_required(&glasshouse::profile::backend_demands(profiles)) {
         return None;
     }
     match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
@@ -376,7 +376,7 @@ fn resolve_resume_overlay(
         None
     };
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
-        std::slice::from_ref(&launch_profile),
+        &[launch_profile.backend_demand()],
         || {
             gateway_upstream(
                 user,

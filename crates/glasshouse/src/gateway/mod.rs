@@ -8,8 +8,10 @@
 //! harness's own tools.
 //!
 //! That rule is **structural here rather than promised**. No file in this
-//! directory imports `crate::session`, `crate::shell`, `crate::tui` or
-//! `crate::harness`, and
+//! directory imports `crate::session`, `crate::shell`, `crate::tui`,
+//! `crate::harness` or `crate::profile` — the last of those because how
+//! Glasshouse *launches* a harness is not something a gateway serving
+//! arbitrary HTTP clients can be allowed to see — and
 //! `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
 //! scans every one of them to keep it that way.
 // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/mod.rs module doc.
@@ -33,7 +35,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::profile::{BackendResource, LaunchProfile};
 use crate::routing::free::FreeResource;
 use crate::routing::interactive::Assignment;
 use crate::secret::REDACTED;
@@ -41,11 +42,49 @@ use crate::secret::REDACTED;
 pub use session::SessionRouting;
 pub use upstream::{Route, Upstream, UpstreamBackend, UpstreamError};
 
+/// What one client asks of this gateway — and the only thing the gateway
+/// needs to know about the configuration a caller started that client from.
+///
+/// The gateway serves HTTP clients. How a client is launched, what program
+/// it is, and what else its configuration says are concepts on the other
+/// side of this door, and the gateway is a better component for being
+/// unable to see them. The one question it has to ask is whether a client's
+/// requests arrive *here*, because that answer alone decides whether a
+/// listener is bound at all.
+///
+/// Two variants rather than three. A caller may well distinguish several
+/// ways for a client to reach a backend without this gateway — its own
+/// first-party account, a provider it talks to directly — but none of those
+/// is a distinction the gateway can act on differently, and a variant that
+/// could only ever be matched alongside another is one invented for the
+/// type rather than read off behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendDemand {
+    /// This client reaches its backend itself. Nothing need be bound for it.
+    Direct,
+    /// This client's requests are to be served by this gateway.
+    LocalGateway,
+}
+
+/// The name this gateway reports *itself* under to a [`DegradeSink`].
+///
+/// The gateway is one resource among the several a caller may be moving a
+/// client between, and a sink is told which of them failed. This is the
+/// spelling of this one. It is owned here because the gateway is the thing
+/// being named: a caller asked to supply a name for it could supply a
+/// different one on each of its start paths, and the failures recorded
+/// against them would not add up.
+///
+/// Glasshouse's own records use the same string — `BackendResource::
+/// GlasshouseGateway.slug()` in `crate::profile`, whose tests assert the
+/// two spellings still agree.
+pub const LOCAL_GATEWAY_RESOURCE: &str = "glasshouse-gateway";
+
 /// Told once per exchange whose outcome says the gateway's own upstream
 /// failed — map line 1735, "detect gateway failure separately from harness
-/// process failure" — with the resource's
-/// [`crate::profile::BackendResource::slug`] and which kind of failure it
-/// was.
+/// process failure" — with the failing resource's name, which for this
+/// gateway is always [`LOCAL_GATEWAY_RESOURCE`], and which kind of failure
+/// it was.
 ///
 /// A closure rather than a direct call to [`crate::events::degrade_resource`]
 /// from inside this module, because that function's
@@ -418,8 +457,8 @@ impl Gateway {
     }
 
     /// The name of the provider this gateway is currently forwarding to —
-    /// map line 1954's gateway shape: a launch backed by
-    /// [`crate::profile::BackendResource::GlasshouseGateway`] does not know
+    /// map line 1954's gateway shape: a launch whose client demanded
+    /// [`BackendDemand::LocalGateway`] does not know
     /// which entitlement it will charge until this gateway has resolved and
     /// started its upstream, and this is the one fact the launch path needs
     /// to ask `EffectiveConfig::entitlement_for_provider` the same question
@@ -579,7 +618,7 @@ fn accept_loop(
                         if let Some(reason) = session::gateway_failure(&exchange)
                             && let Some(sink) = &degrade_sink
                         {
-                            sink(&BackendResource::GlasshouseGateway.slug(), reason);
+                            sink(LOCAL_GATEWAY_RESOURCE, reason);
                         }
                         // Phase 33A's production producer — see
                         // `crate::gateway::session::SessionRouting::record_routing_observation`
@@ -736,26 +775,24 @@ fn refuse_paced(mut stream: std::net::TcpStream, wait: Duration) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-/// Whether any of these launch profiles needs a local gateway.
+/// Whether any of these clients needs a local gateway.
 ///
 /// This is the whole of "start the local gateway only when at least one
-/// active launch profile requires it", and it is deliberately a function of
-/// the **profiles** rather than of a flag someone remembered to set. A flag
-/// can drift from the configuration it was meant to summarise; a predicate
-/// read straight off [`BackendResource`] cannot.
+/// active client requires it", and it is deliberately a function of what
+/// the clients are **backed by** rather than of a flag someone remembered
+/// to set. A flag can drift from the configuration it was meant to
+/// summarise; a predicate read straight off [`BackendDemand`] cannot.
 ///
-/// A profile requires the gateway exactly when its backend *is* the gateway.
-/// [`BackendResource::Native`] and [`BackendResource::DirectProvider`] reach
-/// their backends without one, so neither should cause a socket to exist.
-pub fn gateway_is_required(profiles: &[LaunchProfile]) -> bool {
-    profiles
-        .iter()
-        .any(|profile| matches!(profile.backend, BackendResource::GlasshouseGateway))
+/// A client requires the gateway exactly when it is what serves it.
+/// [`BackendDemand::Direct`] reaches its backend without one, so it should
+/// never cause a socket to exist.
+pub fn gateway_is_required(demands: &[BackendDemand]) -> bool {
+    demands.contains(&BackendDemand::LocalGateway)
 }
 
-/// Start a gateway if — and only if — one of `profiles` requires it.
+/// Start a gateway if — and only if — one of `demands` requires it.
 ///
-/// `Ok(None)` means no active profile asked for a gateway, and so **no
+/// `Ok(None)` means no active client asked for a gateway, and so **no
 /// listener was bound at all**. That absence is the behaviour, not an
 /// optimisation of it.
 ///
@@ -764,10 +801,10 @@ pub fn gateway_is_required(profiles: &[LaunchProfile]) -> bool {
 /// gateway must pay for neither. It is called at most once, and only after
 /// the predicate has already said yes.
 pub fn start_if_required(
-    profiles: &[LaunchProfile],
+    demands: &[BackendDemand],
     upstream: impl FnOnce() -> Result<Upstream>,
 ) -> Result<Option<Gateway>> {
-    if !gateway_is_required(profiles) {
+    if !gateway_is_required(demands) {
         return Ok(None);
     }
     Gateway::start(upstream()?).map(Some)
@@ -790,11 +827,11 @@ pub fn start_if_required(
 /// `crates/glasshouse/src/main.rs` is this package's `FORBIDDEN FILES`; see
 /// the report.
 pub fn start_if_required_with_quota_cache(
-    profiles: &[LaunchProfile],
+    demands: &[BackendDemand],
     upstream: impl FnOnce() -> Result<Upstream>,
     quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
 ) -> Result<Option<Gateway>> {
-    if !gateway_is_required(profiles) {
+    if !gateway_is_required(demands) {
         return Ok(None);
     }
     Gateway::start_with_quota_cache(upstream()?, quota_cache).map(Some)
@@ -814,13 +851,13 @@ pub fn start_if_required_with_quota_cache(
 /// same [`crate::paths::RuntimePaths`] `UserConfig::load(runtime.paths())`
 /// already resolves there.
 pub fn start_if_required_with_telemetry(
-    profiles: &[LaunchProfile],
+    demands: &[BackendDemand],
     upstream: impl FnOnce() -> Result<Upstream>,
     quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
 ) -> Result<Option<Gateway>> {
-    if !gateway_is_required(profiles) {
+    if !gateway_is_required(demands) {
         return Ok(None);
     }
     Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger, health_cache).map(Some)
@@ -844,7 +881,7 @@ pub fn start_if_required_with_telemetry(
 /// this start path waits for the recorder to be ready.
 /// History: design-decisions.md, "Trims: gateway/mod.rs", start_if_required_with_degrade_sink doc.
 pub fn start_if_required_with_degrade_sink(
-    profiles: &[LaunchProfile],
+    demands: &[BackendDemand],
     upstream: impl FnOnce() -> Result<Upstream>,
     quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
@@ -856,7 +893,7 @@ pub fn start_if_required_with_degrade_sink(
     // above does for line 1735.
     prevention_sink: Option<session::FailoverPreventionSink>,
 ) -> Result<Option<Gateway>> {
-    if !gateway_is_required(profiles) {
+    if !gateway_is_required(demands) {
         return Ok(None);
     }
     Gateway::start_with_degrade_sink(

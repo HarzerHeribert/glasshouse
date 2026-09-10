@@ -207,9 +207,10 @@ fn a_free_model_answers_through_a_real_gateway_and_its_health_comes_from_that_re
     // would be evidence about a door nobody walks through.
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
-    let gateway = glasshouse::gateway::start_if_required(&[profile], || Ok(upstream))
-        .expect("loopback is bindable")
-        .expect("a gateway-backed profile requires a gateway");
+    let gateway =
+        glasshouse::gateway::start_if_required(&[profile.backend_demand()], || Ok(upstream))
+            .expect("loopback is bindable")
+            .expect("a gateway-backed profile requires a gateway");
     gateway.routing().bind(
         "claude-code",
         "anthropic-messages",

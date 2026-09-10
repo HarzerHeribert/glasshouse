@@ -329,7 +329,7 @@ fn start_gateway(upstream: Upstream, ledger: Arc<EvidenceLedger>, protocol: &str
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(upstream),
         None,
         Some(ledger),

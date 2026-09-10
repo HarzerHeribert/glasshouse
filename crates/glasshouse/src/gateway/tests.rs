@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 
 use super::fixture::FixtureUpstream;
-use crate::integrations::IntegrationId;
 use crate::secret::Secret;
 
 /// A source file's production code: everything before the first
@@ -99,13 +98,6 @@ fn translate_sources() -> Vec<(&'static str, &'static str)> {
             include_str!("translate/stream.rs"),
         ),
     ]
-}
-
-/// A profile with the given backend, for the start predicate.
-fn profile_backed_by(backend: BackendResource) -> LaunchProfile {
-    let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
-    profile.backend = backend;
-    profile
 }
 
 /// The credential a fixture upstream expects to see attached. Planted,
@@ -315,31 +307,27 @@ fn a_gateway_token_has_no_display_no_deref_and_no_asref() {
     }
 }
 
-// --- the profiles decide, not a flag ----------------------------------
+// --- what the clients are backed by decides, not a flag ---------------
 
-/// The predicate is the whole of "only when at least one active launch
-/// profile requires it", so it has to read the backend rather than
-/// anything that merely travels alongside it. A profile that reaches its
-/// backend directly must never cause a socket to exist.
+/// The predicate is the whole of "only when at least one active client
+/// requires it", so it has to read what the clients are backed by rather
+/// than anything that merely travels alongside that. A client that reaches
+/// its backend directly must never cause a socket to exist.
+///
+/// Which *configuration* produces which demand is the caller's translation
+/// and is tested where it lives — `profile::tests::\
+/// a_profile_demands_the_gateway_only_when_the_gateway_backs_it`. Nothing
+/// in this directory can see a launch profile, which is the point.
 #[test]
-fn only_a_gateway_backed_profile_requires_a_gateway() {
+fn only_a_local_gateway_demand_requires_a_gateway() {
     assert!(!gateway_is_required(&[]));
-    assert!(!gateway_is_required(&[profile_backed_by(
-        BackendResource::Native
-    )]));
-    assert!(!gateway_is_required(&[profile_backed_by(
-        BackendResource::DirectProvider {
-            provider: "openrouter".to_owned(),
-        }
-    )]));
+    assert!(!gateway_is_required(&[BackendDemand::Direct]));
 
-    assert!(gateway_is_required(&[profile_backed_by(
-        BackendResource::GlasshouseGateway
-    )]));
+    assert!(gateway_is_required(&[BackendDemand::LocalGateway]));
     // One among several is enough: "at least one" is the rule.
     assert!(gateway_is_required(&[
-        profile_backed_by(BackendResource::Native),
-        profile_backed_by(BackendResource::GlasshouseGateway),
+        BackendDemand::Direct,
+        BackendDemand::LocalGateway,
     ]));
 }
 
@@ -353,22 +341,17 @@ fn only_a_gateway_backed_profile_requires_a_gateway() {
 /// nothing was going to use, which is the kind of thing that is only
 /// ever noticed after it has been logged somewhere.
 #[test]
-fn no_profile_needing_a_gateway_binds_no_listener_and_resolves_no_credential() {
-    let profiles = [
-        profile_backed_by(BackendResource::Native),
-        profile_backed_by(BackendResource::DirectProvider {
-            provider: "openrouter".to_owned(),
-        }),
-    ];
+fn no_client_needing_a_gateway_binds_no_listener_and_resolves_no_credential() {
+    let demands = [BackendDemand::Direct, BackendDemand::Direct];
     let mut built = false;
-    let started = start_if_required(&profiles, || {
+    let started = start_if_required(&demands, || {
         built = true;
-        unreachable!("the upstream must not be built for profiles that need no gateway")
+        unreachable!("the upstream must not be built for clients that need no gateway")
     })
     .expect("deciding not to start cannot fail");
     assert!(
         started.is_none(),
-        "a gateway was bound for profiles that never asked for one"
+        "a gateway was bound for clients that never asked for one"
     );
     assert!(!built);
 }
@@ -376,14 +359,14 @@ fn no_profile_needing_a_gateway_binds_no_listener_and_resolves_no_credential() {
 /// The other half of the same rule, and the one that keeps it from being
 /// satisfied by a function that simply never starts anything.
 #[test]
-fn a_profile_backed_by_the_gateway_binds_a_listener() {
+fn a_client_served_by_the_gateway_binds_a_listener() {
     let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{}");
-    let profiles = [profile_backed_by(BackendResource::GlasshouseGateway)];
-    let started = start_if_required(&profiles, || Ok(anthropic_upstream_to(&fixture.base_url())))
+    let demands = [BackendDemand::LocalGateway];
+    let started = start_if_required(&demands, || Ok(anthropic_upstream_to(&fixture.base_url())))
         .expect("loopback is bindable");
     assert!(
         started.is_some(),
-        "a gateway-backed profile did not produce a gateway"
+        "a gateway-serving demand did not produce a gateway"
     );
 }
 
@@ -934,6 +917,7 @@ fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
             "crate::shell",
             "crate::tui",
             "crate::harness",
+            "crate::profile",
         ] {
             assert!(
                 !code.contains(forbidden),

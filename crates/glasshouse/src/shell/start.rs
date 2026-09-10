@@ -240,7 +240,7 @@ pub(super) fn start_session_with_profile(
     };
     let secrets = PreferNativeSecretStore::detect();
     let gateway = crate::gateway::start_if_required_with_degrade_sink(
-        std::slice::from_ref(&launch_profile),
+        &[launch_profile.backend_demand()],
         || {
             session::launch_profile::gateway_upstream(
                 &user,

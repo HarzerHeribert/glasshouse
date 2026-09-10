@@ -222,7 +222,7 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
     let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
     profile.backend = BackendResource::GlasshouseGateway;
     let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
-        &[profile],
+        &[profile.backend_demand()],
         || Ok(unreachable_upstream()),
         None,
         None,
