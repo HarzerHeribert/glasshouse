@@ -475,3 +475,76 @@ fn reducer_extracts_real_failure_windows_and_clean_logs_are_negative() {
         "{clean:#?}"
     );
 }
+
+/// Exact structural compression: a run of lines differing only in their
+/// numbers is one observation repeated, and encoding it as a shape plus an
+/// exact count discards no distinct thing that was printed.
+#[test]
+fn a_run_of_identical_shapes_collapses_without_losing_a_distinct_line() {
+    use pane::helper_context::collapse_runs;
+    let mut log = String::from("starting run\n");
+    for i in 0..6_000 {
+        log.push_str(&format!(
+            "[probe] step {i:05} ok cache=hit region=eu-central-1\n"
+        ));
+    }
+    log.push_str("ERROR: the one thing that actually failed\n");
+    log.push_str("FAILED (failures=1)\n");
+
+    let collapsed = collapse_runs(&log);
+    assert_eq!(collapsed.lines_in, 6_003);
+    assert_eq!(
+        collapsed.lines_out, 6,
+        "one shape becomes first + count + last: {}",
+        collapsed.text
+    );
+
+    // Every distinct line survives, and both ends of the run stay readable.
+    assert!(collapsed.text.contains("starting run"));
+    assert!(
+        collapsed
+            .text
+            .contains("ERROR: the one thing that actually failed")
+    );
+    assert!(collapsed.text.contains("FAILED (failures=1)"));
+    assert!(collapsed.text.contains("[probe] step 00000 ok"));
+    assert!(collapsed.text.contains("[probe] step 05999 ok"));
+    assert!(collapsed.text.contains("5998 more lines of the same shape"));
+    assert!(
+        collapsed.text.len() * 20 < log.len(),
+        "it must actually save bulk"
+    );
+}
+
+/// Distinct lines are never merged, however similar they look: only a line
+/// whose neighbour has the same shape is ever folded away.
+#[test]
+fn distinct_lines_are_never_collapsed_into_one_another() {
+    use pane::helper_context::collapse_runs;
+    let log = "error: alpha failed\nerror: beta failed\nerror: gamma failed\n";
+    let collapsed = collapse_runs(log);
+    assert_eq!(collapsed.lines_in, collapsed.lines_out);
+    for name in ["alpha", "beta", "gamma"] {
+        assert!(collapsed.text.contains(name), "{name} was lost");
+    }
+}
+
+/// A short run costs more to describe than to send, so it is sent.
+#[test]
+fn a_short_run_is_left_exactly_as_it_was() {
+    use pane::helper_context::collapse_runs;
+    let log = "step 1\nstep 2\nstep 3\n";
+    let collapsed = collapse_runs(log);
+    assert_eq!(collapsed.text, log);
+    assert_eq!(collapsed.lines_in, collapsed.lines_out);
+}
+
+/// Only digits vary within a shape. Two lines whose words differ are two
+/// observations, not one repeated.
+#[test]
+fn only_numbers_may_vary_within_one_shape() {
+    use pane::helper_context::collapse_runs;
+    let log = "ok id=1\nok id=2\nok id=3\nok id=4\nFAIL id=5\nok id=6\nok id=7\nok id=8\nok id=9\n";
+    let collapsed = collapse_runs(log);
+    assert!(collapsed.text.contains("FAIL id=5"), "{}", collapsed.text);
+}

@@ -1335,25 +1335,90 @@ pub fn gateway_upstream(
     Ok(Upstream::with_failover(backends)?)
 }
 
+/// Build a gateway upstream over several subscriptions at once.
+///
+/// A subscription is the routing unit whose contents are actually knowable: it
+/// says which models the account holds, and its allowance is its own to
+/// report. A raw provider key offers neither, which is why the pool is built
+/// from subscriptions rather than from keys.
+///
+/// With more than one, a session stops being pinned to whichever account it
+/// started on: each request reaches the subscription declaring the model it
+/// names, so one session can reason on a frontier model, reduce on a cheap one
+/// from another account, and delegate to a third. With exactly one it is the
+/// single-broker upstream, unchanged.
+///
+/// Order is preference: the first subscription declaring a model serves it.
+pub fn subscription_pool(
+    brokers: Vec<crate::gateway::subscription_broker::RunningSubscriptionBroker>,
+) -> Result<Upstream, crate::gateway::UpstreamError> {
+    let mut backends = Vec::with_capacity(brokers.len());
+    for broker in brokers {
+        let base = broker.base_url().to_owned();
+        let routes = GATEWAY_INGRESS_PROTOCOLS
+            .iter()
+            .map(|protocol| {
+                Route::new(
+                    protocol.slug().to_owned(),
+                    ingress_targets(*protocol),
+                    &base,
+                )
+                .with_tools(ToolSemantics::Verified)
+            })
+            .collect();
+        let models = subscription_models(&broker);
+        backends.push(UpstreamBackend::from_subscription_broker(
+            routes, broker, models,
+        )?);
+    }
+    Upstream::with_failover(backends)
+}
+
+/// The model identifiers a subscription says it serves.
+///
+/// Parsed here rather than in the gateway because the gateway's relay files
+/// may not name a deserializer at all — the rule that keeps a body inspection
+/// from ever being written there. This reads a catalogue the broker fetched
+/// out of band, which is a different thing entirely, and it lives on this side
+/// of that line so the rule can stay blunt.
+///
+/// A catalogue that will not answer or will not parse yields an empty list,
+/// which claims nothing: an account declaring no model is never selected for
+/// one, and the session's own subscription serves as it did before.
+fn subscription_models(
+    broker: &crate::gateway::subscription_broker::RunningSubscriptionBroker,
+) -> Vec<String> {
+    let Ok(document) = broker.model_catalogue_document() else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&document) else {
+        return Vec::new();
+    };
+    parsed
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    model
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Build a gateway upstream owned by one exact subscription entitlement.
+///
+/// The single-subscription case of [`subscription_pool`], kept because most
+/// sessions have exactly one and should not have to say so as a list.
 pub fn subscription_broker_upstream(
     broker: crate::gateway::subscription_broker::RunningSubscriptionBroker,
 ) -> Result<Upstream, crate::gateway::UpstreamError> {
-    let base = broker.base_url().to_owned();
-    let routes = GATEWAY_INGRESS_PROTOCOLS
-        .iter()
-        .map(|protocol| {
-            Route::new(
-                protocol.slug().to_owned(),
-                ingress_targets(*protocol),
-                &base,
-            )
-            .with_tools(ToolSemantics::Verified)
-        })
-        .collect();
-    Upstream::with_failover(vec![UpstreamBackend::from_subscription_broker(
-        routes, broker,
-    )?])
+    subscription_pool(vec![broker])
 }
 
 /// One [`Route`] per ingress protocol `provider` actually serves, in the

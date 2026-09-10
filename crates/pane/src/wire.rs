@@ -24,6 +24,18 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The Messages API path, appended to whichever base URL applies.
 const MESSAGES_PATH: &str = "/v1/messages";
 
+/// The model this request is for, named in the **head**.
+///
+/// Glasshouse's gateway routes on the request head and never on the body, so
+/// a session that wants a frontier model for reasoning and a cheap one for
+/// reduction has to say which is which somewhere the gateway can read before
+/// it forwards a byte. The model is already in the body; this repeats it in
+/// one header so the gateway need not buffer the payload to find it.
+///
+/// Harmless everywhere else: a provider reached directly ignores a header it
+/// does not know, and Glasshouse strips it rather than forwarding it.
+const MODEL_HEADER: &str = "x-glasshouse-model";
+
 /// The `anthropic-version` header pane sends on every request. 61C's
 /// `/model` slash command points at this and [`MODEL`] rather than a
 /// literal, so both stay in one place.
@@ -640,7 +652,8 @@ pub fn send_turn_bounded_on(
     let mut request = builder
         .build()
         .header("content-type", "application/json")
-        .header("anthropic-version", ANTHROPIC_VERSION);
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header(MODEL_HEADER, model);
     if let Some((name, value)) = credential_header() {
         request = request.header(name, value);
     }
@@ -712,7 +725,8 @@ pub fn send_turn_with_usage(
         .timeout_global(Some(SIDE_ERRAND_TIMEOUT))
         .build()
         .header("content-type", "application/json")
-        .header("anthropic-version", ANTHROPIC_VERSION);
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header(MODEL_HEADER, model);
     if let Some((name, value)) = extra_header {
         request = request.header(name, value);
     }
@@ -1159,7 +1173,8 @@ pub fn send_turn_streaming_on(
         .build()
         .header("content-type", "application/json")
         .header("accept", "text/event-stream")
-        .header("anthropic-version", ANTHROPIC_VERSION);
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header(MODEL_HEADER, model);
     if let Some((name, value)) = credential_header() {
         request = request.header(name, value);
     }

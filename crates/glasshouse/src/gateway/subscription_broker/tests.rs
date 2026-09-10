@@ -408,6 +408,7 @@ while True:
                 &base,
             )],
             broker,
+            Vec::new(),
         )
         .unwrap();
         let upstream = crate::gateway::Upstream::with_failover(vec![backend]).unwrap();

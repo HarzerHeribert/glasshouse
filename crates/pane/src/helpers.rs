@@ -507,12 +507,29 @@ pub fn run(
     // are kept rather than a prefix.
     let role = crate::helper_context::HelperRole::from_helper_name(spec.name);
     let request = prepared.as_ref().map(|packet| {
-        let carried = role
-            .and_then(crate::helper_context::payload_bound)
-            .map_or_else(
-                || input.to_string(),
-                |bound| crate::helper_context::bounded_payload(input, bound),
-            );
+        let carried = match role.and_then(crate::helper_context::payload_bound) {
+            // A bounded role's input is a question, and a question is cut at
+            // both ends rather than compressed.
+            Some(bound) => crate::helper_context::bounded_payload(input, bound),
+            // An unbounded role's input is the work, and it arrives whole in
+            // meaning: runs of structurally identical lines collapse to one
+            // shape and an exact count, so nothing distinct is lost and the
+            // bulk that was only repetition never has to be paid for. Six
+            // thousand identical probe lines are one observation, not six
+            // thousand.
+            None => {
+                let collapsed = crate::helper_context::collapse_runs(input);
+                if collapsed.lines_out < collapsed.lines_in {
+                    format!(
+                        "{}\n[{} lines of repetition collapsed to {}; every distinct line is \
+                         present and each run states its exact count]",
+                        collapsed.text, collapsed.lines_in, collapsed.lines_out
+                    )
+                } else {
+                    collapsed.text
+                }
+            }
+        };
         format!("{}\n\nOriginal helper request:\n{carried}", packet.rendered)
     });
     let mut call = run_unprepared(

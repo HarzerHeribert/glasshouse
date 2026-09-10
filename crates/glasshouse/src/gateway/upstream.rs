@@ -194,6 +194,14 @@ pub struct UpstreamBackend {
     /// One route per protocol this backend serves. Never empty: a backend
     /// with nowhere to forward to is refused at construction.
     routes: Vec<Route>,
+    /// The models this backend's account declares it serves, normalised for
+    /// comparison, or empty when nobody declared any.
+    ///
+    /// Empty means **unknown**, never "all": a backend that claimed a model
+    /// nobody said it had would send a request to a provider that refuses it,
+    /// and the refusal would arrive as a routing failure rather than as the
+    /// configuration mistake it is.
+    models: Vec<String>,
     /// The provider credential, resolved in-process and never leaving it.
     credential: BackendCredential,
     /// Which credential this is, **by name** — the environment variable or
@@ -247,6 +255,9 @@ impl UpstreamBackend {
                 });
             }
         }
+        // Declared models are attached by `with_models`, so every existing
+        // caller keeps the behaviour it had: an empty set claims nothing and
+        // per-model selection simply never picks this backend.
         // Checked once, here, so that a credential carrying a newline is a
         // refusal to start rather than a header-injection attempt on every
         // forwarded request.
@@ -255,6 +266,7 @@ impl UpstreamBackend {
         }
 
         Ok(Self {
+            models: Vec::new(),
             provider,
             routes,
             credential: BackendCredential::Provider(credential),
@@ -265,12 +277,20 @@ impl UpstreamBackend {
 
     /// Consume an exact account-specific broker. Keeping the process inside
     /// the credential boundary makes its lifetime identical to the backend's.
+    /// `models` is the subscription's own catalogue, read and parsed by the
+    /// caller. It arrives as a list rather than being fetched here because
+    /// this file is relay code: `no_part_of_the_relay_deserializes_anything`
+    /// forbids it naming a deserializer at all, and that rule is blunt on
+    /// purpose — a scan cannot tell a catalogue parse from a body parse, and
+    /// the second is the one that must never appear.
     pub(crate) fn from_subscription_broker(
         routes: Vec<Route>,
         broker: RunningSubscriptionBroker,
+        models: Vec<String>,
     ) -> Result<Self, UpstreamError> {
         let credential_id = broker.credential_id().clone();
         let provider = broker.provider_name().to_owned();
+
         if routes.is_empty() {
             return Err(UpstreamError::NoProtocolServed { provider });
         }
@@ -303,7 +323,9 @@ impl UpstreamBackend {
             credential: BackendCredential::SubscriptionBroker(Box::new(broker)),
             credential_id,
             cost: Cost::Free,
-        })
+            models: Vec::new(),
+        }
+        .with_models(models))
     }
 
     /// The provider's name, for a diagnostic.
@@ -312,6 +334,44 @@ impl UpstreamBackend {
     }
 
     /// Which credential this backend uses, by name.
+    /// Declares the models this backend's account serves.
+    ///
+    /// Names are normalised on the way in, because an account catalogue and a
+    /// request spell the same model differently often enough that comparing
+    /// them raw would silently never match.
+    #[must_use]
+    pub fn with_models<I, S>(mut self, models: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.models = models
+            .into_iter()
+            .map(|model| normalise_model(model.as_ref()))
+            .collect();
+        self.models.sort();
+        self.models.dedup();
+        self
+    }
+
+    /// Whether this backend's account declares `model`.
+    ///
+    /// A backend that declares nothing answers `false` for everything. That
+    /// is the direction that keeps an unconfigured pool behaving exactly as it
+    /// does today: per-model selection finds no candidate and the session's
+    /// own backend serves, unchanged.
+    #[must_use]
+    pub fn serves_model(&self, model: &str) -> bool {
+        let wanted = normalise_model(model);
+        self.models.contains(&wanted)
+    }
+
+    /// The models this backend declares.
+    #[must_use]
+    pub fn declared_models(&self) -> &[String] {
+        &self.models
+    }
+
     pub fn credential_id(&self) -> &CredentialId {
         &self.credential_id
     }
@@ -502,6 +562,16 @@ pub enum UpstreamError {
     NoBackend,
 }
 
+/// One spelling for a model name, so a catalogue and a request compare.
+///
+/// Case and the dot/dash split are the two differences that actually occur
+/// between an account catalogue and the identifier a request carries. Nothing
+/// else is rewritten: a date or effort suffix distinguishes two real models
+/// and dropping it would make them collide.
+fn normalise_model(model: &str) -> String {
+    model.trim().to_ascii_lowercase().replace(['.', '_'], "-")
+}
+
 impl Upstream {
     /// One backend and no failover candidates.
     ///
@@ -552,6 +622,38 @@ impl Upstream {
         self.backends
             .get(index)
             .expect("`serving` is only ever set to an index that exists")
+    }
+
+    /// The backend that should carry a request for `model`.
+    ///
+    /// This is the whole of per-model routing: a pool holding several accounts
+    /// resolves each request against the account that declares the model it
+    /// names, instead of sending everything to whichever account the session
+    /// happened to start on. It is what lets one session reason on a frontier
+    /// model, reduce on a cheap one from another provider, and delegate to a
+    /// third.
+    ///
+    /// **It falls back to the serving backend**, so a pool where nothing
+    /// declares the model — which is every pool that has not been given
+    /// catalogues — behaves exactly as it did before this existed.
+    #[must_use]
+    pub fn serving_for(&self, model: Option<&str>) -> &UpstreamBackend {
+        model
+            .and_then(|model| self.for_model(model))
+            .unwrap_or_else(|| self.serving())
+    }
+
+    /// The first backend declaring `model`, or `None`.
+    ///
+    /// First rather than best: the order is the configured one, and a pool
+    /// that lists an account earlier is saying it prefers it. Choosing on
+    /// price or measured quality is a ranking decision that belongs to
+    /// routing, not to the thing that carries the bytes.
+    #[must_use]
+    pub fn for_model(&self, model: &str) -> Option<&UpstreamBackend> {
+        self.backends
+            .iter()
+            .find(|backend| backend.serves_model(model))
     }
 
     /// Every backend, assigned first.
@@ -691,6 +793,91 @@ pub(super) fn agent() -> Agent {
             .allow_non_standard_methods(true)
             .build(),
     )
+}
+
+#[cfg(test)]
+mod per_model_tests {
+    use super::*;
+
+    fn backend(provider: &str, models: &[&str]) -> UpstreamBackend {
+        UpstreamBackend::new(
+            provider.to_string(),
+            vec![Route::new(
+                "anthropic-messages".into(),
+                &["/v1/messages"],
+                "https://example.invalid",
+            )],
+            Secret::mint_for_test("sk-test-credential-value"),
+            CredentialId::new(
+                provider,
+                crate::secret::SecretRef::Environment {
+                    var: format!("{provider}_KEY"),
+                },
+            ),
+            Cost::Metered,
+        )
+        .expect("a backend with one route")
+        .with_models(models.iter().copied())
+    }
+
+    /// The point of the whole thing: one session, several accounts, and each
+    /// request going to the account that declares the model it names.
+    #[test]
+    fn a_request_reaches_the_account_declaring_its_model() {
+        let pool = Upstream::with_failover(vec![
+            backend("claude-max", &["claude-opus-5", "claude-sonnet-5"]),
+            backend("chatgpt", &["gpt-5.6-luna", "gpt-6-astra"]),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            pool.serving_for(Some("claude-opus-5")).provider(),
+            "claude-max"
+        );
+        assert_eq!(pool.serving_for(Some("gpt-5.6-luna")).provider(), "chatgpt");
+        assert_eq!(pool.serving_for(Some("gpt-6-astra")).provider(), "chatgpt");
+    }
+
+    /// A catalogue and a request spell a version differently often enough
+    /// that comparing them raw would silently never match.
+    #[test]
+    fn a_dotted_request_matches_a_dashed_catalogue_entry() {
+        let pool = Upstream::with_failover(vec![backend("chatgpt", &["gpt-5-6-luna"])]).unwrap();
+        assert!(pool.for_model("gpt-5.6-luna").is_some());
+        assert!(pool.for_model("GPT-5.6-LUNA").is_some());
+    }
+
+    /// A pool nobody gave catalogues to behaves exactly as it did before per
+    /// model routing existed: the session's own backend serves everything.
+    #[test]
+    fn a_pool_that_declares_nothing_is_unchanged() {
+        let pool = Upstream::with_failover(vec![backend("a", &[]), backend("b", &[])]).unwrap();
+        assert_eq!(pool.serving_for(Some("anything-at-all")).provider(), "a");
+        assert_eq!(pool.serving_for(None).provider(), "a");
+        assert!(pool.for_model("anything-at-all").is_none());
+    }
+
+    /// A model no account declares falls back rather than failing: the
+    /// request goes where it would have gone anyway.
+    #[test]
+    fn an_undeclared_model_falls_back_to_the_serving_backend() {
+        let pool = Upstream::with_failover(vec![
+            backend("claude-max", &["claude-opus-5"]),
+            backend("chatgpt", &["gpt-6-astra"]),
+        ])
+        .unwrap();
+        assert_eq!(pool.serving_for(Some("llama-9")).provider(), "claude-max");
+    }
+
+    /// Declaring nothing must never mean declaring everything, or a
+    /// misconfigured account would swallow every request and the refusal
+    /// would arrive from the provider instead of from configuration.
+    #[test]
+    fn an_empty_catalogue_claims_no_model() {
+        let empty = backend("a", &[]);
+        assert!(!empty.serves_model("claude-opus-5"));
+        assert!(empty.declared_models().is_empty());
+    }
 }
 
 #[cfg(test)]

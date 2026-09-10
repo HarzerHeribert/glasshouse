@@ -1110,6 +1110,99 @@ pub fn bounded_string(text: &str, max: usize) -> String {
     format!("{}…", &text[..end])
 }
 
+/// A run of consecutive lines that differ only in the numbers inside them.
+///
+/// Four, because three identical lines are cheaper to send than to describe,
+/// and because a run that short carries no real bulk.
+const MIN_RUN: usize = 4;
+
+/// What collapsing a payload cost and saved, for a caller that must report it
+/// rather than claim it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collapsed {
+    pub text: String,
+    pub lines_in: usize,
+    pub lines_out: usize,
+}
+
+/// Collapses runs of structurally identical lines, exactly.
+///
+/// **This is compression, not summarisation, and the difference is the whole
+/// point.** Six thousand `[probe] step 00042 ok` lines are one observation
+/// repeated, and encoding them as one shape plus an exact count throws away
+/// no distinct thing that was ever printed. Nothing decides that a line is
+/// unimportant: a line survives unless the line beside it has the same shape,
+/// and a shape is "identical once digit runs are masked", which is decidable
+/// rather than judged.
+///
+/// Every run keeps its **first and last line verbatim**, so the values at both
+/// ends of the range are still readable, and states how many lay between them.
+/// A distinct line is never dropped, whatever its neighbours look like.
+///
+/// It exists so that a large artifact reaches a reducer whole in meaning
+/// without reaching it whole in bytes — the alternative being a truncation
+/// that silently discards observations nobody counted.
+#[must_use]
+pub fn collapse_runs(text: &str) -> Collapsed {
+    let lines: Vec<&str> = text.lines().collect();
+    let lines_in = lines.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let shape = line_shape(lines[index]);
+        let mut end = index + 1;
+        while end < lines.len() && line_shape(lines[end]) == shape {
+            end += 1;
+        }
+        let run = end - index;
+        if run >= MIN_RUN {
+            let hidden = run - 2;
+            out.push(lines[index].to_string());
+            out.push(format!("… {hidden} more lines of the same shape …"));
+            out.push(lines[end - 1].to_string());
+        } else {
+            for line in &lines[index..end] {
+                out.push((*line).to_string());
+            }
+        }
+        index = end;
+    }
+
+    let lines_out = out.len();
+    let mut text = out.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    Collapsed {
+        text,
+        lines_in,
+        lines_out,
+    }
+}
+
+/// A line with every run of digits masked.
+///
+/// Digits and nothing else: a counter, an index, a timestamp and a latency all
+/// vary that way, while a message, a path and an identifier do not. Masking
+/// more than digits would start merging lines that say different things.
+fn line_shape(line: &str) -> String {
+    let mut shape = String::with_capacity(line.len());
+    let mut in_digits = false;
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                shape.push('\u{0}');
+                in_digits = true;
+            }
+        } else {
+            in_digits = false;
+            shape.push(ch);
+        }
+    }
+    shape
+}
+
 /// Bounds a payload while keeping both ends of it.
 ///
 /// A build or test log puts its summary at the **end** — the failure counts,

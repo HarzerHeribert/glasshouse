@@ -541,7 +541,18 @@ fn forward(
     // this exchange. Phase 9H's failover moves which backend serves from
     // another thread; reading it twice would let one request take its route
     // from one provider and its credential from another.
-    let serving = upstream.serving();
+    // Per-model routing, from the **head** and never the body. A harness that
+    // names its model in `MODEL_HEADER` reaches the account declaring that
+    // model, so one session can reason on one provider's model and reduce on
+    // another's. Absent, or declared by nobody, this is exactly the session's
+    // own backend — which is every request that existed before the header did.
+    let requested = head
+        .headers
+        .get(super::http::MODEL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let serving = upstream.serving_for(requested);
     let Some(route) = serving.route_for(&head.target) else {
         // Phase 56's one branch — see `unrouted`. A served target has a
         // route and never reaches it.

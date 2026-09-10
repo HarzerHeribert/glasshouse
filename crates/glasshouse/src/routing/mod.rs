@@ -28,6 +28,7 @@
 //! write into a tracked configuration file.
 // History: design-decisions.md, "Trims: routing module docs", routing/mod.rs module doc.
 
+pub mod analysis;
 pub mod burn;
 pub mod capability;
 pub mod classify;

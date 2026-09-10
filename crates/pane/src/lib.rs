@@ -22,6 +22,7 @@ pub mod ruler;
 pub mod runtime;
 pub mod sandbox;
 pub mod session;
+pub mod spend;
 pub mod supervisor;
 pub mod telemetry;
 pub mod tools;

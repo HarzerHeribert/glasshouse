@@ -82,7 +82,22 @@ pub(super) enum HeadError {
 /// these forward is the classic proxy defect: `connection: keep-alive` from
 /// a client would be applied to the upstream socket, and a forwarded
 /// `content-length` would contradict the framing the outbound layer chose.
+/// The header a harness uses to name the model it is about to ask for.
+///
+/// It exists because the gateway routes on the request **head** and never on
+/// the body: the model is in the JSON payload, and the payload is streamed to
+/// the provider without ever being held whole (`ingress::forward`). Reading
+/// the model to choose an account would mean buffering every request body and
+/// giving up that property. A header costs nothing, is already parsed before
+/// routing, and lets one session reach several accounts — a frontier model for
+/// reasoning, a cheap one for reduction, a third for delegated work.
+///
+/// It is hop-by-hop: Glasshouse consumes it and never forwards it, because it
+/// is Glasshouse's own routing instruction and no provider declared it.
+pub(super) const MODEL_HEADER: &str = "x-glasshouse-model";
+
 const HOP_BY_HOP: &[&str] = &[
+    MODEL_HEADER,
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -433,5 +448,19 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\n\r\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_header_tests {
+    use super::*;
+
+    /// The routing instruction is Glasshouse's own and no provider declared
+    /// it, so it is consumed here and never forwarded upstream.
+    #[test]
+    fn the_model_header_never_reaches_a_provider() {
+        assert!(HOP_BY_HOP.contains(&MODEL_HEADER));
+        let name = HeaderName::from_static(MODEL_HEADER);
+        assert!(is_hop_by_hop(&name));
     }
 }
