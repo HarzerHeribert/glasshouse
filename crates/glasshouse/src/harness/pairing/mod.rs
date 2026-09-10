@@ -22,7 +22,17 @@
 use std::collections::BTreeMap;
 
 use crate::integrations::IntegrationId;
-use crate::routing::{AssignedModel, ToolSemantics};
+use crate::routing::{AssignedModel, Backend, ToolSemantics};
+// Route identity and evidence identity belong to the routing side, which
+// must be able to name them without naming a harness at all (user ruling
+// 2026-09-10, and `gateway::tests::
+// the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`).
+// They are re-exported here because this module and its callers named them
+// at this path first, and a move that broke every import would be a
+// different package.
+pub use crate::routing::pairing::{
+    EvidenceKey, PairingAffinities, RouteAffinity, ServingRoute, wire_protocol_from_slug,
+};
 
 use super::{Declared, Vendor, WireProtocol};
 
@@ -321,45 +331,6 @@ impl ModelAttribution {
     }
 }
 
-/// Who is serving the model, and over what.
-///
-/// Three fields, stored apart from the model and apart from the harness,
-/// because line 554 says so and because line 555 is the failure that happens
-/// when they are not: a reseller in `provider` must never become an answer to
-/// "who developed this".
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ServingRoute {
-    /// The service the request is sent to. `None` for a harness running on
-    /// its own vendor's first-party service.
-    pub provider: Option<String>,
-    /// The gateway in front of it, when there is one.
-    pub gateway: Option<String>,
-    /// The wire protocol the request is carried over.
-    pub protocol: Option<WireProtocol>,
-}
-
-/// The reverse of [`WireProtocol::slug`], for a caller that only has the
-/// slug a [`crate::routing::Backend`] carries — that type's own doc comment
-/// explains why `routing` keeps the protocol as a string and never parses it
-/// back; this is that parse, for the one caller (Phase 9J's routing consumer)
-/// that already depends on this module and needs a [`ServingRoute::protocol`]
-/// to classify a candidate.
-///
-/// `None` for a slug none of the four known variants produced — a
-/// [`Pairing`]'s vendor-native status never depends on it (see
-/// [`crate::config::pairing::native_pairing_prior_contribution`]'s own doc),
-/// so this only ever weakens [`Pairing::protocol_fit`], never invents one.
-pub fn wire_protocol_from_slug(slug: &str) -> Option<WireProtocol> {
-    [
-        WireProtocol::AnthropicMessages,
-        WireProtocol::OpenAiResponses,
-        WireProtocol::OpenAiChat,
-        WireProtocol::GeminiGenerateContent,
-    ]
-    .into_iter()
-    .find(|protocol| protocol.slug() == slug)
-}
-
 /// One correction a person made to a model's pairing metadata.
 ///
 /// Every field is optional and corrects exactly what it names; anything left
@@ -433,60 +404,6 @@ impl PairingOverrides {
 
     pub fn source(&self) -> &str {
         &self.source
-    }
-}
-
-/// The four-part identity Phase 9J line 572 requires local evidence to be
-/// kept apart by: harness, launch profile, model, and the exact serving
-/// route.
-///
-/// A nominal model id is not enough — the same id reached through a different
-/// gateway, quantization, revision or protocol translation is different
-/// evidence, and [`ServingRoute`] is exactly the value that already carries
-/// that distinction (its `gateway` and `protocol` fields), so this type reuses
-/// it rather than inventing a parallel notion of "route". Two
-/// [`EvidenceKey`]s compare equal only when all four parts match; nothing
-/// here collapses a model to itself across two routes.
-///
-/// Deliberately pure, like the rest of this module: building one needs no
-/// configuration, only the identity of a pairing that was already resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvidenceKey {
-    harness: IntegrationId,
-    launch_profile: String,
-    model: AssignedModel,
-    route: ServingRoute,
-}
-
-impl EvidenceKey {
-    pub fn new(
-        harness: IntegrationId,
-        launch_profile: impl Into<String>,
-        model: AssignedModel,
-        route: ServingRoute,
-    ) -> Self {
-        Self {
-            harness,
-            launch_profile: launch_profile.into(),
-            model,
-            route,
-        }
-    }
-
-    pub fn harness(&self) -> IntegrationId {
-        self.harness
-    }
-
-    pub fn launch_profile(&self) -> &str {
-        &self.launch_profile
-    }
-
-    pub fn model(&self) -> &AssignedModel {
-        &self.model
-    }
-
-    pub fn route(&self) -> &ServingRoute {
-        &self.route
     }
 }
 
@@ -1071,6 +988,59 @@ pub fn classify(query: &PairingQuery, overrides: &PairingOverrides) -> Pairing {
         tool_evidence: tool_evidence(query.tool_calls),
         reason,
     }
+}
+
+/// The client-neutral judgement Glasshouse hands a routing policy about one
+/// candidate — the harness-aware half of the 2026-09-10 ruling, kept on this
+/// side of the boundary.
+///
+/// [`crate::routing::pairing::RouteAffinity`] carries exactly the two things
+/// the ranking actually reads out of a [`Pairing`]:
+/// [`PairingClass::is_vendor_native`] and [`Pairing::reason`]. The reason is
+/// prefixed with the class so a routing explanation reads exactly as it did
+/// when the scorer classified for itself — the class is a word about a
+/// harness, and the routing side is now told it rather than deriving it.
+pub fn route_affinity(query: &PairingQuery, overrides: &PairingOverrides) -> RouteAffinity {
+    let pairing = classify(query, overrides);
+    RouteAffinity::new(
+        pairing.class().is_vendor_native(),
+        format!("{} — {}", pairing.class(), pairing.reason()),
+    )
+}
+
+/// Every candidate's affinity for one harness, as the routing side wants it.
+///
+/// The one place a caller turns "these are my candidates and this is my
+/// harness" into a value the gateway can rank with. `tool_calls` and
+/// `provider_protocols` are the honest absences [`crate::routing::Backend`]
+/// forces: that type keeps neither (see `Backend::tools`' own doc comment),
+/// `classify` reads them only for [`Pairing::tool_semantics`] and
+/// [`Pairing::protocol_fit`], and an affinity reads neither of those.
+pub fn candidate_affinities(
+    harness: IntegrationId,
+    candidates: &[Backend],
+    overrides: &PairingOverrides,
+) -> PairingAffinities {
+    let mut affinities = PairingAffinities::new();
+    for candidate in candidates {
+        let query = PairingQuery {
+            harness,
+            model: candidate.model().clone(),
+            route: ServingRoute {
+                provider: Some(candidate.provider().to_owned()),
+                gateway: None,
+                protocol: wire_protocol_from_slug(candidate.protocol()),
+            },
+            tool_calls: Declared::Unverified,
+            provider_protocols: Vec::new(),
+        };
+        affinities.set(
+            candidate.provider(),
+            candidate.model(),
+            route_affinity(&query, overrides),
+        );
+    }
+    affinities
 }
 
 #[cfg(test)]

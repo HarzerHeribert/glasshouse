@@ -25,12 +25,12 @@ use glasshouse::config::pairing::{
     self, NoObservations, ObservationSource, ObservedEvidence, PairingPreference,
 };
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
-use glasshouse::harness::pairing::{EvidenceKey, PairingClass, PairingQuery, ServingRoute};
+use glasshouse::harness::pairing::{PairingClass, PairingQuery, route_affinity};
 use glasshouse::harness::{Declared, WireProtocol};
 use glasshouse::integrations::IntegrationId;
-use glasshouse::routing::{
-    AssignedModel, EligibleCandidate, HardConstraint, apply_hard_constraints,
-};
+use glasshouse::routing::AssignedModel;
+use glasshouse::routing::pairing::{EvidenceKey, RouteAffinity, ServingRoute};
+use glasshouse::routing::{HardConstraint, apply_hard_constraints};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 fn query(harness: IntegrationId, model: &str) -> PairingQuery {
@@ -47,21 +47,17 @@ fn no_overrides() -> glasshouse::harness::pairing::PairingOverrides {
     glasshouse::harness::pairing::PairingOverrides::default()
 }
 
-/// Wrap a classified pairing as the only public API allows: through the hard
-/// constraint filter, with a check that always passes. This is the same
-/// function a real candidate-scoring caller would have to call — there is no
-/// other way to obtain an `EligibleCandidate`.
-fn eligible(
-    pairing: glasshouse::harness::pairing::Pairing,
-) -> EligibleCandidate<glasshouse::harness::pairing::Pairing> {
-    let (mut ok, rejected) = apply_hard_constraints(vec![pairing], |_| Ok(()));
-    assert!(rejected.is_empty());
-    ok.pop().expect("the one candidate passed the check")
+/// The client-neutral judgement a real caller hands the scorer, produced by
+/// the one production function that produces one — user ruling 2026-09-10:
+/// the scorer is told whether a route is preferred and why, never what the
+/// caller is.
+fn affinity_for(harness: IntegrationId, model: &str) -> RouteAffinity {
+    route_affinity(&query(harness, model), &no_overrides())
 }
 
 fn key_for(harness: IntegrationId, model: &str) -> EvidenceKey {
     EvidenceKey::new(
-        harness,
+        harness.slug(),
         "default",
         AssignedModel::named(model),
         ServingRoute::default(),
@@ -114,7 +110,7 @@ fn the_prior_is_never_a_filter_even_when_the_preference_is_off() {
     let key = key_for(IntegrationId::ClaudeCode, "claude-fable-5");
 
     let explanation = pairing::native_pairing_prior_contribution(
-        &eligible(pairing),
+        &affinity_for(IntegrationId::ClaudeCode, "claude-fable-5"),
         &key,
         PairingPreference::Off,
         &NoObservations,
@@ -135,16 +131,10 @@ fn the_prior_is_never_a_filter_even_when_the_preference_is_off() {
 /// internal decay function alone.
 #[test]
 fn the_prior_contribution_decays_to_zero_as_observations_accumulate() {
-    let pairing = || {
-        glasshouse::harness::pairing::classify(
-            &query(IntegrationId::ClaudeCode, "claude-fable-5"),
-            &no_overrides(),
-        )
-    };
     let key = key_for(IntegrationId::ClaudeCode, "claude-fable-5");
 
     let fresh = pairing::native_pairing_prior_contribution(
-        &eligible(pairing()),
+        &affinity_for(IntegrationId::ClaudeCode, "claude-fable-5"),
         &key,
         PairingPreference::Strong,
         &NoObservations,
@@ -161,7 +151,7 @@ fn the_prior_contribution_decays_to_zero_as_observations_accumulate() {
     none.reliable_observation_count = 200;
     let seasoned = FixedObservations(vec![(key.clone(), none)]);
     let decayed = pairing::native_pairing_prior_contribution(
-        &eligible(pairing()),
+        &affinity_for(IntegrationId::ClaudeCode, "claude-fable-5"),
         &key,
         PairingPreference::Strong,
         &seasoned,
@@ -213,13 +203,16 @@ fn a_cross_vendor_pairing_with_good_evidence_outranks_a_native_pairing_with_bad_
     ]);
 
     let native_explanation = pairing::native_pairing_prior_contribution(
-        &eligible(native),
+        &route_affinity(
+            &query(IntegrationId::ClaudeCode, "claude-fable-5"),
+            &no_overrides(),
+        ),
         &native_key,
         PairingPreference::Strong,
         &evidence,
     );
     let cross_vendor_explanation = pairing::native_pairing_prior_contribution(
-        &eligible(cross_vendor),
+        &route_affinity(&cross_vendor_query, &no_overrides()),
         &cross_vendor_key,
         PairingPreference::Strong,
         &evidence,
@@ -239,15 +232,10 @@ fn a_cross_vendor_pairing_with_good_evidence_outranks_a_native_pairing_with_bad_
 /// below a candidate the prior alone would have ranked beneath it.
 #[test]
 fn a_native_pairing_contradicted_by_evidence_loses_to_a_neutral_candidate() {
-    let native = glasshouse::harness::pairing::classify(
-        &query(IntegrationId::ClaudeCode, "claude-fable-5"),
-        &no_overrides(),
-    );
     let native_key = key_for(IntegrationId::ClaudeCode, "claude-fable-5");
 
     let mut neutral_query = query(IntegrationId::ClaudeCode, "unlisted-model-v1");
     neutral_query.route.protocol = Some(WireProtocol::AnthropicMessages);
-    let neutral = glasshouse::harness::pairing::classify(&neutral_query, &no_overrides());
     let neutral_key = key_for(IntegrationId::ClaudeCode, "unlisted-model-v1");
 
     // 5 observations leave the native prior at 0.75 of its base magnitude
@@ -257,13 +245,16 @@ fn a_native_pairing_contradicted_by_evidence_loses_to_a_neutral_candidate() {
     let evidence = FixedObservations(vec![(native_key.clone(), bad_observations(5))]);
 
     let native_explanation = pairing::native_pairing_prior_contribution(
-        &eligible(native),
+        &route_affinity(
+            &query(IntegrationId::ClaudeCode, "claude-fable-5"),
+            &no_overrides(),
+        ),
         &native_key,
         PairingPreference::Strong,
         &evidence,
     );
     let neutral_explanation = pairing::native_pairing_prior_contribution(
-        &eligible(neutral),
+        &route_affinity(&neutral_query, &no_overrides()),
         &neutral_key,
         PairingPreference::Strong,
         &evidence,
@@ -286,14 +277,10 @@ fn a_native_pairing_contradicted_by_evidence_loses_to_a_neutral_candidate() {
 /// explanation says about a pinned session instead of scoring it.
 #[test]
 fn a_pinned_preference_is_explained_as_a_hard_rule_not_a_score() {
-    let pairing = glasshouse::harness::pairing::classify(
-        &query(IntegrationId::ClaudeCode, "claude-fable-5"),
-        &no_overrides(),
-    );
     let key = key_for(IntegrationId::ClaudeCode, "claude-fable-5");
 
     let explanation = pairing::native_pairing_prior_contribution(
-        &eligible(pairing),
+        &affinity_for(IntegrationId::ClaudeCode, "claude-fable-5"),
         &key,
         PairingPreference::Pin,
         &NoObservations,
@@ -316,9 +303,14 @@ fn a_pinned_preference_is_explained_as_a_hard_rule_not_a_score() {
     );
 }
 
-/// Design decision 2, structurally: a candidate that fails a hard constraint
-/// never reaches the scorer at all, because `apply_hard_constraints` is the
-/// only way to produce the type the scorer accepts.
+/// Design decision 2: a candidate that fails a hard constraint never reaches
+/// the scorer at all, because `apply_hard_constraints` is what the ranking
+/// callers run first and it removes the candidate outright.
+///
+/// The *type-level* half of this went with the 2026-09-10 ruling: the scorer
+/// now takes a `RouteAffinity` — a caller's judgement, which carries no proof
+/// of eligibility — so what remains is this behavioural check on the filter
+/// itself, and `InteractiveRouting::start`'s own pin test at the caller.
 #[test]
 fn a_candidate_that_fails_a_hard_constraint_cannot_be_scored() {
     // OpenCode (openai-chat) on an anthropic-only route: still incompatible
@@ -575,6 +567,13 @@ fn start_with(
     evidence: &dyn ObservationSource,
     continuity: &dyn ContinuitySource,
 ) -> glasshouse::routing::interactive::SessionStart {
+    // The same producer `crate::profile::apply_gateway` uses: this side
+    // classifies, the policy is handed the answer.
+    let affinities = glasshouse::harness::pairing::candidate_affinities(
+        IntegrationId::ClaudeCode,
+        candidates,
+        &no_overrides(),
+    );
     InteractiveRouting::new()
         .start(
             "claude-code",
@@ -582,7 +581,7 @@ fn start_with(
             candidates,
             &SessionStartInputs {
                 preference,
-                overrides: &no_overrides(),
+                affinities: &affinities,
                 evidence,
                 continuity,
             },
@@ -723,7 +722,7 @@ fn measured_evidence_outranks_both_the_prior_and_a_fresh_warm_session() {
 
     let observations = FixedObservations(vec![(
         EvidenceKey::new(
-            IntegrationId::ClaudeCode,
+            IntegrationId::ClaudeCode.slug(),
             "default",
             AssignedModel::named("unlisted-model-v1"),
             ServingRoute {
@@ -799,6 +798,15 @@ fn the_prior_at_session_start_comes_only_from_a_declared_native_family() {
             behaviour: None,
         },
     );
+    let corrected_affinities = glasshouse::harness::pairing::candidate_affinities(
+        IntegrationId::ClaudeCode,
+        &candidates,
+        &glasshouse::harness::pairing::PairingOverrides::from_parts(
+            "the user configuration file",
+            models,
+            harnesses,
+        ),
+    );
     let corrected = InteractiveRouting::new()
         .start(
             "claude-code",
@@ -806,11 +814,7 @@ fn the_prior_at_session_start_comes_only_from_a_declared_native_family() {
             &candidates,
             &SessionStartInputs {
                 preference: PairingPreference::Strong,
-                overrides: &glasshouse::harness::pairing::PairingOverrides::from_parts(
-                    "the user configuration file",
-                    models,
-                    harnesses,
-                ),
+                affinities: &corrected_affinities,
                 evidence: &NoObservations,
                 continuity: &NoWarmSessions,
             },

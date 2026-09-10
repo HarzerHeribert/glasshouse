@@ -742,6 +742,24 @@ impl Upstream {
             .filter_map(|(_, backend)| backend.as_routing_backend(protocol, model))
             .collect()
     }
+
+    /// Every backend, serving one included, as routing candidates for
+    /// `protocol` and `model`, in configuration order.
+    ///
+    /// [`Self::failover_candidates`] answers "where could this session go
+    /// *now*", which is a question about the moment it is asked. This answers
+    /// "which routes could this session ever be on", which is what a caller
+    /// resolving something per route — `crate::profile`'s
+    /// `crate::routing::pairing::PairingAffinities`, at launch — needs: the
+    /// serving index moves when a failover is taken, so a set built from the
+    /// failover candidates alone would be missing exactly the backend the
+    /// session started on the first time it failed back.
+    pub fn routing_backends(&self, protocol: &str, model: &AssignedModel) -> Vec<Backend> {
+        self.backends
+            .iter()
+            .filter_map(|backend| backend.as_routing_backend(protocol, model))
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for Upstream {

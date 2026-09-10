@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::config::pairing::ObservationSource;
-use crate::harness::pairing::EvidenceKey;
 use crate::provider::pricing::PriceTable;
+use crate::routing::pairing::EvidenceKey;
 use crate::{Cli, Runtime};
 use clap::Parser;
 use std::path::Path;
@@ -880,9 +880,9 @@ fn no_aggregate_changes_when_only_token_volume_or_cost_changes() {
 #[test]
 fn observed_evidence_source_answers_from_the_same_ledger_summarize_reads() {
     use crate::harness::WireProtocol;
-    use crate::harness::pairing::ServingRoute;
     use crate::integrations::IntegrationId;
     use crate::routing::AssignedModel;
+    use crate::routing::pairing::ServingRoute;
 
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path(), "alpha");
@@ -897,7 +897,7 @@ fn observed_evidence_source_answers_from_the_same_ledger_summarize_reads() {
     }
 
     let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-opus-4-1"),
         ServingRoute {
@@ -919,16 +919,16 @@ fn observed_evidence_source_answers_from_the_same_ledger_summarize_reads() {
 /// key) must answer `None`, not a fabricated zero.
 #[test]
 fn observed_evidence_source_answers_none_for_a_first_party_route() {
-    use crate::harness::pairing::ServingRoute;
     use crate::integrations::IntegrationId;
     use crate::routing::AssignedModel;
+    use crate::routing::pairing::ServingRoute;
 
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path(), "alpha");
     let ledger = fixture.ledger();
 
     let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-opus-4-1"),
         ServingRoute {

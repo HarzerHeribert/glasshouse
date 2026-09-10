@@ -37,6 +37,7 @@ pub mod domain;
 pub mod evidence;
 pub mod free;
 pub mod interactive;
+pub mod pairing;
 pub mod pressure;
 pub mod request;
 pub mod session;

@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::pairing::NoObservations;
+use crate::harness::pairing;
+use crate::integrations::IntegrationId;
 use crate::routing::evidence::{
     EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation, ObservedEvidenceSource, Outcome,
 };
@@ -33,6 +35,76 @@ fn backend_with(provider: &str, model: &str, protocol: &str, tools: ToolSemantic
 
 fn session() -> Assignment {
     Assignment::new("claude-code", backend("openrouter", "the-model"))
+}
+
+/// The affinities Glasshouse's own launch path hands the policy for
+/// `candidates` — the same `crate::harness::pairing::candidate_affinities`
+/// call `crate::profile::apply_gateway` makes, resolved from the same opaque
+/// slug an [`Assignment`] carries. Every test below scores what the shipped
+/// binary scores rather than a set assembled by hand.
+///
+/// A slug this build does not recognise is a caller with nothing to say,
+/// which is exactly what an empty set means: no preference, every prior
+/// `0.0`.
+fn harness_affinities(harness: &str, candidates: &[Backend]) -> PairingAffinities {
+    match IntegrationId::ALL
+        .iter()
+        .copied()
+        .find(|id| id.slug() == harness)
+    {
+        Some(id) => crate::harness::pairing::candidate_affinities(
+            id,
+            candidates,
+            &pairing::PairingOverrides::default(),
+        ),
+        None => PairingAffinities::new(),
+    }
+}
+
+/// [`harness_affinities`] for [`session_start_candidates`], which every
+/// `start` test below ranks.
+fn session_start_affinities() -> PairingAffinities {
+    harness_affinities("claude-code", &session_start_candidates())
+}
+
+/// [`InteractiveRouting::on_provider_failure`] as the gateway reaches it: the
+/// affinities come from the harness the assignment names, computed the way
+/// `crate::profile` computes them, so no test here has to state the
+/// caller's judgement twice.
+trait FailOverWithAffinities {
+    #[allow(clippy::too_many_arguments)]
+    fn fail_over(
+        &self,
+        current: &Assignment,
+        failure: ProviderFailure,
+        candidates: &[Backend],
+        preference: PairingPreference,
+        evidence: &dyn ObservationSource,
+        correlations: &RouteCorrelations,
+    ) -> FailureResponse;
+}
+
+impl FailOverWithAffinities for InteractiveRouting {
+    fn fail_over(
+        &self,
+        current: &Assignment,
+        failure: ProviderFailure,
+        candidates: &[Backend],
+        preference: PairingPreference,
+        evidence: &dyn ObservationSource,
+        correlations: &RouteCorrelations,
+    ) -> FailureResponse {
+        let affinities = harness_affinities(current.harness(), candidates);
+        self.on_provider_failure(
+            current,
+            failure,
+            candidates,
+            preference,
+            &affinities,
+            evidence,
+            correlations,
+        )
+    }
 }
 
 /// A backend on `provider` using a specific credential variable, so a
@@ -98,7 +170,6 @@ fn session_start_candidates() -> Vec<Backend> {
 fn the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set() {
     let routing = InteractiveRouting::new();
     let candidates = session_start_candidates();
-    let overrides = pairing::PairingOverrides::default();
 
     let mut magnitudes = Vec::new();
     for candidate in &candidates {
@@ -109,7 +180,7 @@ fn the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_se
                 std::slice::from_ref(candidate),
                 &SessionStartInputs {
                     preference: PairingPreference::Strong,
-                    overrides: &overrides,
+                    affinities: &session_start_affinities(),
                     evidence: &crate::config::pairing::NoObservations,
                     continuity: &crate::config::pairing::NoWarmSessions,
                 },
@@ -145,7 +216,6 @@ fn the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_se
 fn session_continuity_separates_the_same_candidate_set_the_prior_cannot() {
     let routing = InteractiveRouting::new();
     let candidates = session_start_candidates();
-    let overrides = pairing::PairingOverrides::default();
     let warm = WarmOn {
         provider: "anthropic",
         session: crate::config::pairing::WarmSession {
@@ -161,7 +231,7 @@ fn session_continuity_separates_the_same_candidate_set_the_prior_cannot() {
             &candidates,
             &SessionStartInputs {
                 preference: PairingPreference::Strong,
-                overrides: &overrides,
+                affinities: &session_start_affinities(),
                 evidence: &crate::config::pairing::NoObservations,
                 continuity: &warm,
             },
@@ -206,7 +276,7 @@ fn a_fresh_session_with_nothing_observed_keeps_the_configured_order() {
             &session_start_candidates(),
             &SessionStartInputs {
                 preference: PairingPreference::Strong,
-                overrides: &pairing::PairingOverrides::default(),
+                affinities: &session_start_affinities(),
                 evidence: &crate::config::pairing::NoObservations,
                 continuity: &crate::config::pairing::NoWarmSessions,
             },
@@ -228,7 +298,7 @@ fn a_session_start_with_no_candidates_chooses_nothing() {
                 &[],
                 &SessionStartInputs {
                     preference: PairingPreference::Strong,
-                    overrides: &pairing::PairingOverrides::default(),
+                    affinities: &session_start_affinities(),
                     evidence: &crate::config::pairing::NoObservations,
                     continuity: &crate::config::pairing::NoWarmSessions,
                 },
@@ -237,9 +307,10 @@ fn a_session_start_with_no_candidates_chooses_nothing() {
     );
 }
 
-/// Line 568 at this caller, and the part `score_candidate`'s own
-/// trivially-true closure could never show: the hard-constraint filter
-/// actually rejects, and it rejects for the user's own pin.
+/// Line 568 at this caller, and the only place the hard-constraint filter is
+/// shown to actually reject: it rejects for the user's own pin. `start` is
+/// where `apply_hard_constraints` runs, and since the 2026-09-10 ruling it is
+/// the only place it runs in this module.
 #[test]
 fn a_session_pin_removes_every_other_candidate_before_anything_is_scored() {
     let routing = InteractiveRouting::pinned_to("anthropic");
@@ -250,7 +321,7 @@ fn a_session_pin_removes_every_other_candidate_before_anything_is_scored() {
             &session_start_candidates(),
             &SessionStartInputs {
                 preference: PairingPreference::Strong,
-                overrides: &pairing::PairingOverrides::default(),
+                affinities: &session_start_affinities(),
                 evidence: &crate::config::pairing::NoObservations,
                 continuity: &WarmOn {
                     provider: "openrouter",
@@ -279,7 +350,7 @@ fn a_pin_no_configured_backend_can_satisfy_starts_the_session_and_says_so() {
             &session_start_candidates(),
             &SessionStartInputs {
                 preference: PairingPreference::Strong,
-                overrides: &pairing::PairingOverrides::default(),
+                affinities: &session_start_affinities(),
                 evidence: &crate::config::pairing::NoObservations,
                 continuity: &crate::config::pairing::NoWarmSessions,
             },
@@ -350,12 +421,11 @@ fn failover_prefers_the_same_model_on_another_provider() {
     let other_model_first = backend("kilo", "a-different-model");
     let same_model = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[other_model_first, same_model],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -378,12 +448,11 @@ fn failover_prefers_the_same_model_on_another_provider() {
 fn a_different_model_is_offered_as_a_migration_rather_than_taken() {
     let routing = InteractiveRouting::new();
     let current = session();
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Refused { status: 503 },
         &[backend("kilo", "a-different-model")],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -407,12 +476,11 @@ fn a_different_model_is_offered_as_a_migration_rather_than_taken() {
 fn a_migration_offer_carries_the_same_cache_locality_computation_as_failover() {
     let routing = InteractiveRouting::new();
     let current = session();
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Refused { status: 503 },
         &[backend("kilo", "a-different-model")],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -441,12 +509,11 @@ fn failover_never_crosses_a_protocol() {
         ToolSemantics::Unverified,
     );
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[wrong_protocol],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -488,12 +555,11 @@ fn failover_never_weakens_what_is_established_about_tool_calls() {
         ToolSemantics::Unverified,
     );
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[known_absent, unverified],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -520,12 +586,11 @@ fn a_pinned_session_does_not_fail_over_even_when_a_perfect_candidate_exists() {
     let current = session();
     let perfect = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[perfect],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -579,12 +644,11 @@ fn on_provider_failure_ranks_same_model_survivors_by_local_evidence_not_order() 
     let poor_evidence_first = backend("kilo", "the-model");
     let good_evidence_second = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[poor_evidence_first, good_evidence_second],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &FakeEvidence {
             good_provider: "nous",
         },
@@ -612,12 +676,11 @@ fn a_failover_explanation_names_the_pairing_class_it_scored() {
     let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
     let candidate = backend("nous", "claude-fable-5");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[candidate],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -653,12 +716,11 @@ fn on_provider_failure_reads_the_callers_preference_not_a_hardcoded_default() {
     let candidate = backend("nous", "claude-fable-5");
 
     let prior_magnitude = |preference: PairingPreference| {
-        let response = routing.on_provider_failure(
+        let response = routing.fail_over(
             &current,
             ProviderFailure::Unreachable,
             std::slice::from_ref(&candidate),
             preference,
-            &pairing::PairingOverrides::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -695,12 +757,11 @@ fn on_provider_failure_degrades_when_the_harness_slug_is_not_recognised() {
     let current = Assignment::new("some-future-harness", backend("openrouter", "the-model"));
     let candidate = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[candidate],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -713,8 +774,14 @@ fn on_provider_failure_degrades_when_the_harness_slug_is_not_recognised() {
             assert!(
                 explanation
                     .render()
-                    .contains("not a harness this build recognises"),
+                    .contains("stated no affinity for this route"),
                 "{}",
+                explanation.render()
+            );
+            assert_eq!(
+                prior_magnitude(&explanation),
+                0.0,
+                "a caller that said nothing must earn no prior: {}",
                 explanation.render()
             );
         }
@@ -819,12 +886,11 @@ fn on_provider_failure_prefers_a_different_failure_domain_over_a_shared_one() {
     let shared_domain = backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
     let diverse_domain = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[shared_domain, diverse_domain],
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -907,21 +973,19 @@ fn on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none(
     ];
     let short = correlated_with_the_failed_backend("nous", 2);
 
-    let with_none = routing.on_provider_failure(
+    let with_none = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &candidates,
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
-    let with_short = routing.on_provider_failure(
+    let with_short = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &candidates,
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &short,
     );
@@ -967,12 +1031,11 @@ fn on_provider_failure_steers_off_a_measured_correlation_and_names_the_route() {
     ];
     let measured = correlated_with_the_failed_backend("nous", 5);
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &candidates,
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &measured,
     );
@@ -1018,12 +1081,11 @@ fn a_same_provider_candidate_carries_no_correlation_term() {
     let routing = InteractiveRouting::new();
     let current = session();
     let shared = backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[shared],
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &correlated_with_the_failed_backend("openrouter", 5),
     );
@@ -1049,12 +1111,11 @@ fn a_cross_provider_candidate_is_scored_unknown_not_independence() {
     let current = session();
     let candidate = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[candidate],
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -1087,12 +1148,11 @@ fn the_failure_domain_contribution_is_named_in_the_explanation_with_a_signed_mag
     let current = session();
     let shared_domain = backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[shared_domain],
         PairingPreference::Off,
-        &pairing::PairingOverrides::default(),
         &NoObservations,
         &RouteCorrelations::default(),
     );
@@ -1228,12 +1288,11 @@ fn on_provider_failure_with_real_recorded_evidence_prefers_the_stronger_candidat
     let poor_evidence_first = backend("kilo", "the-model");
     let good_evidence_second = backend("nous", "the-model");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[poor_evidence_first, good_evidence_second],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &source,
         &RouteCorrelations::default(),
     );
@@ -1299,12 +1358,11 @@ fn on_provider_failure_prior_decays_as_real_recorded_evidence_accumulates() {
     let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
     let candidate = backend("nous", "claude-fable-5");
 
-    let prior_at = |source: &dyn ObservationSource| match routing.on_provider_failure(
+    let prior_at = |source: &dyn ObservationSource| match routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         std::slice::from_ref(&candidate),
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         source,
         &RouteCorrelations::default(),
     ) {
@@ -1369,20 +1427,23 @@ fn score_candidate_does_not_let_a_thin_sample_outrank_an_established_one() {
     };
     let candidate = backend("nous", "unlisted-model-v1");
 
+    let affinities = harness_affinities("claude-code", std::slice::from_ref(&candidate));
+    let affinity = affinities.for_route(candidate.provider(), candidate.model());
+
     let thin_explanation = score_candidate(
-        IntegrationId::ClaudeCode,
+        "claude-code",
         NO_LAUNCH_PROFILE,
         &candidate,
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
+        &affinity,
         &thin,
     );
     let thick_explanation = score_candidate(
-        IntegrationId::ClaudeCode,
+        "claude-code",
         NO_LAUNCH_PROFILE,
         &candidate,
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
+        &affinity,
         &thick,
     );
 
@@ -1449,12 +1510,11 @@ fn on_provider_failure_discounts_a_stale_observation_window() {
     let current = session();
     let candidate = backend("nous", "the-model");
 
-    let total_at = |source: &dyn ObservationSource| match routing.on_provider_failure(
+    let total_at = |source: &dyn ObservationSource| match routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         std::slice::from_ref(&candidate),
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         source,
         &RouteCorrelations::default(),
     ) {
@@ -1493,12 +1553,11 @@ fn on_provider_failure_falls_back_to_the_undecayed_prior_when_no_evidence_exists
     let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
     let candidate = backend("nous", "claude-fable-5");
 
-    let response = routing.on_provider_failure(
+    let response = routing.fail_over(
         &current,
         ProviderFailure::Unreachable,
         &[candidate],
         PairingPreference::Strong,
-        &pairing::PairingOverrides::default(),
         &source,
         &RouteCorrelations::default(),
     );

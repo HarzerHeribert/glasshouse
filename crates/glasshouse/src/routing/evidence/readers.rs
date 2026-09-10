@@ -956,7 +956,7 @@ impl ObservationSource for ObservedEvidenceSource<'_> {
             provider,
             model: key.model().label(),
             route,
-            harness: Some(key.harness().slug()),
+            harness: Some(key.client()),
         };
         let summary = self
             .ledger

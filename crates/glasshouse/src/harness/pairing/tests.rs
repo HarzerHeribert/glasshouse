@@ -602,13 +602,13 @@ fn an_evidence_key_separates_the_same_model_across_gateways() {
     gatewayed.gateway = Some("glasshouse".to_owned());
 
     let a = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-fable-5"),
         direct,
     );
     let b = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-fable-5"),
         gatewayed,
@@ -633,13 +633,13 @@ fn an_evidence_key_separates_the_same_model_across_protocols() {
     };
 
     let a = EvidenceKey::new(
-        IntegrationId::Codex,
+        IntegrationId::Codex.slug(),
         "default",
         AssignedModel::named("some-model"),
         anthropic,
     );
     let b = EvidenceKey::new(
-        IntegrationId::Codex,
+        IntegrationId::Codex.slug(),
         "default",
         AssignedModel::named("some-model"),
         openai,
@@ -657,13 +657,13 @@ fn an_evidence_key_is_equal_for_an_identical_route() {
         protocol: Some(WireProtocol::AnthropicMessages),
     };
     let a = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-fable-5"),
         route.clone(),
     );
     let b = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-fable-5"),
         route,

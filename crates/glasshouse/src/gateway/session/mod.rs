@@ -22,12 +22,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-// `PairingOverrides` comes from `crate::config::pairing`'s own `pub use`, not
-// from `crate::harness::pairing` directly — this module must never name
-// `crate::harness` at all, see the module documentation above.
-use crate::config::pairing::{
-    NoObservations, ObservationSource, PairingOverrides, PairingPreference,
-};
+use crate::config::pairing::{NoObservations, ObservationSource, PairingPreference};
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
     ContextState, EvidenceLedger, FailureClass, HARNESS_TURN_PURPOSE, NewObservation,
@@ -39,6 +34,12 @@ use crate::routing::interactive::{
     InteractiveRouting, MigrationRefusal, Pin, ProviderFailure, RoutingRecord, SessionActivity,
     StayReason,
 };
+// The caller's own judgement about each candidate route, as plain data —
+// this module holds it and hands it to the policy, and is structurally unable
+// to derive one, because deriving one needs `crate::harness` and this module
+// must never name it (see the module documentation above and
+// `gateway::tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`).
+use crate::routing::pairing::PairingAffinities;
 use crate::routing::request::TaskClass;
 use crate::routing::{AssignedModel, Backend, CacheLocality};
 
@@ -85,18 +86,18 @@ struct State {
     /// `ingress`'s own doc comment on why that type stays incapable of
     /// carrying a header value; this is a second, separate observation.
     quota: Option<(RateLimitHeaders, i64)>,
-    /// Phase 9J line 576: the user's configured native-pairing preference and
-    /// corrections, as `crate::profile`'s gateway path resolved them. Held
-    /// here rather than on `policy`, because `Self::pin_to_serving_provider`
-    /// and `Self::unpin` replace `policy` wholesale, and a resolved
-    /// preference must survive that replacement — see
-    /// `Self::set_pairing_preference`. Defaults match
+    /// Phase 9J line 576: the user's configured native-pairing preference,
+    /// and the caller's own affinity for each candidate route, as
+    /// `crate::profile`'s gateway path resolved them. Held here rather than
+    /// on `policy`, because `Self::pin_to_serving_provider` and `Self::unpin`
+    /// replace `policy` wholesale, and a resolved preference must survive
+    /// that replacement — see `Self::set_pairing_preference`. Defaults match
     /// `EffectiveConfig::native_pairing_preference`'s own out-of-the-box
-    /// answer, so a gateway nothing has called `set_pairing_preference` on
-    /// yet — every test double, and any future caller that forgets — scores
-    /// exactly as `on_provider_failure` always has.
+    /// answer and an empty set of affinities, so a gateway nothing has called
+    /// `set_pairing_preference` on yet — every test double, and any future
+    /// caller that forgets — prefers nothing and scores every prior `0.0`.
     pairing_preference: PairingPreference,
-    pairing_overrides: PairingOverrides,
+    pairing_affinities: PairingAffinities,
     /// The Glasshouse session this gateway serves — `crate::database`
     /// migration 24's `routing_observations.session_id`. `None` until a
     /// launch tells it (see [`SessionRouting::serve_session`]), and a
@@ -230,28 +231,30 @@ impl SessionRouting {
     }
 
     /// Phase 9J line 576, called beside [`Self::bind`]: record the
-    /// native-pairing preference and corrections `crate::profile`'s gateway
-    /// path resolved from configuration for this session, so
-    /// `Self::observe_exchange`'s failover scores candidates against what
-    /// the user actually configured instead of the out-of-the-box default
+    /// native-pairing preference and the caller's affinity for each candidate
+    /// route, so `Self::observe_exchange`'s failover scores candidates against
+    /// what the caller actually knows instead of the out-of-the-box default
     /// [`InteractiveRouting::on_provider_failure`] used before this method
     /// existed.
     ///
-    /// `preference_slug` is [`PairingPreference::slug`]'s own spelling, not
-    /// the type itself — `crate::profile`, the only caller, may not import
-    /// `crate::config` (see that module's own documentation), so it resolves
-    /// the value and hands over the spelling. An unrecognised spelling
-    /// degrades to [`PairingPreference::Strong`], the same out-of-the-box
-    /// default `EffectiveConfig::native_pairing_preference` itself falls back
-    /// to — this method never refuses a launch over a configuration value it
-    /// cannot parse.
+    /// Both arguments are **client-neutral by construction** — user ruling
+    /// 2026-09-10. `preference_slug` is [`PairingPreference::slug`]'s own
+    /// spelling, not the type itself, and `affinities` is a table of
+    /// preferences keyed by provider and model rather than the harness
+    /// knowledge behind them: `crate::profile`, the only caller, resolves
+    /// both and hands over the answers, so nothing here has to learn what a
+    /// harness is (or, for the preference, import `crate::config`). An
+    /// unrecognised spelling degrades to [`PairingPreference::Strong`], the
+    /// same out-of-the-box default `EffectiveConfig::native_pairing_preference`
+    /// itself falls back to — this method never refuses a launch over a
+    /// configuration value it cannot parse.
     // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `set_pairing_preference`.
-    pub fn set_pairing_preference(&self, preference_slug: &str, overrides: PairingOverrides) {
+    pub fn set_pairing_preference(&self, preference_slug: &str, affinities: PairingAffinities) {
         let preference =
             PairingPreference::from_slug(preference_slug).unwrap_or(PairingPreference::Strong);
         let mut state = self.lock();
         state.pairing_preference = preference;
-        state.pairing_overrides = overrides;
+        state.pairing_affinities = affinities;
     }
 
     /// Capability map line 2019, and `crate::database` migration 24: record
@@ -703,7 +706,7 @@ impl SessionRouting {
             failure,
             &candidates,
             state.pairing_preference,
-            &state.pairing_overrides,
+            &state.pairing_affinities,
             evidence,
             &correlations,
         ) {

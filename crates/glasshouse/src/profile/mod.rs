@@ -29,7 +29,7 @@ use std::fmt;
 use crate::gateway::translate;
 use crate::gateway::upstream::UpstreamBackend;
 use crate::gateway::{Gateway, Route, Upstream};
-use crate::harness::pairing::PairingOverrides;
+use crate::harness::pairing::{PairingOverrides, candidate_affinities};
 use crate::harness::{
     ApprovalKind, ApprovalMode, ConfigFileNameProblem, CredentialPlacement, CredentialVarProblem,
     Declared, DirectProviderRequest, GeneratedConfigSite, HarnessAdapter, WireProtocol,
@@ -37,6 +37,7 @@ use crate::harness::{
 use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
 use crate::provider::{ProtocolCompatibleProviders, Provider};
+use crate::routing::pairing::PairingAffinities;
 use crate::routing::{AssignedModel, Cost, CredentialId, ToolSemantics};
 use crate::secret::{SecretRef, SecretStore};
 
@@ -1041,6 +1042,34 @@ pub fn resolve_checked(
 ///    later failover scores candidates against what the user configured.
 ///
 /// Everything else comes from the adapter's own declaration.
+/// The client-neutral affinities this launch hands the gateway — user ruling
+/// 2026-09-10's Glasshouse half.
+///
+/// The gateway ranks same-model failover candidates and may not know what a
+/// harness is, so the harness-aware step happens here: every route this
+/// session could ever be served on is classified once, at launch, with the
+/// harness the profile names and the corrections the user configured, and
+/// only the answer crosses over.
+///
+/// [`Upstream::routing_backends`] rather than `failover_candidates` because
+/// the serving index moves when a failover is taken — see that method's own
+/// doc comment. An empty result is honest: no route resolved, nothing to
+/// prefer, every prior `0.0`, which is exactly what the gateway did before a
+/// preference was ever wired through.
+fn gateway_pairing_affinities(
+    profile: &LaunchProfile,
+    gateway: &Gateway,
+    served_protocol: &str,
+    pairing: &GatewayPairing,
+) -> PairingAffinities {
+    let model = match &profile.model {
+        Some(model) => AssignedModel::Named(model.clone()),
+        None => AssignedModel::HarnessDefault,
+    };
+    let candidates = gateway.upstream().routing_backends(served_protocol, &model);
+    candidate_affinities(profile.harness, &candidates, &pairing.overrides)
+}
+
 // History: design-decisions.md, "Trims: profile/mod.rs", `fn apply_gateway`.
 fn apply_gateway(
     profile: &LaunchProfile,
@@ -1169,15 +1198,21 @@ fn apply_gateway(
     );
 
     // Phase 9J line 576, recorded beside the assignment above: the user's
-    // configured native-pairing preference and corrections, so
-    // `on_provider_failure` scores a later failover against them instead of
-    // the out-of-the-box `PairingPreference::Strong` default. Unlike `bind`,
-    // this never returns early — a preference is known whether or not the
-    // protocol/backend lookup above found a route, and there is no honest
-    // reason to drop it because of that.
+    // configured native-pairing preference, and — user ruling 2026-09-10 —
+    // the *result* of applying this harness's pairing knowledge to every
+    // route this session could be served on, rather than the harness
+    // knowledge itself. The gateway ranks a later failover with these
+    // affinities instead of classifying for itself; classifying is this
+    // side's job, and it happens here, once, where the harness is known.
+    //
+    // Unlike `bind`, this never returns early — a preference is known whether
+    // or not the protocol/backend lookup above found a route, and there is no
+    // honest reason to drop it because of that. An unresolved route simply
+    // yields no candidates and therefore an empty (and honest) affinity set.
+    let affinities = gateway_pairing_affinities(profile, gateway, &served_protocol, pairing);
     gateway
         .routing()
-        .set_pairing_preference(pairing.preference_slug, pairing.overrides.clone());
+        .set_pairing_preference(pairing.preference_slug, affinities);
 
     // Phase 9H line 518, applied where the assignment was just made. A pin
     // recorded on the profile is the user's own statement, so it is honoured

@@ -21,13 +21,13 @@ use clap::Parser;
 
 use glasshouse::config::pairing::ObservationSource;
 use glasshouse::harness::WireProtocol;
-use glasshouse::harness::pairing::{EvidenceKey, ServingRoute};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::routing::AssignedModel;
 use glasshouse::routing::evidence::{
     ContextState, CostConfidence, EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation,
     ObservationQuery, ObservedCost, ObservedEvidenceSource, Outcome,
 };
+use glasshouse::routing::pairing::{EvidenceKey, ServingRoute};
 use glasshouse::{Cli, Runtime};
 
 /// A bootstrapped project inside `base`, sharing `base`'s data and config
@@ -353,7 +353,7 @@ fn observed_evidence_source_is_reachable_from_outside_the_crate() {
     }
 
     let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-opus-4-1"),
         ServingRoute {
@@ -393,7 +393,7 @@ fn observed_evidence_source_reflects_recorded_failures() {
     }
 
     let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode,
+        IntegrationId::ClaudeCode.slug(),
         "default",
         AssignedModel::named("claude-opus-4-1"),
         ServingRoute {

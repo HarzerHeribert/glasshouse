@@ -17,7 +17,6 @@
 use std::time::{Duration, Instant};
 
 use glasshouse::config::pairing::{NoObservations, PairingPreference};
-use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::routing::classify::{
     self, ClassificationSource, Complexity, Confidence, TaskClassification, WarmContextValue,
     WorkloadTier,
@@ -32,6 +31,7 @@ use glasshouse::routing::free::{
 use glasshouse::routing::interactive::{
     Assignment, FailureResponse, InteractiveRouting, ProviderFailure, SessionActivity,
 };
+use glasshouse::routing::pairing::PairingAffinities;
 use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use glasshouse::secret::SecretRef;
 
@@ -460,7 +460,7 @@ mod order_dependence {
             ProviderFailure::Unreachable,
             &[other_model.clone(), same_model.clone()],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -469,7 +469,7 @@ mod order_dependence {
             ProviderFailure::Unreachable,
             &[same_model.clone(), other_model.clone()],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -509,7 +509,7 @@ mod order_dependence {
             ProviderFailure::Unreachable,
             &[candidate_a.clone(), candidate_b.clone()],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -523,7 +523,7 @@ mod order_dependence {
             ProviderFailure::Unreachable,
             &[candidate_b, candidate_a],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -604,7 +604,7 @@ mod identity {
             ProviderFailure::Unreachable,
             &[prefixed_provider],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -637,7 +637,7 @@ mod identity {
             ProviderFailure::Unreachable,
             &[prefixed_model],
             PairingPreference::Strong,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );
@@ -1075,7 +1075,7 @@ mod failure_domain {
             ProviderFailure::Unreachable,
             &[shared_domain, diverse_domain],
             PairingPreference::Off,
-            &PairingOverrides::default(),
+            &PairingAffinities::default(),
             &NoObservations,
             &RouteCorrelations::default(),
         );

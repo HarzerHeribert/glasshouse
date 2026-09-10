@@ -33,13 +33,11 @@ use crate::config::pairing::{
     ContinuitySource, ObservationSource, PairingPreference, native_pairing_prior_contribution,
     session_continuity_contribution,
 };
-use crate::harness::Declared;
-use crate::harness::pairing;
-use crate::integrations::IntegrationId;
 use crate::routing::{HardConstraint, apply_hard_constraints};
 
 use super::domain::FailureDomain;
 use super::evidence::{CorrelationVerdict, RouteCorrelations, RouteIdentity};
+use super::pairing::{EvidenceKey, PairingAffinities, RouteAffinity, ServingRoute};
 use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemantics};
 
 /// The backend serving one live gateway-backed session, and the harness it is
@@ -51,10 +49,10 @@ use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemant
 /// decision that did not say which harness it was made for would leave the
 /// harness implicit exactly where the gateway makes it easiest to forget.
 ///
-/// Carried as an integration **slug** rather than an `IntegrationId`, so that
-/// `crate::gateway` — which may not name `crate::harness` or
-/// `crate::integrations` — can hold one. `crate::profile` mints it from the
-/// real identifier.
+/// Carried as an opaque **slug**, never a typed harness identifier: neither
+/// this module nor `crate::gateway` may name `crate::harness` or
+/// `crate::integrations` (user ruling 2026-09-10). `crate::profile` mints the
+/// slug from the real identifier, and nothing here reads meaning into it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
     harness: String,
@@ -366,8 +364,11 @@ pub struct SessionStartInputs<'a> {
     /// Line 576: the native-pairing preference the user configured, resolved
     /// by `crate::config::EffectiveConfig` and carried here by the caller.
     pub preference: PairingPreference,
-    /// Line 561: the user's own corrections to pairing metadata.
-    pub overrides: &'a pairing::PairingOverrides,
+    /// The caller's own judgement about each candidate route — line 561's
+    /// corrections and line 566's native-pairing knowledge, already resolved
+    /// by whoever holds them. Empty is honest and scores every candidate at
+    /// `0.0`.
+    pub affinities: &'a PairingAffinities,
     /// Phase 33A: what has actually been observed about each candidate.
     pub evidence: &'a dyn ObservationSource,
     /// Line 569: which candidates a relevant warm session already exists for.
@@ -382,7 +383,7 @@ impl std::fmt::Debug for SessionStartInputs<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionStartInputs")
             .field("preference", &self.preference)
-            .field("overrides", self.overrides)
+            .field("affinities", self.affinities)
             .finish_non_exhaustive()
     }
 }
@@ -529,33 +530,30 @@ impl InteractiveRouting {
                 .collect()
         };
 
-        let harness_id = resolve_harness(harness);
         let mut scored: Vec<(Assignment, RoutingExplanation)> =
             Vec::with_capacity(scored_candidates.len());
         for candidate in scored_candidates {
-            let mut explanation = match harness_id {
-                Some(id) => score_candidate(
-                    id,
-                    launch_profile,
-                    &candidate,
-                    inputs.preference,
-                    inputs.overrides,
-                    inputs.evidence,
-                ),
-                None => unrecognised_harness_explanation(harness),
-            };
-            if let Some(id) = harness_id {
-                // Line 569. Pushed here rather than inside `score_candidate`
-                // because `on_provider_failure` deliberately does not weigh
-                // continuity: the backend that just failed is the one the
-                // session was warm on, and crediting a *replacement* for a
-                // warmth it does not have would be an invention. A fresh
-                // session's candidates can each honestly hold one.
-                explanation.push(session_continuity_contribution(
-                    &evidence_key_for(id, launch_profile, &candidate),
-                    inputs.continuity,
-                ));
-            }
+            let affinity = inputs
+                .affinities
+                .for_route(candidate.provider(), candidate.model());
+            let mut explanation = score_candidate(
+                harness,
+                launch_profile,
+                &candidate,
+                inputs.preference,
+                &affinity,
+                inputs.evidence,
+            );
+            // Line 569. Pushed here rather than inside `score_candidate`
+            // because `on_provider_failure` deliberately does not weigh
+            // continuity: the backend that just failed is the one the
+            // session was warm on, and crediting a *replacement* for a
+            // warmth it does not have would be an invention. A fresh
+            // session's candidates can each honestly hold one.
+            explanation.push(session_continuity_contribution(
+                &evidence_key_for(harness, launch_profile, &candidate),
+                inputs.continuity,
+            ));
             if pin_eliminated_everything {
                 explanation.push(Contribution::new(
                     "session pin",
@@ -611,10 +609,12 @@ impl InteractiveRouting {
     /// of `crate::routing::evidence::EvidenceLedger` or how its caller
     /// reached it.
     ///
-    /// `preference` and `overrides` (Phase 9J line 576) are taken as
+    /// `preference` and `affinities` (Phase 9J line 576) are taken as
     /// arguments rather than stored on `self`, because `self.pin` is
     /// session *policy* state a pin or unpin replaces wholesale, while a
-    /// resolved preference must survive that replacement unchanged.
+    /// resolved preference must survive that replacement unchanged. They are
+    /// the caller's judgement, never derived here: an empty
+    /// [`PairingAffinities`] prefers nothing and scores every prior `0.0`.
     ///
     /// `correlations` (Phase 33C lines 1370–1376) is read off the same
     /// ledger as `evidence` for the same reason: this function stays pure.
@@ -628,7 +628,7 @@ impl InteractiveRouting {
         failure: ProviderFailure,
         candidates: &[Backend],
         preference: PairingPreference,
-        overrides: &pairing::PairingOverrides,
+        affinities: &PairingAffinities,
         evidence: &dyn ObservationSource,
         correlations: &RouteCorrelations,
     ) -> FailureResponse {
@@ -642,7 +642,6 @@ impl InteractiveRouting {
             };
         }
 
-        let harness = resolve_harness(current.harness());
         let mut rejected = Vec::new();
         let mut same_model: Vec<(Assignment, RoutingExplanation)> = Vec::new();
         let mut migration: Vec<(Assignment, RoutingExplanation)> = Vec::new();
@@ -660,21 +659,18 @@ impl InteractiveRouting {
                 Err(why) => rejected.push(why),
                 Ok(()) => {
                     let to = Assignment::new(current.harness(), candidate.clone());
-                    let mut explanation = match harness {
-                        // A failover has no launch profile name to key
-                        // evidence by — see `score_candidate`'s own doc
-                        // comment — so it passes the empty one it has always
-                        // effectively used.
-                        Some(harness) => score_candidate(
-                            harness,
-                            NO_LAUNCH_PROFILE,
-                            candidate,
-                            preference,
-                            overrides,
-                            evidence,
-                        ),
-                        None => unrecognised_harness_explanation(current.harness()),
-                    };
+                    // A failover has no launch profile name to key evidence
+                    // by — see `score_candidate`'s own doc comment — so it
+                    // passes the empty one it has always effectively used.
+                    let affinity = affinities.for_route(candidate.provider(), candidate.model());
+                    let mut explanation = score_candidate(
+                        current.harness(),
+                        NO_LAUNCH_PROFILE,
+                        candidate,
+                        preference,
+                        &affinity,
+                        evidence,
+                    );
                     // Phase 33C lines 1375 and 1547: failure-domain
                     // diversity is a ranking signal in its own right, named
                     // and evidenced like every other contribution here — see
@@ -765,77 +761,26 @@ impl InteractiveRouting {
 /// has behaved lately.
 pub const FAILOVER_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-/// [`Assignment::harness`], resolved to the strongly-typed identifier
-/// [`pairing::classify`] needs. [`Assignment`] carries it as a slug rather
-/// than an [`IntegrationId`] — see that type's own doc comment — so this is
-/// the same reverse lookup [`crate::config::pairing::report`] already does
-/// for a `--harness` argument, not a new mechanism. `None` for a slug this
-/// build does not know, which only this function's own caller degrades for
-/// (see [`InteractiveRouting::on_provider_failure`]).
-fn resolve_harness(slug: &str) -> Option<IntegrationId> {
-    IntegrationId::ALL
-        .iter()
-        .copied()
-        .find(|id| id.slug() == slug)
-}
-
-/// Phase 9J and Phase 33A's one production consumer: what the native-pairing
-/// prior and local observed evidence contribute to routing `candidate`,
-/// given the harness the failing session was serving.
+/// Phase 9J and Phase 33A's one production consumer: what the caller's own
+/// affinity for `candidate` and the local observed evidence for it contribute
+/// to routing it.
 ///
-/// `preference` and `overrides` are the caller's own resolved configuration —
-/// Phase 9J line 576's patch. `on_provider_failure` receives them as
-/// arguments and this function never looks them up itself, matching every
-/// other value this module reads: it stays a pure function of what it is
-/// given.
-///
-/// One thing this consumer still does not have, and degrades honestly rather
-/// than inventing: **the candidate's protocol as a
-/// [`crate::harness::WireProtocol`]** — [`Backend::protocol`] is deliberately
-/// kept as an opaque slug (see that method's own doc comment);
-/// [`pairing::wire_protocol_from_slug`] is the reverse lookup, and it answers
-/// `None` for a slug it does not recognise rather than guessing, which only
-/// weakens `Pairing::protocol_fit`, a field `native_pairing_prior_contribution`
-/// never reads.
+/// `preference` and `affinity` are the caller's own resolved judgement — Phase
+/// 9J line 576's patch, in the shape the 2026-09-10 ruling requires. This
+/// function derives neither: it classifies nothing and knows no harness, and
+/// stays a pure function of what it is given. `client` is the opaque slug
+/// evidence is partitioned by (see [`EvidenceKey::client`]); nothing here
+/// reads meaning into it.
 fn score_candidate(
-    harness: IntegrationId,
+    client: &str,
     launch_profile: &str,
     candidate: &Backend,
     preference: PairingPreference,
-    overrides: &pairing::PairingOverrides,
+    affinity: &RouteAffinity,
     evidence: &dyn ObservationSource,
 ) -> RoutingExplanation {
-    let route = serving_route(candidate);
-    let query = pairing::PairingQuery {
-        harness,
-        model: candidate.model().clone(),
-        route,
-        // Not the `Declared<bool>` evidence string `crate::routing::Backend`
-        // was built from — `routing` never keeps it, see `Backend::tools`'
-        // own doc comment — and `classify` uses this only for
-        // `Pairing::tool_semantics`, which `native_pairing_prior_contribution`
-        // never reads either.
-        tool_calls: Declared::Unverified,
-        provider_protocols: Vec::new(),
-    };
-    let pairing_value = pairing::classify(&query, overrides);
-
-    // `compatible()` already ran `candidate` through every hard constraint
-    // `on_provider_failure` enforces (protocol, tool semantics) before this
-    // function is ever called. This is that check's type-level receipt
-    // (design decision 2), not a second, independent gate — the closure
-    // always succeeds because the gate already ran.
-    let (eligible, _) = apply_hard_constraints(vec![pairing_value], |_| Ok(()));
-    let Some(eligible) = eligible.into_iter().next() else {
-        unreachable!(
-            "apply_hard_constraints keeps every input its own check accepts, and this check \
-             accepts everything"
-        );
-    };
-
-    let key = evidence_key_for(harness, launch_profile, candidate);
-
-    native_pairing_prior_contribution(&eligible, &key, preference, evidence)
+    let key = evidence_key_for(client, launch_profile, candidate);
+    native_pairing_prior_contribution(affinity, &key, preference, evidence)
 }
 
 /// The launch profile name a caller that genuinely has none passes.
@@ -850,57 +795,34 @@ fn score_candidate(
 /// sessions, is handed a real name by [`InteractiveRouting::start`].
 const NO_LAUNCH_PROFILE: &str = "";
 
-/// The route a [`Backend`] describes, as the pairing model's own type.
+/// The route a [`Backend`] describes, as the evidence key's own type.
 ///
 /// `protocol` degrades to `None` for a slug this build does not recognise
 /// rather than guessing — [`Backend::protocol`] is deliberately an opaque
-/// slug, and [`pairing::wire_protocol_from_slug`] is the one reverse lookup.
-fn serving_route(candidate: &Backend) -> pairing::ServingRoute {
-    pairing::ServingRoute {
+/// slug, and [`super::pairing::wire_protocol_from_slug`] is the one reverse
+/// lookup.
+fn serving_route(candidate: &Backend) -> ServingRoute {
+    ServingRoute {
         provider: Some(candidate.provider().to_owned()),
         gateway: None,
-        protocol: pairing::wire_protocol_from_slug(candidate.protocol()),
+        protocol: super::pairing::wire_protocol_from_slug(candidate.protocol()),
     }
 }
 
-/// The [`pairing::EvidenceKey`] naming exactly one harness, launch profile,
-/// model and backend combination — map line 572's four axes, and the key both
+/// The [`EvidenceKey`] naming exactly one client, launch profile, model and
+/// backend combination — map line 572's four axes, and the key both
 /// [`ObservationSource`] and [`ContinuitySource`] are asked with.
 ///
 /// One function so the two sources are always asked the *same* question. Two
 /// call sites building the key independently is how a warm session for one
 /// route ends up credited to another.
-fn evidence_key_for(
-    harness: IntegrationId,
-    launch_profile: &str,
-    candidate: &Backend,
-) -> pairing::EvidenceKey {
-    pairing::EvidenceKey::new(
-        harness,
+fn evidence_key_for(client: &str, launch_profile: &str, candidate: &Backend) -> EvidenceKey {
+    EvidenceKey::new(
+        client,
         launch_profile,
         candidate.model().clone(),
         serving_route(candidate),
     )
-}
-
-/// The explanation for a candidate whose harness slug this build does not
-/// know: no pairing could be classified, so the prior is `0.0` and says why.
-///
-/// Shared by [`InteractiveRouting::start`] and
-/// [`InteractiveRouting::on_provider_failure`] so that an unrecognised
-/// harness degrades identically at both callers rather than in two places
-/// that could drift.
-fn unrecognised_harness_explanation(harness: &str) -> RoutingExplanation {
-    let mut explanation = RoutingExplanation::new();
-    explanation.push(Contribution::new(
-        "native-pairing prior",
-        0.0,
-        format!(
-            "`{harness}` is not a harness this build recognises, so no pairing could be \
-             classified for it"
-        ),
-    ));
-    explanation
 }
 
 /// Phase 33C lines 1375 and 1547: what failure-domain diversity contributes

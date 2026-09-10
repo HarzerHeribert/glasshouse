@@ -44,7 +44,24 @@ fn production_code(source: &str) -> String {
 fn gateway_sources() -> Vec<(&'static str, &'static str)> {
     let mut sources = relay_sources();
     sources.extend(translate_sources());
+    sources.extend(extracted_sources());
     sources
+}
+
+/// Files outside this directory that are extracted with it.
+///
+/// `routing/interactive` is the ranking policy the gateway calls on a
+/// provider failure, and it leaves with the gateway rather than staying
+/// behind — so the import rule below is its rule too, and by the user ruling
+/// of 2026-09-10 it may no more name a harness than `session/mod.rs` may.
+/// Held here rather than in [`relay_sources`] because the relay's own
+/// no-deserialization rule is about files that move bytes, and this one moves
+/// none.
+fn extracted_sources() -> Vec<(&'static str, &'static str)> {
+    vec![(
+        "routing/interactive/mod.rs",
+        include_str!("../routing/interactive/mod.rs"),
+    )]
 }
 
 /// The relay: the files that move bytes and may not parse them.
@@ -918,6 +935,11 @@ fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
             "crate::tui",
             "crate::harness",
             "crate::profile",
+            // User ruling 2026-09-10: harness and integration identity leave
+            // the gateway entirely. A candidate is ranked on what the caller
+            // states about it (`crate::routing::pairing::RouteAffinity`) and
+            // on what this side can measure, never on which client is asking.
+            "crate::integrations",
         ] {
             assert!(
                 !code.contains(forbidden),
@@ -950,7 +972,7 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
     assert!(!production_code(tested).contains("crate::session"));
     // ... and the file list it runs over is not empty, which would make
     // every assertion in it vacuous.
-    assert_eq!(gateway_sources().len(), 13);
+    assert_eq!(gateway_sources().len(), 14);
 }
 
 /// No file of the **relay** may deserialize anything. The whole of

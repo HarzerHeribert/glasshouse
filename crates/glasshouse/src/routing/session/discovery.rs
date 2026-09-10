@@ -898,7 +898,9 @@ fn serving_route(backend: &Backend) -> pairing::ServingRoute {
 
 fn evidence_key_for(destination: &Destination) -> pairing::EvidenceKey {
     pairing::EvidenceKey::new(
-        destination.harness(),
+        // An `EvidenceKey` partitions by an opaque client slug, never a
+        // harness identifier — see that type's own doc comment.
+        destination.harness().slug(),
         destination.launch_profile(),
         destination.backend().model().clone(),
         serving_route(destination.backend()),

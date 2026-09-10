@@ -35,6 +35,7 @@ use crate::harness::{Declared, WireProtocol};
 use crate::integrations::IntegrationId;
 use crate::profile::BackendResource;
 use crate::routing::AssignedModel;
+use crate::routing::pairing::RouteAffinity;
 
 use super::{EffectiveConfig, Layer};
 
@@ -676,35 +677,34 @@ fn describe_observed(observed: &ObservedEvidence) -> String {
     }
 }
 
-/// Line 566 through 575, as one function: what the native-pairing prior and
-/// the local evidence for `key` contribute to routing `candidate`.
+/// Line 566 through 575, as one function: what the caller's affinity for a
+/// candidate and the local evidence for `key` contribute to routing it.
 ///
-/// `candidate` must already have survived every hard protocol, tool,
-/// capability, privacy and user constraint —
-/// [`crate::routing::EligibleCandidate`] makes that structural (design
-/// decision 2).
-/// The explanation always carries the pairing class and evidence count
+/// `affinity` is the caller's own judgement, never derived here — user ruling
+/// 2026-09-10: the ranking side is told *whether* a route is preferred and
+/// *why*, and is never told what the caller is. Everything else this function
+/// weighs is local evidence it reads for itself.
+/// The explanation always carries the affinity's reason and evidence count
 /// (line 575's first two terms, informational), then either a `pinned`
 /// line (a pin is a hard rule, not scored), or a `native-pairing prior`
-/// (zero unless vendor-native, decayed toward zero as observations
-/// accumulate) plus `local observed evidence` (present only with at least
-/// one reliable observation, unbounded — so a strong observation can
+/// (zero unless the caller preferred this route, decayed toward zero as
+/// observations accumulate) plus `local observed evidence` (present only with
+/// at least one reliable observation, unbounded — so a strong observation can
 /// always outrank the prior, design decision 1, and enough bad ones can
-/// make a vendor-native total lower than a neutral candidate's, line 574).
+/// make a preferred candidate's total lower than a neutral one's, line 574).
 ///
 /// The production caller is `InteractiveRouting::on_provider_failure`, by
 /// way of `score_candidate`, reached from
 /// `crate::gateway::session::SessionRouting::observe_exchange`.
 // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/pairing.rs `native_pairing_prior_contribution`.
 pub fn native_pairing_prior_contribution(
-    candidate: &crate::routing::EligibleCandidate<pairing::Pairing>,
+    affinity: &RouteAffinity,
     key: &pairing::EvidenceKey,
     preference: PairingPreference,
     evidence: &dyn ObservationSource,
 ) -> crate::routing::RoutingExplanation {
     use crate::routing::Contribution;
 
-    let pairing = candidate.value();
     let observed = evidence.observed(key);
     let count = observed
         .as_ref()
@@ -715,7 +715,7 @@ pub fn native_pairing_prior_contribution(
     explanation.push(Contribution::new(
         "pairing class",
         0.0,
-        format!("{} — {}", pairing.class(), pairing.reason()),
+        affinity.reason().to_owned(),
     ));
     explanation.push(Contribution::new(
         "local evidence strength",
@@ -737,7 +737,7 @@ pub fn native_pairing_prior_contribution(
         return explanation;
     };
 
-    let is_native = pairing.class().is_vendor_native();
+    let is_native = affinity.preferred();
     let magnitude = if is_native {
         strength.base_magnitude() * decay_factor(count)
     } else {
@@ -1615,7 +1615,7 @@ mod tests {
     #[test]
     fn no_observations_source_establishes_nothing() {
         let key = pairing::EvidenceKey::new(
-            IntegrationId::ClaudeCode,
+            IntegrationId::ClaudeCode.slug(),
             "default",
             AssignedModel::named("claude-fable-5"),
             ServingRoute::default(),

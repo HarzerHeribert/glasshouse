@@ -907,7 +907,20 @@ fn failover_explanation_log(preference_slug: &str) -> String {
         AssignedModel::named("claude-fable-5"),
         &upstream,
     );
-    routing.set_pairing_preference(preference_slug, PairingOverrides::default());
+    // The affinities `crate::profile::apply_gateway` computes for exactly
+    // this upstream, harness and model — the production producer, not a set
+    // assembled here, so this test proves the wiring end to end.
+    routing.set_pairing_preference(
+        preference_slug,
+        crate::harness::pairing::candidate_affinities(
+            crate::integrations::IntegrationId::ClaudeCode,
+            &upstream.routing_backends(
+                "anthropic-messages",
+                &AssignedModel::named("claude-fable-5"),
+            ),
+            &crate::harness::pairing::PairingOverrides::default(),
+        ),
+    );
 
     let sink = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
