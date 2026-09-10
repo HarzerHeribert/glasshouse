@@ -12,6 +12,7 @@ pub mod config;
 pub mod contract;
 pub mod events;
 pub mod glasshouse;
+pub mod helper_context;
 pub mod helpers;
 pub mod project;
 pub mod prompt;
@@ -63,3 +64,5 @@ mod tests {
         assert!(output.is_empty());
     }
 }
+
+pub mod verification;

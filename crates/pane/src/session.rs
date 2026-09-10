@@ -38,7 +38,8 @@ use crate::telemetry::RequestMeasurement;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
 use crate::tui::{
-    self, CellError, CellView, ContextTokens, Counted, Notebook, SupervisorStatus, TaskTokens,
+    self, CellError, CellView, ContextTokens, Counted, HelperModelTokens, HelperTokens, Notebook,
+    SupervisorStatus, TaskTokens,
 };
 use crate::wire;
 
@@ -1238,7 +1239,8 @@ fn project_command_task(name: &str, body: &str, argument: Option<&str>) -> Strin
 /// turn's figure came from. Spend is telemetry only; only the configured cell
 /// count remains a control limit.
 struct TaskSpend {
-    used: u64,
+    parent_used: u64,
+    helpers: HelperTokens,
     cells_used: u64,
     reported: bool,
     estimated: bool,
@@ -1248,7 +1250,8 @@ struct TaskSpend {
 impl TaskSpend {
     fn new(cells_cap: u64) -> Self {
         Self {
-            used: 0,
+            parent_used: 0,
+            helpers: HelperTokens::default(),
             cells_used: 0,
             reported: false,
             estimated: false,
@@ -1271,17 +1274,17 @@ impl TaskSpend {
         match (served.input_tokens, served.output_tokens) {
             (None, None) => match usage {
                 Some(usage) => {
-                    self.used = self.used.saturating_add(usage.total_tokens());
+                    self.parent_used = self.parent_used.saturating_add(usage.total_tokens());
                     self.reported = true;
                 }
                 None => {
-                    self.used = self.used.saturating_add(estimate);
+                    self.parent_used = self.parent_used.saturating_add(estimate);
                     self.estimated = true;
                 }
             },
             (input, output) => {
-                self.used = self
-                    .used
+                self.parent_used = self
+                    .parent_used
                     .saturating_add(input.unwrap_or(0))
                     .saturating_add(output.unwrap_or(0))
                     .saturating_add(
@@ -1300,6 +1303,86 @@ impl TaskSpend {
         }
     }
 
+    /// Add resolved helper records once, at the preflight or cell boundary
+    /// that owns them. Rendering and rollout replay never call this method.
+    fn add_helpers(&mut self, records: &[crate::helpers::HelperRecord]) {
+        for record in records {
+            let usage = &record.usage;
+            self.helpers.calls = self.helpers.calls.saturating_add(1);
+            if usage.coverage_known {
+                self.helpers.usage_known_calls = self.helpers.usage_known_calls.saturating_add(1);
+            }
+            self.helpers.used = self.helpers.used.saturating_add(usage.known_tokens());
+            self.helpers.input_tokens =
+                self.helpers.input_tokens.saturating_add(usage.input_tokens);
+            self.helpers.output_tokens = self
+                .helpers
+                .output_tokens
+                .saturating_add(usage.output_tokens);
+            self.helpers.requests = self.helpers.requests.saturating_add(usage.requests);
+            self.helpers.reported_requests = self
+                .helpers
+                .reported_requests
+                .saturating_add(usage.reported_requests);
+            self.helpers.cache_read_input_tokens = self
+                .helpers
+                .cache_read_input_tokens
+                .saturating_add(usage.cache_read_input_tokens);
+            self.helpers.cache_creation_input_tokens = self
+                .helpers
+                .cache_creation_input_tokens
+                .saturating_add(usage.cache_creation_input_tokens);
+            self.helpers.cache_read_reported_requests = self
+                .helpers
+                .cache_read_reported_requests
+                .saturating_add(usage.cache_read_reported_requests);
+            self.helpers.cache_creation_reported_requests = self
+                .helpers
+                .cache_creation_reported_requests
+                .saturating_add(usage.cache_creation_reported_requests);
+            let model_index = self
+                .helpers
+                .models
+                .iter()
+                .position(|model| model.model == usage.model)
+                .unwrap_or_else(|| {
+                    self.helpers.models.push(HelperModelTokens {
+                        model: usage.model.clone(),
+                        ..HelperModelTokens::default()
+                    });
+                    self.helpers.models.len() - 1
+                });
+            let model = &mut self.helpers.models[model_index];
+            model.calls = model.calls.saturating_add(1);
+            if usage.coverage_known {
+                model.usage_known_calls = model.usage_known_calls.saturating_add(1);
+            }
+            model.used = model.used.saturating_add(usage.known_tokens());
+            model.input_tokens = model.input_tokens.saturating_add(usage.input_tokens);
+            model.output_tokens = model.output_tokens.saturating_add(usage.output_tokens);
+            model.requests = model.requests.saturating_add(usage.requests);
+            model.reported_requests = model
+                .reported_requests
+                .saturating_add(usage.reported_requests);
+            model.cache_read_input_tokens = model
+                .cache_read_input_tokens
+                .saturating_add(usage.cache_read_input_tokens);
+            model.cache_creation_input_tokens = model
+                .cache_creation_input_tokens
+                .saturating_add(usage.cache_creation_input_tokens);
+            model.cache_read_reported_requests = model
+                .cache_read_reported_requests
+                .saturating_add(usage.cache_read_reported_requests);
+            model.cache_creation_reported_requests = model
+                .cache_creation_reported_requests
+                .saturating_add(usage.cache_creation_reported_requests);
+        }
+    }
+
+    fn used(&self) -> u64 {
+        self.parent_used.saturating_add(self.helpers.used)
+    }
+
     fn counted(&self) -> Option<Counted> {
         match (self.reported, self.estimated) {
             (true, true) => Some(Counted::Mixed),
@@ -1313,7 +1396,7 @@ impl TaskSpend {
     fn line(&self) -> Budget {
         Budget {
             turn_cap: u64::from(wire::MAX_TOKENS),
-            task_used: self.used,
+            task_used: self.used(),
             // Kept in the wire-facing value for API compatibility. The
             // renderer deliberately ignores it: task spend has no cap.
             task_cap: 0,
@@ -1324,7 +1407,9 @@ impl TaskSpend {
 
     fn tokens(&self) -> Option<TaskTokens> {
         Some(TaskTokens {
-            used: self.used,
+            used: self.used(),
+            parent_used: self.parent_used,
+            helpers: self.helpers.clone(),
             counted: self.counted()?,
         })
     }
@@ -1399,6 +1484,7 @@ fn run_task_inner(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
+    let mut budget = TaskSpend::new(session.config.limits.cells);
     transcript.conversation.system = build_system_prompt(session.project, session.profile);
     // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
     // the static orientation already has. It fires **once per task**, before
@@ -1407,6 +1493,9 @@ fn run_task_inner(
     // no scout ran or none answered.
     if let Some(block) = preflight_block(task, session, transcript) {
         transcript.conversation.system.push_str(&block);
+    }
+    if let Some(preflight) = transcript.notebook.preflight.as_ref() {
+        budget.add_helpers(std::slice::from_ref(preflight));
     }
     {
         let _line = session.interrupt.writing();
@@ -1474,7 +1563,6 @@ fn run_task_inner(
         }
         write_turn(session.interrupt, rollout, Role::Assistant, &text)
             .map_err(|e| e.to_string())?;
-        let mut budget = TaskSpend::new(session.config.limits.cells);
         budget.add(&served, turn.usage.as_ref(), estimated);
         transcript.notebook.tokens = budget.tokens();
         transcript.conversation.messages.push(turn.message);
@@ -1495,7 +1583,6 @@ fn run_task_inner(
     .with_response_byte_cap(session.config.limits.response_bytes)
     .with_instruction_context()
     .with_helpers(session.config.helpers.clone());
-    let mut budget = TaskSpend::new(session.config.limits.cells);
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
@@ -1651,6 +1738,9 @@ fn run_task_inner(
         );
         crate::runtime::state::install_helper_progress(previous);
         let mut step = step?;
+        // RuntimeState clears this ledger at each cell boundary, so each
+        // record belongs to this step and enters cumulative spend once here.
+        budget.add_helpers(&step.view.helpers);
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let notices = runtime.take_handler_notices().join("\n");
@@ -2819,7 +2909,7 @@ mod tests {
         };
         let mut direct = TaskSpend::new(10);
         direct.add(&ServedBy::default(), Some(&usage), 999);
-        assert_eq!(direct.used, 105);
+        assert_eq!(direct.used(), 105);
 
         let mut gateway = TaskSpend::new(10);
         gateway.add(
@@ -2832,7 +2922,7 @@ mod tests {
             Some(&usage),
             999,
         );
-        assert_eq!(gateway.used, 107);
+        assert_eq!(gateway.used(), 107);
 
         let mut absent = TaskSpend::new(10);
         absent.add(
@@ -2845,7 +2935,78 @@ mod tests {
             }),
             999,
         );
-        assert_eq!(absent.used, 7);
+        assert_eq!(absent.used(), 7);
+    }
+
+    #[test]
+    fn task_spend_adds_parent_and_helper_usage_once_with_honest_coverage() {
+        let mut spend = TaskSpend::new(10);
+        spend.add(
+            &ServedBy::default(),
+            Some(&wire::Usage {
+                input_tokens: 118_751,
+                output_tokens: 8_773,
+                cache_read_input_tokens: Some(46_336),
+                cache_creation_input_tokens: Some(0),
+            }),
+            0,
+        );
+        let helper = crate::helpers::HelperRecord {
+            usage: crate::helpers::HelperUsage {
+                coverage_known: true,
+                model: "gpt-5.6-luna".into(),
+                requests: 6,
+                reported_requests: 6,
+                input_tokens: 20_329,
+                output_tokens: 2_492,
+                cache_read_input_tokens: 5_120,
+                cache_creation_input_tokens: 0,
+                cache_read_reported_requests: 6,
+                cache_creation_reported_requests: 6,
+            },
+            ..crate::helpers::HelperRecord::default()
+        };
+        spend.add_helpers(&[helper]);
+
+        assert_eq!(spend.parent_used, 173_860);
+        assert_eq!(spend.helpers.used, 27_941);
+        assert_eq!(spend.used(), 201_801);
+        assert_eq!(spend.helpers.requests, 6);
+        assert_eq!(spend.helpers.input_tokens, 20_329);
+        assert_eq!(spend.helpers.output_tokens, 2_492);
+        assert_eq!(spend.helpers.cache_read_input_tokens, 5_120);
+        assert_eq!(spend.helpers.models.len(), 1);
+        assert_eq!(spend.helpers.models[0].model, "gpt-5.6-luna");
+        assert_eq!(spend.helpers.models[0].used, 27_941);
+        assert!(spend.helpers.complete());
+        let first = spend.tokens();
+        assert_eq!(
+            spend.tokens(),
+            first,
+            "reading the meter must not recount helpers"
+        );
+    }
+
+    #[test]
+    fn task_spend_marks_missing_and_historical_helper_usage_partial() {
+        let mut spend = TaskSpend::new(10);
+        spend.add_helpers(&[
+            crate::helpers::HelperRecord {
+                usage: crate::helpers::HelperUsage {
+                    coverage_known: true,
+                    model: "helper-tier".into(),
+                    requests: 1,
+                    ..crate::helpers::HelperUsage::default()
+                },
+                ..crate::helpers::HelperRecord::default()
+            },
+            crate::helpers::HelperRecord::default(),
+        ]);
+
+        assert_eq!(spend.used(), 0, "missing usage must never invent tokens");
+        assert_eq!(spend.helpers.calls, 2);
+        assert_eq!(spend.helpers.usage_known_calls, 1);
+        assert!(!spend.helpers.complete());
     }
 
     #[test]

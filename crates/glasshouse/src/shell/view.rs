@@ -10,6 +10,7 @@
 //! the bottom render at 1x1 to keep it honest.
 
 mod chrome;
+mod launch_choice;
 mod settings_actions;
 use chrome::{
     render_footer, render_header, render_root, render_session_bar, render_status_badge,
@@ -173,6 +174,7 @@ pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut
     }
     match state.overlay() {
         Some(Overlay::HarnessChoice) => render_harness_choice(state, frame, area, sink),
+        Some(Overlay::ProfileChoice) => launch_choice::render(state, frame, area, sink),
         Some(Overlay::Overview) => render_overview(state, frame, area),
         Some(Overlay::Settings) => render_settings(state, frame, area, sink),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),

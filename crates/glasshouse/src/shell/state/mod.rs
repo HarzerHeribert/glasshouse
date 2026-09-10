@@ -34,6 +34,7 @@ use crate::secret::{SecretRef, SecretStore};
 use crate::session::{SessionDisposition, SessionId, SessionPresentation, SessionRecord};
 
 mod knowledge;
+mod launch_choice;
 mod overview;
 mod route;
 mod settings;
@@ -43,6 +44,7 @@ mod settings;
 mod tests;
 
 pub use knowledge::{KnowledgeSection, MemoryDetail, ProjectKnowledgeState, ProjectMemoryState};
+pub use launch_choice::ProfileChoice;
 pub use overview::{OverviewState, ProjectOverviewState};
 pub use route::{
     RouteDecisionRow, RouteDecisionsState, RouteEvidenceRow, RouteEvidenceState, RouteHealthRow,
@@ -125,6 +127,10 @@ pub enum Overlay {
     /// harness enabled `n` still starts it without asking, because there is
     /// nothing to ask about.
     HarnessChoice,
+    /// Which configured launch profile to use for a new session. This is an
+    /// explicit choice because selecting a billed provider must never be a
+    /// side effect of pressing `n`.
+    ProfileChoice,
     /// Read-only, like [`Overlay::ProjectOverview`] and
     /// [`Overlay::SessionEvents`]. See [`RouteEvidenceState`] for the data
     /// behind it.
@@ -282,6 +288,12 @@ pub enum Action {
     /// answer differently from the list they were shown.
     StartSessionWith {
         harness: IntegrationId,
+        presentation: SessionPresentation,
+    },
+    /// Start with the exact enabled launch profile selected in the picker.
+    StartSessionWithProfile {
+        harness: IntegrationId,
+        profile: String,
         presentation: SessionPresentation,
     },
     /// Start a new session with no viewport — Phase 4's headless
@@ -617,6 +629,7 @@ pub struct ShellState {
     /// presentation the interrupted request asked for — a choice made here
     /// has to resume the `n`/`N` the user actually pressed.
     harness_choice: Option<HarnessChoice>,
+    profile_choice: Option<ProfileChoice>,
     /// A one-line note for the status bar, cleared by the next keystroke.
     ///
     /// Its job is to explain a key that appeared to do nothing. Without it a
@@ -704,14 +717,21 @@ impl Action {
     /// action itself. `None` for every action that starts nothing.
     /// A caller that already matched a start action can unwrap this to
     /// `Embedded` — the branch it would otherwise write is unreachable.
-    pub fn start_request(&self) -> Option<(SessionPresentation, Option<IntegrationId>)> {
+    pub fn start_request(
+        &self,
+    ) -> Option<(SessionPresentation, Option<IntegrationId>, Option<&str>)> {
         match self {
-            Action::StartSession => Some((SessionPresentation::Embedded, None)),
-            Action::StartHeadlessSession => Some((SessionPresentation::Headless, None)),
+            Action::StartSession => Some((SessionPresentation::Embedded, None, None)),
+            Action::StartHeadlessSession => Some((SessionPresentation::Headless, None, None)),
             Action::StartSessionWith {
                 harness,
                 presentation,
-            } => Some((*presentation, Some(*harness))),
+            } => Some((*presentation, Some(*harness), None)),
+            Action::StartSessionWithProfile {
+                harness,
+                profile,
+                presentation,
+            } => Some((*presentation, Some(*harness), Some(profile))),
             _ => None,
         }
     }
@@ -735,6 +755,7 @@ impl ShellState {
             selected: 0,
             overlay: None,
             harness_choice: None,
+            profile_choice: None,
             status: None,
             mode: Mode::Control,
             session_view: false,
@@ -1112,6 +1133,10 @@ impl ShellState {
         // underneath the popup.
         if self.overlay == Some(Overlay::HarnessChoice) {
             return self.handle_harness_choice_key(key, had_status);
+        }
+
+        if self.overlay == Some(Overlay::ProfileChoice) {
+            return self.handle_profile_choice_key(key);
         }
 
         if self.overlay == Some(Overlay::Overview) {

@@ -1030,6 +1030,7 @@ impl Runtime {
         }
         self.state.table.borrow_mut().end_task();
         self.state.forget_calls();
+        crate::runtime::checks::clear(&mut self.isolate);
         // The batch is a handle, so the task ending frees it with the rest --
         // §2's third lifetime event applies to the one handle the runtime
         // declared exactly as it does to the ones the model did.

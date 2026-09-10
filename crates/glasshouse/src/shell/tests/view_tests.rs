@@ -188,6 +188,32 @@ fn the_project_root_is_displayed_on_every_frame() {
     );
 }
 
+#[test]
+fn a_short_profile_picker_keeps_the_selected_row_visible() {
+    let mut state = sample();
+    let profiles = (0..10)
+        .map(|index| {
+            let mut profile = crate::profile::LaunchProfile::native(IntegrationId::ClaudeCode);
+            profile.name = format!("profile-{index}");
+            profile
+        })
+        .collect();
+    state.open_profile_choice(profiles, SessionPresentation::Embedded);
+    for _ in 0..8 {
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+
+    let text = rendered(&state, 66, 6);
+    assert!(
+        text.contains("profile-8"),
+        "the cursor's row must remain visible after the list scrolls:\n{text}"
+    );
+    assert!(
+        !text.contains("profile-0"),
+        "the popup must render a moving window rather than clipping its tail:\n{text}"
+    );
+}
+
 /// It has to stay visible from every screen, including behind an overlay,
 /// or "prominently" would mean "until you open something".
 #[test]

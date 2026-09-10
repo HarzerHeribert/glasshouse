@@ -43,6 +43,18 @@ fn metric(value: Option<u64>) -> String {
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unreported".into())
 }
+
+fn helper_metric(value: u64, reported: u32, expected: u32, known_calls: u32, calls: u32) -> String {
+    if known_calls == 0 || reported == 0 && expected > 0 {
+        "unreported".into()
+    } else if reported < expected {
+        format!("{} ({reported}/{expected})", super::compact_tokens(value))
+    } else if known_calls < calls {
+        format!("{} (known subtotal)", super::compact_tokens(value))
+    } else {
+        super::compact_tokens(value)
+    }
+}
 fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
     let glyphs = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let tail = &samples[samples.len().saturating_sub(width)..];
@@ -73,17 +85,81 @@ fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
         .collect()
 }
 fn task_spend(notebook: &Notebook, _width: usize) -> Vec<Line<'static>> {
-    let Some(tokens) = notebook.tokens else {
+    let Some(tokens) = notebook.tokens.as_ref() else {
         return vec![muted("No task spend yet")];
     };
-    vec![
-        Line::styled(
-            format!("Σ {} tokens", super::compact_tokens(tokens.used)),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        muted("cumulative task spend · no cap"),
-        muted(format!("counted: {}", tokens.counted.as_str())),
-    ]
+    let mut lines = vec![Line::styled(
+        format!("Σ {} tokens", super::compact_tokens(tokens.used)),
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )];
+    if tokens.helpers.calls > 0 {
+        lines.push(muted(format!(
+            "parent {} · helpers {}",
+            super::compact_tokens(tokens.parent_used),
+            super::compact_tokens(tokens.helpers.used)
+        )));
+        for model in &tokens.helpers.models {
+            let name = if model.model.is_empty() {
+                "model unreported"
+            } else {
+                &model.model
+            };
+            lines.push(muted(format!(
+                "{name} · {}",
+                super::compact_tokens(model.used)
+            )));
+            lines.push(muted(format!(
+                "responses {}/{} · calls {}/{}",
+                model.reported_requests, model.requests, model.usage_known_calls, model.calls,
+            )));
+            if !model.complete() {
+                lines.push(muted("coverage partial"));
+            }
+            lines.push(muted(format!(
+                "in {} · out {}",
+                helper_metric(
+                    model.input_tokens,
+                    model.reported_requests,
+                    model.requests,
+                    model.usage_known_calls,
+                    model.calls,
+                ),
+                helper_metric(
+                    model.output_tokens,
+                    model.reported_requests,
+                    model.requests,
+                    model.usage_known_calls,
+                    model.calls,
+                )
+            )));
+            lines.push(muted(format!(
+                "cache read {}",
+                helper_metric(
+                    model.cache_read_input_tokens,
+                    model.cache_read_reported_requests,
+                    model.reported_requests,
+                    model.usage_known_calls,
+                    model.calls,
+                )
+            )));
+            lines.push(muted(format!(
+                "cache create {}",
+                helper_metric(
+                    model.cache_creation_input_tokens,
+                    model.cache_creation_reported_requests,
+                    model.reported_requests,
+                    model.usage_known_calls,
+                    model.calls,
+                )
+            )));
+        }
+    }
+    lines.push(muted("cumulative task spend · no cap"));
+    lines.push(muted(format!("counted: {}", tokens.counted.as_str())));
+    if tokens.helpers.calls > 0 && !tokens.helpers.complete() {
+        lines.push(muted("helper coverage partial"));
+    }
+    lines
 }
 
 fn context_window(

@@ -304,6 +304,8 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         }),
         tokens: Some(pane::tui::TaskTokens {
             used: 579,
+            parent_used: 579,
+            helpers: Default::default(),
             counted: pane::tui::Counted::Gateway,
         }),
         supervisor: Some(SupervisorStatus::Nudged("check the request".into())),
@@ -340,6 +342,100 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
 }
 
 #[test]
+fn telemetry_breaks_exact_task_spend_down_by_parent_helper_model_and_cache() {
+    let notebook = Notebook {
+        tokens: Some(pane::tui::TaskTokens {
+            used: 201_801,
+            parent_used: 173_860,
+            helpers: pane::tui::HelperTokens {
+                calls: 3,
+                usage_known_calls: 3,
+                used: 27_941,
+                input_tokens: 20_329,
+                output_tokens: 2_492,
+                requests: 6,
+                reported_requests: 6,
+                cache_read_input_tokens: 5_120,
+                cache_creation_input_tokens: 0,
+                cache_read_reported_requests: 6,
+                cache_creation_reported_requests: 6,
+                models: vec![pane::tui::HelperModelTokens {
+                    model: "gpt-5.6-luna".into(),
+                    calls: 3,
+                    usage_known_calls: 3,
+                    used: 27_941,
+                    input_tokens: 20_329,
+                    output_tokens: 2_492,
+                    requests: 6,
+                    reported_requests: 6,
+                    cache_read_input_tokens: 5_120,
+                    cache_creation_input_tokens: 0,
+                    cache_read_reported_requests: 6,
+                    cache_creation_reported_requests: 6,
+                }],
+            },
+            counted: Counted::Gateway,
+        }),
+        ..Notebook::default()
+    };
+
+    let rendered = text(&draw(120, 40, &state(), &conversation(), &notebook));
+    for field in [
+        "Σ 201.8k tokens",
+        "parent 173.9k · helpers 27.9k",
+        "gpt-5.6-luna · 27.9k",
+        "responses 6/6 · calls 3/3",
+        "in 20.3k · out 2.5k",
+        "cache read 5.1k",
+        "cache create 0",
+        "cumulative task spend · no cap",
+    ] {
+        assert!(rendered.contains(field), "{field}: {rendered}");
+    }
+    assert!(!rendered.contains("helper usage partial"), "{rendered}");
+}
+
+#[test]
+fn telemetry_calls_missing_cache_classes_unreported_instead_of_zero() {
+    let notebook = Notebook {
+        tokens: Some(pane::tui::TaskTokens {
+            used: 173_875,
+            parent_used: 173_860,
+            helpers: pane::tui::HelperTokens {
+                calls: 1,
+                usage_known_calls: 1,
+                used: 15,
+                input_tokens: 10,
+                output_tokens: 5,
+                requests: 1,
+                reported_requests: 1,
+                models: vec![pane::tui::HelperModelTokens {
+                    model: "helper-model".into(),
+                    calls: 1,
+                    usage_known_calls: 1,
+                    used: 15,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    requests: 1,
+                    reported_requests: 1,
+                    ..pane::tui::HelperModelTokens::default()
+                }],
+                ..pane::tui::HelperTokens::default()
+            },
+            counted: Counted::Gateway,
+        }),
+        ..Notebook::default()
+    };
+
+    let rendered = text(&draw(120, 40, &state(), &conversation(), &notebook));
+    assert!(rendered.contains("cache read unreported"), "{rendered}");
+    assert!(rendered.contains("cache create unreported"), "{rendered}");
+    assert!(rendered.contains("responses 1/1 · calls 1/1"), "{rendered}");
+    assert!(rendered.contains("coverage partial"), "{rendered}");
+    assert!(rendered.contains("helper coverage partial"), "{rendered}");
+}
+
+#[test]
 fn statusline_separates_request_context_from_cumulative_spend() {
     let notebook = Notebook {
         context: Some(ContextTokens {
@@ -349,6 +445,8 @@ fn statusline_separates_request_context_from_cumulative_spend() {
         }),
         tokens: Some(pane::tui::TaskTokens {
             used: 369_178,
+            parent_used: 369_178,
+            helpers: Default::default(),
             counted: Counted::Gateway,
         }),
         ..Notebook::default()
@@ -1219,6 +1317,7 @@ fn helper_record(gave: &str, ok: bool, elapsed_ms: u64) -> HelperRecord {
         },
         turns: 1,
         looked: Vec::new(),
+        usage: Default::default(),
     }
 }
 

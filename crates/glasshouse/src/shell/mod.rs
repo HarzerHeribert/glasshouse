@@ -15,7 +15,7 @@
 //! [`view::viewport_slot`].
 
 mod start;
-use start::start_session;
+use start::{LaunchResources, finish_session_start, prepare_session_start};
 mod appearance;
 mod hotspot;
 mod input;
@@ -42,8 +42,7 @@ use crate::pty::TerminalSize;
 use crate::secret;
 use crate::secret::SecretStore as _;
 use crate::session::{
-    self, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionPresentation,
-    SessionRuntime,
+    self, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionRuntime,
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
@@ -90,6 +89,10 @@ pub fn run(runtime: &Runtime) -> Result<()> {
 
     let checkpoints = ProjectCheckpoints::open(runtime)?;
 
+    // Declared before `live` so Rust's reverse local-drop order tears down
+    // every child PTY before releasing the gateway/config resources the
+    // child may still be using when the shell itself exits.
+    let mut launch_resources: HashMap<SessionId, LaunchResources> = HashMap::new();
     let mut live = SessionRuntime::with_event_bus(
         crate::session::runtime::DEFAULT_SCROLLBACK_BYTES,
         events.clone(),
@@ -171,58 +174,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     }
                     Action::StartSession
                     | Action::StartHeadlessSession
-                    | Action::StartSessionWith { .. } => {
-                        // NEVER `continue` here: the redraw is at the END of
-                        // this arm, and an open overlay stops `advance_artwork`
-                        // too, so nothing repaints. Shipped once as a freeze.
-                        if let Some((presentation, harness)) = action.start_request() {
-                            match start_session(
-                                runtime,
-                                &mut live,
-                                &sessions,
-                                presentation,
-                                harness,
-                                view::terminal_size_for(&screen, &state),
-                                &mut index_snapshots,
-                            ) {
-                                Ok(id) => {
-                                    if let Ok(records) = sessions.store().list() {
-                                        state.refresh(records);
-                                    }
-                                    // `n` selects what it started. `refresh`
-                                    // reconciles onto the session that was
-                                    // presented *before* the key, so without
-                                    // this the new session is nowhere on
-                                    // screen and the natural reaction — a
-                                    // second `n` — silently spawns a second
-                                    // harness that neither the viewport nor
-                                    // the keyboard is attached to.
-                                    let named = state::short_session_id(&id);
-                                    if presentation == SessionPresentation::Headless {
-                                        state.select_session(&id);
-                                        // No viewport, so `N` would look like a
-                                        // no-op — `render_viewport`'s placeholder
-                                        // says so on every frame.
-                                        state.set_status(format!(
-                                            "started headless session `{named}` — `o` lists it"
-                                        ));
-                                    } else {
-                                        state.session_started(&id);
-                                        state.set_status(format!("started session `{named}`"));
-                                    }
-                                }
-                                // Refusing to guess is right; sending the user away to answer is not.
-                                Err(err) => {
-                                    if let Some(ids) = session::select::ambiguous_harnesses(&err) {
-                                        state.open_harness_choice(ids.to_vec(), presentation);
-                                    } else {
-                                        tracing::warn!(error = %err, "could not start a session");
-                                        state.set_status(format!(
-                                            "could not start a session: {err:#}"
-                                        ));
-                                    }
-                                }
-                            }
+                    | Action::StartSessionWith { .. }
+                    | Action::StartSessionWithProfile { .. } => {
+                        let size = view::terminal_size_for(&screen, &state);
+                        let start = prepare_session_start(
+                            &action,
+                            runtime,
+                            &mut live,
+                            &sessions,
+                            &mut state,
+                            size,
+                            &mut index_snapshots,
+                            &mut launch_resources,
+                        );
+                        if let Some((presentation, start)) = start {
+                            finish_session_start(&mut state, &sessions, presentation, start);
                         }
                     }
                     Action::InterruptSession(id) => interrupt_session(&mut live, &mut state, id),
@@ -539,6 +505,10 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 let exits = live.poll_exits();
                 let any_exited = !exits.is_empty();
                 for (id, status) in exits {
+                    // Dropping these ends a session-scoped gateway and
+                    // removes generated profile configuration only after the
+                    // child can no longer use either one.
+                    launch_resources.remove(&id);
                     // `ProcessExit` owns this classification, the only place
                     // it lives — two copies of "did it crash" can disagree.
                     let lifecycle = ProcessExit::from_status(&status).session_state();

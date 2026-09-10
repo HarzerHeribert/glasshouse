@@ -83,6 +83,30 @@ pub struct Narrowed {
     pub instructions: &'static str,
 }
 
+pub(crate) struct NarrowedRun<'a> {
+    narrowed: Option<&'a Narrowed>,
+    helper_usage: Option<&'a crate::helpers::HelperUsageTracker>,
+}
+
+impl<'a> NarrowedRun<'a> {
+    fn ordinary(narrowed: Option<&'a Narrowed>) -> Self {
+        Self {
+            narrowed,
+            helper_usage: None,
+        }
+    }
+
+    pub(crate) fn helper(
+        narrowed: &'a Narrowed,
+        usage: &'a crate::helpers::HelperUsageTracker,
+    ) -> Self {
+        Self {
+            narrowed: Some(narrowed),
+            helper_usage: Some(usage),
+        }
+    }
+}
+
 /// Runs one subagent to its end, holding every registered tool. Blocking, and
 /// called on `bg`'s own worker thread — never on the thread that holds the
 /// parent isolate.
@@ -113,6 +137,33 @@ pub fn run_narrowed(
     token: &CancellationToken,
     narrowed: Option<&Narrowed>,
 ) -> AgentResult {
+    run_narrowed_metered(
+        profile,
+        glasshouse,
+        session,
+        task,
+        options,
+        token,
+        NarrowedRun::ordinary(narrowed),
+    )
+}
+
+/// Helper-only metered form of [`run_narrowed`]. Keeping the tracker out of
+/// the public call preserves the ordinary subagent API and prevents callers
+/// from having to construct Pane's private accounting state.
+pub(crate) fn run_narrowed_metered(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &AgentOptions,
+    token: &CancellationToken,
+    narrowed_run: NarrowedRun<'_>,
+) -> AgentResult {
+    let NarrowedRun {
+        narrowed,
+        helper_usage,
+    } = narrowed_run;
     let tools = toolset(narrowed);
     let facts = crate::session::session_facts(profile);
     let instructions = format!(
@@ -170,6 +221,9 @@ pub fn run_narrowed(
         // caller that stopped waiting, so the wire request keeps a hard bound.
         let deadline = narrowed.map(|_| wire::SIDE_ERRAND_TIMEOUT);
         let purpose = narrowed.map(|_| crate::helpers::PURPOSE_HEADER);
+        if let Some(usage) = helper_usage {
+            usage.begin_request();
+        }
         let sent = match wire::send_turn_bounded_with(
             &request,
             &options.model,
@@ -180,6 +234,9 @@ pub fn run_narrowed(
             Ok(sent) => sent,
             Err(error) => return finish(&error.to_string(), "failed", turn, tokens, trajectory),
         };
+        if let Some(usage) = helper_usage {
+            usage.record_response(sent.usage);
+        }
         // A provider response can race the caller's cancellation. Do not let
         // that late response start one of the helper's read tools.
         if token.is_cancelled() {

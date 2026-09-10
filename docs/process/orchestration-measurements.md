@@ -5676,3 +5676,46 @@ caught post-key exhaustion recursing into a child; the editor corrected it and
 all 13 focused tests pass independently. Primary integration passes all 894 Pane tests (one ignored). Installed
 `b2c38db` replay passes in 25.797 seconds: full structured README observed
 exactly, one verifier definition, two fresh nine-test runs, no thrown cells. No capability boxes close in this bounded repair.
+
+
+### Wave 152 — 2026-09-10: helper starting evidence and complete usage
+
+Status: integration and installed trial in progress; no capability boxes closed.
+
+| Package | Tier | Evidence so far |
+|---|---|---|
+| Role-specific starting evidence | Sol medium editor; primary integration | Bounded Scout/Checker/Reducer module, eight focused tests and full Pane worker suite pass; primary tightens ordinary-file reads and incomplete-ignore omission. |
+| Helper token coverage and task meter | Sol high editor; primary review | Isolated implementation covers parent plus helper totals, per-model/cache classes and unknown coverage; integrated full Pane suite passes; installed accounting reconciliation pending. |
+| Profile-aware quick-open | Sol high editor; independent Sol medium review | Picker and shared serving path implemented; review found gateway shutdown drop-order and native fallback regressions, corrections integrated; worker PTY80/shell415 pass, primary full workspace rerun pending. |
+| Named confined checks and reuse | Primary editor; independent Sol medium review | Six focused tests pass. Reviewer found flaky accepted socket in provider fixture; corrected before integrated first-request gate. No production blocker found. |
+
+Three disjoint editors worked concurrently while the primary implemented named
+verification and tested actual cmux focus. The resumed worker names are
+`sol_profiles_resume`, `sol_usage_resume`, and `sol_seeds_resume`; the completed
+seed editor then performed independent reviews, so finished worker output was
+consumed before reassignment. Native helper models in the installed follow-up
+remain Sol task / Luna helpers. API subagent billing is not exposed.
+
+Open-question contribution: parallel implementation still requires independent
+integration review. This batch caught two launch compatibility/lifetime defects
+and one flaky test before installation, rather than treating compilation or a
+single green worker run as acceptance. No tier price or capability-closure rate
+is inferred from unavailable usage data. Final results and observed correction
+counts will be appended after the installed trial.
+
+
+**Gate correction:** the full macOS run caught an additional Native argv
+compatibility regression after source review had accepted the profile patch.
+The shared resolver added approval arguments to the synthesized Native launch;
+the existing real-PTY resize test's plain shell exited with usage (79/80 pass).
+This requires a production correction, not an expectation weakening. It is
+evidence that cheap parallel editors plus source review do not replace the
+full behavior gate. The first library failure at descriptor limit256 was
+separately attributed to probable resource pressure; all 2,333 library tests
+and 116 command tests pass under limit4096. No first failed run is relabelled
+green.
+
+**Corrected integration:** the complete Glasshouse workspace rerun passes,
+including PTY80 and all targets skipped after the first failure. Full Pane
+CI passes (922 summed passing executions including nested probes, one ignored).
+Final installed evidence and cost reconciliation remain pending.

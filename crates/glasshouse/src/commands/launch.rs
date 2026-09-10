@@ -26,11 +26,7 @@ use glasshouse::{Cli, Runtime};
 pub(crate) fn resolved_gateway_pairing(
     effective: &EffectiveConfig<'_>,
 ) -> glasshouse::profile::GatewayPairing {
-    let (preference, _source) = effective.native_pairing_preference();
-    glasshouse::profile::GatewayPairing {
-        preference_slug: preference.slug(),
-        overrides: effective.pairing_overrides(),
-    }
+    glasshouse::session::launch_profile::gateway_pairing(effective)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,48 +78,6 @@ pub(crate) struct LaunchDestination<'a> {
     /// `--checkpoint-first`: check point the session this work is leaving
     /// before it moves — capability map line 1716.
     pub(crate) checkpoint_first: bool,
-}
-
-/// 56A line 1969's binding half, beside line 1973's child-env scrub: the
-/// launch's secret store with every **foreign** entitlement's credential
-/// reference refused. `profile::resolve` binds a direct-provider launch to
-/// "the first credential reference that currently resolves" out of the
-/// provider's declared pool — a rule written before the broker existed —
-/// so with the pool brokered, the resolution the overlay sees must only be
-/// able to answer with the serving account's own reference, or the process
-/// would authenticate as whichever account is listed first while the
-/// announcement names another. Same filter as
-/// `EffectiveConfig::foreign_entitlement_credential_refs`, wrapped rather
-/// than re-derived; everything that is not an entitlement credential
-/// resolves exactly as before.
-struct EntitlementScopedSecrets<'a> {
-    inner: &'a dyn glasshouse::secret::SecretStore,
-    foreign: Vec<glasshouse::secret::SecretRef>,
-}
-
-impl glasshouse::secret::SecretStore for EntitlementScopedSecrets<'_> {
-    fn resolve(
-        &self,
-        reference: &glasshouse::secret::SecretRef,
-    ) -> Option<glasshouse::secret::Secret> {
-        if self.foreign.contains(reference) {
-            return None;
-        }
-        self.inner.resolve(reference)
-    }
-
-    fn is_present(&self, reference: &glasshouse::secret::SecretRef) -> bool {
-        // The same answer `resolve` gives, without producing a value: a
-        // foreign account's credential is not present *to this launch*.
-        !self.foreign.contains(reference) && self.inner.is_present(reference)
-    }
-
-    fn describe(&self) -> &'static str {
-        // The underlying store's own label: this wrapper narrows which
-        // references answer, not where values come from, and a diagnostic
-        // naming a store the user has never heard of would mislead.
-        self.inner.describe()
-    }
 }
 
 /// The profile a `fresh:<harness>:<profile>` identifier names, when it names
@@ -1384,11 +1338,11 @@ pub(crate) fn launch_session(
     // gateway's own upstream resolution above deliberately keeps the
     // unwrapped store: which account serves a gateway-backed session is
     // assigned when the session starts (56A-4), not at this launch.
-    let scoped_secrets = EntitlementScopedSecrets {
-        inner: &secrets,
-        foreign: effective
-            .foreign_entitlement_credential_refs(entitlement.as_ref().map(|e| e.name())),
-    };
+    let scoped_secrets = glasshouse::session::launch_profile::EntitlementScopedSecrets::new(
+        &secrets,
+        &effective,
+        entitlement.as_ref().map(|entry| entry.name()),
+    );
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
         acknowledged_bypass,

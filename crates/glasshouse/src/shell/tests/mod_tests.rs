@@ -1,4 +1,6 @@
+use super::start::{start_session, start_session_with_profile};
 use super::*;
+use crate::session::SessionPresentation;
 use ratatui::style::{Color, Modifier};
 
 /// Colours, bold/inverse, and cursor position must all survive the walk
@@ -3821,14 +3823,24 @@ mod session_mode_geometry_tests {
 mod shell_entitlement_scrub_tests {
     use super::*;
 
+    const VAR_A: &str = "GLASSHOUSE_SHELL_PROFILE_UNIT_TEST_ONLY_A";
+    const VALUE_A: &str = "fake-shell-profile-unit-a-0123456789abcdef";
     const VAR_B: &str = "GLASSHOUSE_SHELL_SCRUB_UNIT_TEST_ONLY_B";
     const VALUE_B: &str = "fake-shell-scrub-unit-b-0123456789abcdef";
+    const NATIVE_VAR_A: &str = "GLASSHOUSE_SHELL_NATIVE_AMBIGUOUS_UNIT_TEST_ONLY_A";
+    const NATIVE_VALUE_A: &str = "fake-shell-native-unit-a-0123456789abcdef";
+    const NATIVE_VAR_B: &str = "GLASSHOUSE_SHELL_NATIVE_AMBIGUOUS_UNIT_TEST_ONLY_B";
+    const NATIVE_VALUE_B: &str = "fake-shell-native-unit-b-0123456789abcdef";
+    const GATEWAY_VAR: &str = "GLASSHOUSE_SHELL_GATEWAY_UNIT_TEST_ONLY";
+    const GATEWAY_VALUE: &str = "fake-shell-gateway-unit-0123456789abcdef";
 
     /// Like `native_session_facts_tests::runtime_with_fake_claude_code`, but
     /// the installed harness dumps its own environment instead of exiting
-    /// silently, and the user config also configures one provider-backed
-    /// entitlement — `claude-b`, carrying an environment-shaped credential
-    /// that no native launch may serve.
+    /// silently. Two entries claim Claude Code's native sign-in, deliberately
+    /// making account metadata ambiguous, while two unrelated provider
+    /// accounts carry environment-shaped credentials. Ordinary native
+    /// quick-open must still launch and scrub both foreign credentials rather
+    /// than treating metadata ambiguity as a harness failure.
     fn runtime_with_env_dumping_harness_and_an_entitlement() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -3853,12 +3865,106 @@ mod shell_entitlement_scrub_tests {
             format!(
                 "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
-                 [entitlements.claude-b]\nvendor = \"claude\"\nprovider = \"beta-probe\"\n\
-                 credential = {{ env = \"{VAR_B}\" }}\n"
+                 [entitlements.claude-a]\nvendor = \"claude\"\nnative_harness = \"claude-code\"\n\n\
+                 [entitlements.claude-b]\nvendor = \"claude\"\nnative_harness = \"claude-code\"\n\n\
+                 [entitlements.foreign-a]\nprovider = \"unused-a\"\n\
+                 credential = {{ env = \"{NATIVE_VAR_A}\" }}\n\n\
+                 [entitlements.foreign-b]\nprovider = \"unused-b\"\n\
+                 credential = {{ env = \"{NATIVE_VAR_B}\" }}\n"
             ),
         )
         .expect("write user config");
 
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &workspace_root).unwrap();
+        (data, workspace, runtime, env_log)
+    }
+
+    fn runtime_with_env_dumping_harness_and_direct_profile() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::Runtime,
+        std::path::PathBuf,
+    ) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git");
+        let workspace_root =
+            std::fs::canonicalize(workspace.path()).expect("canonicalize workspace root");
+
+        let bin_dir = data.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let env_log = data.path().join("env.log");
+        let harness = install_env_dumping_harness(&bin_dir, &env_log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            data.path().join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+                 [providers.alpha]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR_A}\"]\n\n\
+                 [providers.beta]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR_B}\"]\n\n\
+                 [profiles.economy]\nharness = \"claude-code\"\nmodel = \"anthropic/claude-sonnet-4\"\n\
+                 expected_protocol = \"anthropic-messages\"\n\n\
+                 [profiles.economy.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
+                 [entitlements.alpha-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
+                 provider = \"alpha\"\ncredential = {{ env = \"{VAR_A}\" }}\n\n\
+                 [entitlements.beta-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
+                 provider = \"beta\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
+            ),
+        )
+        .expect("write user config");
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &workspace_root).unwrap();
+        (data, workspace, runtime, env_log)
+    }
+
+    fn runtime_with_env_dumping_harness_and_gateway_profile() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::Runtime,
+        std::path::PathBuf,
+    ) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git");
+        let workspace_root =
+            std::fs::canonicalize(workspace.path()).expect("canonicalize workspace root");
+        let bin_dir = data.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let env_log = data.path().join("env.log");
+        let harness = install_env_dumping_harness(&bin_dir, &env_log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            data.path().join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+                 [providers.alpha]\ntemplate = \"openrouter\"\ncredential_env = [\"{GATEWAY_VAR}\"]\n\n\
+                 [profiles.gateway]\nharness = \"claude-code\"\nmodel = \"anthropic/claude-sonnet-4\"\n\n\
+                 [profiles.gateway.backend]\nkind = \"glasshouse-gateway\"\n"
+            ),
+        )
+        .expect("write user config");
         let cli = crate::Cli::try_parse_from([
             "glasshouse",
             "--data-dir",
@@ -3909,14 +4015,11 @@ mod shell_entitlement_scrub_tests {
         path
     }
 
-    /// A configured entitlement's environment-shaped credential must not
-    /// reach a session it does not serve. `start_session`'s launch is
-    /// always Native, served only by the harness's own default sign-in
-    /// (which carries no credential of its own) — so `claude-b`'s variable,
-    /// inherited from this test process, must be scrubbed before the child
-    /// spawns. This is the mutation `foreign_entitlement_credential_vars`
-    /// returning an empty list, or the `env_remove` loop being dropped here,
-    /// would both survive if this test did not exist.
+    /// Ambiguous native account metadata stays best effort, while neither
+    /// account's environment-shaped credential reaches the child. This is
+    /// the mutation `entitlement_for(...)?` on the Native branch, or
+    /// `foreign_entitlement_credential_vars` returning an empty list, would
+    /// survive if this test did not exist.
     #[test]
     fn a_shell_started_native_session_does_not_carry_a_configured_entitlements_variable() {
         let (_data, _workspace, runtime, env_log) =
@@ -3925,9 +4028,25 @@ mod shell_entitlement_scrub_tests {
         let mut live = SessionRuntime::new();
         let mut index_snapshots = HashMap::new();
 
+        let user = UserConfig::load(runtime.paths()).expect("load user config");
+        let project = config::load_project_config(runtime.project()).expect("load project config");
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        assert!(matches!(
+            effective.entitlement_for(
+                IntegrationId::ClaudeCode,
+                &crate::profile::BackendResource::Native
+            ),
+            Err(crate::config::EntitlementLookupError::AmbiguousNativeHarness { .. })
+        ));
+        assert_eq!(
+            effective.foreign_entitlement_credential_vars(None),
+            vec![NATIVE_VAR_A.to_owned(), NATIVE_VAR_B.to_owned()]
+        );
+
         // SAFETY: unique to this test and removed before it can panic.
         unsafe {
-            std::env::set_var(VAR_B, VALUE_B);
+            std::env::set_var(NATIVE_VAR_A, NATIVE_VALUE_A);
+            std::env::set_var(NATIVE_VAR_B, NATIVE_VALUE_B);
         }
         let start_result = start_session(
             &runtime,
@@ -3977,15 +4096,175 @@ mod shell_entitlement_scrub_tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         unsafe {
-            std::env::remove_var(VAR_B);
+            std::env::remove_var(NATIVE_VAR_A);
+            std::env::remove_var(NATIVE_VAR_B);
         }
 
         let child_env =
             std::fs::read_to_string(&env_log).expect("the fake harness dumped its environment");
         assert!(
-            !child_env.contains(VAR_B) && !child_env.contains(VALUE_B),
+            !child_env.contains(NATIVE_VAR_A)
+                && !child_env.contains(NATIVE_VALUE_A)
+                && !child_env.contains(NATIVE_VAR_B)
+                && !child_env.contains(NATIVE_VALUE_B),
             "a configured entitlement's credential reached a native session it does not \
              serve:\n{child_env}"
+        );
+    }
+
+    #[test]
+    fn selected_direct_profile_is_the_backend_that_the_shell_pty_actually_serves() {
+        let (_data, _workspace, runtime, env_log) =
+            runtime_with_env_dumping_harness_and_direct_profile();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let mut resources = HashMap::new();
+
+        // SAFETY: both names are unique to this test and removed before any
+        // assertion can panic.
+        unsafe {
+            std::env::set_var(VAR_A, VALUE_A);
+            std::env::set_var(VAR_B, VALUE_B);
+        }
+        let started = start_session_with_profile(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            Some(IntegrationId::ClaudeCode),
+            "economy",
+            TerminalSize::new(24, 80),
+            &mut index_snapshots,
+            &mut resources,
+        );
+        unsafe {
+            std::env::remove_var(VAR_A);
+            std::env::remove_var(VAR_B);
+        }
+        let id = started.expect("the selected direct profile must start");
+        assert!(
+            resources.contains_key(&id),
+            "profile launch resources must remain owned after start returns"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            live.answer_terminal_queries();
+            if live.poll_exits().iter().any(|(ended, _)| ended == &id) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake harness never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let record = sessions
+            .store()
+            .get(&id)
+            .expect("read session")
+            .expect("session exists");
+        assert_eq!(record.launch_profile.as_deref(), Some("economy"));
+        assert_eq!(
+            record.backend_resource.as_deref(),
+            Some("direct-provider:alpha")
+        );
+        assert_eq!(record.entitlement.as_deref(), Some("alpha-account"));
+        assert_eq!(
+            record.model,
+            Some(crate::routing::AssignedModel::Named(
+                "anthropic/claude-sonnet-4".to_owned()
+            ))
+        );
+        assert_eq!(
+            record.protocol,
+            Some(crate::session::SessionProtocol::AnthropicMessages)
+        );
+
+        let child_env =
+            std::fs::read_to_string(&env_log).expect("the fake harness dumped its environment");
+        assert!(
+            child_env.contains("ANTHROPIC_BASE_URL")
+                && child_env.contains("https://openrouter.ai/api")
+                && child_env.contains("ANTHROPIC_MODEL")
+                && child_env.contains("anthropic/claude-sonnet-4")
+                && child_env.contains("ANTHROPIC_AUTH_TOKEN")
+                && child_env.contains(VALUE_A),
+            "the child did not receive the selected profile's resolved backend:\n{child_env}"
+        );
+        assert!(
+            !child_env.contains(VAR_A)
+                && !child_env.contains(VAR_B)
+                && !child_env.contains(VALUE_B),
+            "provider source variables or a foreign entitlement credential reached the child:\n{child_env}"
+        );
+
+        resources.remove(&id);
+        assert!(resources.is_empty());
+    }
+
+    #[test]
+    fn gateway_guard_keeps_the_selected_profiles_listener_alive_until_session_cleanup() {
+        let (_data, _workspace, runtime, _env_log) =
+            runtime_with_env_dumping_harness_and_gateway_profile();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+        let mut resources = HashMap::new();
+
+        // SAFETY: unique to this test and removed immediately after the
+        // synchronous launch has captured its environment.
+        unsafe {
+            std::env::set_var(GATEWAY_VAR, GATEWAY_VALUE);
+        }
+        let started = start_session_with_profile(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            Some(IntegrationId::ClaudeCode),
+            "gateway",
+            TerminalSize::new(24, 80),
+            &mut index_snapshots,
+            &mut resources,
+        );
+        unsafe {
+            std::env::remove_var(GATEWAY_VAR);
+        }
+        let id = started.expect("the selected gateway profile must start");
+        let base_url = resources
+            .get(&id)
+            .and_then(LaunchResources::gateway_base_url)
+            .expect("a gateway profile owns a running gateway guard");
+        let address = base_url
+            .strip_prefix("http://")
+            .expect("gateway URL is loopback HTTP");
+        std::net::TcpStream::connect(address)
+            .expect("the session-owned gateway must accept while its guard is retained");
+
+        resources.remove(&id);
+        assert!(
+            std::net::TcpStream::connect(address).is_err(),
+            "dropping the session resource must release its gateway listener"
+        );
+    }
+
+    #[test]
+    fn shell_shutdown_drops_children_before_their_profile_resources() {
+        let source = include_str!("../mod.rs");
+        let resources = source
+            .find("let mut launch_resources:")
+            .expect("the shell owns profile launch resources");
+        let children = source
+            .find("let mut live = SessionRuntime::with_event_bus(")
+            .expect("the shell owns its child PTY runtime");
+
+        assert!(
+            resources < children,
+            "locals drop in reverse declaration order, so profile resources must be declared \
+             before the PTY runtime and therefore dropped after its children"
         );
     }
 }
@@ -4378,24 +4657,25 @@ mod starting_selects_what_it_started_tests {
     }
 
     /// The wiring, which no unit test can reach: the run loop's own arm needs
-    /// a real terminal, so the one thing left to prove is that it still calls
-    /// [`ShellState::select_session`] with the identifier `start_session`
-    /// returned. Scanned by single-line literals, so a CRLF checkout cannot
-    /// defeat it (practice §14).
+    /// a real terminal, so the one thing left to prove is that the extracted
+    /// result handler still follows the identifier the launch returned.
+    /// Scanned by single-line literals, so a CRLF checkout cannot defeat it
+    /// (practice §14).
     #[test]
     fn the_start_session_arm_selects_the_session_it_started() {
-        let source = include_str!("../mod.rs");
+        let source = include_str!("../start.rs");
         let start = source
-            .find("match start_session(")
-            .expect("the run loop still starts sessions");
+            .find("pub(super) fn finish_session_start(")
+            .expect("the shell still handles the result of starting a session");
         let end = source[start..]
-            .find("Action::InterruptSession(")
-            .expect("InterruptSession still follows the start arm")
+            .find("/// Resolve a harness")
+            .expect("the next launch helper still follows the result handler")
             + start;
         let arm = &source[start..end];
         assert!(
-            arm.contains("state.select_session(&id)"),
-            "the arm must select what it started, or `n` looks like it did nothing:\n{arm}"
+            arm.contains("state.select_session(&id)") && arm.contains("state.session_started(&id)"),
+            "the arm must focus what it started for either presentation, or `n`/`N` looks \
+             like it did nothing:\n{arm}"
         );
     }
 }

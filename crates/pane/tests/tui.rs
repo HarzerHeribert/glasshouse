@@ -8,8 +8,8 @@ use pane::helpers::{HelperOutcome, HelperRecord};
 use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::{
-    CellError, CellView, Counted, Notebook, ScreenState, SupervisorStatus, TaskTokens,
-    cell_ordinal, render, render_screen,
+    CellError, CellView, Counted, HelperModelTokens, HelperTokens, Notebook, ScreenState,
+    SupervisorStatus, TaskTokens, cell_ordinal, render, render_screen,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -113,6 +113,67 @@ fn buffer_text(buffer: &Buffer) -> String {
         text.push('\n');
     }
     text
+}
+
+#[test]
+fn the_status_meter_names_parent_and_complete_helper_spend() {
+    let conversation = conversation(vec![Message::text(Role::User, "measure this task")]);
+    let notebook = Notebook {
+        tokens: Some(TaskTokens {
+            used: 201_801,
+            parent_used: 173_860,
+            helpers: HelperTokens {
+                calls: 3,
+                usage_known_calls: 3,
+                used: 27_941,
+                input_tokens: 20_329,
+                output_tokens: 2_492,
+                requests: 6,
+                reported_requests: 6,
+                cache_read_input_tokens: 5_120,
+                cache_creation_input_tokens: 0,
+                cache_read_reported_requests: 6,
+                cache_creation_reported_requests: 6,
+                models: vec![HelperModelTokens {
+                    model: "gpt-5.6-luna".into(),
+                    calls: 3,
+                    usage_known_calls: 3,
+                    used: 27_941,
+                    input_tokens: 20_329,
+                    output_tokens: 2_492,
+                    requests: 6,
+                    reported_requests: 6,
+                    cache_read_input_tokens: 5_120,
+                    cache_creation_input_tokens: 0,
+                    cache_read_reported_requests: 6,
+                    cache_creation_reported_requests: 6,
+                }],
+            },
+            counted: Counted::Gateway,
+        }),
+        ..Notebook::default()
+    };
+    let backend = TestBackend::new(180, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_screen(
+                frame,
+                &conversation,
+                &known_served_by(),
+                &HandleTable::new(),
+                &notebook,
+                &ScreenState::default(),
+            )
+        })
+        .unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(text.contains("spent 201.8k"), "{text}");
+    assert!(
+        text.contains("parent 173.9k + helpers 27.9k · reported"),
+        "{text}"
+    );
+    assert!(!text.contains("helpers 27.9k partial"), "{text}");
 }
 
 /// The column each cell in row `y` holds, as one symbol per column -- used
@@ -890,6 +951,8 @@ fn a_nudge_shows_under_the_spend_line() {
     let notebook = Notebook {
         tokens: Some(TaskTokens {
             used: 100,
+            parent_used: 100,
+            helpers: Default::default(),
             counted: Counted::Estimated,
         }),
         // Short enough to fit the sidebar's own width on one row -- this test
@@ -928,6 +991,8 @@ fn a_failed_look_shows_as_failed_and_names_its_cause() {
     let notebook = Notebook {
         tokens: Some(TaskTokens {
             used: 100,
+            parent_used: 100,
+            helpers: Default::default(),
             counted: Counted::Estimated,
         }),
         supervisor: Some(SupervisorStatus::LookFailed("unparseable".to_string())),
@@ -1007,6 +1072,7 @@ fn resolved_helper(asked: &str, gave: &str, elapsed_ms: u64) -> HelperRecord {
         },
         turns: 1,
         looked: Vec::new(),
+        usage: Default::default(),
     }
 }
 
@@ -1262,6 +1328,7 @@ fn recap_record(text: &str, ok: bool) -> HelperRecord {
         },
         turns: 1,
         looked: Vec::new(),
+        usage: Default::default(),
     }
 }
 

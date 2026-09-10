@@ -203,32 +203,14 @@ pub(crate) fn gateway_upstream(
     entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
     paths: &glasshouse::RuntimePaths,
 ) -> anyhow::Result<glasshouse::gateway::Upstream> {
-    if let Some(entitlement) = entitlement {
-        let broker = glasshouse::gateway::subscription_broker::RunningSubscriptionBroker::start(
-            paths,
-            entitlement.name(),
-        )?;
-        return Ok(glasshouse::profile::subscription_broker_upstream(broker)?);
-    }
-    let mut providers = Vec::new();
-    for name in effective.provider_names() {
-        providers.push(effective.configured_provider(&name)?.value);
-    }
-    // Phase 9I line 532: a provider the user has marked at least one free
-    // model on backs this launch with `Cost::Free` rather than the fail-closed
-    // `Cost::Metered` every backend got before. Looked up the same way
-    // `disposable_candidates` looks it up — project layer winning over user —
-    // because `glasshouse::profile` may not import `glasshouse::config` to
-    // answer this itself.
-    let free = |name: &str| -> bool {
-        project
-            .and_then(|p| p.providers().get(name))
-            .or_else(|| user.providers().get(name))
-            .is_some_and(|config| !config.free_models().is_empty())
-    };
-    Ok(glasshouse::profile::gateway_upstream(
-        &providers, secrets, &free,
-    )?)
+    glasshouse::session::launch_profile::gateway_upstream(
+        user,
+        project,
+        effective,
+        secrets,
+        entitlement,
+        paths,
+    )
 }
 
 /// Resolve the exact subscription account for a gateway profile before any
@@ -239,39 +221,7 @@ pub(crate) fn gateway_entitlement(
     profile: &glasshouse::profile::LaunchProfile,
     exact: Option<&str>,
 ) -> anyhow::Result<Option<glasshouse::config::ResolvedEntitlement>> {
-    let requested = exact.or(profile.entitlement.as_deref());
-    let Some(name) = requested else {
-        return Ok(None);
-    };
-    let all = effective.configured_entitlements()?;
-    if let (Some(stored), Some(pinned)) = (exact, profile.entitlement.as_deref())
-        && stored != pinned
-    {
-        anyhow::bail!(
-            "stored gateway entitlement `{stored}` no longer matches profile `{}` entitlement `{pinned}`",
-            profile.name
-        );
-    }
-    let entry = all
-        .into_iter()
-        .find(|entry| entry.name() == name)
-        .with_context(|| format!("gateway entitlement `{name}` is not configured"))?;
-    if entry.backing().subscription_broker().is_none() {
-        anyhow::bail!("gateway entitlement `{name}` is not backed by a subscription broker");
-    }
-    if !entry.rules().serves_harness(profile.harness) {
-        anyhow::bail!(
-            "gateway entitlement `{name}` does not permit harness `{}`",
-            profile.harness.slug()
-        );
-    }
-    if let (Some(model), Some(glasshouse::config::EntitlementModels::Declared { models, .. })) =
-        (profile.model.as_deref(), entry.models())
-        && !models.iter().any(|candidate| candidate == model)
-    {
-        anyhow::bail!("gateway entitlement `{name}` does not serve requested model `{model}`");
-    }
-    Ok(Some(entry))
+    glasshouse::session::launch_profile::gateway_entitlement(effective, profile, exact)
 }
 
 fn validate_recorded_broker_resume(

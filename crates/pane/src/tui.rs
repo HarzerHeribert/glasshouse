@@ -501,10 +501,69 @@ impl Counted {
 }
 
 /// Cumulative task spend and its provenance. It deliberately has no cap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskTokens {
     pub used: u64,
+    /// Parent task turns only. `used - parent_used` is never needed to infer
+    /// helper spend because the complete helper breakdown is carried below.
+    pub parent_used: u64,
+    pub helpers: HelperTokens,
     pub counted: Counted,
+}
+
+/// Known helper usage and the coverage required to interpret it honestly.
+/// Missing provider usage contributes no invented tokens.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HelperTokens {
+    pub calls: u32,
+    pub usage_known_calls: u32,
+    pub used: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub requests: u32,
+    pub reported_requests: u32,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_reported_requests: u32,
+    pub cache_creation_reported_requests: u32,
+    pub models: Vec<HelperModelTokens>,
+}
+
+impl HelperTokens {
+    pub fn complete(&self) -> bool {
+        self.usage_known_calls == self.calls
+            && self.reported_requests == self.requests
+            && self.cache_read_reported_requests == self.reported_requests
+            && self.cache_creation_reported_requests == self.reported_requests
+    }
+}
+
+/// One helper model's contribution to [`HelperTokens`]. The model name is
+/// provider configuration, not a price tier: Pane reports what ran and never
+/// infers a rate from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HelperModelTokens {
+    pub model: String,
+    pub calls: u32,
+    pub usage_known_calls: u32,
+    pub used: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub requests: u32,
+    pub reported_requests: u32,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_reported_requests: u32,
+    pub cache_creation_reported_requests: u32,
+}
+
+impl HelperModelTokens {
+    pub fn complete(&self) -> bool {
+        self.usage_known_calls == self.calls
+            && self.reported_requests == self.requests
+            && self.cache_read_reported_requests == self.reported_requests
+            && self.cache_creation_reported_requests == self.reported_requests
+    }
 }
 
 /// Occupancy of the most recent (or currently assembling) provider request.
@@ -849,13 +908,28 @@ pub(crate) fn render_screen_with_geometry(
         abbreviate(sandbox, 16),
         abbreviate(network, 8)
     );
-    let spent = notebook.tokens.filter(|_| width >= 78).map(|tokens| {
-        format!(
-            "spent {} · {}",
-            compact_tokens(tokens.used),
-            tokens.counted.as_str()
-        )
-    });
+    let spent = notebook
+        .tokens
+        .as_ref()
+        .filter(|_| width >= 78)
+        .map(|tokens| {
+            let scopes = if tokens.helpers.calls == 0 {
+                format!("spent {}", compact_tokens(tokens.used))
+            } else {
+                format!(
+                    "spent {} · parent {} + helpers {}{}",
+                    compact_tokens(tokens.used),
+                    compact_tokens(tokens.parent_used),
+                    compact_tokens(tokens.helpers.used),
+                    if tokens.helpers.complete() {
+                        ""
+                    } else {
+                        " partial"
+                    }
+                )
+            };
+            format!("{scopes} · {}", tokens.counted.as_str())
+        });
     let context = notebook.context.map(|tokens| {
         context_summary(
             tokens,

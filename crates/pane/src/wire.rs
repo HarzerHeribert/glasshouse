@@ -593,6 +593,18 @@ pub fn send_turn_with(
     max_tokens: u32,
     extra_header: Option<(&str, &str)>,
 ) -> Result<Message, WireError> {
+    send_turn_with_usage(conversation, model, max_tokens, extra_header).map(|turn| turn.message)
+}
+
+/// [`send_turn_with`] without discarding the response's provider usage.
+/// Helpers retain it in their durable call record; the supervisor keeps the
+/// message-only compatibility wrapper above.
+pub fn send_turn_with_usage(
+    conversation: &Conversation,
+    model: &str,
+    max_tokens: u32,
+    extra_header: Option<(&str, &str)>,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let body = build_request_body(model, max_tokens, conversation, false);
 
@@ -624,7 +636,7 @@ pub fn send_turn_with(
             body_head: body_head(&text),
         });
     }
-    parse_response(&text).map(|turn| turn.message)
+    parse_response(&text)
 }
 
 /// Shared serialization for default, selected-model, and supervisor requests.

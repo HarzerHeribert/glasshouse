@@ -20,6 +20,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// `ANTHROPIC_BASE_URL` is process-global, so the tests that set it are
 /// serialised against each other exactly as `turns.rs` serialises its own.
@@ -66,6 +67,13 @@ struct Provider {
 }
 
 fn provider(text: &str) -> Provider {
+    provider_with_usage(
+        text,
+        serde_json::json!({"input_tokens": 10, "output_tokens": 5}),
+    )
+}
+
+fn provider_with_usage(text: &str, usage: serde_json::Value) -> Provider {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -96,9 +104,63 @@ fn provider(text: &str) -> Provider {
             let payload = serde_json::json!({
                 "role": "assistant",
                 "content": [{"type": "text", "text": reply}],
-                "usage": {"input_tokens": 10, "output_tokens": 5}
+                "usage": usage
             })
             .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+        }
+    });
+    Provider {
+        url: format!("http://{address}"),
+        requests,
+    }
+}
+
+fn scripted_provider(payloads: Vec<serde_json::Value>) -> Provider {
+    scripted_provider_with_delays(
+        payloads
+            .into_iter()
+            .map(|payload| (payload, Duration::ZERO))
+            .collect(),
+    )
+}
+
+fn scripted_provider_with_delays(payloads: Vec<(serde_json::Value, Duration)>) -> Provider {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for (payload, delay) in payloads {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            if reader.read_exact(&mut body).is_err() {
+                return;
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+            let payload = payload.to_string();
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -277,10 +339,272 @@ fn a_helper_call_leaves_a_record_that_names_it_and_not_its_payload() {
     assert_eq!(record.turns, 1);
     assert!(record.outcome.ok, "{record:?}");
     assert_eq!(record.asked, "4 lines", "{record:?}");
+    assert_eq!(record.usage.model, "test-helper-model");
+    assert_eq!(record.usage.requests, 1);
+    assert_eq!(record.usage.reported_requests, 1);
+    assert_eq!(record.usage.known_tokens(), 15);
+    assert!(
+        !record.usage.complete(),
+        "omitted cache fields are unknown rather than measured zero: {record:?}"
+    );
     assert!(
         !record.asked.contains("SECRET-PAYLOAD-MARKER"),
         "`asked` must describe the payload, never carry it: {record:?}"
     );
+}
+
+#[test]
+fn a_one_shot_helper_records_every_reported_token_class() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("usage-complete");
+    let provider = provider_with_usage(
+        "one failure",
+        serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 70,
+            "cache_creation_input_tokens": 20
+        }),
+    );
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+    let mut runtime = Runtime::new(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-usage-complete"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+
+    let outcome = runtime.run_cell("return await helper.reduce(\"a log line\");\n");
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert_eq!(returned_text(&outcome), "one failure");
+    let records = runtime.helper_records();
+    let usage = &records[0].usage;
+    assert_eq!(usage.model, "test-helper-model");
+    assert_eq!(usage.requests, 1);
+    assert_eq!(usage.reported_requests, 1);
+    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.output_tokens, 5);
+    assert_eq!(usage.cache_read_input_tokens, 70);
+    assert_eq!(usage.cache_creation_input_tokens, 20);
+    assert_eq!(usage.known_tokens(), 105);
+    assert!(usage.complete());
+}
+
+#[test]
+fn a_helper_with_no_usage_object_records_unknown_coverage_not_zero_usage() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("usage-missing");
+    let provider = provider_with_usage("one failure", serde_json::Value::Null);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+    let mut runtime = Runtime::new(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-usage-missing"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+
+    let outcome = runtime.run_cell("return await helper.reduce(\"a log line\");\n");
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert_eq!(returned_text(&outcome), "one failure");
+    let records = runtime.helper_records();
+    let usage = &records[0].usage;
+    assert!(usage.coverage_known);
+    assert_eq!(usage.requests, 1);
+    assert_eq!(usage.reported_requests, 0);
+    assert_eq!(usage.known_tokens(), 0, "unknown usage invents no tokens");
+    assert!(!usage.complete());
+}
+
+#[test]
+fn a_multiturn_helper_sums_each_response_once_with_cache_coverage() {
+    const TWO_TURN: HelperSpec = HelperSpec {
+        name: "two_turn_test",
+        summary: "test helper",
+        verb: "testing",
+        preamble: "Use a cell, then return.",
+        tools: &[],
+        max_tokens: 128,
+        max_turns: 2,
+        input: pane::helpers::InputKind::Text,
+        output: pane::helpers::OutputKind::Reduction,
+        call_sites: &[CallSite::Cell],
+    };
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("usage-multiturn");
+    let provider = scripted_provider(vec![
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "cell-1", "name": "execute_cell",
+                "input": {"code": "const observed = 1; console.log(observed);"}
+            }],
+            "usage": {"input_tokens": 10, "output_tokens": 5,
+                "cache_read_input_tokens": 70, "cache_creation_input_tokens": 20}
+        }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "cell-2", "name": "execute_cell",
+                "input": {"code": "return \"found\";"}
+            }],
+            "usage": {"input_tokens": 11, "output_tokens": 6,
+                "cache_read_input_tokens": 71, "cache_creation_input_tokens": 21}
+        }),
+    ]);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let call = pane::helpers::run(
+        &TWO_TURN,
+        "test-helper-model",
+        "inspect this",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-usage-multiturn"),
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(call.outcome.ok, "{call:?}");
+    assert_eq!(call.outcome.text, "found");
+    assert_eq!(call.turns, 2);
+    assert_eq!(call.usage.model, "test-helper-model");
+    assert_eq!(call.usage.requests, 2);
+    assert_eq!(call.usage.reported_requests, 2);
+    assert_eq!(call.usage.input_tokens, 21);
+    assert_eq!(call.usage.output_tokens, 11);
+    assert_eq!(call.usage.cache_read_input_tokens, 141);
+    assert_eq!(call.usage.cache_creation_input_tokens, 41);
+    assert_eq!(call.usage.known_tokens(), 214);
+    assert!(call.usage.complete());
+}
+
+#[test]
+fn cancellation_keeps_completed_usage_and_marks_the_inflight_request_unknown() {
+    const TWO_TURN: HelperSpec = HelperSpec {
+        name: "two_turn_cancel_test",
+        summary: "test helper",
+        verb: "testing",
+        preamble: "Use a cell, then return.",
+        tools: &[],
+        max_tokens: 128,
+        max_turns: 2,
+        input: pane::helpers::InputKind::Text,
+        output: pane::helpers::OutputKind::Reduction,
+        call_sites: &[CallSite::Cell],
+    };
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("usage-cancelled");
+    let provider = scripted_provider_with_delays(vec![
+        (
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "cell-1", "name": "execute_cell",
+                    "input": {"code": "const observed = 1; console.log(observed);"}
+                }],
+                "usage": {"input_tokens": 10, "output_tokens": 5,
+                    "cache_read_input_tokens": 70, "cache_creation_input_tokens": 20}
+            }),
+            Duration::ZERO,
+        ),
+        (
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "late"}],
+                "usage": {"input_tokens": 999, "output_tokens": 999,
+                    "cache_read_input_tokens": 999, "cache_creation_input_tokens": 999}
+            }),
+            Duration::from_millis(400),
+        ),
+    ]);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let token = pane::tools::invoke::CancellationToken::new();
+    let cancel = token.clone();
+    let requests = provider.requests.clone();
+    let canceller = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while requests.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        cancel.cancel();
+    });
+    let started = Instant::now();
+    let call = pane::helpers::run(
+        &TWO_TURN,
+        "test-helper-model",
+        "inspect this",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-usage-cancelled"),
+        &token,
+    );
+    canceller.join().unwrap();
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(call.outcome.cancelled, "{call:?}");
+    assert!(started.elapsed() < Duration::from_millis(300));
+    assert_eq!(call.usage.requests, 2, "one completed and one in flight");
+    assert_eq!(call.usage.reported_requests, 1);
+    assert_eq!(call.usage.known_tokens(), 105);
+    assert_eq!(call.usage.cache_read_reported_requests, 1);
+    assert_eq!(call.usage.cache_creation_reported_requests, 1);
+    assert!(!call.usage.complete());
+}
+
+#[test]
+fn preflight_carries_its_helper_usage_into_the_returned_record() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("usage-preflight");
+    let provider = provider_with_usage(
+        "src/lib.rs:1 — entry point\nNot checked: other files",
+        serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 70,
+            "cache_creation_input_tokens": 20
+        }),
+    );
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let record = pane::helpers::preflight(
+        "Find the repository entry point",
+        "test-helper-model",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-usage-preflight"),
+        &pane::tools::invoke::CancellationToken::new(),
+        |_| {},
+    )
+    .expect("the roster has a preflight helper");
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(record.outcome.ok, "{record:?}");
+    assert_eq!(record.usage.model, "test-helper-model");
+    assert_eq!(record.usage.requests, 1);
+    assert_eq!(record.usage.reported_requests, 1);
+    assert_eq!(record.usage.known_tokens(), 105);
+    assert!(record.usage.complete());
+}
+
+#[test]
+fn a_historical_helper_record_deserializes_with_unknown_usage_coverage() {
+    let record: pane::helpers::HelperRecord = serde_json::from_value(serde_json::json!({
+        "helper": "reduce",
+        "verb": "reducing",
+        "asked": "old rollout",
+        "outcome": {"text": "done", "ok": true, "cancelled": false, "elapsed_ms": 1},
+        "turns": 1,
+        "looked": []
+    }))
+    .unwrap();
+
+    assert!(!record.usage.coverage_known);
+    assert_eq!(record.usage.known_tokens(), 0);
+    assert!(!record.usage.complete());
 }
 
 /// A helper that could not answer is a throw, never a reduction that looks
@@ -825,6 +1149,9 @@ fn an_oversized_command_result_is_reduced_and_the_full_output_remains() {
     assert_eq!(record.verb, "reducing", "{record:?}");
     assert!(record.outcome.ok, "{record:?}");
     assert_eq!(record.asked, "4,000 lines", "{record:?}");
+    assert_eq!(record.usage.requests, 1);
+    assert_eq!(record.usage.reported_requests, 1);
+    assert_eq!(record.usage.known_tokens(), 15);
 
     let (length, reduction) = reported(&runtime.run_cell(
         "return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n",

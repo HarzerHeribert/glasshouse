@@ -18,6 +18,7 @@
 
 pub mod api;
 pub mod attach;
+pub mod launch_profile;
 pub mod lifecycle;
 pub mod native_id;
 pub mod recovery;

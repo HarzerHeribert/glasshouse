@@ -156,7 +156,7 @@ impl CellTrace {
         Some(self.yield_reason.borrow_mut().take())
     }
 
-    fn record(&self, call: CallRecord) {
+    pub(crate) fn record(&self, call: CallRecord) {
         self.calls.borrow_mut().push(call);
     }
 
@@ -233,7 +233,7 @@ pub enum HostGlobals {
 
 impl HostGlobals {
     /// The globals a helper never holds, whatever else it was given.
-    pub const WITHHELD_FROM_A_HELPER: [&'static str; 3] = ["bg", "send", "mcp"];
+    pub const WITHHELD_FROM_A_HELPER: [&'static str; 4] = ["bg", "send", "mcp", "checks"];
 
     /// Whether `global` is installed under this narrowing — the one predicate
     /// [`install`] and [`crate::prompt::render_runtime_for`] both read, so
@@ -331,6 +331,10 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
             set_fixed_key(scope, background, "cancel", function.into());
         }
         set_fixed_key(scope, global, "bg", background.into());
+    }
+
+    if globals.installs("checks") {
+        crate::runtime::checks::install(scope, global);
     }
 
     // Little helpers (`little-helpers.md`, *Pulled*), installed from the
@@ -2204,6 +2208,16 @@ fn helper_callback(
         asked: asked.clone(),
         ..crate::helpers::HelperRecord::default()
     });
+    let input = if spec.name == "check" {
+        format!(
+            "Original checker request:\n{}\n\n{}",
+            input,
+            crate::runtime::checks::checker_evidence(scope)
+        )
+    } else {
+        input
+    };
+
     let token = state.token.borrow().clone();
     let call = crate::helpers::run(
         spec,
@@ -2949,7 +2963,7 @@ fn throw_cancelled(scope: &mut v8::PinScope, tool: &str) {
     }
 }
 
-fn throw_tool_error(scope: &mut v8::PinScope, message: &str) {
+pub(crate) fn throw_tool_error(scope: &mut v8::PinScope, message: &str) {
     let text = js_string(scope, message);
     match construct(scope, "ToolError", &[text]) {
         Some(error) => {

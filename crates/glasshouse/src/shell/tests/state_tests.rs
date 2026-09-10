@@ -616,6 +616,50 @@ fn n_starts_a_new_session_from_control_mode() {
 }
 
 #[test]
+fn profile_choice_returns_the_exact_profile_and_retains_presentation() {
+    let mut state = state_with(0);
+    let native =
+        crate::profile::LaunchProfile::native(crate::integrations::IntegrationId::ClaudeCode);
+    let mut configured = native.clone();
+    configured.name = "economy".to_owned();
+    configured.backend = crate::profile::BackendResource::DirectProvider {
+        provider: "openrouter".to_owned(),
+    };
+    configured.model = Some("anthropic/claude-sonnet-4".to_owned());
+
+    assert_eq!(
+        state.open_profile_choice(vec![native, configured], SessionPresentation::Headless,),
+        Action::Redraw
+    );
+    assert_eq!(state.overlay(), Some(Overlay::ProfileChoice));
+    assert_eq!(state.handle_key(press(KeyCode::Down)), Action::Redraw);
+    assert_eq!(
+        state.handle_key(press(KeyCode::Enter)),
+        Action::StartSessionWithProfile {
+            harness: crate::integrations::IntegrationId::ClaudeCode,
+            profile: "economy".to_owned(),
+            presentation: SessionPresentation::Headless,
+        }
+    );
+    assert_eq!(state.overlay(), None);
+}
+
+#[test]
+fn escape_from_profile_choice_starts_nothing() {
+    let mut state = state_with(0);
+    state.open_profile_choice(
+        vec![crate::profile::LaunchProfile::native(
+            crate::integrations::IntegrationId::ClaudeCode,
+        )],
+        SessionPresentation::Embedded,
+    );
+
+    assert_eq!(state.handle_key(press(KeyCode::Esc)), Action::Redraw);
+    assert_eq!(state.overlay(), None);
+    assert!(state.profile_choice().is_none());
+}
+
+#[test]
 fn encode_translates_the_documented_keys_to_their_bytes() {
     assert_eq!(encode(press(KeyCode::Char('a'))), Some(b"a".to_vec()));
     assert_eq!(encode(press(KeyCode::Enter)), Some(vec![b'\r']));

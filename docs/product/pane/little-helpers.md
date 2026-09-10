@@ -48,6 +48,52 @@ section of the preflight block is not emitted. The recap has rendering but no pr
 still returned as text rather than a structured array. And a helper's context
 still binds `helper` and `agent`, closed by refusal rather than by absence.
 
+### Deterministic preparation and named checks
+
+The host prepares bounded starting evidence before the first request of an
+invoked Scout, Checker or Reducer. Scout receives a pruned tree, recognized
+manifests and task-term matches. Checker receives original-contract and
+changed-file evidence; its configured named checks run through the parent
+profile before the helper starts. Reducer receives mechanical failure windows
+from the supplied output and does not walk the repository. The original helper
+request remains separate. Excerpts are untrusted evidence, never authority.
+
+Preparation reads at most 8 KiB per admitted ordinary file, skips files above
+256 KiB, prunes generated/dependency directories, refuses symlink traversal,
+and bounds discovery to 1,024 nodes, 256 entries per directory, seven levels
+and 500 ms of checked work. The packet is at most 32 KiB with explicit
+omissions. Supported ignore rules are applied; an unsupported or incompletely
+read ignore file conservatively omits its directory scope. This is a limited
+ignore implementation, not full Git semantics.
+
+`.glasshouse/checks.toml` declares fixed verification commands:
+
+```toml
+checker = ["tests"]
+[checks.tests]
+command = "python3 -m unittest discover -s tests -v"
+inputs = ["src", "tests", "README.md"]
+reuse = true
+```
+
+The task runtime exposes `checks.list()` and `checks.run("tests", force?)`.
+Commands still require existing Bash grants. Helpers cannot invoke the
+effectful checks binding; host preparation uses the parent's authority and
+returns the actual exit status and bounded output to the read-only checker.
+Missing configuration never becomes a guessed passing test. Passing checks
+are evidence for a verdict, not proof of full task completeness.
+
+Reuse is opt-in and request-local, requires a successful exit plus complete
+unchanged declared input contents and process environment before and after
+execution, and retains the original observation time. A cache hit explicitly
+reports `executed=false, reused=true`. Incomplete, denied, missing, special,
+symlinked or oversized dependencies disable reuse. External dependencies and
+nondeterminism require `force=true` or `reuse=false`. A task boundary clears
+the cache.
+
+Integration and installed evidence for this change is tracked in
+[`dogfooding-2026-09-10-helper-preparation.md`](../../process/dogfooding-2026-09-10-helper-preparation.md).
+
 ### What was measured
 
 **The Reducer helps, and the measurement corrected the spec twice.** Four

@@ -431,6 +431,7 @@ impl RuntimeState {
             record.outcome = call.outcome;
             record.turns = call.turns;
             record.looked = call.looked;
+            record.usage = call.usage;
         }
         self.report_helper_progress();
     }
@@ -720,6 +721,7 @@ mod tests {
                 },
                 turns: 1,
                 looked: Vec::new(),
+                usage: crate::helpers::HelperUsage::default(),
             },
         );
         install_helper_progress(previous);
@@ -757,6 +759,7 @@ mod tests {
                 },
                 turns: 1,
                 looked: Vec::new(),
+                usage: crate::helpers::HelperUsage::default(),
             },
         );
         install_helper_progress(previous);

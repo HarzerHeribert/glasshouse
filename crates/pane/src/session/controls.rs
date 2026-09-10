@@ -156,7 +156,12 @@ pub(super) fn command(
             show(session, Panel::text("Last handle preview", table));
         }
         "budget" => {
-            let used = transcript.notebook.tokens.map(|t| t.used).unwrap_or(0);
+            let used = transcript
+                .notebook
+                .tokens
+                .as_ref()
+                .map(|tokens| tokens.used)
+                .unwrap_or(0);
             show(
                 session,
                 Panel::text(

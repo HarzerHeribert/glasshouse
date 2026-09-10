@@ -19,3 +19,5 @@ pub mod repair;
 pub mod state;
 
 pub mod instructions;
+
+pub(crate) mod checks;

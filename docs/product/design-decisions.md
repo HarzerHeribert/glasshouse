@@ -20318,3 +20318,45 @@ and self-written tests therefore supplement the original contract and independen
 acceptance evidence; they do not replace either. Full run evidence lives in
 `docs/process/dogfooding-2026-09-10-helpers.md`; this decision closes no capability
 box and makes no claim of competitive performance from a single fixture.
+
+
+## Helper starting evidence, named verification and shell profile parity — 2026-09-10
+
+The person requested deterministic role-specific work before a cheap helper's
+first model request, reusable verification primitives, complete helper cost
+accounting, and repairs to the remaining quick-open usability gap. Existing
+subscription authorization and Sol worker selection continue to apply.
+
+Scout discovery, Checker contract/change evidence and Reducer failure windows
+are prepared by bounded host code through the immutable parent read profile.
+Generated/vendor trees, symlinks and oversized inputs are excluded. Unsupported
+or unreadable ignore semantics conservatively omit their scope. Original
+requests remain intact and excerpts remain untrusted data. Preparation is not
+an automatic expansion of helper capabilities.
+
+Fixed named commands live in `.glasshouse/checks.toml`; `checks.run(name)` uses
+the existing confined Bash invocation. The config grants no authority. Host
+Checker preparation can run configured checks under parent permissions, while
+the helper itself remains read-only. Opt-in reuse requires successful, complete
+unchanged declared inputs and process environment before and after execution,
+and is limited to the current task. Reused observations retain their original
+time and explicitly distinguish reuse from execution; external state and
+nondeterminism require force or disabled reuse. Passing tests do not settle
+original-contract completeness.
+
+Helper records retain every reported request's model and token/cache classes,
+plus coverage. Task spend includes those records once at their owning task/cell
+boundary. Missing or historical usage stays unknown; cancellation retains known
+completed usage and marks outstanding coverage partial. No token stopping rule
+or guessed price is introduced.
+
+Quick-open retains Native directly when there are no other enabled choices.
+Otherwise it presents Native plus matching enabled profiles and launches the
+exact selected serving path through the shared CLI helpers. Gateway/config
+resources live through child exit, including shell shutdown. Native entitlement
+ambiguity retains its prior best-effort launch and credential scrubbing.
+
+Evidence and the fresh installed follow-up are recorded in
+`docs/process/dogfooding-2026-09-10-helper-preparation.md`. No capability box is
+closed by this decision; a single repeated fixture cannot establish harness
+parity or weighted cost superiority.

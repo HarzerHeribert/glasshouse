@@ -13,7 +13,7 @@
 //! [`FORBIDDEN_TOOLS`] exists as a list a spec cannot hold rather than as a
 //! sentence a model might ignore.
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::contract::{Conversation, Message, Role};
@@ -285,6 +285,95 @@ pub struct HelperOutcome {
     pub elapsed_ms: u64,
 }
 
+/// Provider usage observed for one helper call. Counts and coverage travel
+/// with the helper record so task totals can include helpers exactly once and
+/// a missing usage row never masquerades as zero tokens.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HelperUsage {
+    /// False only when reading a record written before helper metering
+    /// existed. Zero requests in such a record is unknown, not measured zero.
+    pub coverage_known: bool,
+    pub model: String,
+    pub requests: u32,
+    pub reported_requests: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_reported_requests: u32,
+    pub cache_creation_reported_requests: u32,
+}
+
+impl HelperUsage {
+    pub fn known_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
+
+    pub fn complete(&self) -> bool {
+        self.coverage_known
+            && self.reported_requests == self.requests
+            && self.cache_read_reported_requests == self.reported_requests
+            && self.cache_creation_reported_requests == self.reported_requests
+    }
+
+    fn begin_request(&mut self) {
+        self.requests = self.requests.saturating_add(1);
+    }
+
+    fn record_response(&mut self, usage: Option<crate::wire::Usage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        self.reported_requests = self.reported_requests.saturating_add(1);
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        if let Some(tokens) = usage.cache_read_input_tokens {
+            self.cache_read_input_tokens = self.cache_read_input_tokens.saturating_add(tokens);
+            self.cache_read_reported_requests = self.cache_read_reported_requests.saturating_add(1);
+        }
+        if let Some(tokens) = usage.cache_creation_input_tokens {
+            self.cache_creation_input_tokens =
+                self.cache_creation_input_tokens.saturating_add(tokens);
+            self.cache_creation_reported_requests =
+                self.cache_creation_reported_requests.saturating_add(1);
+        }
+    }
+}
+
+/// Shared only with the owned provider worker so a cancellation can retain
+/// every earlier completed turn and name the currently unreported request.
+#[derive(Debug, Clone)]
+pub struct HelperUsageTracker(Arc<Mutex<HelperUsage>>);
+
+impl HelperUsageTracker {
+    fn new(model: &str) -> Self {
+        Self(Arc::new(Mutex::new(HelperUsage {
+            coverage_known: true,
+            model: model.to_string(),
+            ..HelperUsage::default()
+        })))
+    }
+
+    pub(crate) fn begin_request(&self) {
+        self.0.lock().expect("helper usage lock").begin_request();
+    }
+
+    pub(crate) fn record_response(&self, usage: Option<crate::wire::Usage>) {
+        self.0
+            .lock()
+            .expect("helper usage lock")
+            .record_response(usage);
+    }
+
+    fn snapshot(&self) -> HelperUsage {
+        self.0.lock().expect("helper usage lock").clone()
+    }
+}
+
 impl Default for HelperOutcome {
     /// A record read back from an older rollout that predates this field.
     fn default() -> Self {
@@ -341,9 +430,14 @@ pub struct HelperRecord {
     ///
     /// A helper reports numbers it says it computed. Without this the claim
     /// cannot be checked: the caller sees an answer and no trace of the work.
-    /// Empty for a toolless helper, which reaches for nothing by construction.
+    /// Host preparation operations and omissions are prefixed `prepare`;
+    /// a toolless helper has no subsequent model-driven tool operations.
     #[serde(default)]
     pub looked: Vec<String>,
+    /// The helper model and every provider-reported token class, including
+    /// per-class request coverage when a provider omitted usage.
+    #[serde(default)]
+    pub usage: HelperUsage,
 }
 
 impl HelperRecord {
@@ -370,6 +464,7 @@ pub struct HelperCall {
     pub turns: u32,
     /// Tool names the loop reached for, in order; empty for `run_once`.
     pub looked: Vec<String>,
+    pub usage: HelperUsage,
 }
 
 /// Run any helper in the roster: the one entry point a caller uses.
@@ -388,27 +483,77 @@ pub fn run(
     token: &crate::tools::invoke::CancellationToken,
 ) -> HelperCall {
     let started = Instant::now();
+    let prepared = crate::helper_context::HelperRole::from_helper_name(spec.name)
+        .map(|role| crate::helper_context::prepare(role, input, profile, token));
+    let request = prepared
+        .as_ref()
+        .map(|packet| format!("{}\n\nOriginal helper request:\n{}", packet.rendered, input));
+    let mut call = run_unprepared(
+        spec,
+        model,
+        request.as_deref().unwrap_or(input),
+        profile,
+        glasshouse,
+        session,
+        token,
+    );
+    if let Some(packet) = prepared {
+        let mut operations: Vec<String> = packet
+            .operations
+            .into_iter()
+            .map(|operation| format!("prepare: {} {}", operation.action, operation.subject))
+            .collect();
+        operations.extend(packet.omissions.into_iter().map(|omission| {
+            format!(
+                "prepare omitted: {} ({})",
+                omission.subject, omission.reason
+            )
+        }));
+        operations.append(&mut call.looked);
+        call.looked = operations;
+    }
+    call.outcome.elapsed_ms = started.elapsed().as_millis() as u64;
+    call
+}
+
+fn run_unprepared(
+    spec: &HelperSpec,
+    model: &str,
+    input: &str,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+    token: &crate::tools::invoke::CancellationToken,
+) -> HelperCall {
+    let started = Instant::now();
     if token.is_cancelled() {
         return HelperCall {
             outcome: HelperOutcome::cancelled(started),
             turns: 0,
             looked: Vec::new(),
+            usage: HelperUsage {
+                coverage_known: true,
+                model: model.to_string(),
+                ..HelperUsage::default()
+            },
         };
     }
     if one_shot(spec) {
         let spec = *spec;
         let model = model.to_string();
         let input = input.to_string();
-        match wait_for_helper(token, move || run_once(&spec, &model, &input)) {
-            HelperWait::Returned(outcome) => HelperCall {
-                outcome,
-                turns: 1,
-                looked: Vec::new(),
-            },
+        let usage = HelperUsageTracker::new(&model);
+        usage.begin_request();
+        let worker_usage = usage.clone();
+        match wait_for_helper(token, move || {
+            run_once_metered(&spec, &model, &input, &worker_usage)
+        }) {
+            HelperWait::Returned(call) => call,
             HelperWait::Cancelled => HelperCall {
                 outcome: HelperOutcome::cancelled(started),
                 turns: 0,
                 looked: Vec::new(),
+                usage: usage.snapshot(),
             },
             HelperWait::Panicked => HelperCall {
                 outcome: HelperOutcome::failed(
@@ -417,6 +562,7 @@ pub fn run(
                 ),
                 turns: 0,
                 looked: Vec::new(),
+                usage: usage.snapshot(),
             },
         }
     } else {
@@ -477,6 +623,17 @@ fn one_shot(spec: &HelperSpec) -> bool {
 /// loop and is not this function's job; [`validate`] permits such a spec and
 /// callers dispatch on `max_turns`.
 pub fn run_once(spec: &HelperSpec, model: &str, input: &str) -> HelperOutcome {
+    let usage = HelperUsageTracker::new(model);
+    usage.begin_request();
+    run_once_metered(spec, model, input, &usage).outcome
+}
+
+fn run_once_metered(
+    spec: &HelperSpec,
+    model: &str,
+    input: &str,
+    usage: &HelperUsageTracker,
+) -> HelperCall {
     let started = Instant::now();
     debug_assert!(spec.tools.is_empty() && spec.max_turns == 1);
 
@@ -484,25 +641,39 @@ pub fn run_once(spec: &HelperSpec, model: &str, input: &str) -> HelperOutcome {
         system: spec.preamble.to_string(),
         messages: vec![Message::text(Role::User, input)],
     };
-    match wire::send_turn_with(&conversation, model, spec.max_tokens, Some(PURPOSE_HEADER)) {
-        Ok(message) => {
-            let text: String = message
+    let outcome = match wire::send_turn_with_usage(
+        &conversation,
+        model,
+        spec.max_tokens,
+        Some(PURPOSE_HEADER),
+    ) {
+        Ok(turn) => {
+            usage.record_response(turn.usage);
+            let text: String = turn
+                .message
                 .content
                 .iter()
                 .map(crate::contract::Block::text)
                 .collect::<Vec<_>>()
                 .join("");
             if text.trim().is_empty() {
-                return HelperOutcome::failed("the helper returned nothing", started);
-            }
-            HelperOutcome {
-                text,
-                ok: true,
-                cancelled: false,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+                HelperOutcome::failed("the helper returned nothing", started)
+            } else {
+                HelperOutcome {
+                    text,
+                    ok: true,
+                    cancelled: false,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                }
             }
         }
         Err(err) => HelperOutcome::failed(format!("request failed: {err}"), started),
+    };
+    HelperCall {
+        outcome,
+        turns: 1,
+        looked: Vec::new(),
+        usage: usage.snapshot(),
     }
 }
 
@@ -533,6 +704,8 @@ pub fn run_with_tools(
         tools: spec.tools,
         instructions: spec.preamble,
     };
+    let usage = HelperUsageTracker::new(model);
+    let worker_usage = usage.clone();
     // **On an owned thread, always.** `run_narrowed` builds a Runtime, which is
     // a second V8 isolate, and this function is reached from a host callback
     // while the caller's isolate is borrowed. Owning every input also lets the
@@ -545,14 +718,14 @@ pub fn run_with_tools(
     let input = input.to_string();
     let worker_token = token.clone();
     let result = match wait_for_helper(token, move || {
-        crate::agent::run_narrowed(
+        crate::agent::run_narrowed_metered(
             &profile,
             &glasshouse,
             &session,
             &input,
             &options,
             &worker_token,
-            Some(&narrowed),
+            crate::agent::NarrowedRun::helper(&narrowed, &worker_usage),
         )
     }) {
         HelperWait::Returned(result) => result,
@@ -561,6 +734,7 @@ pub fn run_with_tools(
                 outcome: HelperOutcome::cancelled(started),
                 turns: 0,
                 looked: Vec::new(),
+                usage: usage.snapshot(),
             };
         }
         HelperWait::Panicked => {
@@ -571,6 +745,7 @@ pub fn run_with_tools(
                 ),
                 turns: 0,
                 looked: Vec::new(),
+                usage: usage.snapshot(),
             };
         }
     };
@@ -603,6 +778,7 @@ pub fn run_with_tools(
         outcome,
         turns: u32::try_from(result.turns).unwrap_or(u32::MAX),
         looked: result.trajectory,
+        usage: usage.snapshot(),
     }
 }
 
@@ -644,6 +820,7 @@ pub fn preflight(
     record.outcome = call.outcome;
     record.turns = call.turns;
     record.looked = call.looked;
+    record.usage = call.usage;
     progress(&record);
     Some(record)
 }
@@ -675,6 +852,7 @@ pub fn check_completion(
         outcome: call.outcome,
         turns: call.turns,
         looked: call.looked,
+        usage: call.usage,
     })
 }
 

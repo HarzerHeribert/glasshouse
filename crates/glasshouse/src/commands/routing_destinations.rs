@@ -1699,33 +1699,7 @@ pub(crate) fn session_pairing(
     effective: &EffectiveConfig<'_>,
     profile: &glasshouse::profile::LaunchProfile,
 ) -> glasshouse::harness::pairing::Pairing {
-    use glasshouse::harness::Declared;
-    use glasshouse::harness::pairing::{PairingQuery, ServingRoute, classify};
-    use glasshouse::routing::AssignedModel;
-
-    let overrides = effective.pairing_overrides();
-    let configured = effective
-        .pairing_queries()
-        .into_iter()
-        .find(|configured| configured.name() == profile.name)
-        .and_then(|configured| configured.query().cloned());
-
-    let query = configured.unwrap_or_else(|| PairingQuery {
-        harness: profile.harness,
-        model: match &profile.model {
-            Some(model) => AssignedModel::named(model),
-            None => AssignedModel::HarnessDefault,
-        },
-        route: ServingRoute {
-            provider: None,
-            gateway: None,
-            protocol: profile.expected_protocol,
-        },
-        tool_calls: Declared::Unverified,
-        provider_protocols: Vec::new(),
-    });
-
-    classify(&query, &overrides)
+    glasshouse::session::launch_profile::session_pairing(effective, profile)
 }
 
 #[cfg(test)]
