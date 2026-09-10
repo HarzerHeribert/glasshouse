@@ -171,6 +171,25 @@ impl RuntimePaths {
         self.subscription_broker_entitlement_dir(entitlement)
             .join("auth")
     }
+
+    /// This layout expressed in the four paths one entitlement's broker
+    /// needs.
+    ///
+    /// The translation lives here, not in `gateway`: the broker owns a
+    /// sidecar's lifecycle and must stay usable by a host with no
+    /// [`RuntimePaths`], so Glasshouse resolves its own layout and hands the
+    /// result over. The dependency points one way only.
+    pub fn subscription_broker_paths(
+        &self,
+        entitlement: &str,
+    ) -> crate::gateway::subscription_broker::BrokerPaths {
+        crate::gateway::subscription_broker::BrokerPaths {
+            brokers_dir: self.subscription_brokers_dir(),
+            entitlement_dir: self.subscription_broker_entitlement_dir(entitlement),
+            auth_dir: self.subscription_broker_auth_dir(entitlement),
+            executable: self.cliproxyapi_executable(),
+        }
+    }
 }
 
 fn valid_cliproxyapi_version(version: &str) -> bool {

@@ -69,7 +69,7 @@ pub fn gateway_upstream(
 ) -> anyhow::Result<crate::gateway::Upstream> {
     if let Some(entitlement) = entitlement {
         let broker = crate::gateway::subscription_broker::RunningSubscriptionBroker::start(
-            paths,
+            &paths.subscription_broker_paths(entitlement.name()),
             entitlement.name(),
         )?;
         return Ok(profile::subscription_broker_upstream(broker)?);

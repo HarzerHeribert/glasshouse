@@ -1083,7 +1083,7 @@ fn line_1937_a_gateway_backed_route_records_a_success_and_a_failure_and_route_ci
         glasshouse::bootstrap(&cli, &root).unwrap()
     };
     let ledger = Arc::new(EvidenceLedger::open(&runtime).unwrap());
-    let health_cache = GatewayHealthCache::new(runtime.paths());
+    let health_cache = GatewayHealthCache::new(runtime.paths().data_dir());
 
     // One success, one failure, from a fixture upstream on loopback.
     let address = stub_server(vec![

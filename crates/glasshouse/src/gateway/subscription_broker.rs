@@ -18,12 +18,36 @@ use anyhow::{Context, Result, bail};
 use ureq::Agent;
 use ureq::config::AutoHeaderValue;
 
-use crate::paths::RuntimePaths;
 use crate::routing::CredentialId;
 use crate::secret::{REDACTED, SecretRef};
 
 /// Explicit override for the pinned CLIProxyAPI executable.
 pub const ENV_CLIPROXYAPI_BIN: &str = "GLASSHOUSE_CLIPROXYAPI_BIN";
+
+/// Where one entitlement's broker keeps its state, and where its executable
+/// lives.
+///
+/// The four directories [`RunningSubscriptionBroker::start`] needs, resolved
+/// by whoever embeds this module. It is deliberately a plain carrier of
+/// already-decided paths: this module owns the *lifecycle* of a sidecar, not
+/// the layout of the host's data directory, and it must stay usable by a host
+/// that has no `RuntimePaths` at all. `brokers_dir` and `entitlement_dir` are
+/// created as private directories in that order, so `entitlement_dir` must be
+/// under `brokers_dir` and `auth_dir` under `entitlement_dir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerPaths {
+    /// Private state root shared by every entitlement's broker.
+    pub brokers_dir: PathBuf,
+    /// Stable state root for this one entitlement; its `instances`
+    /// subdirectory holds each run's ephemeral serving directory.
+    pub entitlement_dir: PathBuf,
+    /// Stable OAuth state for this one entitlement, which outlives any one
+    /// running sidecar.
+    pub auth_dir: PathBuf,
+    /// The host-managed pinned CLIProxyAPI executable, used when
+    /// [`ENV_CLIPROXYAPI_BIN`] names nothing.
+    pub executable: PathBuf,
+}
 
 const PROVIDER_NAME: &str = "cliproxyapi";
 const CREDENTIAL_SERVICE: &str = "glasshouse-subscription-broker";
@@ -80,7 +104,7 @@ pub struct RunningSubscriptionBroker {
 impl RunningSubscriptionBroker {
     /// Start one sidecar for `entitlement` using the override, when present,
     /// or the Glasshouse-managed pinned executable.
-    pub fn start(paths: &RuntimePaths, entitlement: &str) -> Result<Self> {
+    pub fn start(paths: &BrokerPaths, entitlement: &str) -> Result<Self> {
         let executable = discover_executable(paths, std::env::var_os(ENV_CLIPROXYAPI_BIN))?;
         let mut last = None;
         for _ in 0..3 {
@@ -93,7 +117,7 @@ impl RunningSubscriptionBroker {
     }
 
     fn start_with(
-        paths: &RuntimePaths,
+        paths: &BrokerPaths,
         entitlement: &str,
         executable: &Path,
         timeout: Duration,
@@ -108,12 +132,11 @@ impl RunningSubscriptionBroker {
             );
         }
 
-        let entitlement_dir = paths.subscription_broker_entitlement_dir(entitlement);
-        let auth_dir = paths.subscription_broker_auth_dir(entitlement);
-        let instances_dir = entitlement_dir.join("instances");
+        let auth_dir = paths.auth_dir.clone();
+        let instances_dir = paths.entitlement_dir.join("instances");
         for directory in [
-            paths.subscription_brokers_dir(),
-            entitlement_dir,
+            paths.brokers_dir.clone(),
+            paths.entitlement_dir.clone(),
             auth_dir.clone(),
             instances_dir.clone(),
         ] {
@@ -358,7 +381,7 @@ fn validate_entitlement(entitlement: &str) -> Result<()> {
     Ok(())
 }
 
-fn discover_executable(paths: &RuntimePaths, override_path: Option<OsString>) -> Result<PathBuf> {
+fn discover_executable(paths: &BrokerPaths, override_path: Option<OsString>) -> Result<PathBuf> {
     if let Some(path) = override_path.filter(|value| !value.is_empty()) {
         let path = PathBuf::from(path);
         if path.is_file() {
@@ -370,7 +393,7 @@ fn discover_executable(paths: &RuntimePaths, override_path: Option<OsString>) ->
         );
     }
 
-    let managed = paths.cliproxyapi_executable();
+    let managed = paths.executable.clone();
     if managed.is_file() {
         return Ok(managed);
     }

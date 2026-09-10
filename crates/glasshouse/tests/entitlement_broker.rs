@@ -1152,7 +1152,7 @@ fn the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured(
 
     {
         let runtime = binary.runtime();
-        let quota = GatewayQuotaCache::new(runtime.paths());
+        let quota = GatewayQuotaCache::new(runtime.paths().data_dir());
         let now = now_unix();
         quota.store(
             "alpha-probe",

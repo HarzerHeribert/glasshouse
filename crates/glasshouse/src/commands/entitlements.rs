@@ -25,7 +25,8 @@ pub(crate) fn entitlement_pool_with_telemetry(
     effective: &EffectiveConfig,
 ) -> anyhow::Result<Vec<glasshouse::config::ResolvedEntitlement>> {
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
+    let quota_cache =
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir());
     let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
     let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
         .and_then(|ledger| {
@@ -540,7 +541,7 @@ fn refresh_missing_catalogues(
                 scope.spawn(move || {
                     let Ok(broker) =
                         glasshouse::gateway::subscription_broker::RunningSubscriptionBroker::start(
-                            &paths,
+                            &paths.subscription_broker_paths(entitlement),
                             entitlement,
                         )
                     else {

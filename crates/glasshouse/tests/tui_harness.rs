@@ -419,7 +419,7 @@ fn seed_gateway_telemetry(fixture: &Fixture) {
     let paths = fixture.paths();
     let now = glasshouse::provider::cache::now_unix_seconds();
 
-    GatewayHealthCache::new(&paths).store(
+    GatewayHealthCache::new(paths.data_dir()).store(
         HEALTH_PROVIDER,
         &[GatewayHealthReading {
             credential_label: HEALTH_CREDENTIAL.to_owned(),
@@ -434,7 +434,7 @@ fn seed_gateway_telemetry(fixture: &Fixture) {
         }],
         now,
     );
-    GatewayQuotaCache::new(&paths).store(
+    GatewayQuotaCache::new(paths.data_dir()).store(
         HEALTH_PROVIDER,
         &RateLimitHeaders::read([
             ("ratelimit-limit", HEALTH_STATED_LIMIT.to_string().as_str()),

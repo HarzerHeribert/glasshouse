@@ -388,11 +388,11 @@ fn resolve_resume_overlay(
             )
         },
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         )),
         evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         )),
         Some(degrade_sink),
         // Line 1851, on the resume path too: a resumed session's gateway

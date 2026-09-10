@@ -1631,7 +1631,7 @@ mod project_overview_capacity_tests {
         user.save(runtime.paths()).unwrap();
 
         let now_unix = crate::provider::cache::now_unix_seconds();
-        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths()).store(
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()).store(
             "overview-capacity-test-provider",
             &crate::provider::telemetry::RateLimitHeaders::read(vec![
                 ("x-ratelimit-limit-requests", "100"),
@@ -1770,7 +1770,7 @@ mod project_overview_capacity_tests {
         user.save(runtime.paths()).unwrap();
 
         let now_unix = crate::provider::cache::now_unix_seconds();
-        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths()).store(
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()).store(
             "overview-capacity-test-provider",
             &crate::provider::telemetry::RateLimitHeaders::read(vec![
                 ("x-ratelimit-limit-requests", "100"),
@@ -3267,12 +3267,12 @@ mod route_health_tests {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
 
-        GatewayHealthCache::new(runtime.paths()).store(
+        GatewayHealthCache::new(runtime.paths().data_dir()).store(
             "anyrouter",
             &[reading("claude-opus-4-1", 0, Some(now + 300), true)],
             now,
         );
-        GatewayQuotaCache::new(runtime.paths()).store(
+        GatewayQuotaCache::new(runtime.paths().data_dir()).store(
             "anyrouter",
             &RateLimitHeaders::read([
                 ("ratelimit-limit", "300"),
@@ -3321,7 +3321,7 @@ mod route_health_tests {
     fn a_provider_that_stated_no_headers_leaves_every_stated_field_none() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        GatewayHealthCache::new(runtime.paths()).store(
+        GatewayHealthCache::new(runtime.paths().data_dir()).store(
             "openrouter",
             &[reading("some-free-model", 2, None, false)],
             now,
@@ -3345,7 +3345,7 @@ mod route_health_tests {
     fn two_resources_on_one_provider_are_shared_and_never_independent() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        let health = GatewayHealthCache::new(runtime.paths());
+        let health = GatewayHealthCache::new(runtime.paths().data_dir());
         health.store(
             "anyrouter",
             &[
@@ -3385,7 +3385,7 @@ mod route_health_tests {
     fn opening_the_route_health_view_shows_real_gateway_telemetry() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        GatewayHealthCache::new(runtime.paths()).store(
+        GatewayHealthCache::new(runtime.paths().data_dir()).store(
             "anyrouter",
             &[reading("claude-opus-4-1", 3, None, false)],
             now,

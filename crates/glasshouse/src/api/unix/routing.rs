@@ -39,10 +39,10 @@ pub(super) fn resource_capacity(runtime: &Runtime) -> Response {
 
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
         .gather_gateway_quota(&glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         ))
         .gather_gateway_health(&glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         ))
         .gather_harness_status(now_unix);
 

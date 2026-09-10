@@ -762,7 +762,7 @@ fn disposable_reducer(
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion — the same

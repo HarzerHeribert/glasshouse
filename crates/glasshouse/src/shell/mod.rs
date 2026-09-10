@@ -1235,8 +1235,8 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
     }
 
     let now_unix = crate::provider::cache::now_unix_seconds();
-    let telemetry =
-        GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
+    let telemetry = GatheredTelemetry::new()
+        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().data_dir()));
     let base_thresholds = effective.capacity_band_thresholds().value;
 
     // **Line 1283's producer.** The rows a burn rate counts, read once for
@@ -1835,14 +1835,14 @@ fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
     let quota: std::collections::HashMap<
         String,
         (crate::provider::telemetry::RateLimitHeaders, i64),
-    > = GatewayQuotaCache::new(runtime.paths())
+    > = GatewayQuotaCache::new(runtime.paths().data_dir())
         .load_all()
         .into_iter()
         .map(|(provider, headers, observed_at)| (provider, (headers, observed_at)))
         .collect();
 
     let mut rows = Vec::new();
-    for (provider, readings) in GatewayHealthCache::new(runtime.paths()).load_all() {
+    for (provider, readings) in GatewayHealthCache::new(runtime.paths().data_dir()).load_all() {
         // Concept 5's only honest signal. `FailureDomain::between` compares
         // two `Backend`s and neither cache stores one, so this uses the
         // identity that comparison would use — the provider name. The

@@ -272,7 +272,8 @@ pub(crate) fn routing_destinations(
     use glasshouse::routing::session::{Destination, EstimatedInputSize, SessionContextFacts};
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
+    let quota_cache =
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir());
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
         .gather_gateway_quota(&quota_cache);
 
@@ -1286,8 +1287,8 @@ pub(crate) fn observed_provider_health(
     // the same price table `session_router` loads for `expected_marginal_cost`.
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let now = std::time::Instant::now();
-    let telemetry =
-        GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
+    let telemetry = GatheredTelemetry::new()
+        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().data_dir()));
     let price_table =
         glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
     // Capability map line 1366's *learn* half: read once for every
@@ -1457,7 +1458,7 @@ pub(crate) fn observed_health_of(
     // plus the unix second each provider's file was written, which line
     // 1854's *stale* half is read from. A file with no date fails to
     // deserialize and never reaches this loop.
-    let stored = GatewayHealthCache::new(runtime.paths()).load_all_dated();
+    let stored = GatewayHealthCache::new(runtime.paths().data_dir()).load_all_dated();
     if stored.is_empty() {
         return ObservedHealth { pool, observed_at };
     }

@@ -288,7 +288,7 @@ impl Fixture {
     /// the precondition line 1367 names and the thing an unmeasured pool
     /// does not have.
     fn plant_pool(&self, provider: &str, limit: u32, remaining: u32) {
-        GatewayQuotaCache::new(self.runtime.paths()).store(
+        GatewayQuotaCache::new(self.runtime.paths().data_dir()).store(
             provider,
             &RateLimitHeaders::read(vec![
                 ("x-ratelimit-limit-requests", limit.to_string().as_str()),
@@ -302,7 +302,7 @@ impl Fixture {
     }
 
     fn reservations(&self) -> DispatchReservationCache {
-        DispatchReservationCache::new(self.runtime.paths())
+        DispatchReservationCache::new(self.runtime.paths().data_dir())
     }
 
     /// Every reservation file currently on disk, whatever it says.

@@ -36,10 +36,10 @@ pub(crate) fn resources_report(
 
     let mut telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
     telemetry = telemetry.gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
     );
     telemetry = telemetry.gather_gateway_health(
-        &glasshouse::provider::telemetry::GatewayHealthCache::new(runtime.paths()),
+        &glasshouse::provider::telemetry::GatewayHealthCache::new(runtime.paths().data_dir()),
     );
     // Capability map lines 1316/1365: recent failures by class, from the
     // project's routing evidence ledger. Fail-soft: a project with no ledger

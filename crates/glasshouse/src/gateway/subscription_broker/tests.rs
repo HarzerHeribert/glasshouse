@@ -1,9 +1,26 @@
 use super::*;
 
+/// One entitlement's four directories under `root`.
+///
+/// Chosen here rather than derived from a host's layout, which is the point
+/// of [`BrokerPaths`]: this module is given directories, it does not resolve
+/// them.
+fn broker_paths(root: &Path, entitlement: &str) -> BrokerPaths {
+    let brokers_dir = root.join("subscription-brokers");
+    let entitlement_dir = brokers_dir.join(format!("entitlement-{entitlement}"));
+    let auth_dir = entitlement_dir.join("auth");
+    BrokerPaths {
+        brokers_dir,
+        entitlement_dir,
+        auth_dir,
+        executable: root.join("tools").join("CLIProxyAPI"),
+    }
+}
+
 #[test]
 fn absent_executable_refuses_with_names_and_no_managed_path() {
     let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(temp.path().join("private-data"), temp.path().join("config"));
+    let paths = broker_paths(&temp.path().join("private-data"), "any-entitlement");
     let error = discover_executable(&paths, None).unwrap_err().to_string();
     assert!(error.contains("CLIProxyAPI"));
     assert!(error.contains("managed tools directory"));
@@ -170,7 +187,7 @@ while True:
         mode: &str,
         timeout: Duration,
     ) -> Result<RunningSubscriptionBroker> {
-        let paths = RuntimePaths::new(data.path().join("data"), data.path().join("config"));
+        let paths = broker_paths(&data.path().join("data"), entitlement);
         RunningSubscriptionBroker::start_with(
             &paths,
             entitlement,
@@ -264,10 +281,14 @@ while True:
     fn readiness_timeout_and_early_exit_kill_and_clean_the_instance() {
         let data = tempfile::tempdir().unwrap();
         let fake = Fake::new();
-        let paths = RuntimePaths::new(data.path().join("data"), data.path().join("config"));
+        let root = data.path().join("data");
+        let timed_out = broker_paths(&root, "timeout-account");
+        let never_ready = broker_paths(&root, "empty-account");
+        let exited_early = broker_paths(&root, "exit-account");
+        let rogue_child = broker_paths(&root, "rogue-account");
 
         let timeout = RunningSubscriptionBroker::start_with(
-            &paths,
+            &timed_out,
             "timeout-account",
             &fake.executable,
             Duration::from_millis(120),
@@ -276,10 +297,10 @@ while True:
         .unwrap_err()
         .to_string();
         assert!(timeout.contains("bounded startup timeout"));
-        assert_instances_empty(&paths, "timeout-account");
+        assert_instances_empty(&timed_out);
 
         let empty = RunningSubscriptionBroker::start_with(
-            &paths,
+            &never_ready,
             "empty-account",
             &fake.executable,
             Duration::from_millis(350),
@@ -288,10 +309,10 @@ while True:
         .unwrap_err()
         .to_string();
         assert!(empty.contains("bounded startup timeout"), "{empty}");
-        assert_instances_empty(&paths, "empty-account");
+        assert_instances_empty(&never_ready);
 
         let exited = RunningSubscriptionBroker::start_with(
-            &paths,
+            &exited_early,
             "exit-account",
             &fake.executable,
             Duration::from_secs(2),
@@ -301,10 +322,10 @@ while True:
         .to_string();
         assert!(exited.contains("exited before readiness"));
         assert!(exited.contains("23"));
-        assert_instances_empty(&paths, "exit-account");
+        assert_instances_empty(&exited_early);
 
         let rogue = RunningSubscriptionBroker::start_with(
-            &paths,
+            &rogue_child,
             "rogue-account",
             &fake.executable,
             Duration::from_secs(2),
@@ -314,7 +335,7 @@ while True:
         .to_string();
         assert!(rogue.contains("exited before readiness"), "{rogue}");
         std::thread::sleep(Duration::from_millis(300));
-        assert_instances_empty(&paths, "rogue-account");
+        assert_instances_empty(&rogue_child);
     }
 
     #[test]
@@ -334,8 +355,7 @@ while True:
         drop(broker);
         assert!(TcpStream::connect(&address).is_err());
 
-        let paths = RuntimePaths::new(data.path().join("data"), data.path().join("config"));
-        assert_instances_empty(&paths, "cleanup-account");
+        assert_instances_empty(&broker_paths(&data.path().join("data"), "cleanup-account"));
     }
 
     #[test]
@@ -458,10 +478,8 @@ while True:
         assert!(TcpStream::connect(address).is_err());
     }
 
-    fn assert_instances_empty(paths: &RuntimePaths, entitlement: &str) {
-        let instances = paths
-            .subscription_broker_entitlement_dir(entitlement)
-            .join("instances");
+    fn assert_instances_empty(paths: &BrokerPaths) {
+        let instances = paths.entitlement_dir.join("instances");
         let mut entries = fs::read_dir(instances).unwrap();
         assert!(entries.next().is_none());
     }

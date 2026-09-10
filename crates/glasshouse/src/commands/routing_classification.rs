@@ -740,7 +740,7 @@ fn persist_support_work_health(
     use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
     use glasshouse::routing::free::FreePool;
 
-    let cache = GatewayHealthCache::new(paths);
+    let cache = GatewayHealthCache::new(paths.data_dir());
     let provider = resource.credential().provider().to_owned();
     let label = resource.credential().label();
     let model = resource.model().to_owned();
@@ -835,7 +835,7 @@ pub(crate) fn disposable_extraction_model(
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion. Fail-soft
@@ -991,7 +991,7 @@ pub(crate) fn disposable_extraction_model(
     // is the whole difference between two processes pacing one allowance and
     // two processes spending it twice.
     let reservations =
-        glasshouse::provider::telemetry::DispatchReservationCache::new(runtime.paths());
+        glasshouse::provider::telemetry::DispatchReservationCache::new(runtime.paths().data_dir());
     let mut pool = health.pool().clone();
     let mut notes = Vec::new();
     withhold_reserved_requests(
@@ -1671,7 +1671,7 @@ pub(crate) fn automatic_classification_choice(
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion. Fail-soft
@@ -1773,11 +1773,14 @@ pub(crate) fn automatic_classification_choice(
     );
 
     // Map lines 1441/1442: reuse a recent healthy pick rather than
-    // re-ranking every call. `RoutingStickyCache::new` roots the cache at
-    // `RuntimePaths::project_state_dir(project_id)`, unlike the
-    // account-scoped `GatewayQuotaCache` above, so a pick never leaks
-    // between projects.
-    let sticky_cache = RoutingStickyCache::new(runtime.paths(), runtime.project().id().as_str());
+    // re-ranking every call. This roots the cache at the project's own
+    // `RuntimePaths::project_state_dir`, unlike the account-scoped
+    // `GatewayQuotaCache` above, so a pick never leaks between projects.
+    let sticky_cache = RoutingStickyCache::new(
+        &runtime
+            .paths()
+            .project_state_dir(runtime.project().id().as_str()),
+    );
     let decision = routing.choose_for_automatic_classification(
         &candidates,
         health.pool(),

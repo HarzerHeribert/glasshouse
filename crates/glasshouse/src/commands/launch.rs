@@ -1264,7 +1264,7 @@ pub(crate) fn launch_session(
             )
         },
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         )),
         // Phase 33A: the routing evidence ledger, reached from the shipped
         // binary only here — the same shape `GatewayQuotaCache` had for a
@@ -1281,7 +1281,7 @@ pub(crate) fn launch_session(
         // health cache, the same additive shape as the quota cache above and
         // read back by exactly the same `glasshouse resources` invocation.
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths(),
+            runtime.paths().data_dir(),
         )),
         Some(degrade_relay.sink()),
         // Capability map line 1851: what the failure-domain term did to each

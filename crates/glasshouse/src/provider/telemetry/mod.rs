@@ -1143,12 +1143,13 @@ pub struct GatewayQuotaCache {
 }
 
 impl GatewayQuotaCache {
-    /// The cache under this installation's data directory — the production
-    /// constructor, for a caller that already resolved
-    /// [`crate::paths::RuntimePaths`].
-    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+    /// The cache under an installation's data directory — the production
+    /// constructor, for a caller that already resolved where its own data
+    /// lives. The caller owns the root; `gateway-quota` is this cache's own
+    /// name for its corner of it, which is why this is not [`Self::at`].
+    pub fn new(data_dir: &Path) -> Self {
         Self {
-            root: paths.data_dir().join("gateway-quota"),
+            root: data_dir.join("gateway-quota"),
         }
     }
 
@@ -1394,14 +1395,14 @@ pub struct RoutingStickyCache {
 }
 
 impl RoutingStickyCache {
-    /// The cache for one project, under this installation's data directory —
-    /// the production constructor, for a caller that already resolved
-    /// [`crate::paths::RuntimePaths`] and a project identifier.
-    pub fn new(paths: &crate::paths::RuntimePaths, project_id: &str) -> Self {
+    /// The cache for one project, under that project's own state directory —
+    /// the production constructor, for a caller that already resolved which
+    /// directory holds this project's state. The caller owns that directory;
+    /// `routing-sticky.json` is this cache's own name for its file in it,
+    /// which is why this is not [`Self::at`].
+    pub fn new(project_state_dir: &Path) -> Self {
         Self {
-            path: paths
-                .project_state_dir(project_id)
-                .join("routing-sticky.json"),
+            path: project_state_dir.join("routing-sticky.json"),
         }
     }
 
@@ -1574,11 +1575,11 @@ pub struct GatewayHealthCache {
 }
 
 impl GatewayHealthCache {
-    /// The cache under this installation's data directory — the production
+    /// The cache under an installation's data directory — the production
     /// constructor, exactly [`GatewayQuotaCache::new`]'s own shape.
-    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+    pub fn new(data_dir: &Path) -> Self {
         Self {
-            root: paths.data_dir().join("gateway-health"),
+            root: data_dir.join("gateway-health"),
         }
     }
 
@@ -1884,14 +1885,14 @@ pub struct DispatchReservationCache {
 }
 
 impl DispatchReservationCache {
-    /// The cache under this installation's data directory — exactly
+    /// The cache under an installation's data directory — exactly
     /// [`GatewayQuotaCache::new`]'s own shape, and user-scoped for the same
     /// reason: a credential's request pool belongs to the account the
     /// credential names, not to whichever project a dispatch happened to run
     /// in.
-    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+    pub fn new(data_dir: &Path) -> Self {
         Self {
-            root: paths.data_dir().join("dispatch-reservations"),
+            root: data_dir.join("dispatch-reservations"),
         }
     }
 

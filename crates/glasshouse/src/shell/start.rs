@@ -252,14 +252,14 @@ pub(super) fn start_session_with_profile(
             )
         },
         Some(crate::provider::telemetry::GatewayQuotaCache::new(
-            app_runtime.paths(),
+            app_runtime.paths().data_dir(),
         )),
         crate::routing::evidence::EvidenceLedger::open(app_runtime)
             .map(Arc::new)
             .map_err(|err| tracing::warn!(%err, "routing evidence unavailable"))
             .ok(),
         Some(crate::provider::telemetry::GatewayHealthCache::new(
-            app_runtime.paths(),
+            app_runtime.paths().data_dir(),
         )),
         None,
         None,
