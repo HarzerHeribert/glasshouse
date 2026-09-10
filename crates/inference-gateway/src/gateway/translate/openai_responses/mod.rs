@@ -156,9 +156,10 @@ const PROMPT_CACHE_KEY_NOTE: &str = "set to the harness's own per-session identi
 /// (GH-EFFORT-CARRY) — the same vocabulary and citation as OpenAI Chat's
 /// `reasoning_effort` (`openai_chat.rs`'s `EFFORT_NOTE`); this codec nests
 /// the word under `reasoning` rather than writing it as a top-level field.
-const EFFORT_NOTE: &str = "set to the word `level_for_budget` maps the harness's `thinking.budget_tokens` onto \
+const EFFORT_NOTE: &str = "set to the harness's own `output_config.effort` word when it stated one (up to \
+     `max`), otherwise to the word `level_for_budget` maps its `thinking.budget_tokens` onto \
      (minimal/low/medium/high, never rounded up), nested under `reasoning.effort`; omitted when \
-     the harness set no thinking at all";
+     the harness set no effort at all";
 
 /// Fields ignored by name: informational, never asked for by the caller,
 /// and named here so that ignoring them is a recorded decision.

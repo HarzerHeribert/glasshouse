@@ -70,7 +70,7 @@ libc.workspace = true
 # expose the equivalent: `connect_with_max_prompt_timeout(_, 0)`, which its
 # documentation defines as "prevent the prompt from appearing at all: the
 # operation will immediately be canceled". keyring never calls it and gives a
-# caller no way to, so Glasshouse depends on it directly instead — see
+# caller no way to, so this crate depends on it directly instead — see
 # `src/secret/native.rs`, "Which platforms, and how the third one refuses".
 # Every one of its D-Bus calls also carries a 2-second reply timeout
 # (`dbus-secret-service-4.1.0/src/proxy/mod.rs:17`), so the Linux probe is

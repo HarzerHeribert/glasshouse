@@ -226,9 +226,16 @@ fn connectable_panel(catalogue: &Catalogue) -> Panel {
 /// exit would have nothing to show in between.
 fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let Some(binary) = session.gateway.executable() else {
+    let Some(mut command) = session.gateway.control_command(&[
+        "subscriptions",
+        "connect",
+        provider,
+        "--entitlement",
+        account,
+        "--json",
+    ]) else {
         show(
             session,
             Panel::text(
@@ -238,15 +245,7 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
         );
         return;
     };
-    let spawned = Command::new(binary)
-        .args([
-            "subscriptions",
-            "connect",
-            provider,
-            "--entitlement",
-            account,
-            "--json",
-        ])
+    let spawned = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -366,7 +365,7 @@ fn model_panel(catalogue: Option<Catalogue>, tiers: TierModels) -> Panel {
         ),
         _ => Panel::text(
             title,
-            "Catalogue unavailable. Update Glasshouse or use /model <id>.",
+            "Catalogue unavailable: no gateway answered. Use /model <id>.",
         ),
     }
 }

@@ -1030,9 +1030,11 @@ fn the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness() {
 /// Listed rather than walked, for [`gateway_sources`]'s reason: `include_str!`
 /// needs a literal, and a list somebody has to add to when a file is added is
 /// a list a reviewer can see is complete. The only files left out are the
-/// ones that are `#[cfg(test)]` in their entirety — `conformance.rs`,
-/// `gateway/fixture.rs` — and the inline test modules, which every entry is
-/// cut at by [`production_code_to_test_module`].
+/// ones that are test-only in their entirety — `conformance.rs`,
+/// `gateway/fixture.rs`, and `provider/fixture.rs` behind the `fixtures`
+/// feature — and the inline test modules, which every entry is cut at by
+/// [`production_code_to_test_module`]; a file's test module therefore sits
+/// at its end, which clippy's `items_after_test_module` also insists on.
 ///
 /// `provider/fixture.rs` **is** here even though it exists for tests: it is a
 /// plain `pub mod`, so it ships in the library, and a rule about what this

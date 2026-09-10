@@ -943,33 +943,16 @@ fn run(args: SessionArgs) -> Result<(), String> {
             glasshouse: PathBuf::from("glasshouse"),
         },
     };
-    let gateway = match &args.gateway {
-        Some(path) => Gateway::Command {
-            gateway: path.clone(),
-        },
-        None => Gateway::Command {
-            gateway: PathBuf::from("inference-gateway"),
-        },
-    };
+    let gateway = gateway::select(args.gateway.as_deref(), &glasshouse, &args.root);
     // Held for the whole session: dropping it kills the gateway pane started.
-    // `None` means pane attached to one already serving and owns no process.
+    // `None` means pane attached to one already serving, or runs direct.
     // Before the interrupt thread and the live UI on purpose -- it writes the
     // process environment, which is only sound while single-threaded.
-    let _serving = match gateway::start_or_attach(&gateway) {
-        Ok(serving) => serving,
-        // Not installed, and nobody asked for it by path: the session talks
-        // to the provider directly, exactly as pane did before the gateway
-        // existed, and says so once where the user can see it. A named
-        // `--gateway` that fails stays the refusal it is.
-        Err(gateway::ServeError::NotInstalled(_)) if args.gateway.is_none() => {
-            eprintln!(
-                "pane: no `inference-gateway` on PATH -- talking to the provider directly \
-                 (install it, or pass --gateway <path>)"
-            );
-            None
-        }
-        Err(error) => return Err(error.to_string()),
-    };
+    let _serving = gateway::start_or_attach(
+        &gateway,
+        args.gateway.is_some(),
+        &rollout_path.with_extension("gateway.log"),
+    )?;
 
     let resuming = rollout_path.exists();
     let (conversation, provider_checkpoint, provider_start) = if resuming {

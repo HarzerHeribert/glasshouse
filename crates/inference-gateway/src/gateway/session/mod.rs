@@ -193,6 +193,23 @@ pub(super) struct ExchangeReading<'a> {
     pub(super) effect: ExchangeEffect,
 }
 
+/// The client slug a session nobody bound is recorded under — opaque, as
+/// every client slug is to this crate; a host that binds names its own.
+pub const UNBOUND_CLIENT: &str = "client";
+
+/// The route an exchange actually took, as the backend a self-binding
+/// session records: the serving backend, over the exchange's own protocol,
+/// for the model the request named (or the harness's default when it named
+/// none). `None` when the exchange reached no protocol, which is not a route.
+fn bound_by_exchange(upstream: &Upstream, exchange: &Exchange) -> Option<crate::routing::Backend> {
+    let protocol = exchange.protocol.as_deref()?;
+    let model = match &exchange.requested_model {
+        Some(model) => AssignedModel::named(model.clone()),
+        None => AssignedModel::HarnessDefault,
+    };
+    upstream.serving().as_routing_backend(protocol, &model)
+}
+
 impl SessionRouting {
     pub fn new() -> Self {
         Self::default()
@@ -625,8 +642,22 @@ impl SessionRouting {
         };
 
         let mut state = self.lock();
-        let Some(current) = state.assignment.clone() else {
-            return ExchangeEffect::Unchanged;
+        let current = match state.assignment.clone() {
+            Some(current) => current,
+            // Nobody bound this session: the standalone binary has no launch
+            // profile to bind from and learns what it serves from the first
+            // exchange. Binding here, to the route that exchange took, is
+            // what arms health, credential rotation and same-model failover
+            // for a gateway with no host at all; a host that bound at launch
+            // never reaches this arm.
+            None => match bound_by_exchange(upstream, exchange) {
+                Some(backend) => {
+                    let bound = state.policy.assign(UNBOUND_CLIENT, backend);
+                    state.assignment = Some(bound.clone());
+                    bound
+                }
+                None => return ExchangeEffect::Unchanged,
+            },
         };
         let credential = current.backend().credential().clone();
         let model = model_key(current.backend().model());
@@ -683,12 +714,13 @@ impl SessionRouting {
         // handing this side a ledger handle would be the embedding that
         // undoes the split (see [`super::ObservationSink`]).
         //
-        // `on_provider_failure`'s own documentation names what the two
-        // reproduce: the pre-Phase-33C ranking, which is compatibility,
-        // entitlement, quota, health, cache locality, stickiness and the
-        // failure domain — every one of them something this side observed
-        // itself, which is exactly why same-model failover still works with
-        // no host anywhere.
+        // What the ranking then weighs, standalone: compatibility, the
+        // caller's stated affinity (none → `0.0`) and the failure-domain
+        // term, over candidates in catalogue order. Quota, health and a
+        // stated `Retry-After` are tracked per credential by `free` and
+        // decide rotation and cooldown, not this ranking's order — the
+        // successor that weighs them is named in design-decisions (*The
+        // inference gateway is its own crate and process*, residuals).
         let evidence = NoObservations;
         let correlations = RouteCorrelations::default();
 

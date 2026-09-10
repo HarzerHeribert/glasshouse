@@ -250,6 +250,22 @@ pub fn providers(config: &GatewayConfig) -> Vec<Provider> {
         .iter()
         .map(|(name, entry)| entry.to_provider(name))
         .collect();
+    // The provider a standalone gateway is most often pointed at with no
+    // catalogue written yet: Anthropic's own API through `ANTHROPIC_API_KEY`.
+    // A configured `[providers.anthropic]` replaces it; the shared templates
+    // below stay what every host ships.
+    if !out.iter().any(|provider| provider.name == "anthropic") {
+        out.push(
+            ProviderEntry {
+                base_url: Some("https://api.anthropic.com".to_owned()),
+                protocol: Some("anthropic-messages".to_owned()),
+                protocols: BTreeMap::new(),
+                credential_env: vec!["ANTHROPIC_API_KEY".to_owned()],
+                headers: Default::default(),
+            }
+            .to_provider("anthropic"),
+        );
+    }
     for template in crate::provider::templates() {
         if !out.iter().any(|provider| provider.name == template.name) {
             out.push(template);
@@ -315,6 +331,43 @@ pub fn protocol_from_slug(slug: &str) -> Option<WireProtocol> {
 
 #[cfg(test)]
 mod tests {
+    /// With no configuration at all, Anthropic's API is a provider through
+    /// `ANTHROPIC_API_KEY`; a configured `[providers.anthropic]` replaces it.
+    #[test]
+    fn anthropics_api_is_a_provider_out_of_the_box_and_a_configured_one_replaces_it() {
+        let bare = providers(&GatewayConfig::default());
+        let anthropic = bare
+            .iter()
+            .find(|provider| provider.name == "anthropic")
+            .expect("anthropic is a provider with no configuration");
+        assert_eq!(anthropic.protocols[0].base_url, "https://api.anthropic.com");
+        assert_eq!(
+            anthropic.credential_env,
+            vec!["ANTHROPIC_API_KEY".to_owned()]
+        );
+
+        let config: GatewayConfig = toml::from_str(
+            r#"
+[providers.anthropic]
+base_url = "http://127.0.0.1:4321"
+protocol = "anthropic-messages"
+credential_env = ["MY_KEY"]
+"#,
+        )
+        .expect("parses");
+        let configured = providers(&config);
+        let anthropic: Vec<_> = configured
+            .iter()
+            .filter(|provider| provider.name == "anthropic")
+            .collect();
+        assert_eq!(
+            anthropic.len(),
+            1,
+            "one anthropic provider, the configured one"
+        );
+        assert_eq!(anthropic[0].protocols[0].base_url, "http://127.0.0.1:4321");
+    }
+
     use super::*;
 
     /// The two tables parse, and an account's credential arrives as a

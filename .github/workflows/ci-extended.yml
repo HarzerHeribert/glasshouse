@@ -212,8 +212,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.tc.outputs.version }}
+      # pane's standalone proof runs the real `inference-gateway` beside its own
+      # binary (crates/pane/tests/session.rs `real_gateway_binary`), and that
+      # crate's Linux keychain backend links libdbus -- the same package the
+      # glasshouse job installs, for the same reason.
+      - name: Linux build-host packages (libdbus for the gateway's Secret Service backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
       - name: Build
         run: cargo build --locked -p pane --all-targets
+      - name: Build the gateway pane's standalone proof runs
+        if: runner.os != 'Windows'
+        run: cargo build --locked -p inference-gateway --bin inference-gateway
       - name: Test
         run: cargo test --locked -p pane --no-fail-fast -- --nocapture
 

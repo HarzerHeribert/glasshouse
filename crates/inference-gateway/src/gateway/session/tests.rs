@@ -627,6 +627,73 @@ fn observe_exchange_falls_back_to_configuration_order_with_no_observations() {
     );
 }
 
+/// A session nobody bound — the standalone binary's — binds itself from its
+/// first exchange, so that exchange's failure already fails over. Without
+/// this arm `observe_exchange` returns before touching health or the policy
+/// and a gateway with no host never moves off a dead account.
+#[test]
+fn observe_exchange_binds_itself_from_the_first_exchange_when_nobody_bound_it() {
+    let upstream =
+        Upstream::with_failover(vec![upstream_backend("first"), upstream_backend("second")])
+            .expect("two backends is not none");
+
+    let routing = SessionRouting::new();
+    assert!(routing.assignment().is_none(), "nothing bound this session");
+
+    routing.observe_exchange(
+        &upstream,
+        &unreachable_exchange("first"),
+        Instant::now(),
+        None,
+        None,
+    );
+
+    let assignment = routing
+        .assignment()
+        .expect("the first exchange bound the session");
+    assert_eq!(
+        assignment.provider(),
+        "second",
+        "and its failure failed over"
+    );
+    assert_eq!(assignment.harness(), super::UNBOUND_CLIENT);
+}
+
+/// A failover lands only where the model can be served: a backend that
+/// declares a catalogue without the routed model is skipped even though it
+/// carries the protocol, and one that declares nothing is still a candidate.
+#[test]
+fn observe_exchange_skips_a_candidate_whose_catalogue_omits_the_model() {
+    let upstream = Upstream::with_failover(vec![
+        upstream_backend("first"),
+        upstream_backend("second").with_models(["some-other-model"]),
+        upstream_backend("third"),
+    ])
+    .expect("three backends is not none");
+
+    let routing = SessionRouting::new();
+    routing.bind(
+        "claude-code",
+        "anthropic-messages",
+        AssignedModel::named("the-routed-model"),
+        &upstream,
+    );
+
+    routing.observe_exchange(
+        &upstream,
+        &unreachable_exchange("first"),
+        Instant::now(),
+        None,
+        None,
+    );
+
+    assert_eq!(
+        routing.assignment().map(|a| a.provider().to_owned()),
+        Some("third".to_owned()),
+        "`second` declares a catalogue that does not list the routed model"
+    );
+}
+
 /// The rendered explanation `Self::observe_exchange` logs for a real
 /// failover, captured the way `gateway::ingress::tests::recorded` reads
 /// `Exchange::record`'s own log line — through the exact `tracing` call

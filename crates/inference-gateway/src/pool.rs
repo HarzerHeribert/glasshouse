@@ -196,10 +196,12 @@ pub fn pool_from_catalogue(
             ));
             continue;
         }
-        // The account's own credential first, then the provider's declared
-        // variable names. That order is the point of an account: two
-        // accounts of one provider are two keys, and the per-account
-        // reference is what distinguishes them.
+        // An account that names a credential uses exactly that one — never
+        // another account's key by way of the provider's variable names,
+        // which only an account naming nothing falls back to. Two accounts
+        // of one provider are two keys, and the per-account reference is
+        // what distinguishes them; two that name nothing resolve to the
+        // same credential and the second is never selected.
         let references: Vec<SecretRef> = match entry.credential() {
             Some(credential) => vec![credential.secret_ref().clone()],
             None => provider.secret_refs(),

@@ -106,7 +106,7 @@ const SAME_PROTOCOL: &str =
 /// describe a request no harness here can make. It is refused for the thing
 /// that is actually missing rather than parked behind an end-to-end test
 /// nobody could write yet.
-const NO_GEMINI_HARNESS: &str = "not offered: no installed harness speaks gemini-generate-content at the ingress, so no \
+const NO_GEMINI_HARNESS: &str = "not offered: no supported client speaks gemini-generate-content at the ingress, so no \
      request of this shape can arrive; the Gemini CLI adapter is a separate package (T3b) and \
      these rows are decided when it lands";
 

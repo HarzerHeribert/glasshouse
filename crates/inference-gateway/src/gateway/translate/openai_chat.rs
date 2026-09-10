@@ -109,13 +109,13 @@ const PROMPT_CACHE_KEY_NOTE: &str = "set to the harness's own per-session identi
 /// (GH-EFFORT-CARRY): the vocabulary is
 /// `developers.openai.com/api/docs/guides/reasoning` (fetched 2026-09-02),
 /// which documents `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and
-/// `max` as model-dependent supported values; this codec only ever writes
-/// `minimal`, `low`, `medium` or `high` — the four words
+/// `max` as model-dependent supported values; this codec writes the harness's own word when it
+/// stated one (`output_config.effort`, up to `max`), otherwise the word its budget maps to
 /// [`super::canonical::level_for_budget`] derives from a token budget — and
 /// never the wider or narrower words a specific model's own page might also
 /// accept.
-const EFFORT_NOTE: &str = "set to the word `level_for_budget` maps the harness's `thinking.budget_tokens` onto \
-     (minimal/low/medium/high, never rounded up); omitted when the harness set no thinking at all";
+const EFFORT_NOTE: &str = "set to the harness's own `output_config.effort` word when it stated one (up to `max`), otherwise to the word `level_for_budget` maps its `thinking.budget_tokens` onto \
+     (minimal/low/medium/high, never rounded up); omitted when the harness set no effort at all";
 
 /// Response fields ignored by name: informational, never asked for.
 pub(super) const IGNORED_FIELDS: &[&str] = &[

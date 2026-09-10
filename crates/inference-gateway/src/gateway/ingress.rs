@@ -484,9 +484,9 @@ pub(super) fn serve(
             &mut out,
             StatusCode::UNAUTHORIZED,
             "authentication_error",
-            "this request did not carry the Glasshouse gateway's own token; a gateway ingress \
-             is reachable only from a harness Glasshouse started under a gateway-backed launch \
-             profile",
+            "this request did not carry this gateway's own bearer token; the ingress is \
+             reachable only by the client that was handed the token when the gateway \
+             started",
             Some(&head.method),
         );
         settle(&mut reader, &mut out, head.content_length);

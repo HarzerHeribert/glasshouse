@@ -372,6 +372,23 @@ impl UpstreamBackend {
         &self.models
     }
 
+    /// Whether this backend may be a candidate for `model`: a backend that
+    /// declares a catalogue is a candidate only for what it lists, and one
+    /// that declares nothing is a candidate for everything, as it always was.
+    ///
+    /// The invariant this keeps: a same-model failover lands only where the
+    /// model can be served. Without it every broker-backed subscription —
+    /// which carries all four protocols — is a "compatible" candidate for
+    /// every other's model, and a session fails over into a model-not-found
+    /// it then reads as `Served` and never leaves.
+    #[must_use]
+    pub fn can_serve(&self, model: &AssignedModel) -> bool {
+        match model.name() {
+            Some(name) => self.models.is_empty() || self.serves_model(name),
+            None => true,
+        }
+    }
+
     pub fn credential_id(&self) -> &CredentialId {
         &self.credential_id
     }
@@ -738,7 +755,7 @@ impl Upstream {
         self.backends
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index != serving)
+            .filter(|(index, backend)| *index != serving && backend.can_serve(model))
             .filter_map(|(_, backend)| backend.as_routing_backend(protocol, model))
             .collect()
     }
@@ -757,6 +774,7 @@ impl Upstream {
     pub fn routing_backends(&self, protocol: &str, model: &AssignedModel) -> Vec<Backend> {
         self.backends
             .iter()
+            .filter(|backend| backend.can_serve(model))
             .filter_map(|backend| backend.as_routing_backend(protocol, model))
             .collect()
     }

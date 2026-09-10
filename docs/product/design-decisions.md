@@ -20458,13 +20458,64 @@ set — which is what Glasshouse does when it launches Pane on a gateway-backed
 profile, so a Glasshouse-launched session reaches Glasshouse's in-process
 gateway and its ledger exactly as before.
 
+
+**Three fresh reviews (architecture boundary; failover and policy; Pane
+standalone), and what they changed.** One blocker, found twice: the standalone
+binary never bound a session, and `observe_exchange` returned before health,
+credential rotation or the policy when nothing was bound — so a gateway with no
+host never moved off a dead account. A session nobody bound now binds itself
+from its first exchange (`gateway/session/mod.rs`, `UNBOUND_CLIENT`), proven at
+the library (`observe_exchange_binds_itself_from_the_first_exchange_when_nobody_bound_it`)
+and at the process (`tests/bin.rs::serve_fails_over_to_the_next_account_when_the_first_is_unreachable`:
+two accounts, the first at a dead port, the second request served). Also
+changed on their findings: a backend that declares a catalogue is a failover
+candidate only for the models it lists (`UpstreamBackend::can_serve`; every
+broker-backed subscription carries all four protocols, so without it a session
+failed over into a model-not-found it then read as `Served`); the inline test
+module that hid 630 lines of `routing/pairing.rs` from the boundary scans moved
+to the file's end; two runtime messages that assumed a Glasshouse-only world
+were reworded; the effort notes now say `xhigh`/`max` travel when stated.
+Pane: a session handed a gateway (a base URL with a bearer or a loopback host
+— a bare inherited URL, which Claude Code exports, no longer counts) is
+*hosted* and its `/models`, `/login` and cost readout go to `glasshouse
+--scope <root>`, the catalogue and ledger that are actually serving, as before
+the split; the gateway child runs in its own process group so a terminal
+Ctrl-C does not end it; its stderr is quoted in a start refusal and otherwise
+written to `<rollout>.gateway.log`; the direct-mode notice lives in
+`gateway.rs`; and the standalone gateway offers Anthropic's own API through
+`ANTHROPIC_API_KEY` with no configuration written, since a user with a key and
+an installed gateway was otherwise refused where one without the gateway ran.
+The pane CI cell now installs libdbus and builds the gateway before its tests.
+
+**Recorded, not changed (pre-existing, each one successor line):** the
+standalone ranking weighs neither health nor cost nor cache locality (the
+comment that said so is corrected); under per-model routing a failure is
+attributed to the assignment's backend rather than the one that served
+(`ingress::forward` vs `observe_exchange`); `OfferMigration` is unreachable
+from production because `failover_candidates` stamps the assignment's model on
+every candidate — the fallback-policy seam the ruling names does not exist yet
+and `FailureResponse`/`Pin` is where it goes; the Anthropic encoder writes no
+effort, unreachable while every non-Anthropic decoder refuses reasoning fields;
+eleven host-only purpose constants live in the gateway's evidence vocabulary;
+keychain service, broker service, header and env names still say `glasshouse`
+on both sides of the process boundary (intended: one login, found by both).
+**Not proven by any test:** SSE streaming through the extracted process (every
+process-level test is a bounded `--task` turn), a second turn or a tool round
+through the real gateway, a subscription account through the standalone
+binary, gateway death mid-session, and the direct-mode path's provider request
+(it needs a real key).
+
 **Decisions taken while cutting, for the user to overrule.**
 1. *The ledger-read side of failover ranking is gone from every deployment.*
    The Phase 9J observed-evidence prior and Phase 33C's route correlations were
    read out of the host's SQLite ledger inside `observe_exchange`; the ruling
    above names neither among the gateway's ranking inputs and forbids
    Glasshouse a seat in the path, so the gateway now passes `NoObservations`
-   and `RouteCorrelations::default()` (the documented pre-33C ranking). The
+   and `RouteCorrelations::default()`. What that ranking then weighs is
+   compatibility, the caller's stated affinity and the failure-domain term over
+   candidates in catalogue order; quota, health and a stated `Retry-After` are
+   tracked per credential by the free pool and decide rotation and cooldown,
+   not the ranking's order — one of the reviewers' findings below. The
    pure scoring functions and their unit tests moved with them; the two
    ledger-backed regression tests (`on_provider_failure_prior_decays_as_real_
    recorded_evidence_accumulates`, `…discounts_a_stale_observation_window`)

@@ -74,13 +74,11 @@ pub struct EffortRequest {
 }
 
 impl EffortRequest {
-    /// The four-word level this request maps to: the harness's own word
-    /// when it set one directly, otherwise the word its token budget falls
-    /// into by [`level_for_budget`]. Anthropic's decoder — the only source
-    /// of [`EffortRequest`] today — always sets `budget_tokens` and never
-    /// `level`, so this is the path every current caller takes; `level` is
-    /// carried on the struct for a harness-side wire that states a word
-    /// directly, which no decoder in this codebase produces yet.
+    /// The level this request maps to: the harness's own word when it
+    /// stated one (Anthropic's decoder sets `level` from
+    /// `output_config.effort`, which is how `xhigh` and `max` arrive),
+    /// otherwise the word its `thinking.budget_tokens` falls into by
+    /// [`level_for_budget`].
     pub fn level(&self) -> EffortLevel {
         self.level
             .unwrap_or_else(|| level_for_budget(self.budget_tokens.unwrap_or(0)))
@@ -91,10 +89,9 @@ impl EffortRequest {
 /// `reasoning_effort` / `reasoning.effort` accept exactly these words among
 /// others (`developers.openai.com/api/docs/guides/reasoning`, fetched
 /// 2026-09-02: *"Supported values are model-dependent and can include
-/// `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`"*) — this
-/// form only ever produces the four this gateway can derive from a token
-/// budget, never the wider or narrower words a model-specific page might
-/// also accept.
+/// `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`"*) — a
+/// token budget maps onto the first four; `xhigh` and `max` are reachable
+/// only when the harness stated the word itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EffortLevel {
     Minimal,

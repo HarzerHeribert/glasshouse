@@ -16,10 +16,10 @@
 //! what a caller with nothing to say should produce.
 //!
 //! [`ServingRoute`], [`wire_protocol_from_slug`] and [`EvidenceKey`] live
-//! here rather than in `crate::harness::pairing` for the same reason: they
-//! are route identity and evidence identity, which a routing policy needs and
-//! a harness model does not own. `crate::harness::pairing` re-exports all
-//! three, so every existing import path stays valid.
+//! here rather than beside a harness model for the same reason: they are
+//! route identity and evidence identity, which a routing policy needs and a
+//! harness model does not own. The host re-exports all three at its old
+//! paths, so every existing import there stays valid.
 
 use std::collections::BTreeMap;
 
@@ -228,173 +228,6 @@ impl PairingAffinities {
 /// needing an ordering on a type that has no natural one.
 fn route_key(provider: &str, model: &AssignedModel) -> (String, String) {
     (provider.to_owned(), model.label().to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_route_nobody_judged_is_not_preferred_and_says_so() {
-        let affinities = PairingAffinities::new();
-        let affinity = affinities.for_route("openrouter", &AssignedModel::named("the-model"));
-        assert!(!affinity.preferred());
-        assert!(affinity.reason().contains("no affinity"));
-    }
-
-    #[test]
-    fn an_affinity_is_found_by_provider_and_model_together() {
-        let model = AssignedModel::named("the-model");
-        let other = AssignedModel::named("another-model");
-        let affinities = PairingAffinities::new().with(
-            "openrouter",
-            &model,
-            RouteAffinity::new(true, "the caller's own words"),
-        );
-
-        assert!(affinities.for_route("openrouter", &model).preferred());
-        assert_eq!(
-            affinities.for_route("openrouter", &model).reason(),
-            "the caller's own words"
-        );
-        assert!(
-            !affinities.for_route("nous", &model).preferred(),
-            "a different provider is a different route"
-        );
-        assert!(
-            !affinities.for_route("openrouter", &other).preferred(),
-            "a different model is a different route"
-        );
-    }
-
-    #[test]
-    fn the_harness_default_model_keys_as_itself() {
-        let affinities = PairingAffinities::new().with(
-            "openrouter",
-            &AssignedModel::HarnessDefault,
-            RouteAffinity::new(true, "declared"),
-        );
-        assert!(
-            affinities
-                .for_route("openrouter", &AssignedModel::HarnessDefault)
-                .preferred()
-        );
-        assert!(
-            !affinities
-                .for_route("openrouter", &AssignedModel::named("the-model"))
-                .preferred()
-        );
-    }
-
-    #[test]
-    fn an_evidence_key_separates_two_routes_to_the_same_model() {
-        let one = EvidenceKey::new(
-            "claude-code",
-            "default",
-            AssignedModel::named("the-model"),
-            ServingRoute {
-                provider: Some("openrouter".to_owned()),
-                gateway: None,
-                protocol: Some(WireProtocol::AnthropicMessages),
-            },
-        );
-        let two = EvidenceKey::new(
-            "claude-code",
-            "default",
-            AssignedModel::named("the-model"),
-            ServingRoute {
-                provider: Some("nous".to_owned()),
-                gateway: None,
-                protocol: Some(WireProtocol::AnthropicMessages),
-            },
-        );
-        assert_ne!(one, two);
-        assert_eq!(one.client(), "claude-code");
-    }
-
-    #[test]
-    fn an_unknown_protocol_slug_is_none_rather_than_a_guess() {
-        assert_eq!(
-            wire_protocol_from_slug("anthropic-messages"),
-            Some(WireProtocol::AnthropicMessages)
-        );
-        assert_eq!(wire_protocol_from_slug("something-nobody-ships"), None);
-    }
-
-    // --- scoring helpers: tests that came with them from the host's config/pairing.rs ---
-
-    #[test]
-    fn a_warm_sessions_freshness_is_bounded_at_both_ends() {
-        assert_eq!(continuity_factor(0), 1.0);
-        assert_eq!(continuity_factor(-3600), 1.0);
-        assert_eq!(
-            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS),
-            0.0
-        );
-        assert_eq!(
-            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS * 100),
-            0.0
-        );
-        let half = continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS / 2);
-        assert!(
-            (half - 0.5).abs() < 1e-9,
-            "linear decay, not a curve: {half}"
-        );
-    }
-
-    #[test]
-    fn the_warm_session_values_straddle_the_strongest_prior() {
-        assert!(
-            LIVE_WARM_SESSION_VALUE > PriorStrength::Strong.base_magnitude(),
-            "a live warm session that could never outweigh the prior makes line 569 \
-             unreachable"
-        );
-        assert!(
-            RESUMABLE_WARM_SESSION_VALUE < PriorStrength::Strong.base_magnitude(),
-            "a prior no warm session of any kind could survive is a rule, not a prior"
-        );
-        assert!(
-            RESUMABLE_WARM_SESSION_VALUE > PriorStrength::Weak.base_magnitude(),
-            "continuity must interact with the user's four preference values, not sit \
-             above or below all of them"
-        );
-    }
-
-    #[test]
-    fn the_prior_decays_to_exactly_zero_not_a_floor() {
-        assert_eq!(decay_factor(0), 1.0);
-        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) > 0.0);
-        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) < 1.0);
-        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS), 0.0);
-        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS * 10), 0.0);
-    }
-
-    #[test]
-    fn evidence_signal_has_both_signs() {
-        let mut good = ObservedEvidence::none();
-        good.reliable_observation_count = 20;
-        good.task_success_rate = Some(1.0);
-        good.reliability = Some(1.0);
-        assert!(evidence_signal(&good) > 0.0);
-
-        let mut bad = ObservedEvidence::none();
-        bad.reliable_observation_count = 20;
-        bad.task_success_rate = Some(0.0);
-        bad.reliability = Some(0.0);
-        assert!(evidence_signal(&bad) < 0.0);
-    }
-
-    #[test]
-    fn evidence_signal_scales_with_how_many_observations_back_it() {
-        let mut thin = ObservedEvidence::none();
-        thin.reliable_observation_count = 1;
-        thin.task_success_rate = Some(1.0);
-
-        let mut thick = thin;
-        thick.reliable_observation_count = 20;
-
-        assert!(evidence_signal(&thin).abs() < evidence_signal(&thick).abs());
-    }
 }
 
 // ---- The scoring half of what was `config::pairing`: the preference
@@ -1028,4 +861,171 @@ pub fn native_pairing_prior_contribution(
     }
 
     explanation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_route_nobody_judged_is_not_preferred_and_says_so() {
+        let affinities = PairingAffinities::new();
+        let affinity = affinities.for_route("openrouter", &AssignedModel::named("the-model"));
+        assert!(!affinity.preferred());
+        assert!(affinity.reason().contains("no affinity"));
+    }
+
+    #[test]
+    fn an_affinity_is_found_by_provider_and_model_together() {
+        let model = AssignedModel::named("the-model");
+        let other = AssignedModel::named("another-model");
+        let affinities = PairingAffinities::new().with(
+            "openrouter",
+            &model,
+            RouteAffinity::new(true, "the caller's own words"),
+        );
+
+        assert!(affinities.for_route("openrouter", &model).preferred());
+        assert_eq!(
+            affinities.for_route("openrouter", &model).reason(),
+            "the caller's own words"
+        );
+        assert!(
+            !affinities.for_route("nous", &model).preferred(),
+            "a different provider is a different route"
+        );
+        assert!(
+            !affinities.for_route("openrouter", &other).preferred(),
+            "a different model is a different route"
+        );
+    }
+
+    #[test]
+    fn the_harness_default_model_keys_as_itself() {
+        let affinities = PairingAffinities::new().with(
+            "openrouter",
+            &AssignedModel::HarnessDefault,
+            RouteAffinity::new(true, "declared"),
+        );
+        assert!(
+            affinities
+                .for_route("openrouter", &AssignedModel::HarnessDefault)
+                .preferred()
+        );
+        assert!(
+            !affinities
+                .for_route("openrouter", &AssignedModel::named("the-model"))
+                .preferred()
+        );
+    }
+
+    #[test]
+    fn an_evidence_key_separates_two_routes_to_the_same_model() {
+        let one = EvidenceKey::new(
+            "claude-code",
+            "default",
+            AssignedModel::named("the-model"),
+            ServingRoute {
+                provider: Some("openrouter".to_owned()),
+                gateway: None,
+                protocol: Some(WireProtocol::AnthropicMessages),
+            },
+        );
+        let two = EvidenceKey::new(
+            "claude-code",
+            "default",
+            AssignedModel::named("the-model"),
+            ServingRoute {
+                provider: Some("nous".to_owned()),
+                gateway: None,
+                protocol: Some(WireProtocol::AnthropicMessages),
+            },
+        );
+        assert_ne!(one, two);
+        assert_eq!(one.client(), "claude-code");
+    }
+
+    #[test]
+    fn an_unknown_protocol_slug_is_none_rather_than_a_guess() {
+        assert_eq!(
+            wire_protocol_from_slug("anthropic-messages"),
+            Some(WireProtocol::AnthropicMessages)
+        );
+        assert_eq!(wire_protocol_from_slug("something-nobody-ships"), None);
+    }
+
+    // --- scoring helpers: tests that came with them from the host's config/pairing.rs ---
+
+    #[test]
+    fn a_warm_sessions_freshness_is_bounded_at_both_ends() {
+        assert_eq!(continuity_factor(0), 1.0);
+        assert_eq!(continuity_factor(-3600), 1.0);
+        assert_eq!(
+            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS),
+            0.0
+        );
+        assert_eq!(
+            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS * 100),
+            0.0
+        );
+        let half = continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS / 2);
+        assert!(
+            (half - 0.5).abs() < 1e-9,
+            "linear decay, not a curve: {half}"
+        );
+    }
+
+    #[test]
+    fn the_warm_session_values_straddle_the_strongest_prior() {
+        assert!(
+            LIVE_WARM_SESSION_VALUE > PriorStrength::Strong.base_magnitude(),
+            "a live warm session that could never outweigh the prior makes line 569 \
+             unreachable"
+        );
+        assert!(
+            RESUMABLE_WARM_SESSION_VALUE < PriorStrength::Strong.base_magnitude(),
+            "a prior no warm session of any kind could survive is a rule, not a prior"
+        );
+        assert!(
+            RESUMABLE_WARM_SESSION_VALUE > PriorStrength::Weak.base_magnitude(),
+            "continuity must interact with the user's four preference values, not sit \
+             above or below all of them"
+        );
+    }
+
+    #[test]
+    fn the_prior_decays_to_exactly_zero_not_a_floor() {
+        assert_eq!(decay_factor(0), 1.0);
+        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) > 0.0);
+        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) < 1.0);
+        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS), 0.0);
+        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS * 10), 0.0);
+    }
+
+    #[test]
+    fn evidence_signal_has_both_signs() {
+        let mut good = ObservedEvidence::none();
+        good.reliable_observation_count = 20;
+        good.task_success_rate = Some(1.0);
+        good.reliability = Some(1.0);
+        assert!(evidence_signal(&good) > 0.0);
+
+        let mut bad = ObservedEvidence::none();
+        bad.reliable_observation_count = 20;
+        bad.task_success_rate = Some(0.0);
+        bad.reliability = Some(0.0);
+        assert!(evidence_signal(&bad) < 0.0);
+    }
+
+    #[test]
+    fn evidence_signal_scales_with_how_many_observations_back_it() {
+        let mut thin = ObservedEvidence::none();
+        thin.reliable_observation_count = 1;
+        thin.task_success_rate = Some(1.0);
+
+        let mut thick = thin;
+        thick.reliable_observation_count = 20;
+
+        assert!(evidence_signal(&thin).abs() < evidence_signal(&thick).abs());
+    }
 }

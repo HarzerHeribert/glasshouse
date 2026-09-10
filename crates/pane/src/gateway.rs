@@ -7,17 +7,21 @@
 //! same protocol boundary [`crate::glasshouse`] already crosses. A session
 //! runs with no `glasshouse` binary anywhere on `PATH`.
 //!
-//! **Start or attach is decided once, from `ANTHROPIC_BASE_URL`**
-//! ([`start_or_attach`]): a set variable means something upstream — Glasshouse,
-//! a shell, a test — already has a gateway serving and passed its URL, so pane
-//! uses it and starts nothing. An unset variable means pane is standalone and
-//! owns the gateway's whole lifetime. There is no third case and no silent
-//! fallback to a provider endpoint: a gateway that cannot be started is a
-//! startup refusal, because a request that skipped the gateway would also skip
-//! the entitlement and cost controls that are the reason it exists.
+//! **Start, attach or go direct is decided once** ([`select`] then
+//! [`start_or_attach`]). A gateway was *handed over* when `ANTHROPIC_BASE_URL`
+//! names one and either `ANTHROPIC_AUTH_TOKEN` came with it or the host is
+//! loopback — Glasshouse's launch does exactly that — and pane attaches,
+//! starts nothing, and sends the three controls to Glasshouse's own commands
+//! for this project. Otherwise pane starts the gateway it was named (or
+//! `inference-gateway` on `PATH`) and owns its whole lifetime. The one
+//! fallback is loud, not silent: no gateway installed and none named means
+//! the session talks to the provider directly and says so; a gateway named
+//! by path that cannot be started is a startup refusal, because a request
+//! that skipped a gateway the user asked for would also skip the entitlement
+//! and cost controls that are the reason it exists.
 
 use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,30 +42,42 @@ pub enum Gateway {
     Command {
         gateway: PathBuf,
     },
+    /// Attached to a gateway Glasshouse started for this project: the serving
+    /// URL was handed over in the environment, and the three controls go to
+    /// Glasshouse's own commands scoped to `root`, exactly as they did before
+    /// the gateway was its own binary — so `/models`, `/login` and the cost
+    /// readout describe the catalogue and ledger of the project the session
+    /// runs in, not a standalone gateway's.
+    Hosted {
+        glasshouse: PathBuf,
+        root: PathBuf,
+    },
 }
 
 impl Gateway {
-    /// The executable this handle shells out to, for the one caller that must
-    /// **stream** a command rather than wait for it (the login flow reports an
-    /// authorization URL first and an outcome minutes later).
-    #[must_use]
-    pub fn executable(&self) -> Option<&Path> {
-        match self {
-            Self::None => None,
-            Self::Command { gateway } => Some(gateway.as_path()),
-        }
+    /// The command one control runs, with the executable and the prefix the
+    /// variant needs in front of `args` — every control, streamed or waited
+    /// for, builds its command here so a hosted session's `--scope` cannot
+    /// be forgotten at one call site.
+    pub(crate) fn control_command(&self, args: &[&str]) -> Option<Command> {
+        let mut command = match self {
+            Self::None => return None,
+            Self::Command { gateway } => Command::new(gateway),
+            Self::Hosted { glasshouse, root } => {
+                let mut command = Command::new(glasshouse);
+                command.arg("--scope").arg(root);
+                command
+            }
+        };
+        command.args(args);
+        Some(command)
     }
 
     /// The one definition of reachable: found, spawned, and exited 0.
     /// `stdin`, when given, is written and then dropped -- closing that end of
     /// the pipe -- so a child reading until EOF gets exactly one message.
     pub(crate) fn run(&self, args: &[&str], stdin: Option<&[u8]>) -> Option<Vec<u8>> {
-        let Gateway::Command { gateway } = self else {
-            return None;
-        };
-
-        let mut command = Command::new(gateway);
-        command.args(args);
+        let mut command = self.control_command(args)?;
         command.stdout(Stdio::piped());
         command.stderr(Stdio::null());
         command.stdin(if stdin.is_some() {
@@ -90,7 +106,7 @@ impl Gateway {
     /// listening, so the wait is short; doing it here rather than on a helper
     /// thread is what lets [`start_or_attach`] set the process environment
     /// while this process is still single-threaded.
-    pub fn serve(&self) -> Result<Serving, ServeError> {
+    pub fn serve(&self, log: &Path) -> Result<Serving, ServeError> {
         let Gateway::Command { gateway } = self else {
             return Err(ServeError::Other(
                 "pane cannot start: no inference gateway is configured -- pass \
@@ -100,13 +116,23 @@ impl Gateway {
             ));
         };
 
-        let mut child = Command::new(gateway)
-            .arg("serve")
-            .arg("--listen")
-            .arg("127.0.0.1:0")
+        let mut command = Command::new(gateway);
+        command.arg("serve").arg("--listen").arg("127.0.0.1:0");
+        // Its own process group, so a Ctrl-C the terminal sends to pane's
+        // group does not also end the gateway: pane treats one Ctrl-C as
+        // "cancel this call", and the next turn needs the gateway alive.
+        // `Serving`'s `Drop` is what ends it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped, never nulled: a refusal before the ready line is quoted
+            // back to the user, and everything after it goes to `log`.
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 let message = format!(
@@ -132,15 +158,40 @@ impl Gateway {
             Ok(0) | Err(_) => None,
             Ok(_) => serde_json::from_str::<Ready>(line.trim()).ok(),
         };
+        let mut stderr = child
+            .stderr
+            .take()
+            .expect("stderr was piped by the spawn above");
         let Some(ready) = ready else {
             let _ = child.kill();
             let _ = child.wait();
+            let mut said = String::new();
+            let _ = stderr.read_to_string(&mut said);
+            let said = said.trim();
             return Err(ServeError::Other(format!(
                 "pane cannot start: the inference gateway `{}` did not report a \
-                 listening address on its first line of output",
-                gateway.display()
+                 listening address on its first line of output{}",
+                gateway.display(),
+                if said.is_empty() {
+                    String::new()
+                } else {
+                    format!("; it said: {said}")
+                }
             )));
         };
+        // The gateway's own diagnostics for the rest of the session, where a
+        // failing session can be read back: the TUI owns the terminal from
+        // here on, so they cannot go to pane's stderr.
+        let log = log.to_path_buf();
+        std::thread::spawn(move || {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+            {
+                let _ = std::io::copy(&mut stderr, &mut file);
+            }
+        });
 
         Ok(Serving {
             child,
@@ -232,12 +283,94 @@ impl Drop for Serving {
 /// environment. The only caller is `session::run`, before it spawns the
 /// interrupt watcher or starts the live UI, and [`Gateway::serve`] itself
 /// starts no thread -- so this process is single-threaded at the write.
-pub fn start_or_attach(gateway: &Gateway) -> Result<Option<Serving>, ServeError> {
-    if std::env::var("ANTHROPIC_BASE_URL").is_ok_and(|value| !value.is_empty()) {
+/// Whether the environment hands this session a gateway to attach to: a
+/// base URL, and with it either the bearer the gateway minted or a loopback
+/// host. A base URL alone is not enough — Claude Code exports one into every
+/// child it starts, and a pane run from such a shell would otherwise attach
+/// to a proxy it was never given a token for and never start its own.
+#[must_use]
+pub fn handed_a_gateway() -> bool {
+    let Ok(url) = std::env::var("ANTHROPIC_BASE_URL") else {
+        return false;
+    };
+    if url.is_empty() {
+        return false;
+    }
+    if std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok_and(|token| !token.is_empty()) {
+        return true;
+    }
+    let host = url
+        .split_once("://")
+        .map_or(url.as_str(), |(_, rest)| rest)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .rsplit_once(':')
+        .map_or_else(|| "", |(host, _)| host)
+        .trim_end_matches(']');
+    let host = if host.is_empty() {
+        url.split_once("://")
+            .map_or(url.as_str(), |(_, rest)| rest)
+            .split(['/', '?', ':'])
+            .next()
+            .unwrap_or_default()
+    } else {
+        host
+    };
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+/// The handle a session runs its controls through, decided once from the
+/// environment and the flag: handed a gateway, the session is hosted by
+/// Glasshouse and its controls are Glasshouse's, scoped to `root`; otherwise
+/// the gateway named, or `inference-gateway` on `PATH`.
+#[must_use]
+pub fn select(
+    named: Option<&Path>,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    root: &Path,
+) -> Gateway {
+    if handed_a_gateway() {
+        return Gateway::Hosted {
+            glasshouse: glasshouse
+                .executable()
+                .map_or_else(|| PathBuf::from("glasshouse"), Path::to_path_buf),
+            root: root.to_path_buf(),
+        };
+    }
+    Gateway::Command {
+        gateway: named.map_or_else(|| PathBuf::from("inference-gateway"), Path::to_path_buf),
+    }
+}
+
+/// `Ok(None)` is an attached session or a direct one; `Ok(Some)` owns the
+/// gateway it started. `named` says whether the user asked for this gateway
+/// by path, which is what turns "not installed" from a notice into a refusal.
+pub fn start_or_attach(
+    gateway: &Gateway,
+    named: bool,
+    log: &Path,
+) -> Result<Option<Serving>, String> {
+    if matches!(gateway, Gateway::Hosted { .. }) {
         return Ok(None);
     }
 
-    let serving = gateway.serve()?;
+    let serving = match gateway.serve(log) {
+        Ok(serving) => serving,
+        // Not installed, and nobody asked for it by path: the session talks
+        // to the provider directly, exactly as pane did before the gateway
+        // existed, and says so once. A named `--gateway` that fails stays the
+        // refusal it is.
+        Err(ServeError::NotInstalled(_)) if !named => {
+            eprintln!(
+                "pane: no `inference-gateway` on PATH -- talking to the provider directly \
+                 (install it, or pass --gateway <path>)"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     // SAFETY: single-threaded at this point -- see the doc comment above.
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", serving.base_url());

@@ -324,6 +324,95 @@ credential = {{ env = "GATEWAY_BIN_TEST_KEY" }}
     );
 }
 
+/// Same-model failover with no host anywhere: two accounts, the first at a
+/// port nothing listens on. The first request fails there; the gateway moves
+/// the session to the second account on that outcome, and the next request
+/// is served — with the provider seeing exactly one request.
+#[test]
+fn serve_fails_over_to_the_next_account_when_the_first_is_unreachable() {
+    let provider = FakeProvider::start();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[providers.dead]
+base_url = "http://127.0.0.1:1"
+protocol = "anthropic-messages"
+credential_env = ["GATEWAY_BIN_TEST_KEY"]
+
+[providers.fixture]
+base_url = "{}"
+protocol = "anthropic-messages"
+credential_env = ["GATEWAY_BIN_TEST_KEY"]
+
+[accounts.a-first]
+kind = "api-key"
+provider = "dead"
+credential = {{ env = "GATEWAY_BIN_TEST_KEY" }}
+
+[accounts.b-second]
+kind = "api-key"
+provider = "fixture"
+credential = {{ env = "GATEWAY_BIN_TEST_KEY" }}
+"#,
+            provider.base_url()
+        ),
+    )
+    .expect("the configuration is written");
+
+    let mut child = gateway(&config_path, scratch.path())
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("GATEWAY_BIN_TEST_KEY", "fixture-provider-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built binary runs");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).expect("a ready line arrives");
+    let ready: serde_json::Value =
+        serde_json::from_str(ready.trim()).expect("the ready line is one JSON object");
+    let listening = ready["listening"].as_str().expect("`listening`").to_owned();
+    let token = ready["token"].as_str().expect("`token`").to_owned();
+    let request =
+        r#"{"model":"fixture-model","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
+
+    let (first, _) = post(
+        &format!("{listening}/v1/messages"),
+        &format!("Bearer {token}"),
+        request,
+    );
+    assert!(
+        !first.contains("200"),
+        "the first account is unreachable, so the first request fails: {first}"
+    );
+    let (second, body) = post(
+        &format!("{listening}/v1/messages"),
+        &format!("Bearer {token}"),
+        request,
+    );
+    assert!(
+        second.contains("200"),
+        "the gateway failed over to the second account on its own: {second}"
+    );
+    assert!(
+        body.contains("msg_fixture"),
+        "served by the fixture: {body}"
+    );
+    assert_eq!(
+        provider.requests(1).len(),
+        1,
+        "one request reached the fixture"
+    );
+
+    drop(child.stdin.take().expect("stdin was piped"));
+    let status = wait_for_exit(&mut child);
+    assert!(status.success(), "clean exit on stdin EOF, got {status:?}");
+}
+
 /// `entitlements --json` over a two-account catalogue: the documented keys,
 /// sorted by account, and a subscription row that says which flow connects
 /// it and that nothing has.

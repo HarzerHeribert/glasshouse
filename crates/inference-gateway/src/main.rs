@@ -772,11 +772,10 @@ mod tests {
     /// This binary's own files are covered by the rule `lib.rs`'s header
     /// states — **nothing in this crate may name Glasshouse**.
     ///
-    /// `gateway::tests::the_gateway_names_no_glasshouse_path` scans a
-    /// hand-written list of the library's files and pins its own length, so
-    /// files added after it was written are outside it until that list is
-    /// extended. This covers the three added here in the meantime; it is the
-    /// same two needles, checked the same way.
+    /// `gateway::tests::the_gateway_names_no_glasshouse_path` lists these
+    /// three files too and pins its own length; this is the same two needles
+    /// checked from the binary's own target, so the rule holds even for a
+    /// `cargo test --bin` run that never builds the library's tests.
     #[test]
     fn the_binarys_own_files_name_no_glasshouse_path() {
         const FORBIDDEN: [&str; 2] = ["glasshouse::", "rusqlite"];

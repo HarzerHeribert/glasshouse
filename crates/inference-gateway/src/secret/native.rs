@@ -1062,7 +1062,10 @@ impl PreferNativeSecretStore {
 /// `fixtures` feature: Glasshouse's acceptance test that a stored credential
 /// reaches a launch overlay lives on the host side of the extraction and needs
 /// exactly these three.
-#[cfg(any(test, feature = "fixtures"))]
+#[cfg(all(
+    any(test, feature = "fixtures"),
+    any(target_os = "macos", target_os = "windows")
+))]
 pub mod fixtures {
     use super::{NativeSecretStore, SERVICE, SecretRef};
 

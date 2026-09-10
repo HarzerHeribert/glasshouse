@@ -418,10 +418,11 @@ fn run_session(
 /// [`run_session`], plus the `inference-gateway` binary the entitlement,
 /// subscription and routing-cost controls shell out to.
 ///
-/// `base_url` is still set, so the session **attaches** rather than starting
-/// a gateway of its own; the fake script here answers only the control
-/// subcommands. The standalone case -- an unset `ANTHROPIC_BASE_URL` and a
-/// gateway pane starts itself -- is
+/// `base_url` is set to a loopback host, so the session is **hosted**: it
+/// attaches rather than starting a gateway of its own, and its controls go
+/// to `glasshouse`, scoped to the project — which is why the usage-row tests
+/// pass their fake as `--glasshouse`. The standalone case -- an unset
+/// `ANTHROPIC_BASE_URL` and a gateway pane starts itself -- is
 /// [`a_session_runs_standalone_against_a_gateway_it_started`].
 fn run_session_with_gateway(
     root: &Path,
@@ -1562,7 +1563,7 @@ fn write_routing_cost(dir: &Path, name: &str, once_only: bool) -> PathBuf {
         String::new()
     };
     let body = format!(
-        "#!/bin/sh\ncase \"$1\" in\n  routing-cost)\n{guard}    echo '{row}'\n    ;;\nesac\nexit 0\n"
+        "#!/bin/sh\nif [ \"$1\" = \"--scope\" ]; then shift 2; fi\ncase \"$1\" in\n  routing-cost)\n{guard}    echo '{row}'\n    ;;\nesac\nexit 0\n"
     );
     write_script(dir, name, &body)
 }
@@ -1591,8 +1592,8 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
         "sess-budget-gateway",
         "count them",
         &base_url,
-        None,
         Some(&gateway),
+        None,
     );
     assert!(
         output.status.success(),
@@ -1644,8 +1645,8 @@ fn a_turn_the_gateway_never_metered_is_labelled_rather_than_averaged() {
         "sess-budget-mixed",
         "count them",
         &base_url,
-        None,
         Some(&gateway),
+        None,
     );
     assert!(
         output.status.success(),
@@ -2119,8 +2120,8 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
         "sess-budget-gateway-over-usage",
         "count them",
         &base_url,
-        None,
         Some(&gateway),
+        None,
     );
     assert!(
         output.status.success(),
@@ -3847,7 +3848,7 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
         &rollout,
         "sess-model-report",
         &["/model"],
-        &base_url,
+        Some(&base_url),
         &gateway,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -5164,6 +5165,27 @@ exit 0
     write_script(dir, name, &body)
 }
 
+/// [`write_fake_gateway`]'s script as a fake **Glasshouse**: the same
+/// answers, after the `--scope <root>` prefix every hosted control carries.
+#[cfg(unix)]
+fn write_fake_glasshouse(dir: &Path, name: &str, record: &Path) -> PathBuf {
+    const SCRIPT: &str = r#"#!/bin/sh
+echo "$@" >> "@RECORD@"
+if [ "$1" = "--scope" ]; then shift 2; fi
+case "$1" in
+  entitlements)
+    echo '{"version":1,"accounts":[{"account":"work@example.com","provider":"anthropic","models":["claude-opus-5"],"scope":"user","selectable":true,"authenticated":false,"connect_with":"anthropic"}]}'
+    ;;
+  subscriptions)
+    echo '{"state":"connected","account":"work@example.com"}'
+    ;;
+esac
+exit 0
+"#;
+    let body = SCRIPT.replace("@RECORD@", &record.display().to_string());
+    write_script(dir, name, &body)
+}
+
 /// A provider endpoint that records each request's **headers** as well as its
 /// body.
 ///
@@ -5230,11 +5252,12 @@ fn run_session_stdin_with_gateway(
     rollout: &Path,
     session_id: &str,
     inputs: &[&str],
-    base_url: &str,
+    base_url: Option<&str>,
     gateway: &Path,
 ) -> std::process::Output {
     use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pane"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
+    command
         .arg("session")
         .arg("--root")
         .arg(root)
@@ -5244,14 +5267,16 @@ fn run_session_stdin_with_gateway(
         .arg(session_id)
         .arg("--gateway")
         .arg(gateway)
-        .env("ANTHROPIC_BASE_URL", base_url)
+        .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    if let Some(base_url) = base_url {
+        command.env("ANTHROPIC_BASE_URL", base_url);
+    }
+    let mut child = command.spawn().unwrap();
     {
         let stdin = child.stdin.as_mut().unwrap();
         for line in inputs {
@@ -5521,12 +5546,14 @@ fn the_model_and_login_controls_reach_the_gateway_without_a_scope() {
     let base_url = refused_base_url();
     let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
 
+    // Standalone: nothing handed pane a gateway, so it starts this one and
+    // every control goes to it.
     let output = run_session_stdin_with_gateway(
         &root,
         &rollout,
         "sess-gateway-controls",
         &["/model", "/login work@example.com"],
-        &base_url,
+        None,
         &gateway,
     );
     assert!(
@@ -5565,9 +5592,164 @@ fn the_model_and_login_controls_reach_the_gateway_without_a_scope() {
     );
 }
 
-/// A gateway that cannot be started is a **startup refusal**, naming the
-/// binary. Falling back to a direct provider request would send a turn past
-/// every entitlement and cost control the gateway exists to apply.
+/// **Hosted** controls: handed a gateway by Glasshouse (a base URL with a
+/// loopback host, as its launch passes), `/model` and `/login` go to
+/// Glasshouse's own commands scoped to this project — the catalogue that is
+/// actually serving — and the gateway binary is neither started nor asked.
+#[cfg(unix)]
+#[test]
+fn the_model_and_login_controls_of_a_hosted_session_reach_glasshouse_scoped_to_the_project() {
+    let root = scratch_dir("hosted-controls-root");
+    let rollout = root.join("rollout.jsonl");
+    let gateway_record = root.join("gateway-argv.txt");
+    let glasshouse_record = root.join("glasshouse-argv.txt");
+    let base_url = refused_base_url();
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &gateway_record, &base_url, "x");
+    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &glasshouse_record);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-hosted-controls",
+        &["/model", "/login work@example.com"],
+        &base_url,
+        Some(&glasshouse),
+        false,
+    );
+    let _ = gateway;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let seen = fs::read_to_string(&glasshouse_record).unwrap_or_default();
+    let scoped = format!("--scope {} entitlements --json --refresh", root.display());
+    assert!(
+        seen.lines().any(|line| line == scoped),
+        "/model must refresh entitlements through Glasshouse, scoped: {seen}"
+    );
+    assert!(
+        seen.lines().any(|line| line
+            .ends_with("subscriptions connect anthropic --entitlement work@example.com --json")
+            && line.starts_with("--scope ")),
+        "/login must run the connect flow through Glasshouse, scoped: {seen}"
+    );
+    assert!(
+        !gateway_record.exists(),
+        "a hosted session neither starts nor asks the gateway binary"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("claude-opus-5"),
+        "the model panel must be built from Glasshouse's catalogue:\n{stdout}"
+    );
+}
+
+/// A base URL with neither a bearer nor a loopback host is not a gateway
+/// handed to this session — it is what Claude Code exports into every child
+/// — so pane starts its own gateway and points itself at that instead.
+#[cfg(unix)]
+#[test]
+fn a_base_url_without_a_token_or_a_loopback_host_does_not_count_as_a_handed_gateway() {
+    let root = scratch_dir("inherited-base-url-root");
+    let rollout = root.join("rollout.jsonl");
+    let record = root.join("gateway-argv.txt");
+    let (provider_url, requests) = start_header_recording_provider(vec![ending_reply()]);
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &provider_url, "gw-7");
+
+    let output = run_session_with_gateway(
+        &root,
+        &rollout,
+        "sess-inherited-url",
+        "hi",
+        "http://proxy.invalid:9",
+        None,
+        Some(&gateway),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen = fs::read_to_string(&record).unwrap_or_default();
+    assert!(
+        seen.lines().any(|line| line.starts_with("serve ")),
+        "pane must start its own gateway rather than attach to an inherited URL: {seen}"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "the turn went to the gateway pane started, not to the inherited URL"
+    );
+}
+
+/// A gateway that starts and then refuses to serve says why, in pane's own
+/// refusal: the real binary with an account whose credential resolves
+/// nowhere exits before its ready line, and its words come back.
+#[cfg(unix)]
+#[test]
+fn a_gateway_that_refuses_to_serve_is_quoted_in_panes_refusal() {
+    let gateway = real_gateway_binary();
+    let root = scratch_dir("gateway-refusal-root");
+    let rollout = root.join("rollout.jsonl");
+    let config = root.join("gateway.toml");
+    fs::write(
+        &config,
+        r#"
+[providers.fixture]
+base_url = "http://127.0.0.1:1"
+protocol = "anthropic-messages"
+credential_env = ["PANE_E2E_UNSET_VAR"]
+
+[accounts.nokey]
+kind = "api-key"
+provider = "fixture"
+credential = { env = "PANE_E2E_UNSET_VAR" }
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(&rollout)
+        .arg("--session")
+        .arg("sess-gateway-refusal")
+        .arg("--task")
+        .arg("hi")
+        .arg("--gateway")
+        .arg(&gateway)
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("PANE_E2E_UNSET_VAR")
+        .env("PATH", "/usr/bin:/bin")
+        .env("INFERENCE_GATEWAY_CONFIG", &config)
+        .env("INFERENCE_GATEWAY_DATA_DIR", root.join("gateway-data"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a gateway that cannot serve is a refusal"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not report a listening address") && stderr.contains("it said:"),
+        "the refusal must carry the gateway's own words: {stderr}"
+    );
+    assert!(
+        stderr.contains("nokey") || stderr.contains("PANE_E2E_UNSET_VAR"),
+        "the gateway's words must name what could not be resolved: {stderr}"
+    );
+}
+
+/// A gateway **named by path** that cannot be started is a startup refusal,
+/// naming the binary: a turn that skipped a gateway the user asked for would
+/// skip every entitlement and cost control it exists to apply. Only an
+/// unnamed, uninstalled gateway is the direct-mode case, and that is a notice.
 #[test]
 fn a_gateway_that_cannot_be_started_refuses_the_session_by_name() {
     let root = scratch_dir("gateway-missing-root");
