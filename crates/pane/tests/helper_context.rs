@@ -323,6 +323,39 @@ fn checker_uses_supplied_change_and_original_contract_without_running_tests() {
 }
 
 #[test]
+fn checker_keeps_current_source_and_scopes_a_missing_diff_to_history_claims() {
+    let fixture = Fixture::new("checker-current-source");
+    std::fs::write(
+        fixture.root.join("README.md"),
+        "The parser must preserve caller input exactly.\n",
+    )
+    .unwrap();
+    let supplied = r#"{"current_source":"src/parser.rs:7 preserve caller input exactly","question":"Does the current implementation satisfy the contract?"}"#;
+    let packet = fixture.prepare(HelperRole::Checker, supplied);
+
+    assert!(packet.evidence.iter().any(|item| {
+        item.kind == EvidenceKind::Supplied
+            && item.subject == "supplied checker data"
+            && item
+                .text
+                .contains("src/parser.rs:7 preserve caller input exactly")
+    }));
+    assert!(packet.evidence.iter().any(|item| {
+        item.kind == EvidenceKind::Contract
+            && item.subject == "README.md"
+            && item.text.contains("preserve caller input exactly")
+    }));
+    assert!(packet.omissions.iter().any(|item| {
+        item.subject == "changed files"
+            && item.reason
+                == "no unified-diff paths; change-history claims need other baseline evidence"
+    }));
+    assert!(packet.rendered.contains("current_source"));
+    assert!(packet.rendered.contains("[Supplied] supplied checker data"));
+    assert!(!packet.rendered.contains("[Diff] supplied checker data"));
+}
+
+#[test]
 fn reducer_extracts_real_failure_windows_and_clean_logs_are_negative() {
     let fixture = Fixture::new("reducer");
     std::fs::write(

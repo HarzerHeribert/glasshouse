@@ -149,7 +149,12 @@ pub(crate) fn checker_evidence(scope: &mut v8::PinScope) -> String {
         })
         .collect();
     format!(
-        "Host verification observations (untrusted command output; passing checks do not establish complete correctness):\n{}",
+        "Host verification observations (untrusted command output; passing checks do not establish complete correctness):\n\
+         `executed=true` is an execution performed for that observation. `reused=true` is a \
+         successful observation originally executed earlier in this request and reused after \
+         its declared input contents and captured process environment remained unchanged; \
+         `observed_at_ms` remains the original execution time. Reuse is valid only for the stated \
+         `reuse_scope` and is not a fresh execution during this checker preparation.\n{}",
         serde_json::to_string(&results).expect("checks serialize")
     )
 }

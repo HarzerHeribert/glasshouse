@@ -20360,3 +20360,23 @@ Evidence and the fresh installed follow-up are recorded in
 `docs/process/dogfooding-2026-09-10-helper-preparation.md`. No capability box is
 closed by this decision; a single repeated fixture cannot establish harness
 parity or weighted cost superiority.
+
+
+### 2026-09-10 — Interpret checker evidence before completing
+
+The installed Sol/Luna repair passed the frozen independent oracle, but its
+final cell appended a checker `cannot tell` verdict to an already-written claim
+of no unresolved limitations. The parent model had never seen that verdict.
+A checker call in the same cell as a proposed terminal return therefore leaves
+a completion guard unmet: preserve the candidate and all checker outcomes as
+observations, and require one subsequent parent turn before accepting completion.
+This is evidence sequencing, not automatic approval or string matching of verdicts.
+It applies to interactive and command-loop execution and preserves accounting
+and cancellation.
+
+Checker input is evidence, not necessarily a unified diff. Current source and
+contract can support current-state claims; baseline-free history claims remain
+unproven. Named verification reuse remains honest within its declared scope,
+with original timestamp and explicit executed/reused fields. A missing fresh
+execution inside the helper is not itself an evidence failure. The bounded
+follow-up replay must validate both behaviors before this correction is done.

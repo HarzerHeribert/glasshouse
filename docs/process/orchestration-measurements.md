@@ -5719,3 +5719,18 @@ green.
 including PTY80 and all targets skipped after the first failure. Full Pane
 CI passes (922 summed passing executions including nested probes, one ignored).
 Final installed evidence and cost reconciliation remain pending.
+
+**Installed v3:** 9f3a129 repair passes 10 project tests and 16 frozen external
+cases with zero operator corrections, 7 cells and 309.3 s. Known reported
+usage 84,753 Sol + 33,776 Luna = 118,529; cache reporting partial, no monetary data.
+The helper share of known tokens is 28.5%, not two-thirds. UI/ledger reconcile.
+
+**Follow-up batch:** Sol high completion-guard editor and Sol medium checker
+evidence editor run concurrently with Sol high accounting audit. Primary
+review caught the initial guard touching only the nested-agent path; the editor
+added the actual session/TUI path and regressions for both. It also expanded
+the handoff to all checkers in the cell. A temporary worktree collision was
+detected through disjoint-file status, corrected by extracting only the seed
+worker's patch into its own worktree, and left main untouched. No worker was
+discarded or silently reset. These are process correction counts, not hidden
+operator corrections to the native coding task. Final integration/replay pending.

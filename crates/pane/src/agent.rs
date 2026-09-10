@@ -377,6 +377,41 @@ pub(crate) fn run_narrowed_metered(
             && outcome.ends_the_task()
         {
             let answer = terminal.render(value);
+            let helpers = runtime.helper_records();
+            if let Some(handoff) = checker_handoff(&helpers, &answer) {
+                // A return written before the checker answered cannot have
+                // evaluated that answer, even though JavaScript awaited the
+                // call before reaching `return`. Preserve both pieces as an
+                // observation and give the parent model one later turn to
+                // decide what the evidence means. The checker prose is data:
+                // no verdict spelling is parsed and no outcome is promoted to
+                // approval by the host.
+                let result = result_message(&outcome, turn);
+                let mut full = prompt::render_result(&result);
+                full.push_str(&handoff);
+                let mut historical = prompt::render_result_history(&result);
+                historical.push_str(&handoff);
+                if let Some((id, _, _)) = &native {
+                    conversation.messages.push(Message::runtime_tool_result(
+                        id.clone(),
+                        full,
+                        false,
+                        historical,
+                    ));
+                } else {
+                    conversation
+                        .messages
+                        .push(Message::runtime(full, historical));
+                }
+                if let Some(pending) = instruction_boundary {
+                    if pending.fatal {
+                        runtime.end_task();
+                        return finish(&pending.text, "failed", turn, tokens, trajectory);
+                    }
+                    runtime.acknowledge_instructions();
+                }
+                continue;
+            }
             if let Some((id, _, _)) = &native {
                 let result = result_message(&outcome, turn);
                 let mut feedback = prompt::render_result(&result);
@@ -428,6 +463,44 @@ pub(crate) fn run_narrowed_metered(
         tokens,
         trajectory,
     )
+}
+
+/// The deterministic boundary between a checker call and accepting a parent
+/// completion. It carries the returned candidate and the helper's unparsed
+/// outcome into the next provider request; neither can be silently dropped or
+/// treated as approval by host-side prose matching.
+pub(crate) fn checker_handoff(
+    helpers: &[crate::helpers::HelperRecord],
+    candidate: &str,
+) -> Option<String> {
+    let checkers: Vec<_> = helpers
+        .iter()
+        .filter(|record| record.helper == "check")
+        .collect();
+    if checkers.is_empty() {
+        return None;
+    }
+    let mut handoff = format!("\n\n## Candidate completion (deferred)\n{candidate}");
+    for (index, checker) in checkers.iter().enumerate() {
+        let status = if checker.outcome.cancelled {
+            "cancelled"
+        } else if checker.outcome.ok {
+            "returned"
+        } else {
+            "failed"
+        };
+        handoff.push_str(&format!(
+            "\n\n## Checker observation {} ({status})\n{}",
+            index + 1,
+            checker.outcome.text
+        ));
+    }
+    handoff.push_str(
+        "\n\nA checker ran in the same cell as this candidate. Evaluate every observation and \
+         the candidate in this subsequent turn before deciding whether to return, revise, or \
+         continue working.",
+    );
+    Some(handoff)
 }
 
 /// The tools this loop is declared, by name.

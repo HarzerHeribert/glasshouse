@@ -84,8 +84,10 @@ fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evide
         model: Some("fixture-helper".into()),
         ..HelpersConfig::default()
     });
+    let warmed = runtime
+        .run_cell("const verified = await checks.run('tests', true); console.log(verified);");
     let scout = runtime.run_cell("const oriented = await helper.find('Find FIRST-VERIFIED acceptance'); console.log(oriented);");
-    let first=runtime.run_cell("const first = await helper.check('Check original requirement: input.txt begins FIRST-VERIFIED'); console.log(first);");
+    let first=runtime.run_cell("const first = await helper.check(JSON.stringify({authoritative_contract: 'input.txt must begin FIRST-VERIFIED', current_source: 'input.txt:1 FIRST-VERIFIED', configured_verification: verified, question: 'Check the current source against the original contract; report whether this named test observation was freshly executed and passed, and whether all original tests remain'})); console.log(first);");
     let second=runtime.run_cell("const second = await helper.check('Check the same original requirement with current evidence'); console.log(second);");
     let reducer = runtime.run_cell("const reduced = await helper.reduce('command: tests\\nexit code: 1\\nerror: REAL-FAILURE-SENTINEL'); console.log(reduced);");
     drop(runtime);
@@ -97,6 +99,10 @@ fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evide
     }
     let requests = worker.join().unwrap();
     std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        warmed.turn().stdout_tail.contains("\"executed\": true"),
+        "{warmed:?}"
+    );
     assert!(first.turn().stdout_tail.contains("holds"), "{first:?}");
     assert!(second.turn().stdout_tail.contains("holds"), "{second:?}");
     assert_eq!(requests.len(), 4);
@@ -125,7 +131,7 @@ fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evide
     strings(&requests[1], &mut first_body);
     let mut second_body = String::new();
     strings(&requests[2], &mut second_body);
-    assert!(first_body.contains("Check original requirement: input.txt begins FIRST-VERIFIED"));
+    assert!(first_body.contains("Check the current source against the original contract"));
     assert!(second_body.contains("Check the same original requirement with current evidence"));
     let mut scout_body = String::new();
     strings(&requests[0], &mut scout_body);
@@ -143,8 +149,34 @@ fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evide
         assert!(body.contains("FIRST-VERIFIED"));
         assert!(body.contains("\"exit_code\":0"), "{body}");
         assert!(body.contains("Original checker request"));
+        assert!(body.contains("[Contract] README.md"), "{body}");
     }
-    assert!(first_body.contains("\"executed\":true"), "{first_body}");
+    let host_evidence = first_body
+        .find("Host verification observations")
+        .expect("the actual first checker packet includes host evidence");
+    let original_request = &first_body[..host_evidence];
+    let prepared_observation = &first_body[host_evidence..];
+    assert!(
+        original_request.contains("\"executed\":true")
+            && original_request.contains("\"reused\":false"),
+        "the caller's proven fresh observation must survive into the first checker packet: {first_body}"
+    );
+    assert!(
+        prepared_observation.contains("\"executed\":false")
+            && prepared_observation.contains("\"reused\":true"),
+        "host preparation must accurately label reuse: {first_body}"
+    );
+    assert!(
+        prepared_observation.contains("originally executed earlier in this request"),
+        "{first_body}"
+    );
+    assert!(
+        first_body.contains("Current source and its contract can establish a current-state claim")
+            && first_body.contains(
+                "no unified-diff paths; change-history claims need other baseline evidence"
+            ),
+        "the first packet must permit current-state assessment while preserving the missing baseline limitation: {first_body}"
+    );
     assert!(second_body.contains("\"executed\":false"), "{second_body}");
     assert!(second_body.contains("\"reused\":true"), "{second_body}");
 }

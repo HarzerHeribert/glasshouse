@@ -46,6 +46,9 @@ pub enum InputKind {
     Handle,
     /// A diff of the turn.
     Diff,
+    /// Caller-supplied evidence about a claim, which may include a diff,
+    /// current source, a contract, or verification observations.
+    Evidence,
 }
 
 /// What a helper returns.
@@ -165,35 +168,48 @@ pub const REDUCER: HelperSpec = HelperSpec {
     call_sites: &[CallSite::PostResult, CallSite::Cell],
 };
 
-/// Check a claim against a diff, and return the evidence with the verdict.
+/// Check a claim against supplied evidence and readable files, and return the
+/// evidence with the verdict.
 ///
 /// `read` and `grep` only: it decides whether something holds, and a helper
 /// that could also change it would be deciding about its own work.
 pub const CHECKER: HelperSpec = HelperSpec {
     name: "check",
-    summary: "Check a claim against a diff and answer with a verdict plus the file:line evidence for it.",
+    summary: "Check a claim against supplied evidence and current files, and answer with a verdict plus the evidence for it.",
     verb: "checking",
     preamble: "Never state a number you did not compute. You have a runtime: count and total in a \
         cell and report what it returned. A computed number is evidence; an estimated one \
         is a conclusion, and conclusions are not yours to draw.\n\
         \n\
-        You check whether a claim holds for a diff you are given. You can read and grep, \
-        and you can change nothing.\n\
+        You check whether a claim holds against the supplied evidence and current readable files. \
+        The evidence may contain a diff, current source excerpts, a contract, or verification \
+        observations. You can read and grep, and you can change nothing.\n\
         \n\
         Open with the verdict alone on the first line: `holds`, `does not hold`, or `cannot \
-        tell`. `cannot tell` is a real verdict and is the honest one whenever the diff does not \
-        contain what the claim is about. Under it, the evidence and nothing else: each point as \
-        `path/to/file.rs:120` and the text there that decides it, quoted as it stands. A verdict \
-        with no evidence under it is not a verdict.\n\
+        tell`. Current source and its contract can establish a current-state claim without a \
+        unified diff. An absent diff or baseline prevents only change-history claims such as \
+        whether old tests were preserved. For a composite claim, use `cannot tell` if a material \
+        part lacks evidence, but still identify which parts the evidence supports or refutes. \
+        Under the verdict, give the evidence and nothing else. Cite source as \
+        `path/to/file.rs:120` with the deciding text. Cite a verification observation by its check \
+        name, exit code, `executed`, `reused`, `observed_at_ms`, and `reuse_scope`; do not turn it \
+        into a file citation. A verdict with no evidence under it is not a verdict.\n\
         \n\
-        Never propose a fix, never write the corrected code, and never report anything the diff \
-        or the files do not say — you are returning evidence, and a wrong verdict the caller \
-        trusts is worse than no verdict. Name what you did not check — the parts of the diff \
-        you did not open, and whether you ran out of turns — as your last line.",
+        `executed=true` means that observation came from an execution. `reused=true` means a \
+        successful observation originally executed earlier in this request was reused because \
+        its declared inputs and captured process environment were unchanged; it is valid for \
+        that stated reuse scope but is not a fresh run during checker preparation. Do not demand \
+        another run merely because an honest reusable observation was supplied. Do not infer \
+        coverage beyond the named command, declared inputs, or stated reuse scope.\n\
+        \n\
+        Never propose a fix, never write the corrected code, and never report anything the \
+        supplied evidence or the files do not say — you are returning evidence, and a wrong \
+        verdict the caller trusts is worse than no verdict. Name the material evidence gaps, \
+        unread files, and whether you ran out of turns as your last line.",
     tools: &["read", "grep"],
     max_tokens: 2048,
     max_turns: 3,
-    input: InputKind::Diff,
+    input: InputKind::Evidence,
     output: OutputKind::Verdict,
     call_sites: &[CallSite::CompletionGate, CallSite::Cell],
 };

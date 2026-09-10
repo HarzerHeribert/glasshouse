@@ -91,6 +91,21 @@ symlinked or oversized dependencies disable reuse. External dependencies and
 nondeterminism require `force=true` or `reuse=false`. A task boundary clears
 the cache.
 
+Checker evidence can be a diff, current source, the original contract, or
+host verification observations. Missing history limits claims about what was
+preserved or changed; it does not prevent judging current behavior from source
+and the contract. A valid reused observation is evidence within its declared
+scope, never a fresh execution. The checker names material gaps rather than
+inventing an obligation to rerun an unchanged successful check.
+
+A checker invoked inside a cell creates a completion guard. A return from that
+same cell is a candidate, not an accepted terminal response: the host presents
+the candidate and every checker outcome to the parent in a subsequent model
+turn. The parent must interpret that evidence before deciding to finish or
+continue. This guard does not parse verdict wording, grant approval, or require
+human intervention. It prevents a prewritten completion from claiming success
+before the model has seen a contradictory or uncertain checker result.
+
 Integration and installed evidence for this change is tracked in
 [`dogfooding-2026-09-10-helper-preparation.md`](../../process/dogfooding-2026-09-10-helper-preparation.md).
 
@@ -202,7 +217,7 @@ pub struct HelperSpec {
     pub call_sites: &'static [CallSite],
 }
 
-pub enum InputKind  { Request, Text, Handle, Diff }
+pub enum InputKind  { Request, Text, Handle, Diff, Evidence }
 pub enum OutputKind { Spans, Reduction, Verdict }
 pub enum CallSite   { Preflight, PostResult, CompletionGate, Cell }
 
@@ -259,7 +274,7 @@ it gets reviewed as such.
 | question | where is it · what is relevant | what does this say, shorter | does this hold |
 | `tools` | `read` `glob` `grep` `context` | **`[]`** | `read` `grep` |
 | `max_turns` | 8 | 1 | 3 |
-| `input` | `Request` | `Text` \| `Handle` | `Diff` |
+| `input` | `Request` | `Text` \| `Handle` | `Evidence` |
 | `output` | `Spans` | `Reduction` | `Verdict` |
 | `call_sites` | `Preflight`, `Cell` | `PostResult`, `Cell` | `CompletionGate`, `Cell` |
 | absorbs | selection, oracle scouting, boundary scouting, conventions, semantic search, index answers | log reduction, evidence compaction | diff review, claim verification |
@@ -538,6 +553,7 @@ question as much as a routing one.
 
 ## Open, not decided here
 
-Whether one tier model serves all three specs or each names its own. Whether
-CHECKER may run one named command or only read what has already been produced.
-Whether SCOUT's budget is a token count or a file count.
+Whether one tier model serves all three specs or each names its own.
+Whether SCOUT's budget is a token count or a file count. Named checker
+verification is now host-owned through the parent profile; the helper itself
+remains read-only.

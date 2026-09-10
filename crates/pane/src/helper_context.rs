@@ -63,6 +63,7 @@ pub enum EvidenceKind {
     Match,
     ChangedFile,
     Diff,
+    Supplied,
     Contract,
     Command,
     Status,
@@ -310,11 +311,14 @@ impl<'a> State<'a> {
             );
         }
         if changed.is_empty() {
-            self.omit("changed files", "no unified-diff paths found");
+            self.omit(
+                "changed files",
+                "no unified-diff paths; change-history claims need other baseline evidence",
+            );
         }
         if !bounded_input.is_empty() {
             self.add(
-                EvidenceKind::Diff,
+                EvidenceKind::Supplied,
                 "supplied checker data",
                 sanitize_blob(&bounded_input),
             );

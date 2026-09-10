@@ -174,3 +174,84 @@ Artifacts: `helper-preparation-ci-macos.log`,
 Final integrated workspace Clippy (both crates, all targets, warnings denied)
 passes. The corrected Glasshouse workspace log sums to 4,244 passed and six
 ignored across 168 test summaries; nested probes are included in that sum.
+
+## Installed v3 trial and observed completion correction
+
+Both release binaries from `9f3a129` installed as
+`v0.1.0-pre.1-130-g9f3a129`; their SHA-256 values match the immutable manifest.
+The primary used the new visible quick-open profile picker in the dedicated
+cmux window, selecting subscription-openai-pane (gpt-5.6-sol). Embedded Pane
+accepted the complete 1,219-byte prompt with no extra focus step and kept the
+submitted prompt visible. The real session is `cb726e661965`, Pane `pane-67138`.
+The footer reports effort auto; this is a setting, not evidence of hidden reasoning.
+
+The task completed in seven cells with zero operator corrections. Ten project
+tests pass, and all 16 unchanged independent oracle cases pass. Baseline hashes
+prove only four implementation files and tests/test_report.py changed; AST
+comparison proves all five original test methods unchanged. The actual September
+EUR CLI returns 1,029 cents, three transactions, food 1,000 and “travel, train” 29.
+
+The Scout used two Luna requests (previous v2 used four), with recorded bounded
+preparation excluding build and node_modules. Parent glob still returned 625 paths
+before the model filtered them; bounded helper preparation does not fix broad
+parent glob selection. The live helper lane, partial-cache coverage and combined
+parent/helper spend were visible. Exact ledger reconciliation is pending.
+
+Three recovered cell errors remain recorded: unsupported TypeScript `as const`,
+invalid JavaScript string quoting, and denied git diff. The model recovered
+through permitted source context without changing permissions or asking the user.
+
+The final answer exposed a real sequencing defect: it appended a checker verdict
+`cannot tell` then asserted no unresolved limitations, because the return text
+was composed in the same cell before the checker outcome reached the parent
+model. Two Sol workers are correcting that handoff and the checker's diff-only
+evidence assumptions. Code acceptance passes; harness completion behavior is
+not treated as flawless. Final installed replay is required after correction.
+
+### v3 measured accounting and usability
+
+| Scope | Requests | Input | Output | Reported cache read | Known total |
+|---|---:|---:|---:|---:|---:|
+| Sol parent | 7 | 54,251 | 8,102 | 22,400 | 84,753 |
+| Luna helpers | 4 | 21,088 | 1,424 | 11,264 | 33,776 |
+| Combined | 11 | 75,339 | 9,526 | 33,664 | 118,529 |
+
+Input/output coverage is 11/11; cached input is reported on 7/11 requests. Helper
+cache creation is unreported on all four helper responses. All monetary fields
+are null. These are exact known sums with partial overall coverage, not complete
+usage or a monetary cost estimate. Two persisted helper calls cover all four
+helper ledger requests once. The final UI matches at 118.5k total, 84.8k parent,
+33.8k helpers and explicitly reports partial coverage. The final persisted cell
+feedback predates adding that cell's helper usage; its 95,853 subtotal plus 22,676
+Checker tokens equals the final notebook/ledger 118,529.
+
+The persisted operator-prompt-to-final-answer interval is 309.300 seconds, matching
+the UI 309.3 s; the second-resolution provider span is 310 s. There was one exact
+operator prompt; the seven other protocol-user rows are runtime cell feedback.
+The later external observation timestamp is an upper bound, not task wall time.
+
+The previous v2 trial recorded 201,801 known tokens, 13 cells and 361.7 s. This v3
+trial recorded 118,529, 7 cells and 309.3 s. Setup/prompt/cache differences and the
+observed completion flaw preclude a controlled savings or parity claim.
+
+Installed 9f3a129 also passed standalone composer launch/Unicode typing through
+the cmux API, and actual desktop click-to-focus windowed and fullscreen. A
+non-submitted draft survived focus/size transitions and was cleared afterward.
+The standalone probe made no provider request and added no rollout session.
+Desktop typeText delivered the umlaut but not the requested lambda; Unicode
+lambda input is established through cmux API, not that desktop typing call.
+Shift-drag/clipboard behavior remains unverified.
+
+The completion correction integrates the shared parent handoff in both agent
+and session paths, plus evidence-based checker instructions. Primary review
+also relabels non-diff supplied packets as Supplied rather than Diff, and
+serializes both environment-sensitive provider fixtures with their existing
+lock. Focused evidence tests pass; final scoped gate and installed replay follow.
+
+Final correction gate: `scripts/ci-local.sh --scoped` exits0, all traced targets
+and full Pane suite pass (925 summed passing executions including nested probes,
+one ignored). Pane all-target Clippy with warnings denied also passes. The
+scoped gate includes formatting, docs, size, scripts and Glasshouse Rust1.88
+MSRV. Its nested Glasshouse Windows-GNU compile check passed; no Pane Windows
+compile or Windows execution is claimed. The earlier full Glasshouse workspace
+remains the unmodified-host behavior evidence. No push performed.

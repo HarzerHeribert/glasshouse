@@ -2319,8 +2319,17 @@ fn act_on(
             value, terminal, ..
         } if outcome.ends_the_task() => {
             let text = terminal.render(value);
-            view.returned = Some(text.clone());
-            response = Some(text);
+            if let Some(handoff) = crate::agent::checker_handoff(&view.helpers, &text) {
+                // A completion guard answered during this cell, after the
+                // candidate was authored. Keep the candidate as notebook
+                // output and feed the unparsed observations to a later model
+                // turn; this is not yet a terminal response.
+                view.output = Some(handoff.clone());
+                result.output = Some(handoff);
+            } else {
+                view.returned = Some(text.clone());
+                response = Some(text);
+            }
         }
         CellOutcome::Returned {
             value, terminal, ..
