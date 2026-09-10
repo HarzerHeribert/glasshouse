@@ -234,7 +234,7 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
     assert_eq!(
         slash_matches("/mo"),
         vec![
-            ("/model".into(), "select the active model"),
+            ("/model".into(), "set the parent, helper or subagent model"),
             ("/motion".into(), "on or off · reduce animation"),
             ("/mode".into(), "execute or plan without running code")
         ]
@@ -254,7 +254,7 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
             .unwrap()
             .contains("/model")
     );
-    assert!(rendered.contains("select the active model"));
+    assert!(rendered.contains("set the parent, helper or subagent model"));
 }
 #[test]
 fn the_root_view_does_not_draw_an_outer_window_border() {

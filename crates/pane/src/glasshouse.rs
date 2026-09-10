@@ -49,6 +49,21 @@ pub enum Glasshouse {
 }
 
 impl Glasshouse {
+    /// The executable this handle shells out to, for the one caller that must
+    /// **stream** a command rather than wait for it.
+    ///
+    /// [`Self::run`] reads a whole answer, which is right for every seam that
+    /// asks a question. A login is not a question: it reports an authorization
+    /// URL first and an outcome minutes later, and a caller that waited for
+    /// the exit would have nothing to show in between.
+    #[must_use]
+    pub fn executable(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::None => None,
+            Self::Command { glasshouse } => Some(glasshouse.as_path()),
+        }
+    }
+
     /// The one definition of reachable: found, spawned, and exited 0.
     /// `stdin`, when given, is written and then dropped -- closing that end
     /// of the pipe -- so a child reading until EOF gets exactly one message

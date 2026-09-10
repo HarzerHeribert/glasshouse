@@ -6,7 +6,7 @@ pub use inspection::Inspection;
 mod markdown;
 mod ribbon;
 mod telemetry;
-pub use controls::{Mode, ModelGroup, Panel, PanelRow, StatusLine};
+pub use controls::{Assignment, Mode, ModelGroup, Panel, PanelRow, StatusLine, TierModels};
 pub(crate) use controls::{PanelGeometry, PanelHit};
 pub use telemetry::Pulse;
 
@@ -355,8 +355,9 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
             (
                 format!("/{}", command.name()),
                 match command {
-                    BuiltIn::Model => "select the active model",
+                    BuiltIn::Model => "set the parent, helper or subagent model",
                     BuiltIn::Entitlements => "inspect available entitlements",
+                    BuiltIn::Login => "connect a subscription account",
                     BuiltIn::Handles => "inspect runtime handles",
                     BuiltIn::Supervisor => "inspect supervisor settings",
                     BuiltIn::Rollback => "roll back to a checkpoint",

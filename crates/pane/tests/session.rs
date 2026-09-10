@@ -3820,8 +3820,13 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(&format!("Current: {}", pane::wire::MODEL)),
+        stdout.contains(&format!("parent {}", pane::wire::MODEL)),
         "`/model` did not name the active slug: {stdout}"
+    );
+    // And the two tiers a person would otherwise never learn they had.
+    assert!(
+        stdout.contains("helper off") && stdout.contains("subagent inherits parent"),
+        "`/model` named only the parent tier: {stdout}"
     );
     assert!(
         bodies.lock().unwrap().is_empty(),

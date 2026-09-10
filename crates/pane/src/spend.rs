@@ -37,6 +37,48 @@ impl Tier {
             Self::Subagents => "subagents",
         }
     }
+
+    /// The singular form, for a sentence about one assignment.
+    #[must_use]
+    pub fn singular(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Helpers => "helper",
+            Self::Subagents => "subagent",
+        }
+    }
+
+    /// The tier a person names, in either spelling.
+    ///
+    /// **This is the same enum the ledger reports**, which is the point:
+    /// `/model helper luna` and the `helpers` heading in the breakdown must
+    /// be the same tier, or configuring the ladder and reading its bill are
+    /// two vocabularies a person has to hold at once.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "parent" => Some(Self::Parent),
+            "helper" | "helpers" => Some(Self::Helpers),
+            "subagent" | "subagents" => Some(Self::Subagents),
+            _ => None,
+        }
+    }
+
+    /// The three, in the order work flows through them.
+    #[must_use]
+    pub fn every() -> [Self; 3] {
+        [Self::Parent, Self::Helpers, Self::Subagents]
+    }
+
+    /// The next tier, wrapping — what Tab does in the model panel.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Parent => Self::Helpers,
+            Self::Helpers => Self::Subagents,
+            Self::Subagents => Self::Parent,
+        }
+    }
 }
 
 /// One tier's consumption, on one model.
@@ -236,6 +278,33 @@ mod tests {
             Some("claude-max"),
         );
         ledger
+    }
+
+    /// Configuring a tier and reading its bill are one vocabulary.
+    ///
+    /// `/model helper luna` and the `helpers` heading below must name the
+    /// same tier, or a person has to hold two spellings at once to connect
+    /// what they chose to what it cost.
+    #[test]
+    fn a_tier_parses_from_either_spelling_it_is_written_in() {
+        for tier in Tier::every() {
+            assert_eq!(Tier::parse(tier.as_str()), Some(tier));
+            assert_eq!(Tier::parse(tier.singular()), Some(tier));
+        }
+        assert_eq!(Tier::parse("frontier"), None);
+        assert_eq!(Tier::parse(""), None);
+    }
+
+    #[test]
+    fn cycling_visits_all_three_and_returns() {
+        let mut seen = vec![Tier::Parent];
+        for _ in 0..3 {
+            seen.push(seen.last().expect("seeded").next());
+        }
+        assert_eq!(
+            seen,
+            [Tier::Parent, Tier::Helpers, Tier::Subagents, Tier::Parent]
+        );
     }
 
     /// The reason the module exists: the same total means different things

@@ -184,7 +184,14 @@ impl PaneConfig {
         }
     }
 
-    fn parse(text: &str) -> Result<Self, String> {
+    /// Parses without touching the filesystem.
+    ///
+    /// Public so that a caller about to **write** `pane.toml` can prove the
+    /// text it is about to save loads — the same check `/permissions` makes
+    /// by compiling a profile before saving `settings.json`. Reading stays
+    /// this module's only filesystem verb; the write belongs to the command
+    /// that made the edit.
+    pub fn parse(text: &str) -> Result<Self, String> {
         let value: toml::Value = toml::from_str(text).map_err(|e| format!("pane.toml: {e}"))?;
         let table = value.as_table().ok_or_else(|| {
             "pane.toml: must be a table of [limits], [supervisor], [helpers] and [agents]"

@@ -1,6 +1,8 @@
 //! Human-invoked session inspection and configuration. No model dispatch.
 use super::*;
-use crate::tui::{Mode, Panel, PanelRow};
+use crate::config::PaneConfig;
+use crate::spend::Tier;
+use crate::tui::{Mode, Panel, PanelRow, TierModels};
 
 pub(super) fn show(session: &Session<'_>, panel: Panel) {
     if let Some(ui) = session.ui {
@@ -32,6 +34,13 @@ struct Account {
     scope: String,
     selectable: Option<bool>,
     unavailable_reason: Option<String>,
+    /// Whether this account holds a credential. `None` for one that is not
+    /// connectable at all, such as a provider reached with an API key.
+    #[serde(default)]
+    authenticated: Option<bool>,
+    /// The provider whose flow would connect it.
+    #[serde(default)]
+    connect_with: Option<String>,
 }
 
 pub(super) fn models(session: &Session<'_>) {
@@ -43,26 +52,315 @@ pub(super) fn models(session: &Session<'_>) {
             None,
         )
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
-    show(session, model_panel(catalogue, &session.model.borrow()));
+    show(session, model_panel(catalogue, tier_models(session)));
 }
 
-fn model_panel(catalogue: Option<Catalogue>, current: &str) -> Panel {
-    let title = format!("Models by provider · Current: {current}");
+/// What each tier of this session runs on right now.
+///
+/// Helpers report `None` when they are off *for any reason* -- no model, or
+/// `enabled = false` -- because from the panel's side those are one state:
+/// no helper will run.
+fn tier_models(session: &Session<'_>) -> TierModels {
+    let config = session.config();
+    TierModels {
+        parent: session.model.borrow().clone(),
+        helper: config
+            .helpers
+            .enabled
+            .then(|| config.helpers.model.clone())
+            .flatten(),
+        subagent: config.agents.model.clone(),
+    }
+}
+
+/// Assigns a model to one tier, and persists the two that outlive the session.
+///
+/// The parent stays in memory, which is what `/model` has always done. A
+/// helper or subagent model is written to `.glasshouse/pane.toml`, because
+/// `agent.rs` loads that file itself when a delegated goal starts: a choice
+/// held only here would be one a subagent could not see.
+///
+/// SAFETY OF THE EDIT: the text is proved to load with [`PaneConfig::parse`]
+/// **before** it replaces the file, so a rejected model name -- a path, a
+/// glob, a registered tool's name -- fails with the config's own sentence and
+/// leaves the file as it was. There is one validator, not two.
+pub(super) fn assign_model(
+    session: &Session<'_>,
+    tier: Tier,
+    value: &str,
+) -> Result<String, String> {
+    let (section, key_removed) = match tier {
+        Tier::Parent => return Err("the parent model is set by `/model <id>`".into()),
+        Tier::Helpers => ("helpers", value == "off"),
+        Tier::Subagents => ("agents", value == "inherit"),
+    };
+    let path = session.project.root.join(".glasshouse").join("pane.toml");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut document: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::Table::new())
+    } else {
+        toml::from_str(&text).map_err(|e| format!("pane.toml: {e}"))?
+    };
+    let table = document
+        .as_table_mut()
+        .ok_or_else(|| "pane.toml: must be a table".to_string())?
+        .entry(section)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("pane.toml: `[{section}]` must be a table"))?;
+    if key_removed {
+        table.remove("model");
+    } else {
+        table.insert("model".into(), toml::Value::String(value.into()));
+        // Choosing a helper model in a panel IS the opt-in the fail-closed
+        // default asks for, so an earlier `enabled = false` must not silently
+        // swallow the choice a person just made.
+        if tier == Tier::Helpers {
+            table.insert("enabled".into(), toml::Value::Boolean(true));
+        }
+    }
+    let encoded = toml::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    let parsed = PaneConfig::parse(&encoded)?;
+    fs::create_dir_all(path.parent().expect("pane.toml has a parent"))
+        .map_err(|e| e.to_string())?;
+    fs::write(&path, &encoded).map_err(|e| e.to_string())?;
+    *session.config.borrow_mut() = parsed;
+    Ok(match (tier, key_removed) {
+        (Tier::Helpers, true) => "helpers off; no helper will run".to_string(),
+        (Tier::Subagents, true) => "subagents inherit the parent's model".to_string(),
+        (tier, _) => format!("{} model set to {value}", tier.singular()),
+    })
+}
+
+/// Connects a subscription account without leaving the session.
+///
+/// Glasshouse owns the credential from end to end. What crosses this boundary
+/// is the authorization URL, a countdown and an outcome — never a token —
+/// which is exactly what lets the flow be rendered here instead of handing the
+/// terminal to a child process.
+///
+/// With no account named it lists the ones that could be connected, so
+/// `/login` is discoverable on its own and not only from the model picker.
+pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
+    let root = session.project.root.to_string_lossy();
+    let catalogue = session
+        .glasshouse
+        .run(&["--scope", &root, "entitlements", "--json"], None)
+        .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
+
+    let Some(catalogue) = catalogue else {
+        show(
+            session,
+            Panel::text("Connect an account", "Glasshouse is not reachable."),
+        );
+        return;
+    };
+
+    let Some(account) = account else {
+        show(session, connectable_panel(&catalogue));
+        return;
+    };
+
+    let Some(entry) = catalogue
+        .accounts
+        .iter()
+        .find(|entry| entry.account == account)
+    else {
+        show(
+            session,
+            Panel::text(
+                "Connect an account",
+                format!("`{account}` is not a configured account."),
+            ),
+        );
+        return;
+    };
+    let Some(provider) = entry.connect_with.clone() else {
+        show(
+            session,
+            Panel::text(
+                "Connect an account",
+                format!("`{account}` is not connected with a login flow."),
+            ),
+        );
+        return;
+    };
+
+    stream_connect(session, &provider, account);
+}
+
+/// The accounts a login flow could connect, connected or not.
+fn connectable_panel(catalogue: &Catalogue) -> Panel {
+    let mut rows: Vec<tui::PanelRow> = catalogue
+        .accounts
+        .iter()
+        .filter(|entry| entry.connect_with.is_some())
+        .map(|entry| {
+            let state = if entry.authenticated == Some(true) {
+                "connected"
+            } else {
+                "not connected"
+            };
+            tui::PanelRow {
+                text: format!("{} · {} · {state}", entry.account, entry.scope),
+                command: Some(format!("/login {}", entry.account)),
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(tui::PanelRow {
+            text: "No account in this project is connected with a login flow.".into(),
+            command: None,
+        });
+    }
+    Panel::rows("Connect an account", rows)
+}
+
+/// Runs the flow, showing each line Glasshouse reports as it arrives.
+///
+/// Streamed rather than awaited because the first line is the URL a person
+/// must open and the last arrives minutes later: a caller that waited for the
+/// exit would have nothing to show in between.
+fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let Some(binary) = session.glasshouse.executable() else {
+        show(
+            session,
+            Panel::text("Connect an account", "Glasshouse is not reachable."),
+        );
+        return;
+    };
+    let root = session.project.root.to_string_lossy().into_owned();
+    let spawned = Command::new(binary)
+        .args([
+            "--scope",
+            &root,
+            "subscriptions",
+            "connect",
+            provider,
+            "--entitlement",
+            account,
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = spawned else {
+        show(
+            session,
+            Panel::text("Connect an account", "Glasshouse could not be started."),
+        );
+        return;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return;
+    };
+
+    let title = format!("Connecting {account}");
+    let mut rows: Vec<tui::PanelRow> = Vec::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let Some(progress) = describe_progress(&line) else {
+            continue;
+        };
+        match progress {
+            // The countdown replaces itself rather than filling the panel.
+            Describe::Replace(text) => {
+                if matches!(rows.last(), Some(row) if row.command.is_none() && row.text.starts_with("waiting"))
+                {
+                    rows.pop();
+                }
+                rows.push(tui::PanelRow {
+                    text,
+                    command: None,
+                });
+            }
+            Describe::Keep(text) => rows.push(tui::PanelRow {
+                text,
+                command: None,
+            }),
+        }
+        show(session, Panel::rows(title.clone(), rows.clone()));
+    }
+    let _ = child.wait();
+}
+
+enum Describe {
+    Keep(String),
+    Replace(String),
+}
+
+/// One progress line, as a person reads it.
+///
+/// Unknown shapes are dropped rather than printed raw: this is another
+/// program's output and the panel is not a place to echo bytes nobody
+/// recognised.
+fn describe_progress(line: &str) -> Option<Describe> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    match value.get("state")?.as_str()? {
+        "opened" => Some(Describe::Keep(format!(
+            "open this to continue:\n{}",
+            value.get("authorize_url")?.as_str()?
+        ))),
+        "waiting" => Some(Describe::Replace(format!(
+            "waiting for the browser ({}s left)",
+            value.get("seconds_remaining").and_then(|v| v.as_u64())?
+        ))),
+        "connected" => Some(Describe::Keep(format!(
+            "connected{}",
+            value
+                .get("account")
+                .and_then(|v| v.as_str())
+                .map(|a| format!(" as {a}"))
+                .unwrap_or_default()
+        ))),
+        "failed" => Some(Describe::Keep(format!(
+            "failed: {}",
+            value.get("reason").and_then(|v| v.as_str()).unwrap_or("")
+        ))),
+        _ => None,
+    }
+}
+
+fn model_panel(catalogue: Option<Catalogue>, tiers: TierModels) -> Panel {
+    let title = "Models".to_string();
     match catalogue {
         Some(catalogue) if catalogue.version == 1 => Panel::models(
             title,
             catalogue
                 .accounts
                 .into_iter()
-                .map(|account| tui::ModelGroup {
-                    provider: account.provider.unwrap_or_else(|| "native harness".into()),
-                    account: account.account,
-                    scope: account.scope,
-                    models: account.models,
-                    selectable: account.selectable,
-                    unavailable_reason: account.unavailable_reason,
+                .map(|account| {
+                    // An account that could be connected and is not is the row
+                    // a person most wants to act on, so it says so and offers
+                    // the flow rather than sitting empty.
+                    let connect = match (account.authenticated, &account.connect_with) {
+                        (Some(false), Some(provider)) => Some(provider.clone()),
+                        _ => None,
+                    };
+                    let unavailable_reason = match (&connect, account.unavailable_reason) {
+                        (Some(_), _) => Some("not connected — press enter to connect".into()),
+                        (None, existing) => existing,
+                    };
+                    tui::ModelGroup {
+                        provider: account.provider.unwrap_or_else(|| "native harness".into()),
+                        account: account.account,
+                        scope: account.scope,
+                        models: account.models,
+                        selectable: account.selectable,
+                        unavailable_reason,
+                        connect,
+                    }
                 })
                 .collect(),
+            tiers,
         ),
         _ => Panel::text(
             title,
@@ -168,7 +466,7 @@ pub(super) fn command(
                     "Task spend",
                     format!(
                         "Last task: {used} cumulative tokens\nToken spend is telemetry and has no cap.\nCell limit: {}\nConfigure runtime limits in .glasshouse/pane.toml for the next session.",
-                        session.config.limits.cells
+                        session.config().limits.cells
                     ),
                 ),
             );
@@ -224,10 +522,15 @@ pub(super) fn command(
                         session.profile.rule_count(),
                         session.profile.command_pattern_count(),
                         session.profile.grants_network(),
-                        session.config.limits.cells,
-                        session.config.limits.cell_wall_clock_s,
-                        session.config.limits.response_bytes,
-                        session.config.supervisor.model.as_deref().unwrap_or("off")
+                        session.config().limits.cells,
+                        session.config().limits.cell_wall_clock_s,
+                        session.config().limits.response_bytes,
+                        session
+                            .config()
+                            .supervisor
+                            .model
+                            .as_deref()
+                            .unwrap_or("off")
                     ),
                 ),
             );
@@ -245,20 +548,20 @@ pub(super) fn command(
                     "Supervisor",
                     format!(
                         "State: {}\nModel: {}\nCadence: every {} cells\nLatest: {}\nConfigure [supervisor] in .glasshouse/pane.toml for the next session.",
-                        if session.config.supervisor.enabled
-                            && session.config.supervisor.model.is_some()
+                        if session.config().supervisor.enabled
+                            && session.config().supervisor.model.is_some()
                         {
                             "active"
                         } else {
                             "off"
                         },
                         session
-                            .config
+                            .config()
                             .supervisor
                             .model
-                            .as_deref()
-                            .unwrap_or("not configured"),
-                        session.config.supervisor.every,
+                            .clone()
+                            .unwrap_or_else(|| "not configured".to_string()),
+                        session.config().supervisor.every,
                         latest
                     ),
                 ),
@@ -272,6 +575,7 @@ pub(super) fn command(
         "entitlements" => {
             models(session);
         }
+        "login" => login(session, argument),
         _ => return false,
     }
     true
@@ -452,7 +756,7 @@ mod tests {
                 {"account":"b-account", "provider":"a-provider", "scope":"declared", "models":["shared/id"]}
             ]
         })).unwrap();
-        let mut panel = model_panel(Some(catalogue), "current");
+        let mut panel = model_panel(Some(catalogue), TierModels::default());
         let headings: Vec<_> = panel
             .rows
             .iter()
@@ -514,7 +818,7 @@ mod tests {
             mode: Cell::new(tui::Mode::Execute),
             effort: Cell::new(wire::Effort::Auto),
             project: &project,
-            config: &config,
+            config: &RefCell::new(config),
             interrupt: &interrupt,
             profile: &profile,
             glasshouse: &glasshouse,
@@ -538,6 +842,100 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(parsed["permissions"]["allow"], serde_json::json!([]));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Builds a session rooted at `root` and runs `body` against it.
+    fn with_session(root: &std::path::Path, body: impl FnOnce(&Session<'_>)) {
+        let project = ProjectConfig {
+            root: root.to_path_buf(),
+            ..ProjectConfig::default()
+        };
+        let config = RefCell::new(PaneConfig::load(root).expect("the fixture parses"));
+        let profile = Profile::compile(root, None);
+        let glasshouse = Glasshouse::Command {
+            glasshouse: root.join("absent"),
+        };
+        let id = SessionId::new("tier-test");
+        let memory = LocalMemory::new(root);
+        let interrupt = Interrupter::new(id.clone());
+        let session = Session {
+            inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
+            window: RefCell::new(crate::events::window::Window::new(Default::default())),
+            messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
+            ui: None,
+            model: RefCell::new("opus-5".into()),
+            context_window: None,
+            interface: Cell::new(crate::abi::Interface::default()),
+            mode: Cell::new(tui::Mode::Execute),
+            effort: Cell::new(wire::Effort::Auto),
+            project: &project,
+            config: &config,
+            interrupt: &interrupt,
+            profile: &profile,
+            glasshouse: &glasshouse,
+            id: &id,
+            memory: &memory,
+            rollbacks: RefCell::new(Vec::new()),
+            rollback_pending: Cell::new(None),
+        };
+        body(&session);
+    }
+
+    /// A tier assignment takes effect now and survives the session, and an
+    /// unrelated setting in the same file is not collateral damage.
+    #[test]
+    fn assigning_a_tier_is_live_persisted_and_reversible() {
+        let root = std::env::temp_dir().join(format!("pane-tier-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".glasshouse")).unwrap();
+        let file = root.join(".glasshouse").join("pane.toml");
+        fs::write(
+            &file,
+            "[limits]\ncells = 42\n\n[helpers]\nenabled = false\n",
+        )
+        .unwrap();
+
+        with_session(&root, |session| {
+            assert_eq!(tier_models(session).parent, "opus-5");
+            assert_eq!(tier_models(session).helper, None, "helpers ship off");
+
+            assign_model(session, Tier::Helpers, "gpt-5.6-luna").unwrap();
+            // Live, with no restart -- the next cell's runtime is built from
+            // this.
+            assert_eq!(tier_models(session).helper.as_deref(), Some("gpt-5.6-luna"));
+            // Persisted, because `agent.rs` loads this file itself when a
+            // delegated goal starts.
+            let saved = PaneConfig::load(&root).unwrap();
+            assert_eq!(saved.helpers.model.as_deref(), Some("gpt-5.6-luna"));
+            // Choosing a model IS the opt-in, so an earlier `enabled = false`
+            // does not silently swallow it.
+            assert!(saved.helpers.enabled);
+            // And an unrelated setting survived the edit.
+            assert_eq!(saved.limits.cells, 42);
+
+            assign_model(session, Tier::Subagents, "claude-sonnet-5").unwrap();
+            assert_eq!(
+                PaneConfig::load(&root).unwrap().agents.model.as_deref(),
+                Some("claude-sonnet-5")
+            );
+
+            // Reversible, which is what makes the panel safe to press.
+            assign_model(session, Tier::Helpers, "off").unwrap();
+            assert_eq!(tier_models(session).helper, None);
+            assert_eq!(PaneConfig::load(&root).unwrap().helpers.model, None);
+            assign_model(session, Tier::Subagents, "inherit").unwrap();
+            assert_eq!(tier_models(session).subagent, None);
+
+            // A value the config refuses fails with the config's own sentence
+            // and leaves the file byte-identical: one validator, not two.
+            let before = fs::read_to_string(&file).unwrap();
+            assert!(assign_model(session, Tier::Helpers, "../etc/passwd").is_err());
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+
+            // The parent is not this function's to set.
+            assert!(assign_model(session, Tier::Parent, "opus-5").is_err());
+        });
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

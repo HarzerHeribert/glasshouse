@@ -22,6 +22,7 @@ pub const BUILT_INS: [BuiltIn; 7] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltIn {
     Model,
+    Login,
     Entitlements,
     Handles,
     Supervisor,
@@ -36,6 +37,7 @@ impl BuiltIn {
     pub fn name(self) -> &'static str {
         match self {
             BuiltIn::Model => "model",
+            BuiltIn::Login => "login",
             BuiltIn::Entitlements => "entitlements",
             BuiltIn::Handles => "handles",
             BuiltIn::Supervisor => "supervisor",

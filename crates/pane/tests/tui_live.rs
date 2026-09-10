@@ -505,7 +505,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     app.send(b"/effort medium\r");
     app.contains("Effort: medium");
     app.send(b"/mo");
-    app.contains("select the active model");
+    app.contains("set the parent, helper or subagent model");
     app.send(b"\tfixture-next\r");
     app.contains("model changed to fixture-next");
     app.send(b"\x1b[200~first line\nsecond line\x1b[201~");
@@ -559,7 +559,7 @@ fn a_request_error_is_visible_and_the_editor_remains_usable() {
     app.send(b"/effort medium\r");
     app.contains("Effort: medium");
     app.send(b"/mo");
-    app.contains("select the active model");
+    app.contains("set the parent, helper or subagent model");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
     assert!(!app.screen.screen().alternate_screen());
@@ -619,7 +619,8 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '{\"version\":1,\"accounts\":[{\"account\":\"z-account\",\"provider\":\"fixture\",\"models\":[\"z-model\"],\"scope\":\"provider-declared\"},{\"account\":\"a-account\",\"provider\":\"fixture\",\"models\":[\"b-model\",\"a-model\"],\"scope\":\"provider-declared\"}]}'\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/model\r");
-    app.contains("Models by provider");
+    // The title now names every tier, not just that this is a model list.
+    app.contains("helper off");
     app.contains("a-model");
     let content = app.screen.screen().contents();
     assert!(content.find("a-account").unwrap() < content.find("z-account").unwrap());

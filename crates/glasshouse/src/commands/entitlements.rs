@@ -424,6 +424,20 @@ pub(crate) fn entitlements_json(runtime: &Runtime, refresh: bool) -> anyhow::Res
                     active_entitlement.as_deref().unwrap_or_default()
                 )
             });
+            // Whether this account can be used at all, and if not, how to
+            // connect it. A subscription with no credential is not a broken
+            // row to hide — it is the row a person most wants to act on, and
+            // it is the only one that can say which flow would fix it.
+            let connect_with = entry.backing().subscription_broker().and_then(|_| {
+                glasshouse::subscription::provider_for_entitlement(entry.kind(), entry.vendor())
+                    .map(|provider| provider.as_str().to_owned())
+            });
+            let authenticated = connect_with.as_ref().map(|_| {
+                glasshouse::subscription::credential_present(
+                    &runtime.paths().subscription_broker_auth_dir(entry.name()),
+                )
+                .unwrap_or(false)
+            });
             serde_json::json!({
                 "account":entry.name(),
                 "provider":provider,
@@ -431,6 +445,8 @@ pub(crate) fn entitlements_json(runtime: &Runtime, refresh: bool) -> anyhow::Res
                 "scope":scope,
                 "selectable":selectable,
                 "unavailable_reason":unavailable_reason,
+                "authenticated":authenticated,
+                "connect_with":connect_with,
             })
         })
         .collect();

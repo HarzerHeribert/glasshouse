@@ -6,7 +6,7 @@
 
 mod ui;
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
@@ -544,7 +544,7 @@ fn preflight_block(
     session: &Session<'_>,
     transcript: &mut Transcript,
 ) -> Option<String> {
-    let helpers = &session.config.helpers;
+    let helpers = session.config().helpers.clone();
     if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
         return None;
     }
@@ -892,8 +892,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // cell runs is not a guardrail.
     crate::helpers::validate().map_err(|reason| format!("pane cannot start: {reason}"))?;
     let project = project::load(&args.root);
-    let config = PaneConfig::load(&args.root)?;
-    if config.supervisor.model.is_none() {
+    // Shared and mutable because `/model helper <id>` changes it mid-session:
+    // the next cell's runtime must be built from the choice just made, not
+    // from what the file said at startup.
+    let config = RefCell::new(PaneConfig::load(&args.root)?);
+    if config.borrow().supervisor.model.is_none() {
         session_println!("supervisor: off (no model)");
     }
 
@@ -1092,7 +1095,7 @@ struct Session<'a> {
     /// The entry points this session shows the parent model.
     interface: Cell<crate::abi::Interface>,
     project: &'a ProjectConfig,
-    config: &'a PaneConfig,
+    config: &'a RefCell<PaneConfig>,
     /// The keyboard's end of the cancellation facility: the SIGINT handler's
     /// flag, the token of the cell now running, and the lock every rollout
     /// write is taken under. A task publishes each cell's fresh token to it
@@ -1109,6 +1112,14 @@ struct Session<'a> {
 }
 
 impl Session<'_> {
+    /// The project's configuration as it stands now.
+    ///
+    /// A borrow rather than a field, because a tier assignment replaces it
+    /// mid-session; hold the `Ref` no longer than one statement.
+    fn config(&self) -> Ref<'_, PaneConfig> {
+        self.config.borrow()
+    }
+
     /// The entry points this session declares to the parent model.
     ///
     /// The dialect follows the **active** request model, so a `/model` switch
@@ -1248,6 +1259,7 @@ fn is_session_control(name: &str) -> bool {
             | "config"
             | "permissions"
             | "entitlements"
+            | "login"
             | "supervisor"
             | "rollback"
             | "memory"
@@ -1512,7 +1524,7 @@ fn run_task_inner(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
-    let mut budget = TaskSpend::new(session.config.limits.cells);
+    let mut budget = TaskSpend::new(session.config().limits.cells);
     transcript.conversation.system = build_system_prompt(session.project, session.profile);
     // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
     // the static orientation already has. It fires **once per task**, before
@@ -1606,12 +1618,12 @@ fn run_task_inner(
         session.glasshouse,
         session.id,
         DEFAULT_HEAP_LIMIT_BYTES,
-        Duration::from_secs(session.config.limits.cell_wall_clock_s),
+        Duration::from_secs(session.config().limits.cell_wall_clock_s),
     )
-    .with_response_byte_cap(session.config.limits.response_bytes)
+    .with_response_byte_cap(session.config().limits.response_bytes)
     .with_instruction_context()
-    .with_helpers(session.config.helpers.clone())
-    .with_agents(session.config.agents.clone());
+    .with_helpers(session.config().helpers.clone())
+    .with_agents(session.config().agents.clone());
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
@@ -1625,7 +1637,7 @@ fn run_task_inner(
     let mut prose_turns = 0u32;
     let supervisor = Supervisor::new();
     let supervisor_active =
-        session.config.supervisor.enabled && session.config.supervisor.model.is_some();
+        session.config().supervisor.enabled && session.config().supervisor.model.is_some();
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
 
     loop {
@@ -1845,17 +1857,17 @@ fn run_task_inner(
         if !poisoned && step.answer.is_some() {
             if !supervisor_active {
                 transcript.notebook.supervisor = Some(SupervisorStatus::Off);
-            } else if cells_since_look.len() as u32 >= session.config.supervisor.every {
+            } else if cells_since_look.len() as u32 >= session.config().supervisor.every {
                 let trajectory = crate::supervisor::compress(&cells_since_look);
                 cells_since_look.clear();
                 // `supervisor_active` already established `model.is_some()`.
                 let model = session
-                    .config
+                    .config()
                     .supervisor
                     .model
-                    .as_deref()
+                    .clone()
                     .expect("supervisor_active implies a configured model");
-                let decision = supervisor.look(model, &trajectory);
+                let decision = supervisor.look(&model, &trajectory);
                 if decision.intervene {
                     nudge_reason = Some(decision.reason.clone());
                     transcript.notebook.supervisor =
@@ -2739,9 +2751,34 @@ fn answer_command(
     // A bare `/` or `/help` lists rather than resolves, so `commands::all`
     // has a caller and the binary actually *offers* what 2450 names.
     if name == "model" {
-        if let Some(model) = argument.filter(|value| !value.is_empty()) {
-            if model.chars().any(char::is_whitespace) {
-                session_println!("/model expects one model name");
+        if let Some(argument) = argument.filter(|value| !value.is_empty()) {
+            // A session is three models. `/model <id>` stays what it always
+            // was -- the parent's -- and a leading tier word assigns one of
+            // the other two.
+            // The first sentence is the one a mistyped slug has always got;
+            // the second is the tiers it can now also name.
+            const USAGE: &str = "/model expects one model name\n\
+                /model parent|helper|subagent <id> assigns one tier\n\
+                /model helper off · /model subagent inherit";
+            let (tier, model) = match argument.split_once(char::is_whitespace) {
+                Some((word, rest)) => match crate::spend::Tier::parse(word) {
+                    Some(tier) => (tier, rest.trim()),
+                    None => {
+                        session_println!("{USAGE}");
+                        return;
+                    }
+                },
+                None => (crate::spend::Tier::Parent, argument),
+            };
+            if model.is_empty() || model.chars().any(char::is_whitespace) {
+                session_println!("{USAGE}");
+                return;
+            }
+            if tier != crate::spend::Tier::Parent {
+                match controls::assign_model(session, tier, model) {
+                    Ok(outcome) => session_println!("{outcome}"),
+                    Err(reason) => session_println!("{reason}"),
+                }
                 return;
             }
             *session.model.borrow_mut() = model.into();

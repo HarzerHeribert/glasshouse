@@ -101,7 +101,7 @@ pub(super) enum Update {
     ToolDelta(String),
     Mode(tui::Mode),
     Effort(crate::wire::Effort),
-    Panel(tui::Panel),
+    Panel(Box<tui::Panel>),
     Notice(String),
     Stop,
 }
@@ -196,7 +196,7 @@ impl LiveUi {
         let _ = self.updates.send(Update::Mode(mode));
     }
     pub(super) fn panel(&self, panel: tui::Panel) {
-        let _ = self.updates.send(Update::Panel(panel));
+        let _ = self.updates.send(Update::Panel(Box::new(panel)));
     }
     pub(super) fn model(&self, model: &str) {
         let _ = self.updates.send(Update::Model(model.into()));
@@ -585,7 +585,7 @@ fn run(
                 Update::Model(model) => state.model = Some(model),
                 Update::Mode(mode) => state.mode = mode,
                 Update::Effort(effort) => state.effort = effort,
-                Update::Panel(panel) => state.panel = Some(panel),
+                Update::Panel(panel) => state.panel = Some(*panel),
                 Update::Notice(message) => state.notice = Some(message),
                 Update::Stop => return Ok(()),
             }
@@ -818,6 +818,12 @@ fn run(
                         }
                         KeyCode::Up => panel.move_selection(false, 1),
                         KeyCode::Down => panel.move_selection(true, 1),
+                        // Which tier a chosen model is assigned to. Tab rather
+                        // than a letter because the model panel's plain keys
+                        // are its search box.
+                        KeyCode::Tab => {
+                            panel.cycle_tier();
+                        }
                         KeyCode::PageUp => panel.move_selection(false, 10),
                         KeyCode::PageDown => panel.move_selection(true, 10),
                         KeyCode::Enter => {
@@ -1320,6 +1326,7 @@ mod tests {
                         models: vec!["a-model".into()],
                         selectable: Some(true),
                         unavailable_reason: None,
+                        connect: None,
                     },
                     tui::ModelGroup {
                         provider: "openrouter".into(),
@@ -1328,8 +1335,10 @@ mod tests {
                         models: vec!["o-one".into(), "o-two".into()],
                         selectable: Some(true),
                         unavailable_reason: None,
+                        connect: None,
                     },
                 ],
+                tui::TierModels::default(),
             )),
             ..ScreenState::default()
         };

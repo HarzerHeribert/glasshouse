@@ -1,4 +1,5 @@
 //! Local session controls and scrollable command panels.
+use crate::spend::Tier;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -40,6 +41,44 @@ pub struct Panel {
     pub rows: Vec<PanelRow>,
     pub selected: usize,
     pub search: Option<PanelSearch>,
+    /// Present only on the model panel: which tier a chosen model is being
+    /// assigned to, and what all three run on now.
+    pub assignment: Option<Assignment>,
+}
+
+/// What picking a model in this panel will do, and to which tier.
+///
+/// A session is three models, not one. Without this the panel could only
+/// ever set the parent, and the other two tiers existed solely in a file
+/// most people never open — so most people never met them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    /// The tier Enter assigns to. Tab moves it.
+    pub active: Tier,
+    pub models: TierModels,
+}
+
+/// What each tier runs on right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TierModels {
+    pub parent: String,
+    /// `None` when helpers are off, which is a state rather than a missing
+    /// value: no helper model means no helper ever runs.
+    pub helper: Option<String>,
+    /// `None` when a delegated goal inherits the parent's model.
+    pub subagent: Option<String>,
+}
+
+impl TierModels {
+    /// One tier's model, and the word for having none.
+    #[must_use]
+    pub fn describe(&self, tier: Tier) -> &str {
+        match tier {
+            Tier::Parent => &self.parent,
+            Tier::Helpers => self.helper.as_deref().unwrap_or("off"),
+            Tier::Subagents => self.subagent.as_deref().unwrap_or("inherits parent"),
+        }
+    }
 }
 #[derive(Debug, Clone, Default)]
 pub struct PanelSearch {
@@ -58,6 +97,9 @@ pub struct ModelGroup {
     pub models: Vec<String>,
     pub selectable: Option<bool>,
     pub unavailable_reason: Option<String>,
+    /// The provider whose login flow would connect this account, when it is
+    /// connectable and not yet connected. `None` for every other row.
+    pub connect: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct PanelRow {
@@ -116,10 +158,30 @@ impl Panel {
                 .collect(),
             selected: 0,
             search: None,
+            assignment: None,
         }
     }
 
-    pub fn models(title: impl Into<String>, mut groups: Vec<ModelGroup>) -> Self {
+    /// A panel whose rows the caller built, including any that are selectable
+    /// because they carry a command.
+    ///
+    /// [`Self::text`] splits prose into inert lines; this is for a list whose
+    /// entries are meant to be chosen.
+    pub fn rows(title: impl Into<String>, rows: Vec<PanelRow>) -> Self {
+        Self {
+            title: title.into(),
+            rows,
+            selected: 0,
+            search: None,
+            assignment: None,
+        }
+    }
+
+    pub fn models(
+        title: impl Into<String>,
+        mut groups: Vec<ModelGroup>,
+        models: TierModels,
+    ) -> Self {
         groups.sort_by(|a, b| {
             (&a.provider, &a.account, &a.scope).cmp(&(&b.provider, &b.account, &b.scope))
         });
@@ -130,11 +192,21 @@ impl Panel {
             group.models.sort();
             group.models.dedup();
         }
+        // The title states all three tiers, because it is the one part of the
+        // panel that also reaches the piped path, where nothing rendered is
+        // drawn at all.
+        let summary = Tier::every()
+            .map(|tier| format!("{} {}", tier.singular(), models.describe(tier)))
+            .join(" · ");
         let mut panel = Self {
-            title: title.into(),
+            title: format!("{} · {summary}", title.into()),
             search: Some(PanelSearch {
                 source: groups,
                 ..PanelSearch::default()
+            }),
+            assignment: Some(Assignment {
+                active: Tier::Parent,
+                models,
             }),
             ..Self::default()
         };
@@ -154,6 +226,27 @@ impl Panel {
             panel.provider_rows();
         }
         panel
+    }
+
+    /// Moves the assignment to the next tier, wrapping.
+    ///
+    /// The rows do not change -- the same catalogue serves all three tiers --
+    /// but the command each row carries does, which is the whole mechanism.
+    pub fn cycle_tier(&mut self) -> bool {
+        let Some(assignment) = self.assignment.as_mut() else {
+            return false;
+        };
+        assignment.active = assignment.active.next();
+        self.provider_rows();
+        true
+    }
+
+    /// The tier a chosen row would be assigned to.
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        self.assignment
+            .as_ref()
+            .map_or(Tier::Parent, |assignment| assignment.active)
     }
 
     pub fn move_provider(&mut self, forward: bool) {
@@ -256,11 +349,27 @@ impl Panel {
     }
 
     fn provider_rows(&mut self) {
+        let tier = self.tier();
         let Some(search) = &mut self.search else {
             return;
         };
         self.rows.clear();
         search.choices.clear();
+        // A tier that can be *unset* offers that as its first row, because
+        // otherwise the panel could turn helpers on and never off again --
+        // and "off" is the state helpers ship in.
+        let clearing = match tier {
+            Tier::Parent => None,
+            Tier::Helpers => Some(("  ⊘ off — run no helpers", "/model helper off")),
+            Tier::Subagents => Some(("  ↳ inherit the parent's model", "/model subagent inherit")),
+        };
+        if let Some((text, command)) = clearing {
+            search.choices.push(self.rows.len());
+            self.rows.push(PanelRow {
+                text: text.to_string(),
+                command: Some(command.to_string()),
+            });
+        }
         for group in search
             .matched
             .iter()
@@ -282,6 +391,18 @@ impl Panel {
                 ),
                 command: None,
             });
+            // An account that could be connected and is not has no models to
+            // list, so the row that would have been empty is the connect
+            // action instead. This is where a person looks for models, so it
+            // is where the reason there are none belongs.
+            if let Some(provider) = &group.connect {
+                search.choices.push(self.rows.len());
+                self.rows.push(PanelRow {
+                    text: format!("  ⊕ connect this {provider} account"),
+                    command: Some(format!("/login {}", group.account)),
+                });
+                continue;
+            }
             for id in &group.models {
                 search.choices.push(self.rows.len());
                 self.rows.push(PanelRow {
@@ -293,7 +414,10 @@ impl Panel {
                             ""
                         }
                     ),
-                    command: (group.selectable != Some(false)).then(|| format!("/model {id}")),
+                    command: (group.selectable != Some(false)).then(|| match tier {
+                        Tier::Parent => format!("/model {id}"),
+                        assigned => format!("/model {} {id}", assigned.singular()),
+                    }),
                 });
             }
         }
@@ -401,17 +525,42 @@ pub(super) fn render_panel(
             .rev()
             .find(|(i, _)| !search.choices.contains(i))
             .map_or("", |(_, row)| row.text.as_str());
+        // The two assignment lines are why this panel is worth opening even
+        // when nobody means to change anything: they are the only place the
+        // three tiers of a session are stated together.
+        // One line, and it is why this panel is worth opening even when
+        // nobody means to change anything: the only place a session's three
+        // tiers are stated together. `▸` marks the one Enter would assign.
+        // The title already names all three; this says which one Enter would
+        // change, and it is the half that moves when Tab is pressed.
+        let assignment = panel
+            .assignment
+            .as_ref()
+            .map_or_else(String::new, |assignment| {
+                format!("Tab ⇄ assigning to {} · ", assignment.active.singular())
+            });
+        // Folded into the existing hint rather than added as a line of its
+        // own: an extra header row costs a model row, and on an 80x24
+        // terminal that pushed the last account off the panel.
         let lines = [
             format!("Search: {prompt}  · {matches}/{total}"),
-            "← → provider · Ctrl-U clear · route unchanged".into(),
+            format!("{assignment}← → provider · Ctrl-U clear"),
             if matches > 0 {
                 group.to_string()
             } else {
                 String::new()
             },
         ];
-        for text in lines.into_iter().filter(|text| !text.is_empty()) {
-            if inner.height == 0 {
+        // The panel is a model list first. On a short terminal the hint lines
+        // yield to it rather than squeezing it to nothing -- which two extra
+        // header lines did, leaving a ten-row panel with no models at all.
+        const RESERVED_FOR_MODELS: u16 = 3;
+        for (index, text) in lines
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .enumerate()
+        {
+            if inner.height == 0 || (index > 0 && inner.height <= RESERVED_FOR_MODELS) {
                 break;
             }
             frame.render_widget(
@@ -570,8 +719,10 @@ mod tests {
                     models: vec![format!("model-{i}/exact"), "shared/flash".into()],
                     selectable: None,
                     unavailable_reason: None,
+                    connect: None,
                 })
                 .collect(),
+            TierModels::default(),
         )
     }
 
@@ -612,7 +763,9 @@ mod tests {
                 models: vec!["gemini/exact".into(), "gemini/second".into()],
                 selectable: Some(false),
                 unavailable_reason: Some("Pinned to another account".into()),
+                connect: None,
             }],
+            TierModels::default(),
         );
         assert!(panel.rows[0].text.contains("Pinned to another account"));
         assert!(panel.rows.iter().all(|row| row.command.is_none()));
@@ -622,6 +775,99 @@ mod tests {
         panel.search_insert("other-sub exact");
         assert_eq!(panel.rows.len(), 2);
         assert!(panel.rows[panel.selected].command.is_none());
+    }
+
+    /// The panel sets three models, not one.
+    ///
+    /// Same catalogue, same rows, same keys -- the tier changes only what the
+    /// chosen row *does*, which is why a person can discover the ladder
+    /// without being taught it.
+    #[test]
+    fn tab_moves_which_tier_a_chosen_model_is_assigned_to() {
+        let mut panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "openai".into(),
+                account: "chatgpt-subscription".into(),
+                scope: "subscription".into(),
+                models: vec!["gpt-5.6-luna".into()],
+                selectable: Some(true),
+                unavailable_reason: None,
+                connect: None,
+            }],
+            TierModels {
+                parent: "opus-5".into(),
+                helper: None,
+                subagent: None,
+            },
+        );
+        let command = |panel: &Panel| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| row.command.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(panel.tier(), Tier::Parent);
+        assert_eq!(command(&panel), ["/model gpt-5.6-luna"]);
+
+        assert!(panel.cycle_tier());
+        assert_eq!(panel.tier(), Tier::Helpers);
+        assert_eq!(
+            command(&panel),
+            ["/model helper off", "/model helper gpt-5.6-luna"],
+            "a tier that can be unset offers that too"
+        );
+
+        assert!(panel.cycle_tier());
+        assert_eq!(
+            command(&panel),
+            ["/model subagent inherit", "/model subagent gpt-5.6-luna"]
+        );
+
+        assert!(panel.cycle_tier());
+        assert_eq!(panel.tier(), Tier::Parent, "Tab wraps");
+    }
+
+    /// Opening the panel is how a person finds out the other two tiers exist,
+    /// so it states all three whether or not they are set.
+    #[test]
+    fn the_panel_states_every_tier_including_the_ones_that_are_unset() {
+        let panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "openai".into(),
+                account: "chatgpt-subscription".into(),
+                scope: "subscription".into(),
+                models: vec!["gpt-5.6-luna".into()],
+                selectable: Some(true),
+                unavailable_reason: None,
+                connect: None,
+            }],
+            TierModels {
+                parent: "opus-5".into(),
+                helper: None,
+                subagent: Some("claude-sonnet-5".into()),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_panel(frame, frame.area(), &panel, super::super::Theme::Neon);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("parent opus-5"), "{screen}");
+        assert!(screen.contains("helper off"), "{screen}");
+        assert!(
+            screen.contains("subagent claude-sonnet-5"),
+            "an unset helper and a set subagent are both named: {screen}"
+        );
+        assert!(screen.contains("Tab ⇄ assigning to parent"), "{screen}");
     }
 
     #[test]
@@ -636,6 +882,7 @@ mod tests {
                     models: vec!["claude/exact".into()],
                     selectable: Some(false),
                     unavailable_reason: Some("another route is active".into()),
+                    connect: None,
                 },
                 ModelGroup {
                     provider: "google".into(),
@@ -644,8 +891,10 @@ mod tests {
                     models: vec!["gemini/exact".into()],
                     selectable: Some(true),
                     unavailable_reason: None,
+                    connect: None,
                 },
             ],
+            TierModels::default(),
         );
         assert!(panel.rows[0].text.starts_with("google · gemini-sub"));
         assert_eq!(
@@ -679,7 +928,9 @@ mod tests {
                 models: vec!["gemini/one".into(), "gemini/two".into()],
                 selectable: Some(true),
                 unavailable_reason: None,
+                connect: None,
             }],
+            TierModels::default(),
         );
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
@@ -827,12 +1078,17 @@ mod tests {
                 models: (0..20).map(|index| format!("model-{index:02}")).collect(),
                 selectable: Some(true),
                 unavailable_reason: None,
+                connect: None,
             }],
+            TierModels::default(),
         );
         long.move_selection(true, 19);
         let scrolled = geometry(&long, 40, 10);
         let drawn: Vec<_> = scrolled.models.iter().map(|(_, index)| *index).collect();
-        assert_eq!(drawn, [19, 20]);
+        // Three, because the hint lines now yield to the list on a short
+        // panel; the property under test is that what is drawn is hittable
+        // and what scrolled off is not.
+        assert_eq!(drawn, [18, 19, 20]);
         for (area, index) in &scrolled.models {
             assert_eq!(scrolled.hit(area.x, area.y), Some(PanelHit::Model(*index)));
         }
