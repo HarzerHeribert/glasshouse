@@ -43,6 +43,15 @@ pub struct CellTurn {
     /// than the record because it is task state the screen re-renders every
     /// cell, not a line the rollout owes.
     pub plan: Vec<PlanItem>,
+    /// The canonical typed result of each capability call, in call order,
+    /// captured only for a frame lowered from direct provider tool calls.
+    ///
+    /// It rides the turn because the turn is the frame's own value and dies
+    /// with it: `CellTurn` is not `Serialize`, so this cannot reach the
+    /// rollout, whose rule is programs and previews and never objects
+    /// (`runtime-contract.md` §4). An authored cell captures nothing and this
+    /// stays empty — the model already holds those results as live handles.
+    pub capability_results: Vec<String>,
 }
 
 /// One item of the model's own plan — `todo.write`'s unit.
@@ -355,6 +364,7 @@ mod tests {
                 calls: Vec::new(),
             },
             plan: Vec::new(),
+            capability_results: Vec::new(),
         }
     }
 

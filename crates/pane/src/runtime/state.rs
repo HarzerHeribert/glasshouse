@@ -321,6 +321,14 @@ impl RuntimeState {
         self.plan.borrow().clone()
     }
 
+    /// The ordinal the next cell will take.
+    ///
+    /// Read before the frame runs so a lowered direct call can name its
+    /// bindings deterministically; `begin_cell` is what actually advances it.
+    pub(crate) fn next_cell(&self) -> u64 {
+        self.cell.get() + u64::from(!self.handlers.running.get())
+    }
+
     pub(crate) fn begin_cell(&self) -> u64 {
         self.visible_sources
             .borrow_mut()

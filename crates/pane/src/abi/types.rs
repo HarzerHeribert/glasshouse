@@ -70,6 +70,24 @@ escalation. Do not reproduce those mechanisms yourself.
     }
     return tests;";
 
+/// How the model reports and how it asks — a user ruling of 2026-09-10.
+///
+/// It is in the prompt rather than in a type because it governs prose, which
+/// is the one thing a schema cannot constrain. It is short for the same
+/// reason [`GUIDANCE`] is: a rule the model must apply to every sentence has
+/// to be recallable, not looked up.
+pub const REPORTING: &str = "\
+Report in product behaviour, not in coordinates. A file name, a symbol, an
+identifier or a line number may support an explanation and must never stand in
+for one: say what changed for the person using this project, then cite the
+place if it helps.
+
+When you need a decision, do not ask the person to choose between internal
+names or representations. Explain the behaviour each option produces, why the
+choice exists, what each one costs, and which you recommend. If a decision has
+already been made and only an internal representation is left, choose the
+smallest coherent one and keep going without asking.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +142,15 @@ mod tests {
                 "the model prompt explains `{leaked}`, which is pane's business"
             );
         }
+    }
+
+    #[test]
+    fn the_reporting_rule_asks_for_behaviour_and_bans_bare_coordinates() {
+        assert!(REPORTING.contains("product behaviour"));
+        assert!(REPORTING.contains("recommend"));
+        // The rule is only useful if it is short enough to apply every turn.
+        let words = REPORTING.split_whitespace().count();
+        assert!(words < 140, "the reporting rule is {words} words");
     }
 
     #[test]

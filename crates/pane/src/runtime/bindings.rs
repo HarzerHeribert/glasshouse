@@ -124,6 +124,10 @@ pub(crate) struct CellTrace {
     yield_requested: Cell<bool>,
     yield_reason: RefCell<Option<String>>,
     pub(crate) response_byte_cap: Cell<usize>,
+    /// Whether this frame's capability results are being captured for a
+    /// provider `tool_result`. Off for an authored cell, which pays nothing.
+    capture_results: Cell<bool>,
+    results: RefCell<Vec<String>>,
 }
 
 impl CellTrace {
@@ -133,6 +137,8 @@ impl CellTrace {
             yield_requested: Cell::new(false),
             yield_reason: RefCell::new(None),
             response_byte_cap: Cell::new(DEFAULT_RESPONSE_BYTE_CAP),
+            capture_results: Cell::new(false),
+            results: RefCell::new(Vec::new()),
         })
     }
 
@@ -140,6 +146,27 @@ impl CellTrace {
         self.calls.borrow_mut().clear();
         self.yield_requested.set(false);
         self.yield_reason.borrow_mut().take();
+        self.results.borrow_mut().clear();
+    }
+
+    /// Turns capture on for the frame about to run. Scoped to that frame:
+    /// [`Self::take_results`] drains it and the next `begin_cell` clears
+    /// whatever a failed frame left behind.
+    pub(crate) fn capture_results(&self, on: bool) {
+        self.capture_results.set(on);
+    }
+
+    pub(crate) fn captures_results(&self) -> bool {
+        self.capture_results.get()
+    }
+
+    pub(crate) fn record_result(&self, json: String) {
+        self.results.borrow_mut().push(json);
+    }
+
+    /// This frame's typed results, in call order, taken once.
+    pub(crate) fn take_results(&self) -> Vec<String> {
+        std::mem::take(&mut *self.results.borrow_mut())
     }
 
     /// Every call that ran this cell, in order, taken once.
@@ -233,7 +260,15 @@ pub enum HostGlobals {
 
 impl HostGlobals {
     /// The globals a helper never holds, whatever else it was given.
-    pub const WITHHELD_FROM_A_HELPER: [&'static str; 4] = ["bg", "send", "mcp", "checks"];
+    /// `helper` and `agent` are withheld for a different reason than the
+    /// other four, and it is a lifetime one: `helpers-and-subagents.md` §11
+    /// forbids the `Helper -> Helper` and `Helper -> Subagent` edges, and §19
+    /// forbids a detached helper. `agent.run` was already refused to a helper
+    /// by the subagent depth check, but a capability absent from the binding
+    /// surface cannot be reached by a helper talked into trying, which is the
+    /// standard `little-helpers.md` sets for the toolset.
+    pub const WITHHELD_FROM_A_HELPER: [&'static str; 6] =
+        ["bg", "send", "mcp", "checks", "helper", "agent"];
 
     /// Whether `global` is installed under this narrowing — the one predicate
     /// [`install`] and [`crate::prompt::render_runtime_for`] both read, so
@@ -369,7 +404,11 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
     // closure per entry built in a loop coerces to a fn pointer and fails
     // inside the v8 crate, naming none of this code.
     let helper = v8::Object::new(scope);
+    let install_helpers = globals.installs("helper");
     for spec in crate::helpers::HELPERS {
+        if !install_helpers {
+            break;
+        }
         if !crate::prompt::declarations::callable_from_a_cell(spec) {
             continue;
         }
@@ -382,15 +421,19 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
         };
         set_fixed_key(scope, helper, spec.name, function.into());
     }
-    set_fixed_key(scope, global, "helper", helper.into());
+    if install_helpers {
+        set_fixed_key(scope, global, "helper", helper.into());
+    }
 
     // Subagents. Fixed for the same reason as `bg`: a program that replaced
     // `agent` could not stop what it started.
-    let agent = v8::Object::new(scope);
-    if let Some(function) = v8::Function::builder(agent_run_callback).build(scope) {
-        set_fixed_key(scope, agent, "run", function.into());
+    if globals.installs("agent") {
+        let agent = v8::Object::new(scope);
+        if let Some(function) = v8::Function::builder(agent_run_callback).build(scope) {
+            set_fixed_key(scope, agent, "run", function.into());
+        }
+        set_fixed_key(scope, global, "agent", agent.into());
     }
-    set_fixed_key(scope, global, "agent", agent.into());
 
     // The model's own plan. Fixed like every other host object: a program
     // that replaced `todo` would leave the screen showing a checklist nothing
@@ -763,6 +806,17 @@ fn tool_callback(
     match traced.outcome {
         Ok(result) => {
             let value = typed_result(scope, tool, &call_args, &result, &state);
+            // The canonical typed result, captured as the model sees it, for a
+            // frame lowered from direct provider calls. Stringifying the value
+            // the isolate returns is what makes the provider result and the
+            // cell result one observation rather than two encodings.
+            let trace = trace(scope);
+            if trace.captures_results() {
+                let json = v8::json::stringify(scope, value)
+                    .map(|json| json.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "null".to_string());
+                trace.record_result(json);
+            }
             retval.set(value);
         }
         Err(ToolError::Denied(denied)) => throw_denied(scope, &denied),

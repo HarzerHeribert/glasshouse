@@ -1127,6 +1127,27 @@ impl Runtime {
         self.run_program(source, None)
     }
 
+    /// Runs one frame lowered from direct provider tool calls.
+    ///
+    /// The only difference from [`Self::run_cell`] is that this frame's
+    /// capability results are captured so each provider `tool_result` can
+    /// carry one — there is no second executor and no second path
+    /// (`tool-abi.md` §1). Capture is turned off again immediately, so an
+    /// authored cell that follows is unaffected even if this frame threw.
+    /// The ordinal the next cell will take, for a caller lowering direct
+    /// provider calls into a frame whose binding names must be known before
+    /// it runs.
+    pub fn next_cell(&self) -> u64 {
+        self.state.next_cell()
+    }
+
+    pub fn run_direct_frame(&mut self, source: &str) -> CellOutcome {
+        self.trace().capture_results(true);
+        let outcome = self.run_program(source, None);
+        self.trace().capture_results(false);
+        outcome
+    }
+
     fn run_program(
         &mut self,
         source: &str,
@@ -1785,6 +1806,7 @@ impl Runtime {
             yield_reason,
             record,
             plan: self.state.plan(),
+            capability_results: self.trace().take_results(),
         };
 
         match ending {

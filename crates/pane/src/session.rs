@@ -416,6 +416,12 @@ pub struct SessionArgs {
     #[arg(long)]
     pub model: Option<String>,
 
+    /// Which entry points the model is shown: `hybrid` (familiar tools and
+    /// `execute_cell`), `cells`, or `tools`. Visibility only -- every mode
+    /// runs the same capabilities through the same executor.
+    #[arg(long, value_parser = crate::abi::Interface::parse)]
+    pub interface: Option<crate::abi::Interface>,
+
     /// Input context capacity for the initial model. Pane does not guess
     /// provider-specific limits; switching models makes the capacity unknown
     /// until a future catalogue supplies per-model metadata.
@@ -1042,6 +1048,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         }),
         mode: Cell::new(tui::Mode::Execute),
         effort: Cell::new(wire::Effort::Auto),
+        interface: Cell::new(args.interface.unwrap_or_default()),
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
     };
@@ -1082,6 +1089,8 @@ struct Session<'a> {
     context_window: Option<(String, u64)>,
     mode: Cell<tui::Mode>,
     effort: Cell<wire::Effort>,
+    /// The entry points this session shows the parent model.
+    interface: Cell<crate::abi::Interface>,
     project: &'a ProjectConfig,
     config: &'a PaneConfig,
     /// The keyboard's end of the cancellation facility: the SIGINT handler's
@@ -1097,6 +1106,25 @@ struct Session<'a> {
     rollbacks: RefCell<Vec<RollbackCheckpoint>>,
     /// Stack length previewed by the last bare `/rollback`.
     rollback_pending: Cell<Option<usize>>,
+}
+
+impl Session<'_> {
+    /// The entry points this session declares to the parent model.
+    ///
+    /// The dialect follows the **active** request model, so a `/model` switch
+    /// to another family changes which spellings are shown without changing a
+    /// capability, an execution path or a lifetime
+    /// (`tool-abi.md` §5, `helpers-and-subagents.md` §17).
+    fn surface(&self) -> wire::Surface {
+        wire::Surface::Acting {
+            interface: self.interface.get(),
+            dialect: self.dialect(),
+        }
+    }
+
+    fn dialect(&self) -> crate::abi::Dialect {
+        crate::abi::Dialect::for_model(&self.model.borrow())
+    }
 }
 
 fn context_cap(session: &Session<'_>, model: &str) -> Option<u64> {
@@ -1735,6 +1763,7 @@ fn run_task_inner(
             rollout,
             session.interrupt,
             session.profile,
+            session.dialect(),
         );
         crate::runtime::state::install_helper_progress(previous);
         let mut step = step?;
@@ -2038,6 +2067,7 @@ fn act_on(
     rollout: &mut Rollout,
     interrupt: &Interrupter,
     profile: &Profile,
+    dialect: crate::abi::Dialect,
 ) -> Result<Step, String> {
     let assistant_text = message_text(assistant);
     let calls: Vec<_> = assistant
@@ -2048,7 +2078,66 @@ fn act_on(
             _ => None,
         })
         .collect();
-    if calls.len() > 1 || calls.first().is_some_and(|call| call.1 != "execute_cell") {
+    // Direct familiar-tool calls: every call is a dialect spelling, so the
+    // turn lowers into one frame of the same TypeScript a model could have
+    // written and runs through the same executor (`tool-abi.md` §1, §18).
+    // A turn mixing `execute_cell` with direct tools is refused, because the
+    // two would be one frame whose ordering nothing states.
+    let direct = !calls.is_empty()
+        && calls.iter().all(|(_, name, _)| *name != "execute_cell")
+        && calls
+            .iter()
+            .all(|(_, name, _)| dialect.lookup(name).is_some());
+    let lowered = if direct {
+        let requested: Vec<(String, String, serde_json::Value)> = calls
+            .iter()
+            .map(|(id, name, input)| ((*id).clone(), (*name).clone(), (*input).clone()))
+            .collect();
+        match crate::abi::lower(dialect, &requested, runtime.next_cell()) {
+            Ok(lowered) => Some(lowered),
+            Err(error) => {
+                // A decode refusal is per call and names what was wrong, so
+                // the next turn can repair it without re-reading the schema.
+                let message = error.message();
+                let content = calls
+                    .iter()
+                    .map(|(id, _, _)| Block::ToolResult {
+                        tool_use_id: (*id).clone(),
+                        content: message.clone(),
+                        is_error: true,
+                    })
+                    .collect();
+                return Ok(Step {
+                    answer: Some(message.clone()),
+                    historical: None,
+                    native_result: Some(Message {
+                        role: Role::User,
+                        content,
+                        historical: None,
+                    }),
+                    response: None,
+                    prose: true,
+                    record: None,
+                    rollback: None,
+                    view: CellView {
+                        error: Some(CellError {
+                            class: error.kind.as_str().into(),
+                            message,
+                            line: None,
+                            column: None,
+                        }),
+                        ..CellView::default()
+                    },
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    if lowered.is_none()
+        && (calls.len() > 1 || calls.first().is_some_and(|call| call.1 != "execute_cell"))
+    {
         let explanation = if calls.len() > 1 {
             "ProtocolError: exactly one execute_cell call is allowed; nothing ran."
         } else {
@@ -2085,8 +2174,10 @@ fn act_on(
             },
         });
     }
-    let native = calls.first().copied();
-    let (source, repaired_from) = if let Some((id, _, input)) = native {
+    let native = lowered.is_none().then(|| calls.first().copied()).flatten();
+    let (source, repaired_from) = if let Some(lowered) = &lowered {
+        (lowered.source.clone(), None)
+    } else if let Some((id, _, input)) = native {
         let source = input
             .as_object()
             .filter(|object| object.len() == 1)
@@ -2226,7 +2317,11 @@ fn act_on(
     };
 
     let before = crate::changes::Snapshot::capture(profile);
-    let outcome = runtime.run_cell(&source);
+    let outcome = if lowered.is_some() {
+        runtime.run_direct_frame(&source)
+    } else {
+        runtime.run_cell(&source)
+    };
     let after = crate::changes::Snapshot::capture(profile);
     let changes = before.diff(&after);
     let rollback = changes.is_some().then_some((before, after));
@@ -2241,7 +2336,8 @@ fn act_on(
         // carries what came back and how long it took, which is what the
         // lane and the `HELPERS` inspector section both draw.
         helpers: runtime.helper_records(),
-        executed_source: (native.is_some() || repaired_from.is_some()).then(|| source.clone()),
+        executed_source: (native.is_some() || repaired_from.is_some() || lowered.is_some())
+            .then(|| source.clone()),
         repaired_from,
         changes,
         call_count: Some(record.calls.len()),
@@ -2380,6 +2476,61 @@ fn act_on(
         .is_none()
         .then(|| feedback(prompt::render_result_history(&result)));
 
+    // One provider `tool_result` per direct call, carrying that call's own
+    // canonical typed result. The frame's trajectory decides which calls ran:
+    // a throw stops the frame, so every later call reports that it did not
+    // run rather than silently returning nothing (`tool-abi.md` §20's
+    // requested-versus-executed).
+    let direct_result = lowered.as_ref().map(|lowered| {
+        let turn = outcome.turn();
+        let mut produced = turn.capability_results.iter();
+        let router = crate::abi::Router::default();
+        let content = lowered
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                let ended = record.calls.get(index).map(|call| &call.ended);
+                match ended {
+                    Some(crate::runtime::outcome::Ended::Ok) => {
+                        let value = produced
+                            .next()
+                            .and_then(|json| serde_json::from_str(json).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        let presented = router.present(call.capability, &call.binding, &value);
+                        Block::ToolResult {
+                            tool_use_id: call.id.clone(),
+                            content: crate::abi::encode_result(&presented).to_string(),
+                            is_error: false,
+                        }
+                    }
+                    Some(crate::runtime::outcome::Ended::Denied { rule }) => Block::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: format!("PermissionDenied: {rule}"),
+                        is_error: true,
+                    },
+                    Some(crate::runtime::outcome::Ended::Threw { class }) => Block::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: format!("{class}: {}", cell_error_text(&outcome)),
+                        is_error: true,
+                    },
+                    None => Block::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: "This call did not run: an earlier call in the same turn \
+                                  stopped it."
+                            .to_string(),
+                        is_error: true,
+                    },
+                }
+            })
+            .collect();
+        Message {
+            role: Role::User,
+            content,
+            historical: None,
+        }
+    });
+
     let native_result = native.map(|(id, _, _)| {
         let with_return = |mut text: String| {
             if let Some(value) = &response {
@@ -2400,13 +2551,21 @@ fn act_on(
     Ok(Step {
         answer,
         historical,
-        native_result,
+        native_result: direct_result.or(native_result),
         response,
         prose: false,
         record: Some(record),
         rollback,
         view,
     })
+}
+
+/// The message of a frame that threw, for a direct call's own error result.
+fn cell_error_text(outcome: &CellOutcome) -> String {
+    match outcome {
+        CellOutcome::Threw { error, .. } => error.message.clone(),
+        _ => "the call did not return".to_string(),
+    }
 }
 
 /// §5's answer to a message that carried no program: the handle table
@@ -2492,11 +2651,13 @@ fn send_task_turn(
     let model = session.model.borrow();
     let request = prompt::with_task_context(conversation, &model, task);
     let conversation = &request;
+    let surface = session.surface();
     if let Some(ui) = session.ui {
-        wire::send_turn_streaming_configured(
+        wire::send_turn_streaming_on(
             conversation,
             &model,
             session.effort.get(),
+            surface,
             &mut |delta| match delta {
                 wire::StreamDelta::Text(text) => ui.append_delta(&text),
                 // Root's UI integration replaces these no-ops with
@@ -2506,7 +2667,14 @@ fn send_task_turn(
             },
         )
     } else {
-        wire::send_turn_configured(conversation, &model, session.effort.get())
+        wire::send_turn_bounded_on(
+            conversation,
+            &model,
+            session.effort.get(),
+            None,
+            None,
+            surface,
+        )
     }
 }
 
@@ -2819,6 +2987,192 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixture tree and a profile that admits reading it.
+    fn abi_fixture(name: &str) -> (std::path::PathBuf, Profile) {
+        let root = std::env::temp_dir().join(format!("pane-admit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("target.rs"), "fn admitted() {}\n").unwrap();
+        let profile = Profile::compile(&root, Some(r#"{"permissions":{"allow":[]}}"#));
+        (root, profile)
+    }
+
+    fn direct_call(id: &str, name: &str, input: serde_json::Value) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+            }],
+            historical: None,
+        }
+    }
+
+    fn act(
+        assistant: &Message,
+        root: &std::path::Path,
+        profile: &Profile,
+        dialect: crate::abi::Dialect,
+    ) -> Step {
+        let session = SessionId::new("admit");
+        let mut runtime = Runtime::new(profile, &Glasshouse::None, &session);
+        let mut budget = TaskSpend::new(40);
+        let mut rollout =
+            Rollout::create(&root.join("rollout.jsonl"), session.clone(), "system").unwrap();
+        let interrupt = Interrupter::new(session.clone());
+        act_on(
+            assistant,
+            &mut runtime,
+            &mut budget,
+            &mut rollout,
+            &interrupt,
+            profile,
+            dialect,
+        )
+        .expect("the turn is acted on")
+    }
+
+    fn result_blocks(step: &Step) -> Vec<(String, String, bool)> {
+        step.native_result
+            .as_ref()
+            .expect("a direct call is answered with tool results")
+            .content
+            .iter()
+            .map(|block| match block {
+                Block::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => (tool_use_id.clone(), content.clone(), *is_error),
+                other => panic!("a direct call answers with tool results only: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The turn a hybrid session exists for: the model emits its familiar
+    /// tool, and the tool actually runs and answers.
+    #[test]
+    fn a_direct_provider_call_runs_and_answers_with_a_typed_result() {
+        let (root, profile) = abi_fixture("runs");
+        let target = root.join("target.rs");
+        let assistant = direct_call(
+            "call-1",
+            "Read",
+            serde_json::json!({"file_path": target.to_string_lossy()}),
+        );
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+
+        let blocks = result_blocks(&step);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "call-1", "the result correlates to the call");
+        assert!(!blocks[0].2, "the read succeeded: {blocks:?}");
+
+        let value: serde_json::Value = serde_json::from_str(&blocks[0].1).unwrap();
+        assert_eq!(value["source"], serde_json::json!("exact"));
+        assert_eq!(value["complete"], serde_json::json!(true));
+        assert!(
+            value["text"].as_str().unwrap().contains("fn admitted()"),
+            "the result carries what was actually read: {value}"
+        );
+
+        // The capability ran through the ordinary trajectory, so the ledger
+        // records it exactly as it records a cell's own call.
+        let record = step.record.expect("a direct frame records its cell");
+        assert_eq!(record.calls.len(), 1);
+        assert_eq!(record.calls[0].tool, "read");
+    }
+
+    /// Several independent familiar calls in one turn become one frame, and
+    /// each still gets its own correlated answer.
+    #[test]
+    fn independent_direct_calls_answer_individually_from_one_frame() {
+        let (root, profile) = abi_fixture("fused");
+        let target = root.join("target.rs");
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                Block::ToolUse {
+                    id: "a".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": target.to_string_lossy()}),
+                },
+                Block::ToolUse {
+                    id: "b".into(),
+                    name: "Glob".into(),
+                    input: serde_json::json!({"pattern": "*.rs"}),
+                },
+            ],
+            historical: None,
+        };
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+
+        let blocks = result_blocks(&step);
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert_eq!(blocks[0].0, "a");
+        assert_eq!(blocks[1].0, "b");
+        assert!(!blocks[0].2 && !blocks[1].2, "{blocks:?}");
+        let record = step.record.expect("one frame");
+        assert_eq!(record.calls.len(), 2, "one frame ran both calls");
+    }
+
+    /// A malformed familiar call is refused per call, naming what was wrong,
+    /// and nothing runs.
+    #[test]
+    fn a_malformed_direct_call_is_refused_by_name_and_runs_nothing() {
+        let (root, profile) = abi_fixture("malformed");
+        let assistant = direct_call("call-1", "Read", serde_json::json!({"path": "target.rs"}));
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+
+        let blocks = result_blocks(&step);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].2, "an undeclared parameter is an error");
+        assert!(
+            blocks[0].1.contains("file_path"),
+            "the refusal names the declared parameter: {}",
+            blocks[0].1
+        );
+        assert!(step.record.is_none(), "nothing ran, so no cell is recorded");
+    }
+
+    /// The OpenAI façade reaches the same capability as the Anthropic one.
+    #[test]
+    fn the_other_dialect_reaches_the_same_capability() {
+        let (root, profile) = abi_fixture("dialect");
+        let assistant = direct_call("call-1", "shell", serde_json::json!({"command": "true"}));
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::OpenAi);
+        let record = step.record.expect("a direct frame records its cell");
+        assert_eq!(record.calls.len(), 1);
+        assert_eq!(record.calls[0].tool, "bash");
+    }
+
+    /// A turn mixing a cell with direct tools is refused rather than guessed
+    /// at: the two would be one frame whose ordering nothing states.
+    #[test]
+    fn a_turn_mixing_a_cell_with_direct_tools_runs_nothing() {
+        let (root, profile) = abi_fixture("mixed");
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                Block::ToolUse {
+                    id: "a".into(),
+                    name: "execute_cell".into(),
+                    input: serde_json::json!({"code": "return 1;"}),
+                },
+                Block::ToolUse {
+                    id: "b".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "target.rs"}),
+                },
+            ],
+            historical: None,
+        };
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+        assert!(step.record.is_none(), "nothing ran");
+        let blocks = result_blocks(&step);
+        assert!(blocks.iter().all(|(_, _, is_error)| *is_error));
+    }
 
     /// The roster is checked where the session starts, and this pins the call
     /// rather than the predicate: `helpers::validate()` passes for the shipped

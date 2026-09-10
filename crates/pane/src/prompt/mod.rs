@@ -265,10 +265,11 @@ pub fn render_abi_for(globals: HostGlobals) -> String {
     }
     let bodies: Vec<String> = declarations.into_iter().map(|(_, body)| body).collect();
     format!(
-        "## Familiar tools\n\n{}\n\n{}\n\n{}",
+        "## Familiar tools\n\n{}\n\n{}\n\n{}\n\n{}",
         types::PRELUDE,
         bodies.join("\n\n"),
-        types::GUIDANCE
+        types::GUIDANCE,
+        types::REPORTING
     )
 }
 

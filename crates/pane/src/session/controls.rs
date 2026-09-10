@@ -510,6 +510,7 @@ mod tests {
             ui: None,
             model: RefCell::new("test".into()),
             context_window: None,
+            interface: Cell::new(crate::abi::Interface::default()),
             mode: Cell::new(tui::Mode::Execute),
             effort: Cell::new(wire::Effort::Auto),
             project: &project,
