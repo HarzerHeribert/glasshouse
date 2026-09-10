@@ -5673,5 +5673,6 @@ correct completed task, not minimizing or concealing total work.
 **Console follow-up (Sol high editor, Sol medium reviewer):** the observed
 96-character nested cap was repaired with a shared argument budget. The reviewer
 caught post-key exhaustion recursing into a child; the editor corrected it and
-all 13 focused tests pass independently. Primary integration and installed
-replay follow. No capability boxes close in this bounded repair.
+all 13 focused tests pass independently. Primary integration passes all 894 Pane tests (one ignored). Installed
+`b2c38db` replay passes in 25.797 seconds: full structured README observed
+exactly, one verifier definition, two fresh nine-test runs, no thrown cells. No capability boxes close in this bounded repair.

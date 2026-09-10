@@ -1,6 +1,6 @@
 # Sol task model and Luna helpers — installed dogfood
 
-Date: 2026-09-10 (Europe/Berlin). Status: **IN PROGRESS**.
+Date: 2026-09-10 (Europe/Berlin). Status: **REPAIRS INSTALLED; FUNCTIONAL TRIALS PASS; DESKTOP RETEST BLOCKED**.
 
 ## Target state
 
@@ -309,3 +309,37 @@ one-shot helper usage is discarded and multi-turn helper totals are not
 propagated into `TaskSpend`. This is an existing open Phase 64 telemetry item,
 now backed by a concrete trial; it is not fixed in the console patch. No dollar
 cost or billing savings can be established from these fields.
+
+
+### Final installed formatter replay
+
+`b2c38db` is installed as `v0.1.0-pre.1-128-gb2c38db` for both Glasshouse and
+Pane. The installer built release artifacts, smoke-tested both version commands
+and switched the current-version symlink. Both installed binary hashes were
+checked against the manifest before the real subscription replay.
+
+The read-only replay completed in 25.797 seconds, four cells, no thrown cells,
+no `--yolo`, and no operator correction. Its first cell printed the actual
+`{contract: readme.excerpt(...)}` shape. Primary JSON assertions compare every
+numbered README line and metadata exactly: no omission, no truncated lines.
+The next cell chose the documented absolute interpreter correctly, defined
+`async verify()` once and executed it. A later cell called the same identifier
+again. Both real commands exited zero and returned complete structured stderr
+with nine tests and `OK`; the final cell asserted both results before returning.
+The deliberate second execution was a binding/freshness test, not a recommended
+extra verification step for ordinary coding tasks. Actual calls were read, bash,
+bash; the model made no edit calls.
+
+Artifacts: `.agent-runtime/input-fixes/console-{install.log,replay-run.json,
+replay-verdict.json,replay-terminal.log}`, and the demo's
+`.pane/console-replay.jsonl`. Full integrated Pane verification is 894 passed,
+one ignored; all 13 focused excerpt regressions also passed independent review.
+The earlier full workspace evidence remains applicable to unchanged Glasshouse
+source. The working launch example is `glasshouse-helper-demo-v2/run-pane.sh`.
+
+Remaining findings are explicit: no new desktop/cmux mouse-focus proof while
+the controller returns `cgWindowNotFound`; helper usage is missing from the UI
+task meter; quick-open still lacks the CLI profile-selection behavior; this
+round has no Windows proof because the upstream V8 GNU artifact was unavailable.
+An automatic permission classifier and web crawling remain future work, as
+requested while prioritizing this harness repair. No capability box is closed.
