@@ -29,10 +29,27 @@ set -uo pipefail
 log="${1:?usage: rerun-failed-alone.sh <test-log> [wrapper-command...]}"
 shift
 
-failed="$(awk '
+# The log is what cargo printed to a terminal: `CARGO_TERM_COLOR=always`
+# colours the `Running` lines and a Windows runner ends them in CRLF, so both
+# are stripped before any pattern is tried (the first sweep parsed nothing
+# through them and reported a red cell green -- the one outcome this script
+# must never produce). A binary path is printed with the platform's own
+# separator; it is run with forward slashes, which every bash on every runner
+# takes as a relative path rather than a PATH lookup.
+plain="$(awk '
+  {
+    esc = sprintf("%c", 27)
+    gsub(esc "\\[[0-9;]*[A-Za-z]", "")
+    sub(/\r$/, "")
+    print
+  }
+' "$log")"
+
+failed="$(printf '%s\n' "$plain" | awk '
   /^ *Running .*\(target[\/\\][^)]*\)/ {
     match($0, /\(target[\/\\][^)]*\)/)
     bin = substr($0, RSTART + 1, RLENGTH - 2)
+    gsub(/\\/, "/", bin)
   }
   /^ *Doc-tests / { bin = "" }
   /^test .* \.\.\. FAILED$/ {
@@ -41,10 +58,24 @@ failed="$(awk '
     sub(/ \.\.\. FAILED$/, "", name)
     if (bin != "") print bin "\t" name
   }
-' "$log" | sort -u)"
+' | sort -u)"
 
 if [ -z "$failed" ]; then
-  echo "rerun-failed-alone: no failed test with a runnable binary in $log"
+  # Nothing to rerun is only good news when the log shows a clean run. A
+  # failure marker this parser could not map to a binary, a compile error,
+  # or a log with no test result at all is red -- the Test step was red and
+  # this step must not launder it.
+  markers="$(printf '%s\n' "$plain" | grep -aE '^test .* \.\.\. FAILED$|^test result: FAILED|^error(\[|:)' | head -20)"
+  if [ -n "$markers" ]; then
+    echo "rerun-failed-alone: the log carries failures this script could not map to a test binary; the red stands:"
+    printf '  %s\n' "$markers"
+    exit 1
+  fi
+  if ! printf '%s\n' "$plain" | grep -aq '^test result: ok'; then
+    echo "rerun-failed-alone: $log shows no test result at all; the red stands"
+    exit 1
+  fi
+  echo "rerun-failed-alone: no failed test in $log"
   exit 0
 fi
 

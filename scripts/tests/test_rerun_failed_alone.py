@@ -73,23 +73,58 @@ class RerunFailedAlone(unittest.TestCase):
             self.assertIn("flaky-pass: flaky_one", result.stdout)
             self.assertIn("1 flaky-pass, 0 still red", result.stdout)
 
-    def test_no_failure_is_exit_zero(self):
+    def test_a_clean_log_is_exit_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             result = run(root, "test steady ... ok\ntest result: ok. 1 passed\n")
             self.assertEqual(result.returncode, 0)
             self.assertIn("no failed test", result.stdout)
 
-    def test_a_windows_shaped_path_is_recognised(self):
+    def test_a_coloured_crlf_windows_log_is_parsed_and_the_binary_runs(self):
+        """The shape the first sweep produced: `CARGO_TERM_COLOR=always` colours
+        the Running line, the runner writes CRLF, and the path uses
+        backslashes. Sweep 34595144923 parsed nothing through it and turned a
+        red Windows cell green; this is the regression that must stay red."""
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             rel = fake_binary(root)
-            windows = rel.replace("/", "\\\\") + ".exe"
-            # The binary named in the log does not exist under that spelling,
-            # so the rerun fails to start: what matters is that the failure was
-            # attributed to a binary at all rather than skipped as unrunnable.
-            result = run(root, f"     Running tests\\fake.rs ({windows})\ntest flaky_one ... FAILED\n")
-            self.assertIn("rerun-failed-alone: flaky_one (", result.stdout)
+            windows = rel.replace("/", "\\")
+            log = (
+                f"\x1b[1m\x1b[92m     Running\x1b[0m tests\\fake.rs ({windows})\r\n"
+                "test flaky_one ... FAILED\r\n"
+                "test result: FAILED. 0 passed; 1 failed\r\n"
+            )
+            result = run(root, log)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("flaky-pass: flaky_one", result.stdout)
+            argv = (root / rel).with_name("fake-0123abcd.argv").read_text()
+            self.assertIn("flaky_one --exact --test-threads=1 --nocapture", argv)
+
+    def test_a_failure_with_no_binary_to_map_it_to_stays_red(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = run(root, "test flaky_one ... FAILED\ntest result: FAILED. 0 passed; 1 failed\n")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("could not map", result.stdout)
+            self.assertIn("test flaky_one ... FAILED", result.stdout)
+
+    def test_a_compile_error_stays_red(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            log = (
+                "error[E0425]: cannot find value `x` in this scope\n"
+                "error: could not compile `pane` (test \"session\") due to 1 previous error\n"
+            )
+            result = run(root, log)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("could not compile", result.stdout)
+
+    def test_an_empty_log_stays_red(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = run(root, "")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("no test result at all", result.stdout)
 
 
 if __name__ == "__main__":
