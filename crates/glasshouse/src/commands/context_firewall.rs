@@ -92,7 +92,7 @@ pub(crate) fn context_firewall_hook(
                     user,
                     project.as_ref(),
                     &gateway,
-                    &glasshouse::secret::native::PreferNativeSecretStore::detect(),
+                    &runtime.paths().secret_store(),
                 )
             {
                 eprintln!(
@@ -767,7 +767,7 @@ fn disposable_reducer(
     let reducer_model_pin = effective.context_firewall_reducer_model().value;
     let local_only = effective.context_firewall_reducer_local_only().value;
 
-    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let secrets = runtime.paths().secret_store();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(
@@ -879,7 +879,13 @@ fn disposable_reducer(
         )
         .ok()?;
 
-    match context_firewall_reducer_model(user, project, choice.provider(), choice.model()) {
+    match context_firewall_reducer_model(
+        runtime.paths(),
+        user,
+        project,
+        choice.provider(),
+        choice.model(),
+    ) {
         Ok(reducer) => Some(Box::new(reducer)),
         Err(err) => {
             tracing::warn!(error = %err, "the configured context-firewall reducer cannot be used");
@@ -940,6 +946,7 @@ fn local_disposable_reducer(
 /// restated for the reducer's own type, since both build a real client from
 /// a provider name and a model name after routing has already decided them.
 fn context_firewall_reducer_model(
+    paths: &glasshouse::paths::RuntimePaths,
     user: &UserConfig,
     project: Option<&ProjectConfig>,
     provider_name: &str,
@@ -966,7 +973,7 @@ fn context_firewall_reducer_model(
         format!("the context-firewall reducer's provider does not resolve: {err}")
     })?;
 
-    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let secrets = paths.secret_store();
     let credential = provider
         .credential_env
         .iter()

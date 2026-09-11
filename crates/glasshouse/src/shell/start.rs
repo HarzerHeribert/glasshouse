@@ -23,7 +23,6 @@ use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
 use crate::profile::{self, BackendResource, LaunchProfile};
 use crate::pty::TerminalSize;
-use crate::secret::native::PreferNativeSecretStore;
 use crate::session::{
     self, NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation,
     SessionRuntime,
@@ -240,7 +239,7 @@ pub(super) fn start_session_with_profile(
         }
         _ => None,
     };
-    let secrets = PreferNativeSecretStore::detect();
+    let secrets = app_runtime.paths().secret_store();
     let gateway = crate::gateway::start_if_required_with_degrade_sink(
         &[launch_profile.backend_demand()],
         || {

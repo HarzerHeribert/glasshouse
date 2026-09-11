@@ -254,7 +254,7 @@ impl<'de> Deserialize<'de> for ConfiguredHeadroomBand {
 /// ([`EntitlementLookupError::TwoBackings`]).
 ///
 /// An overlay naming an account the gateway does not have is refused by
-/// [`ConfigError::UnknownGatewayAccount`] rather than dropped: a rule the
+/// [`EntitlementLookupError::UnknownAccount`] rather than dropped: a rule the
 /// user believes is in force and that matches nothing is the silent kind of
 /// wrong this project keeps paying for.
 ///

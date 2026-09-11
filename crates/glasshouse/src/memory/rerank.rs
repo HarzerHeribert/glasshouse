@@ -419,7 +419,6 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
     use crate::routing::disposable::{DisposableCandidate, DisposableRouting, JobKind};
     use crate::routing::free::{FreePool, FreePreferences};
     use crate::routing::pressure::ReserveScope;
-    use crate::secret::native::PreferNativeSecretStore;
     use crate::secret::{SecretRef, SecretStore as _};
 
     let user = UserConfig::load(runtime.paths()).ok()?;
@@ -476,7 +475,7 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
         )));
     }
 
-    let secrets = PreferNativeSecretStore::detect();
+    let secrets = runtime.paths().secret_store();
 
     // Step 2: the local bypass. A provider naming no credential variable is
     // not expressible as a `DisposableCandidate` — see

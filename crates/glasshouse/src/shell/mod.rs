@@ -2127,14 +2127,15 @@ fn spawn_provider_probe(
     let cache = ModelCache::new(&runtime.paths().provider_cache_dir());
     let results = results.clone();
     let wake = wake.clone();
+    // The store is built here, where `runtime` is in scope, and moved into
+    // the thread; the `Secret` it resolves is still read at the last
+    // possible moment, off the drawing thread, and lives only as long as the
+    // closure. The same store a launch would use.
+    let store = runtime.paths().secret_store();
 
     std::thread::Builder::new()
         .name(format!("glasshouse-probe-{}", intent.provider))
         .spawn(move || {
-            // Resolved here, not in `state`: the last possible moment before
-            // it is needed, off the drawing thread, and the `Secret` lives
-            // only as long as this closure. The same store a launch would use.
-            let store = secret::native::PreferNativeSecretStore::detect();
             let credential = intent
                 .secret_refs
                 .iter()

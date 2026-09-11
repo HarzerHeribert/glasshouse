@@ -155,6 +155,19 @@ impl RuntimePaths {
     /// The gateway's private state root. Everything under it — brokers,
     /// managed tools, model catalogues, the quota and health caches — is the
     /// gateway's, and Glasshouse only reads it.
+    /// The credential store every Glasshouse-side resolution uses: the
+    /// gateway's credential file first, then the native store, then the
+    /// environment — the same chain the gateway itself resolves through, so a
+    /// key entered in Pane and stored by the gateway is what a hosted
+    /// session gets. Built here rather than by `PreferNativeSecretStore::detect()`
+    /// at each site because only this type knows where the gateway keeps
+    /// its file.
+    pub fn secret_store(&self) -> crate::secret::native::PreferNativeSecretStore {
+        crate::secret::native::PreferNativeSecretStore::detect_with_file(
+            inference_gateway::config::credentials_path(self.gateway_data_dir()),
+        )
+    }
+
     pub fn gateway_data_dir(&self) -> &Path {
         &self.gateway_data_dir
     }

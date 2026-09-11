@@ -1050,10 +1050,12 @@ fn the_doctor_report_says_which_secret_store_credentials_come_from() {
         report.contains("Secret storage"),
         "the report must have a secret-storage section: {report}"
     );
-    // Whichever of the three arrangements is in force on the machine
-    // running this, the report must print that arrangement's own label —
-    // never nothing, and never a label for a different one.
-    let store = crate::secret::native::PreferNativeSecretStore::detect();
+    // Whichever arrangement is in force on the machine running this, the
+    // report must print that arrangement's own label — never nothing, and
+    // never a label for a different one. The store is the runtime's, so the
+    // gateway's credential file is in the chain exactly as it is in the
+    // report.
+    let store = runtime.paths().secret_store();
     let label = crate::secret::SecretStore::describe(&store);
     assert!(
         report.contains(&format!("credentials resolve from: {label}")),
@@ -1064,6 +1066,8 @@ fn the_doctor_report_says_which_secret_store_credentials_come_from() {
             crate::secret::native::NATIVE_FIRST_LABEL,
             crate::secret::native::UNSUPPORTED_PLATFORM_LABEL,
             crate::secret::native::STORE_UNREACHABLE_LABEL,
+            crate::secret::native::FILE_FIRST_LABEL,
+            crate::secret::native::FILE_THEN_ENVIRONMENT_LABEL,
         ]
         .contains(&label),
         "`{label}` is not one of the three arrangements this store can be in"

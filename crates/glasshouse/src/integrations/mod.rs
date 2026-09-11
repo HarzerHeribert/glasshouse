@@ -965,7 +965,7 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     // Glasshouse believes: which store a credential would actually be read
     // from, said out loud. A fallback nobody is told about is a silent
     // degradation, and this is what stops it being one.
-    let secrets = crate::secret::native::PreferNativeSecretStore::detect();
+    let secrets = runtime.paths().secret_store();
     let _ = writeln!(out, "Secret storage");
     let _ = writeln!(
         out,
