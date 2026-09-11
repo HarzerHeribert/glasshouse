@@ -5159,6 +5159,17 @@ case "$1" in
   subscriptions)
     echo '{"state":"connected","account":"work@example.com"}'
     ;;
+  credentials)
+    case "$2" in
+      list)
+        echo '{"version":1,"providers":[{"provider":"anthropic","variable":"ANTHROPIC_API_KEY","source":null,"native_store":"absent"}]}'
+        ;;
+      set)
+        cat > "@RECORD@.stdin"
+        echo '{"provider":"'"$3"'","variable":"ANTHROPIC_API_KEY","stored_in":"/dev/null/credentials.toml"}'
+        ;;
+    esac
+    ;;
 esac
 exit 0
 "#;
@@ -5596,6 +5607,152 @@ fn the_model_and_login_controls_reach_the_gateway_without_a_scope() {
     );
 }
 
+/// **A key entered in the session exists in exactly one place afterwards.**
+/// It reaches the gateway on the child's stdin -- never in `argv`, which any
+/// process on the machine can read -- and nowhere a later reader could find
+/// it: not the session's answers, not its diagnostics, not the rollout it
+/// would replay from.
+#[cfg(unix)]
+#[test]
+fn a_key_typed_at_the_prompt_reaches_the_gateway_on_stdin_and_nothing_else() {
+    const KEY: &str = "sk-test-secret-value";
+    let root = scratch_dir("gateway-key-entry-root");
+    let rollout = root.join("rollout.jsonl");
+    let record = root.join("gateway-argv.txt");
+    let base_url = refused_base_url();
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
+
+    let output = run_session_stdin_with_gateway(
+        &root,
+        &rollout,
+        "sess-key-entry",
+        &["/key anthropic", KEY],
+        None,
+        &gateway,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let seen = fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.lines()
+            .any(|line| line == "credentials set anthropic --json"),
+        "/key must store through the gateway's own command: {seen}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("gateway-argv.txt.stdin")).unwrap(),
+        KEY,
+        "the gateway must receive the key itself, on stdin"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let replayed = fs::read_to_string(&rollout).unwrap_or_default();
+    for (place, text) in [
+        ("stdout", stdout.as_ref()),
+        ("stderr", stderr.as_ref()),
+        ("the rollout", replayed.as_str()),
+    ] {
+        assert!(
+            !text.contains(KEY),
+            "the key must never reach {place}:\n{text}"
+        );
+    }
+    assert!(
+        stdout.contains("Stored the ANTHROPIC_API_KEY for anthropic in the gateway."),
+        "the variable it was stored under is what the session reports:\n{stdout}"
+    );
+}
+
+/// `/login` is where a person goes to be able to send a turn, so it lists
+/// both ways of becoming able to: the accounts a flow connects, and then the
+/// providers whose API key the gateway holds -- or does not.
+#[cfg(unix)]
+#[test]
+fn the_login_panel_lists_api_key_rows_after_the_accounts() {
+    let root = scratch_dir("gateway-key-panel-root");
+    let rollout = root.join("rollout.jsonl");
+    let record = root.join("gateway-argv.txt");
+    let base_url = refused_base_url();
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
+
+    let output = run_session_stdin_with_gateway(
+        &root,
+        &rollout,
+        "sess-key-panel",
+        &["/login"],
+        None,
+        &gateway,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(account) = stdout.find("work@example.com · user") else {
+        panic!("the account row must still be listed:\n{stdout}");
+    };
+    let Some(key) = stdout.find("anthropic · API key · not set") else {
+        panic!("the key row must be listed:\n{stdout}");
+    };
+    assert!(
+        account < key,
+        "the key rows come after the accounts:\n{stdout}"
+    );
+}
+
+/// A hosted session's keys live where its gateway does, which is not this
+/// machine: `/login` offers no key row, and `/key` says so rather than
+/// storing anything.
+#[cfg(unix)]
+#[test]
+fn a_hosted_session_offers_no_key_entry() {
+    let root = scratch_dir("hosted-key-entry-root");
+    let rollout = root.join("rollout.jsonl");
+    let glasshouse_record = root.join("glasshouse-argv.txt");
+    let base_url = refused_base_url();
+    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &glasshouse_record);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-hosted-key",
+        &["/login", "/key anthropic"],
+        &base_url,
+        Some(&glasshouse),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("work@example.com · user"),
+        "a hosted /login still lists its accounts:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("· API key ·"),
+        "a hosted session must offer no key row:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("API keys are entered where the gateway runs"),
+        "/key must say where the keys of a hosted session live:\n{stdout}"
+    );
+    let seen = fs::read_to_string(&glasshouse_record).unwrap_or_default();
+    assert!(
+        !seen.contains("credentials"),
+        "a hosted session must not try to store a key: {seen}"
+    );
+}
+
 /// **Hosted** controls: handed a gateway by Glasshouse (a base URL with a
 /// loopback host, as its launch passes), `/model` and `/login` go to
 /// Glasshouse's own commands scoped to this project — the catalogue that is
@@ -5688,9 +5845,11 @@ fn a_base_url_without_a_token_or_a_loopback_host_does_not_count_as_a_handed_gate
     );
 }
 
-/// A gateway that starts and then refuses to serve says why, in pane's own
-/// refusal: the real binary with an account whose credential resolves
-/// nowhere exits before its ready line, and its words come back.
+/// A gateway that refuses before its ready line says why, in pane's own
+/// refusal: the real binary given a configuration it cannot read exits with
+/// its words on stderr, and they come back. (An account whose credential
+/// resolves nowhere is no longer a refusal: since 2026-09-11 the gateway
+/// listens and waits for a key — `a_key_entered_in_the_session_…` above.)
 #[cfg(unix)]
 #[test]
 fn a_gateway_that_refuses_to_serve_is_quoted_in_panes_refusal() {
@@ -5698,21 +5857,7 @@ fn a_gateway_that_refuses_to_serve_is_quoted_in_panes_refusal() {
     let root = scratch_dir("gateway-refusal-root");
     let rollout = root.join("rollout.jsonl");
     let config = root.join("gateway.toml");
-    fs::write(
-        &config,
-        r#"
-[providers.fixture]
-base_url = "http://127.0.0.1:1"
-protocol = "anthropic-messages"
-credential_env = ["PANE_E2E_UNSET_VAR"]
-
-[accounts.nokey]
-kind = "api-key"
-provider = "fixture"
-credential = { env = "PANE_E2E_UNSET_VAR" }
-"#,
-    )
-    .unwrap();
+    fs::write(&config, "[providers.fixture\nthis is not toml\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .arg("session")
@@ -5745,8 +5890,8 @@ credential = { env = "PANE_E2E_UNSET_VAR" }
         "the refusal must carry the gateway's own words: {stderr}"
     );
     assert!(
-        stderr.contains("nokey") || stderr.contains("PANE_E2E_UNSET_VAR"),
-        "the gateway's words must name what could not be resolved: {stderr}"
+        stderr.contains("gateway.toml"),
+        "the gateway's words must name the file it could not read: {stderr}"
     );
 }
 
@@ -5796,4 +5941,109 @@ fn a_gateway_that_cannot_be_started_refuses_the_session_by_name() {
         !rollout.exists(),
         "a refused session must not have opened a rollout"
     );
+}
+
+/// The user's own case (2026-09-11): no key anywhere, the session starts
+/// anyway, the key entered at `/key` is stored by the gateway pane spawned,
+/// and the next turn completes through it. Stdin mode stands in for the
+/// masked prompt: the line after `/key fixture` is the key.
+#[cfg(unix)]
+#[test]
+fn a_key_entered_in_the_session_is_stored_by_the_gateway_and_the_next_turn_completes() {
+    use std::io::Write as _;
+    const ENTERED_KEY: &str = "entered-at-the-prompt-never-in-the-environment";
+
+    let gateway = real_gateway_binary();
+    let root = scratch_dir("real-gateway-key-entry");
+    let rollout = root.join("rollout.jsonl");
+    let (provider_url, requests) = start_header_recording_provider(vec![ending_reply()]);
+    let config = root.join("gateway.toml");
+    fs::write(
+        &config,
+        format!(
+            r#"
+[providers.fixture]
+base_url = "{provider_url}"
+protocol = "anthropic-messages"
+credential_env = ["PANE_E2E_ENTERED_KEY"]
+"#
+        ),
+    )
+    .unwrap();
+    let data_dir = root.join("gateway-data");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(&rollout)
+        .arg("--session")
+        .arg("sess-key-entry")
+        .arg("--gateway")
+        .arg(&gateway)
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("PANE_E2E_ENTERED_KEY")
+        .env("PATH", "/usr/bin:/bin")
+        .env("INFERENCE_GATEWAY_CONFIG", &config)
+        .env("INFERENCE_GATEWAY_DATA_DIR", &data_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(format!("/key fixture\n{ENTERED_KEY}\nhi\n").as_bytes())
+        .unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the session must complete: {stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("No provider credential is stored yet"),
+        "a session that spawned a keyless gateway says so once: {stderr}"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the turn after the key was entered reached the provider: {stdout}\n{stderr}"
+    );
+    let (headers, _) = &requests[0];
+    assert!(
+        headers.iter().any(|header| header.ends_with(ENTERED_KEY)),
+        "the provider was given the entered key by the gateway: {headers:?}"
+    );
+
+    let credentials = data_dir.join("credentials.toml");
+    let stored =
+        fs::read_to_string(&credentials).expect("the gateway stored the key in its own file");
+    assert!(stored.contains("PANE_E2E_ENTERED_KEY"), "{stored}");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(&credentials).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "owner-only, was {mode:o}");
+    }
+    for (name, text) in [
+        ("stdout", stdout.to_string()),
+        ("stderr", stderr.to_string()),
+        ("rollout", fs::read_to_string(&rollout).unwrap_or_default()),
+        (
+            "gateway log",
+            fs::read_to_string(rollout.with_extension("gateway.log")).unwrap_or_default(),
+        ),
+    ] {
+        assert!(
+            !text.contains(ENTERED_KEY),
+            "the key leaked into {name}: {text}"
+        );
+    }
 }

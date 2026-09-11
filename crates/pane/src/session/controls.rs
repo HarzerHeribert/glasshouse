@@ -160,7 +160,7 @@ pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
     };
 
     let Some(account) = account else {
-        show(session, connectable_panel(&catalogue));
+        show(session, connectable_panel(&catalogue, &api_keys(session)));
         return;
     };
 
@@ -192,8 +192,62 @@ pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
     stream_connect(session, &provider, account);
 }
 
-/// The accounts a login flow could connect, connected or not.
-fn connectable_panel(catalogue: &Catalogue) -> Panel {
+/// The gateway's credential table, for a session whose gateway is a binary
+/// this machine runs. A hosted session's keys live where its gateway does,
+/// which is not here, so it is never asked.
+fn api_keys(session: &Session<'_>) -> Vec<crate::gateway::CredentialRow> {
+    if !matches!(session.gateway, Gateway::Command { .. }) {
+        return Vec::new();
+    }
+    crate::gateway::credentials(session.gateway).unwrap_or_default()
+}
+
+/// Says a startup once, and only for the one state a person must act on:
+/// pane started the gateway, the gateway names providers, and not one of
+/// them has a credential -- so every turn would come back 503 until a key is
+/// entered.
+pub(super) fn announce_missing_credential(session: &Session<'_>, started_the_gateway: bool) {
+    const NOTICE: &str = "No provider credential is stored yet. Use /login to enter an API key \
+                          or connect an account.";
+    if !started_the_gateway || !crate::gateway::nothing_resolves(session.gateway) {
+        return;
+    }
+    if session.ui.is_some() {
+        session_println!("{NOTICE}");
+    } else {
+        // Not stdout: a session driven by a script has a caller reading its
+        // answers there, and a notice is not an answer.
+        eprintln!("{NOTICE}");
+    }
+}
+
+/// One row per provider that declares a key, after the accounts: where the
+/// key resolves from now, and `/key <provider>` to enter one.
+fn key_rows(keys: &[crate::gateway::CredentialRow]) -> Vec<tui::PanelRow> {
+    keys.iter()
+        .map(|row| {
+            let state = match (row.source.as_deref(), row.native_store.as_deref()) {
+                (Some("file"), _) => "stored in the gateway's credential file".to_string(),
+                (Some("native"), _) => "stored in the native store".to_string(),
+                (Some("environment"), _) => "stored in the environment".to_string(),
+                (Some(source), _) => format!("stored in {source}"),
+                (None, Some("refused")) => {
+                    "a Keychain item exists that this build may not read; enter it again"
+                        .to_string()
+                }
+                (None, _) => "not set".to_string(),
+            };
+            tui::PanelRow {
+                text: format!("{} · API key · {state}", row.provider),
+                command: Some(format!("/key {}", row.provider)),
+            }
+        })
+        .collect()
+}
+
+/// The accounts a login flow could connect, connected or not, and then the
+/// API keys the gateway holds.
+fn connectable_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
     let mut rows: Vec<tui::PanelRow> = catalogue
         .accounts
         .iter()
@@ -210,13 +264,82 @@ fn connectable_panel(catalogue: &Catalogue) -> Panel {
             }
         })
         .collect();
-    if rows.is_empty() {
+    let keys = key_rows(keys);
+    // The filler is for a panel with nothing in it at all: a key row is
+    // something to do, so saying there is nothing would be false.
+    if rows.is_empty() && keys.is_empty() {
         rows.push(tui::PanelRow {
             text: "No account in this project is connected with a login flow.".into(),
             command: None,
         });
     }
+    rows.extend(keys);
     Panel::rows("Connect an account", rows)
+}
+
+/// `/key <provider>`: takes an API key without echoing it and hands it to the
+/// gateway to store.
+///
+/// **The value is read, passed to one child's stdin, and dropped.** It is
+/// never put in the editor, the conversation, the rollout, a panel or a log
+/// -- the panel this ends with names the *variable*, never the key.
+pub(super) fn key(session: &Session<'_>, provider: Option<&str>) {
+    let Some(provider) = provider.filter(|value| !value.is_empty()) else {
+        show(
+            session,
+            Panel::text(
+                "API key",
+                "/key <provider> takes an API key for one provider -- `/key anthropic`. \
+                 /login lists the providers this gateway knows.",
+            ),
+        );
+        return;
+    };
+    if matches!(session.gateway, Gateway::Hosted { .. }) {
+        show(
+            session,
+            Panel::text(
+                "API key",
+                "API keys are entered where the gateway runs; this session's gateway is \
+                 hosted by Glasshouse.",
+            ),
+        );
+        return;
+    }
+    let Some(value) = entered_secret(session, provider).filter(|value| !value.is_empty()) else {
+        session_println!("no key entered");
+        return;
+    };
+    match crate::gateway::store_credential(session.gateway, provider, &value) {
+        Some(variable) => show(
+            session,
+            Panel::text(
+                "API key",
+                format!("Stored the {variable} for {provider} in the gateway."),
+            ),
+        ),
+        None => show(
+            session,
+            Panel::text(
+                "API key",
+                format!(
+                    "The gateway did not store the key; run `inference-gateway credentials \
+                     set {provider}` in a shell to see why."
+                ),
+            ),
+        ),
+    }
+}
+
+/// The key itself: a modal masked prompt with a terminal, the next line of
+/// stdin without one. Neither path echoes what it reads.
+fn entered_secret(session: &Session<'_>, provider: &str) -> Option<String> {
+    match session.ui {
+        Some(ui) => ui.secret(&format!(
+            "API key for {provider} — Enter stores it, Esc cancels"
+        )),
+        None => ui::read_line().ok().flatten(),
+    }
 }
 
 /// Runs the flow, showing each line the gateway reports as it arrives.
@@ -577,6 +700,7 @@ pub(super) fn command(
             models(session);
         }
         "login" => login(session, argument),
+        "key" => key(session, argument),
         _ => return false,
     }
     true

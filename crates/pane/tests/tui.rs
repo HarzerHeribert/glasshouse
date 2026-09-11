@@ -9,7 +9,7 @@ use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::{
     CellError, CellView, Counted, HelperModelTokens, HelperTokens, Notebook, ScreenState,
-    SupervisorStatus, TaskTokens, cell_ordinal, render, render_screen,
+    SecretPrompt, SupervisorStatus, TaskTokens, cell_ordinal, render, render_screen,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -565,6 +565,55 @@ fn an_output_region_with_nothing_to_show_says_so_rather_than_collapsing() {
         line_after(&buffer, "[2] out"),
         "(no outputs)",
         "the latest cell's output region must say so when its table is empty"
+    );
+}
+
+/// **A masked prompt shows how much was typed and never what.** One bullet
+/// per character is the whole of what the renderer can see of it -- `mask()`
+/// is the only spelling the drawing code is given -- and the composer's own
+/// completions are suppressed while the prompt has the keyboard.
+#[test]
+fn the_masked_prompt_renders_bullets_and_never_the_key() {
+    const KEY: &str = "sk-test-secret-value";
+    let mut prompt =
+        SecretPrompt::new("API key for anthropic \u{2014} Enter stores it, Esc cancels");
+    prompt.push(KEY);
+    let state = ScreenState {
+        input: "/key".into(),
+        secret_prompt: Some(prompt),
+        ..ScreenState::default()
+    };
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_screen(
+                frame,
+                &conversation(vec![]),
+                &known_served_by(),
+                &HandleTable::new(),
+                &Notebook::default(),
+                &state,
+            )
+        })
+        .unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(
+        text.contains(&"\u{2022}".repeat(KEY.chars().count())),
+        "one bullet per character of the key:\n{text}"
+    );
+    assert!(
+        !text.contains(KEY),
+        "the key itself must not render:\n{text}"
+    );
+    assert!(!text.contains("sk-"), "nor any part of it:\n{text}");
+    assert!(
+        text.contains("API key for anthropic"),
+        "the prompt must say what it is asking for:\n{text}"
+    );
+    assert!(
+        !text.contains("enter a provider API key"),
+        "completions for the composer must not be offered while it is modal:\n{text}"
     );
 }
 

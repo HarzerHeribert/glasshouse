@@ -94,8 +94,26 @@ impl Drop for Restore {
     }
 }
 
+/// The next line of the session's stdin, `None` at end of input.
+///
+/// **One line per lock, rather than `stdin().lock().lines()`.** A lock held
+/// for a whole read loop is not reentrant, and `/key` reads the key's own
+/// line from inside the input that asked for it -- which would deadlock
+/// against a loop still holding the lock it was called from.
+pub(super) fn read_line() -> io::Result<Option<String>> {
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    line.truncate(line.trim_end_matches('\n').trim_end_matches('\r').len());
+    Ok(Some(line))
+}
+
 pub(super) enum Update {
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
+    /// Open a modal masked prompt with this title. The terminal thread
+    /// answers it on the secret channel and on nothing else.
+    SecretPrompt(String),
     Model(String),
     Delta(String),
     ToolDelta(String),
@@ -111,10 +129,20 @@ enum Input {
     Failed(String),
 }
 
+/// The two channels the terminal thread answers on. A masked prompt's reply
+/// has its own, so a secret cannot arrive where a message is expected.
+struct Answers<'a> {
+    inputs: &'a mpsc::Sender<Input>,
+    secrets: &'a mpsc::Sender<Option<String>>,
+}
+
 pub(super) struct LiveUi {
     handler_cancellations: Arc<Mutex<Vec<String>>>,
     updates: mpsc::Sender<Update>,
     inputs: mpsc::Receiver<Input>,
+    /// Answers to [`Update::SecretPrompt`], on their own channel: a secret
+    /// must not be able to arrive as an `Input` and be taken for a message.
+    secrets: mpsc::Receiver<Option<String>>,
     thread: Option<JoinHandle<()>>,
 }
 impl LiveUi {
@@ -125,6 +153,7 @@ impl LiveUi {
     ) -> Result<Self, String> {
         let (updates, receiver) = mpsc::channel();
         let (input_sender, inputs) = mpsc::channel();
+        let (secret_sender, secrets) = mpsc::channel();
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let handler_cancellations = Arc::new(Mutex::new(Vec::new()));
         let commands = handler_cancellations.clone();
@@ -134,7 +163,10 @@ impl LiveUi {
                 conversation,
                 notebook,
                 receiver,
-                &input_sender,
+                Answers {
+                    inputs: &input_sender,
+                    secrets: &secret_sender,
+                },
                 ready_sender,
                 commands,
             );
@@ -150,8 +182,17 @@ impl LiveUi {
             handler_cancellations,
             updates,
             inputs,
+            secrets,
             thread: Some(thread),
         })
+    }
+    /// Opens the modal masked prompt and blocks until it is answered:
+    /// `Some` is what was entered, `None` an Esc or a terminal that went
+    /// away. **Nothing typed into it reaches the editor, the transcript or
+    /// the input history** -- it comes back here and nowhere else.
+    pub(super) fn secret(&self, title: &str) -> Option<String> {
+        self.updates.send(Update::SecretPrompt(title.into())).ok()?;
+        self.secrets.recv().ok().flatten()
     }
     pub(super) fn handler_cancellations(&self) -> Vec<String> {
         std::mem::take(&mut *super::lock(&self.handler_cancellations))
@@ -466,7 +507,7 @@ fn run(
     mut conversation: Conversation,
     mut notebook: Notebook,
     updates: mpsc::Receiver<Update>,
-    inputs: &mpsc::Sender<Input>,
+    answers: Answers<'_>,
     ready: mpsc::SyncSender<Result<(), String>>,
     handler_cancellations: Arc<Mutex<Vec<String>>>,
 ) -> io::Result<()> {
@@ -587,6 +628,13 @@ fn run(
                 Update::Effort(effort) => state.effort = effort,
                 Update::Panel(panel) => state.panel = Some(*panel),
                 Update::Notice(message) => state.notice = Some(message),
+                Update::SecretPrompt(title) => {
+                    state.secret_prompt = Some(tui::SecretPrompt::new(title));
+                    // A panel over a modal prompt would take the Enter that
+                    // submits it.
+                    state.panel = None;
+                    state.inspection = None;
+                }
                 Update::Stop => return Ok(()),
             }
         }
@@ -699,7 +747,11 @@ fn run(
                 }
             }
             Event::Paste(text) => {
-                if !state
+                // Pasting is how most keys are entered, so the masked prompt
+                // takes a paste before anything else can.
+                if let Some(prompt) = state.secret_prompt.as_mut() {
+                    prompt.push(&text);
+                } else if !state
                     .panel
                     .as_mut()
                     .is_some_and(|panel| panel.search_insert(&text))
@@ -710,6 +762,36 @@ fn run(
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 dirty = true;
+                // **Modal, and first.** While a masked prompt is open every
+                // key belongs to it: none reaches the editor, the panel, the
+                // inspector or the input history.
+                if let Some(prompt) = state.secret_prompt.as_mut() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let entered = state.secret_prompt.take().map(tui::SecretPrompt::take);
+                            let _ = answers.secrets.send(entered);
+                        }
+                        KeyCode::Esc => {
+                            state.secret_prompt = None;
+                            let _ = answers.secrets.send(None);
+                        }
+                        KeyCode::Char('c' | 'u')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            prompt.clear();
+                        }
+                        KeyCode::Backspace => prompt.backspace(),
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            prompt.push(&c.to_string());
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if let Some(inspection) = state.inspection.as_mut() {
                     let handled = match key.code {
                         KeyCode::Esc => {
@@ -847,7 +929,7 @@ fn run(
                                 } else if !busy {
                                     state.panel = None;
                                     busy = true;
-                                    let _ = inputs.send(Input::Submit(command));
+                                    let _ = answers.inputs.send(Input::Submit(command));
                                 }
                             }
                         }
@@ -860,7 +942,8 @@ fn run(
                 if key.code == KeyCode::BackTab {
                     if !busy {
                         busy = true;
-                        let _ = inputs
+                        let _ = answers
+                            .inputs
                             .send(Input::Submit(format!("/mode {}", state.mode.next().name())));
                     } else {
                         state.notice = Some("Change mode after the current task finishes.".into());
@@ -908,7 +991,7 @@ fn run(
                             continue;
                         }
                         KeyCode::Char('d') if !busy && editor.text.is_empty() => {
-                            let _ = inputs.send(Input::Exit);
+                            let _ = answers.inputs.send(Input::Exit);
                             return Ok(());
                         }
                         _ => {}
@@ -1072,7 +1155,7 @@ fn run(
                     state.scrollback = 0;
                     state.notice = None;
                     if text.trim() == "/exit" {
-                        let _ = inputs.send(Input::Exit);
+                        let _ = answers.inputs.send(Input::Exit);
                         return Ok(());
                     }
                     if text.split_whitespace().next() == Some("/statusline") {
@@ -1101,7 +1184,7 @@ fn run(
                     task_started = Some(Instant::now());
                     state.pulse = tui::Pulse::default();
                     state.activity = Activity::Thinking;
-                    if inputs.send(Input::Submit(text)).is_err() {
+                    if answers.inputs.send(Input::Submit(text)).is_err() {
                         return Ok(());
                     }
                 }

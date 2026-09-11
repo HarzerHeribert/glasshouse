@@ -8,7 +8,7 @@ mod ui;
 
 use std::cell::{Cell, Ref, RefCell};
 use std::fs;
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1082,6 +1082,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
     };
+    controls::announce_missing_credential(&session, _serving.is_some());
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
     // §5 again, and this one is the promise `session::run` itself makes: an
     // input that failed mid-task left `run_task` by `?` without reaching its
@@ -1213,9 +1214,7 @@ fn drive(
         return Ok(());
     }
 
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
+    while let Some(line) = ui::read_line().map_err(|e| e.to_string())? {
         // **A failed input ends that input, not the session.** A REPL that
         // exits on the first upstream error loses the whole conversation to
         // one 400 or one dropped connection, which is what a person watching
@@ -1292,6 +1291,7 @@ fn is_session_control(name: &str) -> bool {
             | "permissions"
             | "entitlements"
             | "login"
+            | "key"
             | "supervisor"
             | "rollback"
             | "memory"

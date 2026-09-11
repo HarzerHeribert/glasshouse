@@ -42,6 +42,9 @@ pub struct ScreenState {
     pub cursor: Option<usize>,
     pub completion_selected: usize,
     pub notice: Option<String>,
+    /// A modal masked prompt, open over the composer. While it is set the
+    /// composer is not what the keyboard reaches.
+    pub secret_prompt: Option<SecretPrompt>,
     /// Fold long code and previews locally; never changes the model messages.
     pub compact: bool,
     pub pretty: bool,
@@ -84,6 +87,69 @@ pub struct ScreenState {
     /// failed: a recap must never replace or delay the answer it follows.
     /// The caller clears it when the next task begins.
     pub recap: Option<HelperRecord>,
+}
+
+/// A modal masked prompt: the one place a session takes a secret from the
+/// keyboard.
+///
+/// **What was typed leaves this value only through [`Self::take`].** The
+/// renderer is given [`Self::mask`] -- one `•` per character -- and `Debug`
+/// redacts, so a screen state that is cloned, logged or dumped carries the
+/// bullets and never the key.
+#[derive(Clone, Default)]
+pub struct SecretPrompt {
+    title: String,
+    entered: String,
+}
+
+impl std::fmt::Debug for SecretPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretPrompt")
+            .field("title", &self.title)
+            .field("entered", &self.mask())
+            .finish()
+    }
+}
+
+impl SecretPrompt {
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            entered: String::new(),
+        }
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    /// Typed or pasted text, control characters dropped: a pasted key carries
+    /// whatever line ending the place it was copied from used, and none of it
+    /// belongs in a credential.
+    pub fn push(&mut self, text: &str) {
+        self.entered
+            .extend(text.chars().filter(|c| !c.is_control()));
+    }
+    pub fn backspace(&mut self) {
+        self.entered.pop();
+    }
+    pub fn clear(&mut self) {
+        self.entered.clear();
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entered.is_empty()
+    }
+    /// One bullet per character -- all the renderer is ever given.
+    #[must_use]
+    pub fn mask(&self) -> String {
+        "•".repeat(self.entered.chars().count())
+    }
+    /// What was entered, consuming the prompt with it.
+    #[must_use]
+    pub fn take(self) -> String {
+        self.entered
+    }
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
@@ -261,7 +327,10 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
         .max(3)
         .min(remaining);
     let input = Rect::new(area.x, status.y - input_h, area.width, input_h);
-    let completion_h = (slash_matches(&state.input).len() as u16)
+    // A masked prompt owns the composer: the editor's text is still there,
+    // but it is not what the next keystroke goes to, so completions for it
+    // would be an offer the keyboard cannot take.
+    let completion_h = (completions_shown(state).len() as u16)
         .min(7)
         .min((input.y - area.y).saturating_sub(5));
     let completions = Rect::new(area.x, input.y - completion_h, area.width, completion_h);
@@ -341,6 +410,15 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
 
 /// Only real built-ins, with descriptions of their vocabulary rather than
 /// claims that a command was successfully executed.
+/// The completions this screen is offering, which is none at all while a
+/// masked prompt has the keyboard.
+fn completions_shown(state: &ScreenState) -> Vec<(String, &'static str)> {
+    if state.secret_prompt.is_some() {
+        return Vec::new();
+    }
+    slash_matches(&state.input)
+}
+
 pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
     let Some(prefix) = input.strip_prefix('/') else {
         return Vec::new();
@@ -387,6 +465,10 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                 ),
                 ("/cell".to_string(), "inspect a numbered cell · /cell 12"),
                 ("/chat".to_string(), "return to the conversation"),
+                (
+                    "/key".to_string(),
+                    "enter a provider API key · /key anthropic",
+                ),
                 ("/effort".to_string(), "configure response reasoning effort"),
                 (
                     "/context".to_string(),
@@ -832,7 +914,7 @@ pub(crate) fn render_screen_with_geometry(
     let completion_skip = state
         .completion_selected
         .saturating_sub(usize::from(regions.completions.height).saturating_sub(1));
-    let matches: Vec<Line> = slash_matches(&state.input)
+    let matches: Vec<Line> = completions_shown(state)
         .into_iter()
         .enumerate()
         .skip(completion_skip)
@@ -855,9 +937,21 @@ pub(crate) fn render_screen_with_geometry(
     frame.render_widget(Paragraph::new(matches), regions.completions);
     let input_lines = wrapped_input(state, regions.input.width);
     let visible = usize::from(regions.input.height.saturating_sub(2));
-    let cursor = state
-        .cursor
-        .map(|offset| composer_cursor(&state.input, offset, regions.input.width.saturating_sub(2)));
+    // A masked prompt puts the caret after the last bullet, from the mask
+    // alone: the entered text is not available to this function.
+    let cursor = match state.secret_prompt.as_ref() {
+        Some(prompt) => {
+            let mask = prompt.mask();
+            Some(composer_cursor(
+                &mask,
+                mask.len(),
+                regions.input.width.saturating_sub(2),
+            ))
+        }
+        None => state.cursor.map(|offset| {
+            composer_cursor(&state.input, offset, regions.input.width.saturating_sub(2))
+        }),
+    };
     let skip = cursor
         .map(|(row, _)| row.saturating_sub(visible.saturating_sub(1)))
         .unwrap_or_else(|| input_lines.len().saturating_sub(visible));
@@ -866,10 +960,24 @@ pub(crate) fn render_screen_with_geometry(
         regions.input,
     );
     if regions.input.height > 0 {
-        for y in [regions.input.y, regions.input.bottom() - 1] {
+        let width = usize::from(regions.input.width);
+        // The masked prompt's title rides the composer's own top rule: it is
+        // modal, so it belongs where the keyboard now goes rather than in the
+        // notice line a task could overwrite.
+        let top = match state.secret_prompt.as_ref() {
+            Some(prompt) => {
+                let title = format!("─ {} ", prompt.title());
+                let filled = title.chars().count();
+                format!("{title}{}", "─".repeat(width.saturating_sub(filled)))
+            }
+            None => "─".repeat(width),
+        };
+        for (y, rule) in [
+            (regions.input.y, top),
+            (regions.input.bottom() - 1, "─".repeat(width)),
+        ] {
             frame.render_widget(
-                Paragraph::new("─".repeat(usize::from(regions.input.width)))
-                    .style(Style::default().fg(ACCENT).bg(state.theme.dock())),
+                Paragraph::new(rule).style(Style::default().fg(ACCENT).bg(state.theme.dock())),
                 Rect::new(regions.input.x, y, regions.input.width, 1),
             );
         }
@@ -1136,15 +1244,15 @@ fn composer_cursor(input: &str, offset: usize, width: u16) -> (usize, usize) {
 }
 
 fn wrapped_input(state: &ScreenState, width: u16) -> Vec<Line<'static>> {
-    let text = if state.input.is_empty() {
-        "message or / for commands"
-    } else {
-        &state.input
-    };
-    let text = if state.cursor == Some(state.input.len()) && !state.input.is_empty() {
-        format!("{text} ")
-    } else {
-        text.to_string()
+    // The masked prompt's arm is the whole reason this function takes the
+    // state rather than the text: `mask()` is the only spelling of an entered
+    // secret that exists outside the prompt itself.
+    let text = match state.secret_prompt.as_ref() {
+        Some(prompt) if prompt.is_empty() => "the key is not shown as you type".to_string(),
+        Some(prompt) => prompt.mask(),
+        None if state.input.is_empty() => "message or / for commands".to_string(),
+        None if state.cursor == Some(state.input.len()) => format!("{} ", state.input),
+        None => state.input.clone(),
     };
     wrap_lines(
         text.split('\n')

@@ -382,6 +382,77 @@ pub fn start_or_attach(
 }
 
 // ---------------------------------------------------------------------
+// The credentials the gateway holds, and the one way pane adds to them
+// ---------------------------------------------------------------------
+
+/// One row of `inference-gateway credentials list --json`: a provider that
+/// declares a credential variable, and where that variable resolves from now.
+/// `source` is `None` when nothing resolves it -- the state `/key` exists to
+/// leave.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredentialRow {
+    pub provider: String,
+    #[serde(default)]
+    pub variable: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    /// `present`, `absent`, `refused` or `unavailable`. `refused` is the one
+    /// a person must act on: a Keychain item exists that this build may not
+    /// read, so the key has to be entered again.
+    #[serde(default)]
+    pub native_store: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialList {
+    #[serde(default)]
+    providers: Vec<CredentialRow>,
+}
+
+/// The gateway's credential table, or `None` when it cannot be asked -- not
+/// installed, not reachable, or too old to have the subcommand. Absent is not
+/// empty: a caller must not read "could not ask" as "nothing is stored".
+#[must_use]
+pub fn credentials(gateway: &Gateway) -> Option<Vec<CredentialRow>> {
+    let stdout = gateway.run(&["credentials", "list", "--json"], None)?;
+    serde_json::from_slice::<CredentialList>(&stdout)
+        .ok()
+        .map(|list| list.providers)
+}
+
+/// Whether the gateway answered, named at least one provider, and resolves a
+/// credential for none of them -- the only state worth a startup notice.
+#[must_use]
+pub fn nothing_resolves(gateway: &Gateway) -> bool {
+    credentials(gateway)
+        .is_some_and(|rows| !rows.is_empty() && rows.iter().all(|row| row.source.is_none()))
+}
+
+/// Hands `key` to the gateway to store, and reports the variable it was
+/// stored under. `None` is a gateway that refused or could not be run.
+///
+/// **The key travels on the child's stdin and never in `args`.** A command
+/// line is readable by every process on the machine; a pipe is not.
+#[must_use]
+pub fn store_credential(gateway: &Gateway, provider: &str, key: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Stored {
+        #[serde(default)]
+        variable: Option<String>,
+    }
+    let stdout = gateway.run(
+        &["credentials", "set", provider, "--json"],
+        Some(key.as_bytes()),
+    )?;
+    Some(
+        serde_json::from_slice::<Stored>(&stdout)
+            .ok()
+            .and_then(|stored| stored.variable)
+            .unwrap_or_else(|| "API key".to_string()),
+    )
+}
+
+// ---------------------------------------------------------------------
 // Which entitlement served each request, and what it cost
 // ---------------------------------------------------------------------
 
