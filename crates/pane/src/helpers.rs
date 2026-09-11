@@ -1093,15 +1093,20 @@ mod tests {
         });
 
         let started = Instant::now();
+        // The operation would hold for three seconds; a cancellation that
+        // returns in well under one proves it did not wait for it. The bound
+        // is a second rather than a few poll intervals because a starved CI
+        // runner (macOS, run 34585283591) took over 250ms just to schedule the
+        // cancelling thread, and that is not what this test is about.
         let result = wait_for_helper(&token, move || {
-            let _ = held.recv_timeout(Duration::from_secs(1));
+            let _ = held.recv_timeout(Duration::from_secs(3));
             7
         });
         drop(release);
 
         assert!(matches!(result, HelperWait::Cancelled));
         assert!(
-            started.elapsed() < Duration::from_millis(250),
+            started.elapsed() < Duration::from_secs(1),
             "cancellation waited for the owned helper operation"
         );
     }

@@ -154,15 +154,31 @@ jobs:
       # -- the same fixture ci-local.sh's run_linux() sources, so the local
       # gate and this sweep agree. macOS and Windows are the unchanged step
       # below; nothing here touches them.
+      # The two Test steps continue-on-error on purpose, and the log they tee
+      # is judged by the "Re-run failures alone" step at the END of the job:
+      # a red test must not stop the doctests, clippy and rustdoc behind it
+      # (user, 2026-09-11 -- a load-flaky pty test was hiding every later
+      # red), and a failed test gets one rerun alone before it counts, the
+      # sweep's form of CLAUDE.md rule 4. The job is red when a test is red
+      # alone too, or when any later step is.
       - name: Test (Linux, under the Secret Service fixture)
+        id: test_linux
         if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
         run: |
+          set -o pipefail
           . scripts/lib/secret-service-fixture.sh
-          secret_service_fixture_run cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture
+          secret_service_fixture_run cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/test.log"
 
       - name: Test
+        id: test
         if: runner.os != 'Linux'
-        run: cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/test.log"
 
       - name: Doctests
         run: cargo test --locked --workspace --exclude pane --doc
@@ -176,6 +192,18 @@ jobs:
         run: cargo doc --workspace --exclude pane --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+      - name: Re-run failures alone, once
+        if: always() && (steps.test.outcome == 'failure' || steps.test_linux.outcome == 'failure')
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            printf '%s\n' '#!/usr/bin/env bash' '. scripts/lib/secret-service-fixture.sh' 'secret_service_fixture_run "$@"' > "$RUNNER_TEMP/with-fixture.sh"
+            chmod +x "$RUNNER_TEMP/with-fixture.sh"
+            bash scripts/ci/rerun-failed-alone.sh "$RUNNER_TEMP/test.log" "$RUNNER_TEMP/with-fixture.sh"
+          else
+            bash scripts/ci/rerun-failed-alone.sh "$RUNNER_TEMP/test.log"
+          fi
 
       - name: Cache statistics
         if: always()
@@ -224,8 +252,19 @@ jobs:
       - name: Build the gateway pane's standalone proof runs
         if: runner.os != 'Windows'
         run: cargo build --locked -p inference-gateway --bin inference-gateway
+      # Same shape as the glasshouse job: the log is judged at the end, and a
+      # failed test is rerun alone once before it counts.
       - name: Test
-        run: cargo test --locked -p pane --no-fail-fast -- --nocapture
+        id: test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p pane --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - name: Re-run failures alone, once
+        if: always() && steps.test.outcome == 'failure'
+        shell: bash
+        run: bash scripts/ci/rerun-failed-alone.sh "$RUNNER_TEMP/test.log"
 
   # The checks that never cost a compiler: formatting, the README progress
   # block, the file-size ratchet, the doc boundary, evidence coverage, and the

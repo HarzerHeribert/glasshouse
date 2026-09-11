@@ -49,7 +49,11 @@ for Red. What changes:
    family (`terminal_loss`, `session_supervision`, the pty fixtures) is re-run alone
    once by the gate and reported `flaky-pass`, which is not red and gets no attribution
    write-up; three flaky-passes in a week buy a determinism packet for that test.
-   Until `GH-GATE-RERUN-ALONE` lands, do the one rerun by hand and stop there.
+   `blast-radius.sh` does the rerun for the local gate, and since 2026-09-11 the
+   GitHub sweep does it too: `scripts/ci/rerun-failed-alone.sh` reruns every
+   failed test alone once at the end of the cell and names each `flaky-pass`;
+   a red Test step no longer stops the cell's doctests, clippy and rustdoc
+   (user, 2026-09-11: a flaky pty test was hiding every red behind it).
 5. **Evidence entries and checkpoints are bounded.** An evidence entry is the
    contract, the tests by name, the mutation table (Amber/Red) and the limits — the
    worker's report is the record, linked by path. A checkpoint is under 150 lines. A

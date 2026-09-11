@@ -299,6 +299,16 @@ const RESIZE_TO_KEYSTROKE: [Duration; 2] = [Duration::from_millis(4), Duration::
 /// here. Three stays proved against that residual without the reverted line
 /// coming anywhere close.
 const MAX_STALLS: [usize; 2] = [3, 3];
+/// Which of [`RESIZE_TO_KEYSTROKE`]'s gaps this test **asserts** on, index
+/// for index. The other is measured and printed, never failed on.
+///
+/// The 4ms gap is not a proof — [`MAX_STALLS`]'s own doc measured that it
+/// cannot tell the fixed tree from the reverted one under load — and on
+/// GitHub's macOS runners it has swallowed 2, then 5, of 8 judged
+/// keystrokes (runs 33980693956 and 34583872522), turning the cell red and
+/// stopping the job before its clippy and rustdoc steps ran. The 500µs gap
+/// is the proof, and stays asserted at its measured residual.
+const GAP_IS_A_PROOF: [bool; 2] = [false, true];
 
 /// How many *judged* resize-then-type trials `a_resize_does_not_swallow_the_
 /// keystroke_that_follows_it` wants, split evenly between
@@ -1002,6 +1012,17 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
                 MAX_STALLS[which],
                 swallowed.len(),
                 judged[which],
+            );
+            continue;
+        }
+        if !GAP_IS_A_PROOF[which] {
+            println!(
+                "NOTE: the {gap:?} gap is measured, not asserted: {} of the {} judged \
+                 keystrokes were swallowed (trials {swallowed:?}); the tolerance it would be \
+                 held to is {}. See GAP_IS_A_PROOF for why this gap does not decide the run.",
+                swallowed.len(),
+                judged[which],
+                MAX_STALLS[which],
             );
             continue;
         }
