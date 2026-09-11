@@ -1000,7 +1000,9 @@ fn preventions_after_a_failover(
         "claude-code",
         "anthropic-messages",
         AssignedModel::named(FAILOVER_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

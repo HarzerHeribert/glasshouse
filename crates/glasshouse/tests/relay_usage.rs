@@ -344,7 +344,9 @@ fn start_gateway(upstream: Upstream, ledger: Arc<EvidenceLedger>, protocol: &str
         "claude-code",
         protocol,
         AssignedModel::named(MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     gateway
 }

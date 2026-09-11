@@ -604,7 +604,9 @@ fn a_real_forwarded_exchanges_health_is_persisted_for_the_next_process() {
         ROUTED_HARNESS,
         ANTHROPIC_MESSAGES,
         crate::routing::AssignedModel::named(ROUTED_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     assert!(
         cache.load("fixture").is_empty(),
@@ -720,7 +722,9 @@ fn a_real_forwarded_exchange_is_reported_to_the_sink() {
         "fixture-harness",
         ANTHROPIC_MESSAGES,
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = as_text(&send_and_read(
@@ -829,7 +833,9 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
         "harness-a",
         ANTHROPIC_MESSAGES,
         AssignedModel::named("model-a"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let address = gateway.address();
@@ -846,7 +852,9 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
         "harness-b",
         ANTHROPIC_MESSAGES,
         AssignedModel::named("model-b"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     may_answer.wait();
 
@@ -2239,7 +2247,9 @@ fn routed_gateway(first: &FixtureUpstream, second: &FixtureUpstream) -> Gateway 
         ROUTED_HARNESS,
         ANTHROPIC_MESSAGES,
         crate::routing::AssignedModel::named(ROUTED_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     gateway
 }
@@ -2490,7 +2500,9 @@ fn a_credential_the_provider_will_not_accept_rotates_to_the_same_providers_other
         ROUTED_HARNESS,
         ANTHROPIC_MESSAGES,
         crate::routing::AssignedModel::named(ROUTED_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     let token = gateway.token().expose().to_owned();
 
@@ -2566,7 +2578,9 @@ fn every_turn_goes_to_the_assigned_backend_and_a_free_alternative_is_never_conne
         ROUTED_HARNESS,
         ANTHROPIC_MESSAGES,
         crate::routing::AssignedModel::named(ROUTED_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     let token = gateway.token().expose().to_owned();
 

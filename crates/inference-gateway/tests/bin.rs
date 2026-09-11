@@ -549,3 +549,258 @@ fn a_fixed_listen_port_is_refused_before_anything_is_bound() {
         "the refusal names what was asked for and what is accepted: {stderr}"
     );
 }
+
+/// The standalone bootstrap, end to end: nothing resolves at start, the
+/// gateway listens anyway and answers `503` naming the fix; a key stored
+/// through `credentials set` — on stdin — is picked up by the *running*
+/// gateway on a later request, and the provider sees exactly that key.
+#[test]
+fn serve_listens_before_a_credential_exists_and_picks_one_up_when_stored() {
+    let provider = FakeProvider::start();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[providers.fixture]
+base_url = "{}"
+protocol = "anthropic-messages"
+credential_env = ["GATEWAY_BIN_DEFERRED_KEY"]
+
+[accounts.local]
+kind = "api-key"
+provider = "fixture"
+credential = {{ env = "GATEWAY_BIN_DEFERRED_KEY" }}
+"#,
+            provider.base_url()
+        ),
+    )
+    .expect("the configuration is written");
+
+    let mut child = gateway(&config_path, scratch.path())
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env_remove("GATEWAY_BIN_DEFERRED_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built binary runs");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("a ready line arrives even with nothing to serve");
+    let ready: serde_json::Value =
+        serde_json::from_str(ready.trim()).expect("the ready line is one JSON object");
+    let listening = ready["listening"].as_str().expect("a URL").to_owned();
+    let token = format!("Bearer {}", ready["token"].as_str().expect("a token"));
+    let url = format!("{listening}/v1/messages");
+    let body =
+        r#"{"model":"fixture-model","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
+
+    let (status, answer) = post(&url, &token, body);
+    assert!(
+        status.contains("503"),
+        "nothing to forward to yet: {status}"
+    );
+    assert!(
+        answer.contains("no account in the catalogue can serve a request")
+            && answer.contains("credentials set"),
+        "the refusal names the cause and the fix: {answer}"
+    );
+    assert!(answer.contains(r#""type":"api_error""#), "{answer}");
+    assert!(
+        provider.requests(0).is_empty(),
+        "nothing reached the provider"
+    );
+    let (status, _) = post(&url, "Bearer not-this-gateways-token", body);
+    assert!(
+        status.contains("401"),
+        "the bearer rule holds while nothing is served: {status}"
+    );
+
+    let mut set = gateway(&config_path, scratch.path())
+        .args(["credentials", "set", "fixture", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built binary runs");
+    set.stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(b"stored-through-stdin\n")
+        .expect("the key is written");
+    let set = set.wait_with_output().expect("set exits");
+    assert!(
+        set.status.success(),
+        "storing the key: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&set.stdout).expect("one JSON object on stdout");
+    assert_eq!(stored["provider"], "fixture");
+    assert_eq!(stored["variable"], "GATEWAY_BIN_DEFERRED_KEY");
+
+    // A refused rebuild stands for a second before a request tries again.
+    std::thread::sleep(Duration::from_millis(1100));
+    let (status, answer) = post(&url, &token, body);
+    assert!(
+        status.contains("200"),
+        "the running gateway picked the stored key up: {status} {answer}"
+    );
+    let seen = provider.requests(1);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].header("authorization"),
+        Some("Bearer stored-through-stdin"),
+        "the provider was given the key that was stored, and nothing else"
+    );
+
+    drop(child.stdin.take().expect("stdin was piped"));
+    let status = wait_for_exit(&mut child);
+    assert!(
+        status.success(),
+        "clean exit after a deferred start: {status:?}"
+    );
+}
+
+/// `credentials list`, `set` and `remove` in the shapes another program
+/// reads, with the refusals a person reads: an empty key and an unknown
+/// provider store nothing.
+#[test]
+fn credentials_list_set_and_remove_report_the_documented_shapes() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        "[providers.fixture]\nbase_url = \"http://127.0.0.1:1\"\nprotocol = \
+         \"anthropic-messages\"\ncredential_env = [\"GATEWAY_BIN_LIST_KEY\"]\n",
+    )
+    .expect("the configuration is written");
+    let credentials_file = scratch.path().join("credentials.toml");
+
+    let list = || -> serde_json::Value {
+        let output = gateway(&config_path, scratch.path())
+            .args(["credentials", "list", "--json"])
+            .env_remove("GATEWAY_BIN_LIST_KEY")
+            .output()
+            .expect("the built binary runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("one JSON document")
+    };
+    let fixture_row = |document: &serde_json::Value| -> serde_json::Value {
+        document["providers"]
+            .as_array()
+            .expect("providers is an array")
+            .iter()
+            .find(|row| row["provider"] == "fixture")
+            .cloned()
+            .expect("the configured provider is listed")
+    };
+    let set = |provider: &str, key: &[u8]| -> std::process::Output {
+        let mut child = gateway(&config_path, scratch.path())
+            .args(["credentials", "set", provider])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the built binary runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(key)
+            .expect("written");
+        child.wait_with_output().expect("set exits")
+    };
+
+    let before = list();
+    assert_eq!(before["version"], 1);
+    let row = fixture_row(&before);
+    assert_eq!(row["variable"], "GATEWAY_BIN_LIST_KEY");
+    assert!(row["source"].is_null(), "{row}");
+    assert!(
+        ["present", "absent", "refused", "unavailable"]
+            .contains(&row["native_store"].as_str().unwrap_or_default()),
+        "{row}"
+    );
+    assert!(
+        before["providers"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|row| row["provider"] == "anthropic" && row["variable"] == "ANTHROPIC_API_KEY"),
+        "the built-in templates are listed too: {before}"
+    );
+
+    let empty = set("fixture", b"\n");
+    assert!(!empty.status.success(), "an empty key is refused");
+    assert!(
+        String::from_utf8_lossy(&empty.stderr).contains("no key arrived on stdin"),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let unknown = set("no-such-provider", b"a-key\n");
+    assert!(!unknown.status.success(), "an unknown provider is refused");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("neither a configured provider"),
+        "{}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+    assert!(!credentials_file.exists(), "a refused set writes nothing");
+
+    let stored = set("fixture", b"the-key\n");
+    assert!(
+        stored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+    let said = String::from_utf8_lossy(&stored.stdout);
+    assert!(
+        said.contains("stored GATEWAY_BIN_LIST_KEY for fixture in"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("the-key"),
+        "the value is never printed: {said}"
+    );
+    assert_eq!(fixture_row(&list())["source"], "file");
+    assert!(
+        std::fs::read_to_string(&credentials_file)
+            .expect("the file exists")
+            .contains("GATEWAY_BIN_LIST_KEY = \"the-key\""),
+        "flat TOML, variable to value"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&credentials_file)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "owner-only, was {mode:o}");
+    }
+
+    let removed = gateway(&config_path, scratch.path())
+        .args(["credentials", "remove", "fixture", "--json"])
+        .output()
+        .expect("the built binary runs");
+    assert!(removed.status.success());
+    let removed: serde_json::Value =
+        serde_json::from_slice(&removed.stdout).expect("one JSON object");
+    assert_eq!(removed["removed"], true);
+    assert!(fixture_row(&list())["source"].is_null());
+    let again = gateway(&config_path, scratch.path())
+        .args(["credentials", "remove", "fixture", "--json"])
+        .output()
+        .expect("the built binary runs");
+    let again: serde_json::Value = serde_json::from_slice(&again.stdout).expect("one JSON object");
+    assert_eq!(again["removed"], false, "absent is not an error");
+}

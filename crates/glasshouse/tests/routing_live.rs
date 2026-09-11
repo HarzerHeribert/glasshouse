@@ -215,7 +215,9 @@ fn a_free_model_answers_through_a_real_gateway_and_its_health_comes_from_that_re
         "claude-code",
         "anthropic-messages",
         AssignedModel::named(choice.model()),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let body = format!(

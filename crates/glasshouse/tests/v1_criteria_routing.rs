@@ -1125,7 +1125,9 @@ fn line_1937_a_gateway_backed_route_records_a_success_and_a_failure_and_route_ci
         "claude-code",
         ANTHROPIC,
         AssignedModel::named(MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let ok = send_and_read(

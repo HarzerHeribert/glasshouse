@@ -850,7 +850,9 @@ fn a_claude_code_request_is_translated_to_generate_content_and_the_answer_back_w
         "claude-code",
         "gemini-generate-content",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

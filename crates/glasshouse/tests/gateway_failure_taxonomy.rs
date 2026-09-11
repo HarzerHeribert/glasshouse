@@ -308,7 +308,9 @@ fn gateway_over(
         "claude-code",
         "anthropic-messages",
         AssignedModel::named(MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     gateway
 }

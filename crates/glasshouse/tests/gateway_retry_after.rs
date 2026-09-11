@@ -293,7 +293,9 @@ fn gateway_to_stub(
         "claude-code",
         "anthropic-messages",
         AssignedModel::named(MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     gateway

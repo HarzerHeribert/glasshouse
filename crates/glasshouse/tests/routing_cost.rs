@@ -589,7 +589,9 @@ fn gateway_to_stub(
         FIRST_BYTE_HARNESS,
         "anthropic-messages",
         AssignedModel::named(FIRST_BYTE_MODEL),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     gateway

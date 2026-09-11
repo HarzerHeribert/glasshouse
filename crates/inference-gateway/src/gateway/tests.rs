@@ -1087,6 +1087,7 @@ fn crate_sources() -> Vec<(&'static str, &'static str)> {
         ("routing/wire.rs", include_str!("../routing/wire.rs")),
         ("secret/mod.rs", include_str!("../secret/mod.rs")),
         ("secret/native.rs", include_str!("../secret/native.rs")),
+        ("secret/file.rs", include_str!("../secret/file.rs")),
         (
             "subscription/mod.rs",
             include_str!("../subscription/mod.rs"),
@@ -1147,7 +1148,7 @@ fn the_gateway_names_no_glasshouse_path() {
     // ... and the scan is not vacuous: it runs over the whole crate, and it
     // fires on the change it exists to catch rather than passing because a
     // needle was misspelled.
-    assert_eq!(crate_sources().len(), 42);
+    assert_eq!(crate_sources().len(), 43);
     let violating =
         production_code_to_test_module("use glasshouse::session::SessionId;\nfn f() {}");
     assert!(FORBIDDEN.iter().any(|needle| violating.contains(needle)));
@@ -1463,7 +1464,9 @@ fn bound_gateway_with_observation_sink_for_model(
         "fixture-harness",
         "anthropic-messages",
         AssignedModel::named(assigned_model),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     gateway
 }
@@ -1605,4 +1608,65 @@ fn a_request_without_a_purpose_header_is_recorded_as_a_harness_turn() {
 
     let row = reported_purpose_observation(&seen);
     assert_eq!(row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
+}
+
+/// A deferred slot: the first request rebuilds at once, a refused rebuild
+/// stands for the interval, and once the supplier answers the slot is filled
+/// for good.
+#[test]
+fn a_deferred_slot_paces_rebuilds_and_fills_once_its_supplier_answers() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(AtomicBool::new(false));
+    let supplier = {
+        let attempts = Arc::clone(&attempts);
+        let ready = Arc::clone(&ready);
+        move || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            if !ready.load(Ordering::SeqCst) {
+                return Err("still nothing".to_owned());
+            }
+            Upstream::new(
+                "fixture".to_owned(),
+                vec![Route::new(
+                    "anthropic-messages".to_owned(),
+                    &["/messages"],
+                    "http://127.0.0.1:1",
+                )],
+                Secret::mint_for_test("k"),
+                crate::routing::CredentialId::new(
+                    "fixture".to_owned(),
+                    crate::secret::SecretRef::Environment {
+                        var: "K".to_owned(),
+                    },
+                ),
+            )
+            .map_err(|error| error.to_string())
+        }
+    };
+    let slot = UpstreamSlot::deferred("nothing at start".to_owned(), Box::new(supplier))
+        .with_rebuild_interval(Duration::from_millis(50));
+
+    assert_eq!(slot.current_or_build().unwrap_err(), "still nothing");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "the first request rebuilds at once"
+    );
+    assert_eq!(slot.current_or_build().unwrap_err(), "still nothing");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a refusal stands for the interval"
+    );
+    ready.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(60));
+    assert!(slot.current_or_build().is_ok());
+    assert!(slot.current().is_some());
+    assert!(slot.current_or_build().is_ok());
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "filled once, never rebuilt"
+    );
 }

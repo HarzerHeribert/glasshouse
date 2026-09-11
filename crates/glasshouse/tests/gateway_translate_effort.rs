@@ -626,7 +626,9 @@ fn a_thinking_request_reaches_a_chat_only_entitlement_with_reasoning_effort_at_t
         "claude-code",
         "openai-chat",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -653,7 +655,9 @@ fn a_thinking_request_reaches_a_responses_only_entitlement_with_nested_reasoning
         "claude-code",
         "openai-responses",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

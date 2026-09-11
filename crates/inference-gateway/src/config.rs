@@ -194,6 +194,12 @@ pub fn default_data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", APPLICATION).map(|dirs| dirs.data_dir().to_path_buf())
 }
 
+/// The gateway's own credential file, where `credentials set` stores a
+/// provider key — see [`crate::secret::file`] for why a gateway keeps one.
+pub fn credentials_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("credentials.toml")
+}
+
 /// The four directories one entitlement's subscription broker needs,
 /// derived from `data_dir`.
 ///

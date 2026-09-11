@@ -484,9 +484,7 @@ pub(super) fn serve(
             &mut out,
             StatusCode::UNAUTHORIZED,
             "authentication_error",
-            "this request did not carry this gateway's own bearer token; the ingress is \
-             reachable only by the client that was handed the token when the gateway \
-             started",
+            UNAUTHENTICATED_MESSAGE,
             Some(&head.method),
         );
         settle(&mut reader, &mut out, head.content_length);
@@ -952,6 +950,75 @@ fn unrouted(
     // instead of the status that explains what was wrong.
     settle(&mut reader, out, head.content_length);
     (exchange(Outcome::Unrouted, 404, upstream, None), no_quota())
+}
+
+/// The `401` body, shared by the served and the deferred path so the two
+/// cannot say different things about the same rule.
+const UNAUTHENTICATED_MESSAGE: &str = "this request did not carry this gateway's own bearer token; the ingress is reachable only \
+     by the client that was handed the token when the gateway started";
+
+/// Refuse a request because this gateway has no upstream yet — see
+/// `super::UpstreamSlot`. The head is read so the bearer rule and the `HEAD`
+/// rule apply exactly as on a served request; nothing is opened upstream
+/// because there is no upstream to open, and no exchange is recorded because
+/// there is no provider to attribute one to.
+pub(super) fn refuse_unserved(stream: TcpStream, token: &GatewayToken, reason: &str) {
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(Some(HEAD_TIMEOUT));
+    let Ok(mut out) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(stream);
+    let head = match http::read_head(&mut reader) {
+        Ok(head) => head,
+        Err(HeadError::Empty | HeadError::Io) => return,
+        Err(error) => {
+            let (status, kind, message) = decline(&error);
+            refuse(&mut out, status, kind, message, None);
+            settle(&mut reader, &mut out, None);
+            return;
+        }
+    };
+    if !presented_token_matches(&head, token) {
+        refuse(
+            &mut out,
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            UNAUTHENTICATED_MESSAGE,
+            Some(&head.method),
+        );
+        settle(&mut reader, &mut out, head.content_length);
+        return;
+    }
+    refuse(
+        &mut out,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "api_error",
+        &json_text(reason),
+        Some(&head.method),
+    );
+    settle(&mut reader, &mut out, head.content_length);
+}
+
+/// `text` as the inside of a JSON string literal. The refusal bodies this
+/// file writes by hand are fixed text; a reason built from configured
+/// provider names is not, and a quote in one must not end the body early.
+fn json_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// No response was received, so there is nothing a quota reading could have

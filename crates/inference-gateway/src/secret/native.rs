@@ -326,9 +326,51 @@ impl SecretStore for NativeSecretStore {
 /// can read the answer to rather than infer.
 #[derive(Debug)]
 pub struct PreferNativeSecretStore {
+    /// The gateway's own credential file, when a gateway is what runs this
+    /// store. Answers before both others: a key stored through
+    /// `credentials set` is the one the user chose most deliberately.
+    file: Option<super::file::FileSecretStore>,
     native: Result<NativeSecretStore, Unavailable>,
     environment: EnvironmentSecretStore,
 }
+
+/// Which of a [`PreferNativeSecretStore`]'s sources answered — the token a
+/// program switches on, where [`PreferNativeSecretStore::source_of`] is the
+/// label a person reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    File,
+    Native,
+    Environment,
+}
+
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Native => "native",
+            Self::Environment => "environment",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::File => super::file::LABEL,
+            Self::Native => "the native secure store",
+            Self::Environment => "the process environment",
+        }
+    }
+}
+
+/// [`SecretStore::describe`] with the gateway's credential file answering
+/// first and a native store behind it.
+pub const FILE_FIRST_LABEL: &str =
+    "the gateway's credential file, then the native secure store, then the process environment";
+
+/// [`SecretStore::describe`] with the gateway's credential file answering
+/// first and no native store behind it.
+pub const FILE_THEN_ENVIRONMENT_LABEL: &str = "the gateway's credential file, then the process environment (no native secure store could \
+     be opened)";
 
 /// [`SecretStore::describe`] with a native store answering first.
 ///
@@ -367,9 +409,44 @@ impl PreferNativeSecretStore {
     /// one per variable per frame.
     pub fn detect() -> Self {
         Self {
+            file: None,
             native: NativeSecretStore::detect(),
             environment: EnvironmentSecretStore::new(),
         }
+    }
+
+    /// [`Self::detect`], with the gateway's own credential file at `path`
+    /// answering before either other source — see [`mod@super::file`] for
+    /// why a gateway keeps one.
+    pub fn detect_with_file(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            file: Some(super::file::FileSecretStore::at(path)),
+            ..Self::detect()
+        }
+    }
+
+    /// The credential file, when this store has one.
+    pub fn file(&self) -> Option<&super::file::FileSecretStore> {
+        self.file.as_ref()
+    }
+
+    /// Which kind of source answers `reference` right now. `None` when none
+    /// does. [`Self::source_of`] is the same answer as a label.
+    pub fn source_kind(&self, reference: &SecretRef) -> Option<SourceKind> {
+        if let Some(file) = &self.file
+            && file.is_present(reference)
+        {
+            return Some(SourceKind::File);
+        }
+        if let Ok(native) = &self.native
+            && native.is_present(reference)
+        {
+            return Some(SourceKind::Native);
+        }
+        if self.environment.is_present(reference) {
+            return Some(SourceKind::Environment);
+        }
+        None
     }
 
     /// The native store, when one answered — the handle
@@ -385,6 +462,11 @@ impl PreferNativeSecretStore {
     /// arrangement. A user with one key in the Keychain and another in a
     /// shell profile is told that, one line each.
     pub fn source_of(&self, reference: &SecretRef) -> Option<&'static str> {
+        if let Some(file) = &self.file
+            && file.is_present(reference)
+        {
+            return Some(super::file::LABEL);
+        }
         if let Ok(native) = &self.native
             && native.is_present(reference)
         {
@@ -405,6 +487,11 @@ impl SecretStore for PreferNativeSecretStore {
     /// launched Glasshouse, because the stored one is the one they chose
     /// deliberately.
     fn resolve(&self, reference: &SecretRef) -> Option<Secret> {
+        if let Some(file) = &self.file
+            && let Some(secret) = file.resolve(reference)
+        {
+            return Some(secret);
+        }
         if let Ok(native) = &self.native
             && let Some(secret) = native.resolve(reference)
         {
@@ -414,19 +501,16 @@ impl SecretStore for PreferNativeSecretStore {
     }
 
     fn is_present(&self, reference: &SecretRef) -> bool {
-        if let Ok(native) = &self.native
-            && native.is_present(reference)
-        {
-            return true;
-        }
-        self.environment.is_present(reference)
+        self.source_kind(reference).is_some()
     }
 
     fn describe(&self) -> &'static str {
-        match self.native {
-            Ok(_) => NATIVE_FIRST_LABEL,
-            Err(Unavailable::UnsupportedPlatform) => UNSUPPORTED_PLATFORM_LABEL,
-            Err(Unavailable::StoreUnreachable(_)) => STORE_UNREACHABLE_LABEL,
+        match (&self.file, &self.native) {
+            (Some(_), Ok(_)) => FILE_FIRST_LABEL,
+            (Some(_), Err(_)) => FILE_THEN_ENVIRONMENT_LABEL,
+            (None, Ok(_)) => NATIVE_FIRST_LABEL,
+            (None, Err(Unavailable::UnsupportedPlatform)) => UNSUPPORTED_PLATFORM_LABEL,
+            (None, Err(Unavailable::StoreUnreachable(_))) => STORE_UNREACHABLE_LABEL,
         }
     }
 }
@@ -1052,6 +1136,7 @@ mod backend {
 impl PreferNativeSecretStore {
     pub(crate) fn without_native(reason: Unavailable) -> Self {
         Self {
+            file: None,
             native: Err(reason),
             environment: EnvironmentSecretStore::new(),
         }

@@ -504,7 +504,9 @@ fn a_translated_streamed_exchange_notes_first_token_and_first_tool_call_in_order
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -577,7 +579,9 @@ fn a_translated_stream_with_text_and_no_tool_use_records_no_first_tool_call() {
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -651,7 +655,9 @@ fn a_relayed_document_records_its_usage_and_no_first_token_or_first_tool_call() 
         "claude-code",
         "anthropic-messages",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -731,7 +737,9 @@ fn a_translated_document_with_text_and_a_tool_call_records_both_as_first_byte_at
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -782,7 +790,9 @@ fn a_translated_stream_whose_only_text_is_whitespace_records_no_first_token() {
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

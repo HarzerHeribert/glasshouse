@@ -1064,7 +1064,12 @@ fn gateway_pairing_affinities(
         Some(model) => AssignedModel::Named(model.clone()),
         None => AssignedModel::HarnessDefault,
     };
-    let candidates = gateway.upstream().routing_backends(served_protocol, &model);
+    // A hosted gateway is never deferred, so the slot is full here; the
+    // `None` arm is the honest shape of the accessor, not a path.
+    let candidates = gateway
+        .upstream()
+        .map(|upstream| upstream.routing_backends(served_protocol, &model))
+        .unwrap_or_default();
     candidate_affinities(profile.harness, &candidates, &pairing.overrides)
 }
 
@@ -1134,7 +1139,7 @@ fn apply_gateway(
     let mut first_pair: Option<&'static translate::Pair> = None;
     let translated = 'search: {
         for candidate in candidates.iter().copied() {
-            for &slug in &served {
+            for slug in &served {
                 let Some(pair) = translate::lookup(candidate.slug(), slug) else {
                     continue;
                 };
@@ -1188,12 +1193,11 @@ fn apply_gateway(
         Some(model) => AssignedModel::Named(model.clone()),
         None => AssignedModel::HarnessDefault,
     };
-    gateway.routing().bind(
-        profile.harness.slug(),
-        &served_protocol,
-        model,
-        gateway.upstream(),
-    );
+    if let Some(upstream) = gateway.upstream() {
+        gateway
+            .routing()
+            .bind(profile.harness.slug(), &served_protocol, model, &upstream);
+    }
 
     // Phase 9J line 576, recorded beside the assignment above: the user's
     // configured native-pairing preference, and — user ruling 2026-09-10 —

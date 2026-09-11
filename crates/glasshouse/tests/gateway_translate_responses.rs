@@ -717,7 +717,9 @@ fn a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_pre
         "claude-code",
         "openai-responses",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -1061,7 +1063,9 @@ fn a_codex_request_is_translated_to_anthropic_messages_and_back_with_ids_preserv
         "codex",
         "anthropic-messages",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

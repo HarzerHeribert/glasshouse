@@ -1304,8 +1304,10 @@ pub(crate) fn launch_session(
     };
 
     if is_gateway_backend && entitlement.is_none() {
-        let gateway_provider = gateway.as_ref().map(|gateway| gateway.serving_provider());
-        entitlement = match gateway_provider {
+        let gateway_provider = gateway
+            .as_ref()
+            .and_then(|gateway| gateway.serving_provider());
+        entitlement = match &gateway_provider {
             Some(provider) => match effective.entitlement_for_provider(provider) {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -1326,7 +1328,7 @@ pub(crate) fn launch_session(
         crate::commands::routing_destinations::announce_entitlement(
             entitlement.as_ref(),
             &launch_profile,
-            gateway_provider,
+            gateway_provider.as_deref(),
         );
     }
 

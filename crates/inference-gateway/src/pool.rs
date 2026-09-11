@@ -62,7 +62,7 @@ const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
 ///
 /// Every variant carries names only — a credential value never reaches a
 /// diagnostic, which is precisely the case
-/// [`Self::CredentialUnavailable`] is printed in.
+/// [`Self::NoCredentialResolves`] is printed in.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolRefusal {
     #[error(
@@ -80,16 +80,14 @@ pub enum PoolRefusal {
         served: String,
     },
 
-    #[error(
-        "this gateway needs the credential for the provider `{provider}`, but the environment \
-         variable it names ({}) has no value; set it and try again",
-        .variables.join(" and "),
-    )]
-    CredentialUnavailable {
-        provider: String,
-        /// The environment variable **names** the provider declares. Never a
-        /// value.
-        variables: Vec<String>,
+    /// No provider this gateway could forward to has a credential. The
+    /// message names every variable that would have been read, grouped by
+    /// provider, so the message is the fix — and a name is all it holds.
+    #[error("{}", no_credential_message(.candidates))]
+    NoCredentialResolves {
+        /// Each candidate provider and the variable **names** it declares.
+        /// An empty list is a provider that declares no variable at all.
+        candidates: Vec<(String, Vec<String>)>,
     },
 
     /// Every account in the catalogue was skipped, and this says why each
@@ -97,7 +95,11 @@ pub enum PoolRefusal {
     /// catalogue can fail for reasons a raw provider list cannot: an
     /// account naming a provider nothing declares, or a broker that would
     /// not start.
-    #[error("no account in the catalogue can serve a request: {}", .notes.join("; "))]
+    #[error(
+        "no account in the catalogue can serve a request: {}. A provider key is stored with \
+         `inference-gateway credentials set <provider>` (the key on stdin)",
+        .notes.join("; ")
+    )]
     NoAccountUsable { notes: Vec<String> },
 
     #[error(transparent)]
@@ -270,10 +272,10 @@ pub fn gateway_upstream(
     }
 
     let mut backends = Vec::new();
-    let mut variables = Vec::new();
+    let mut named = Vec::new();
     for candidate in candidates.iter() {
         let provider = candidate.provider();
-        variables.extend(provider.credential_env.iter().cloned());
+        named.push((provider.name.clone(), provider.credential_env.clone()));
         for var in &provider.credential_env {
             let reference = SecretRef::Environment { var: var.clone() };
             let Some(credential) = secrets.resolve(&reference) else {
@@ -294,14 +296,7 @@ pub fn gateway_upstream(
     }
 
     if backends.is_empty() {
-        return Err(PoolRefusal::CredentialUnavailable {
-            provider: candidates
-                .iter()
-                .map(|candidate| candidate.name().to_owned())
-                .collect::<Vec<_>>()
-                .join(", "),
-            variables,
-        });
+        return Err(PoolRefusal::NoCredentialResolves { candidates: named });
     }
 
     Ok(Upstream::with_failover(backends)?)
@@ -419,6 +414,39 @@ fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str
         .serves(protocol)
         .map(|support| support.base_url.as_str())
         .filter(|base_url| !base_url.is_empty())
+}
+
+/// The one sentence a user reads when nothing resolves: every variable that
+/// was looked for, by provider, and the command that stores one.
+fn no_credential_message(candidates: &[(String, Vec<String>)]) -> String {
+    let variables: Vec<String> = candidates
+        .iter()
+        .flat_map(|(provider, vars)| vars.iter().map(move |var| format!("{var} ({provider})")))
+        .collect();
+    let keyless: Vec<&str> = candidates
+        .iter()
+        .filter(|(_, vars)| vars.is_empty())
+        .map(|(provider, _)| provider.as_str())
+        .collect();
+    let mut message = if variables.is_empty() {
+        "no provider has a credential: none of the configured providers declares a credential \
+         variable"
+            .to_owned()
+    } else {
+        format!(
+            "no provider has a credential: none of {} holds a value in the gateway's credential \
+             file, the native secure store or the environment. Store one with \
+             `inference-gateway credentials set <provider>` (the key on stdin)",
+            variables.join(", ")
+        )
+    };
+    if !keyless.is_empty() {
+        message.push_str(&format!(
+            "; {} declare no credential variable",
+            keyless.join(", ")
+        ));
+    }
+    message
 }
 
 /// `a`, `b` and `c` — a list of protocols for a message a user reads.

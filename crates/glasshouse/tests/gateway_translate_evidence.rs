@@ -384,7 +384,9 @@ fn a_translated_exchanges_stated_usage_reaches_the_routing_row() {
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -463,7 +465,9 @@ fn a_relayed_exchange_records_the_usage_its_body_states_and_invents_none() {
         "claude-code",
         "anthropic-messages",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

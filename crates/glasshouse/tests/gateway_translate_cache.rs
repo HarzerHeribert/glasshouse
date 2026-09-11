@@ -583,7 +583,9 @@ fn cache_control_is_carried_as_prompt_cache_key_and_the_read_ratio_still_reaches
         "claude-code",
         "openai-chat",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

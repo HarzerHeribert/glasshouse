@@ -267,7 +267,8 @@ pub(super) fn start_session_with_profile(
     if is_gateway && entitlement.is_none() {
         entitlement = gateway
             .as_ref()
-            .map(|gateway| effective.entitlement_for_provider(gateway.serving_provider()))
+            .and_then(|gateway| gateway.serving_provider())
+            .map(|provider| effective.entitlement_for_provider(&provider))
             .transpose()?
             .flatten();
     }

@@ -574,7 +574,9 @@ fn a_translated_streamed_exchange_measures_the_offsets_from_the_send() {
         "claude-code",
         "openai-chat",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_with_a_pause_before_the_body(
@@ -759,7 +761,9 @@ fn a_relayed_exchange_measures_the_first_byte_and_the_completion_and_neither_tok
         "claude-code",
         "anthropic-messages",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(
@@ -838,7 +842,9 @@ fn an_exchange_that_never_reached_a_provider_measures_none_of_the_four_offsets()
         "claude-code",
         "anthropic-messages",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
 
     let response = send_and_read(

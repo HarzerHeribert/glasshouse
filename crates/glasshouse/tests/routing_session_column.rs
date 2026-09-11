@@ -789,7 +789,9 @@ fn a_prompt_shaped_request_records_the_prompt_shape_and_no_invented_effort() {
         "claude-code",
         "openai-chat",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     let served = SessionId::new("ses_prompt_shaped");
     gateway.routing().serve_session(served.as_str());
@@ -834,7 +836,9 @@ fn a_relayed_exchange_records_the_session_and_neither_request_fact() {
         "claude-code",
         "anthropic-messages",
         AssignedModel::named("fixture-model"),
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     let served = SessionId::new("ses_relayed");
     gateway.routing().serve_session(served.as_str());
@@ -1145,7 +1149,9 @@ fn no_harness_identifier_and_no_credential_reaches_any_row() {
         "claude-code",
         "openai-chat",
         AssignedModel::HarnessDefault,
-        gateway.upstream(),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
     );
     let served = SessionId::new("ses_isolation");
     gateway.routing().serve_session(served.as_str());

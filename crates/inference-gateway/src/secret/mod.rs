@@ -9,7 +9,8 @@
 //! `resolve` reads the source when called, not when built, so a stored
 //! `SecretRef` always reflects the environment now.
 //!
-//! This module writes and reads no file, reaches a launch through exactly
+//! This module reads and writes one file, the gateway's own credential file
+//! ([`mod@file`]), reaches a launch through exactly
 //! one call site (`profile::resolve`, which mints, moves and drops
 //! one [`Secret`]; a harness adapter gets variable *names*, never a
 //! `Secret`), and ships only the native OS-backed stores it can prove
@@ -21,6 +22,7 @@
 
 use std::fmt;
 
+pub mod file;
 pub mod native;
 
 /// What stands in for a credential everywhere one might otherwise be

@@ -34,10 +34,10 @@ mod usage;
 use std::fmt;
 use std::io::{ErrorKind, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -331,6 +331,118 @@ impl fmt::Debug for GatewayToken {
 /// and an unwinding panic alike.
 ///
 /// In-flight connection threads are **not** joined.
+/// What this gateway forwards to — or, until it can, why it cannot.
+///
+/// The invariant: **a gateway listens before it has an upstream, and a
+/// request never waits on one being built.** A standalone gateway started
+/// with no credential anywhere would otherwise refuse to start, and the one
+/// flow that stores a credential — the client's own login control — runs
+/// through a session that needs the gateway listening first. So a slot may
+/// start empty; the first request asks its supplier again at once, a
+/// refused rebuild stands for [`REBUILD_INTERVAL`] so a burst does not
+/// rebuild once each, and every refused request is answered `503` with the
+/// refusal that stands.
+/// A host's gateway is never deferred: every `start_if_required_*` door
+/// fills the slot before the listener accepts.
+pub struct UpstreamSlot {
+    current: RwLock<Option<Arc<Upstream>>>,
+    supplier: Option<Supplier>,
+    /// The last refusal and when it was made, so a burst of requests does
+    /// not rebuild the pool once each. Held across a rebuild, which
+    /// serialises requests only while there is nothing to serve them with.
+    last_refusal: Mutex<(String, Option<Instant>)>,
+    rebuild_interval: Duration,
+}
+
+type Supplier = Box<dyn Fn() -> Result<Upstream, String> + Send + Sync>;
+
+/// How long a refused rebuild stands before a request tries again.
+const REBUILD_INTERVAL: Duration = Duration::from_secs(1);
+
+impl fmt::Debug for UpstreamSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.current() {
+            Some(upstream) => fmt::Debug::fmt(&upstream, f),
+            None => f.write_str("<no upstream yet>"),
+        }
+    }
+}
+
+impl UpstreamSlot {
+    fn ready(upstream: Upstream) -> Self {
+        Self {
+            current: RwLock::new(Some(Arc::new(upstream))),
+            supplier: None,
+            last_refusal: Mutex::new((String::new(), None)),
+            rebuild_interval: REBUILD_INTERVAL,
+        }
+    }
+
+    /// Empty, carrying the start's own refusal for a request that arrives
+    /// before any rebuild — unstamped, so the first request rebuilds at
+    /// once: a key stored right after the start must serve the very next
+    /// turn, however soon it comes.
+    fn deferred(refusal: String, supplier: Supplier) -> Self {
+        Self {
+            current: RwLock::new(None),
+            supplier: Some(supplier),
+            last_refusal: Mutex::new((refusal, None)),
+            rebuild_interval: REBUILD_INTERVAL,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_rebuild_interval(mut self, interval: Duration) -> Self {
+        self.rebuild_interval = interval;
+        self
+    }
+
+    /// The upstream, if this gateway has one. Never builds.
+    pub fn current(&self) -> Option<Arc<Upstream>> {
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The upstream, building it when the slot is empty and the last
+    /// refusal is older than the interval. `Err` is what the request is
+    /// told.
+    fn current_or_build(&self) -> Result<Arc<Upstream>, String> {
+        if let Some(upstream) = self.current() {
+            return Ok(upstream);
+        }
+        let Some(supplier) = &self.supplier else {
+            return Err("this gateway has no upstream".to_owned());
+        };
+        let mut last = self
+            .last_refusal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Built by the thread that held the lock while this one waited.
+        if let Some(upstream) = self.current() {
+            return Ok(upstream);
+        }
+        if let (reason, Some(at)) = &*last
+            && at.elapsed() < self.rebuild_interval
+        {
+            return Err(reason.clone());
+        }
+        match supplier() {
+            Ok(upstream) => {
+                let upstream = Arc::new(upstream);
+                *self.current.write().unwrap_or_else(PoisonError::into_inner) =
+                    Some(Arc::clone(&upstream));
+                Ok(upstream)
+            }
+            Err(reason) => {
+                *last = (reason.clone(), Some(Instant::now()));
+                Err(reason)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Gateway {
     address: SocketAddr,
@@ -338,8 +450,9 @@ pub struct Gateway {
     /// Shared with the accept loop rather than moved into it, so that a
     /// launch profile can ask what this gateway actually serves. Its
     /// [`Debug`](fmt::Debug) renders the credential's redaction marker, not
-    /// the credential — see [`Upstream`].
-    upstream: Arc<Upstream>,
+    /// the credential — see [`Upstream`]. Empty only for a deferred start —
+    /// see [`UpstreamSlot`].
+    upstream: Arc<UpstreamSlot>,
     /// Which backend is serving this session, what has moved it, and what
     /// real work has said about each resource — Phase 9H and Phase 9I.
     ///
@@ -445,6 +558,25 @@ impl Gateway {
         observation_sink: Option<ObservationSink>,
         prevention_sink: Option<session::FailoverPreventionSink>,
     ) -> Result<Self> {
+        Self::start_slot(
+            UpstreamSlot::ready(upstream),
+            quota_cache,
+            health_cache,
+            observation_sink,
+            prevention_sink,
+        )
+    }
+
+    /// The one body every start shares: bind, mint, accept. Takes the slot
+    /// rather than an upstream so a deferred start ([`start_awaiting_upstream`])
+    /// is the same code path with an empty slot, not a second listener.
+    fn start_slot(
+        upstream: UpstreamSlot,
+        quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+        health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
+        observation_sink: Option<ObservationSink>,
+        prevention_sink: Option<session::FailoverPreventionSink>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
         // Port 0 was a request, not an address. This is the answer, and it is
@@ -534,8 +666,17 @@ impl Gateway {
     /// Slugs rather than a protocol enum because no file in this directory
     /// may name `harness` — see this module's header. The
     /// caller that reads them is `crate::profile`, which can.
-    pub fn served_protocols(&self) -> Vec<&str> {
-        self.upstream.served_protocols()
+    pub fn served_protocols(&self) -> Vec<String> {
+        self.upstream
+            .current()
+            .map(|upstream| {
+                upstream
+                    .served_protocols()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Which backend is serving this session, and everything that has moved
@@ -568,8 +709,9 @@ impl Gateway {
     /// what a session could move to.
     ///
     /// No credential comes out with it: [`Upstream`] has no accessor for one.
-    pub fn upstream(&self) -> &Upstream {
-        &self.upstream
+    /// `None` only while a deferred start has nothing to forward to.
+    pub fn upstream(&self) -> Option<Arc<Upstream>> {
+        self.upstream.current()
     }
 
     /// The name of the provider this gateway is currently forwarding to —
@@ -583,8 +725,10 @@ impl Gateway {
     /// Delegates to `Upstream::serving`, which stays `pub(super)`: nothing
     /// else about the upstream — its routes, its credential — is exposed
     /// here or anywhere outside this module.
-    pub fn serving_provider(&self) -> &str {
-        self.upstream.serving().provider()
+    pub fn serving_provider(&self) -> Option<String> {
+        self.upstream
+            .current()
+            .map(|upstream| upstream.serving().provider().to_owned())
     }
 }
 
@@ -621,7 +765,7 @@ fn accept_loop(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
     token: Arc<GatewayToken>,
-    upstream: Arc<Upstream>,
+    upstream: Arc<UpstreamSlot>,
     routing: Arc<SessionRouting>,
     quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
     health_cache: Option<Arc<crate::provider::telemetry::GatewayHealthCache>>,
@@ -638,7 +782,7 @@ fn accept_loop(
         match listener.accept() {
             Ok((stream, _peer)) => {
                 let token = Arc::clone(&token);
-                let upstream = Arc::clone(&upstream);
+                let slot = Arc::clone(&upstream);
                 let agent = Arc::clone(&agent);
                 let routing = Arc::clone(&routing);
                 let quota_cache = quota_cache.clone();
@@ -648,6 +792,15 @@ fn accept_loop(
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
+                        // Nothing to forward to yet: say so and record
+                        // nothing — see `UpstreamSlot`.
+                        let upstream = match slot.current_or_build() {
+                            Ok(upstream) => upstream,
+                            Err(reason) => {
+                                ingress::refuse_unserved(stream, &token, &reason);
+                                return;
+                            }
+                        };
                         // Phase 33A's own honest caveat, named where it is
                         // stamped rather than only in `routing::evidence`'s
                         // doc: this is the instant the connection was handed
@@ -1031,6 +1184,24 @@ pub fn start_if_required_with_degrade_sink(
         prevention_sink,
     )
     .map(Some)
+}
+
+/// Listen with no upstream yet — the standalone binary's door when nothing
+/// resolves at start. `refusal` answers every request until `supplier`
+/// succeeds; see [`UpstreamSlot`]. No caches and no prevention sink: a
+/// deferred start is the standalone binary's, which has neither.
+pub fn start_awaiting_upstream(
+    refusal: String,
+    supplier: impl Fn() -> Result<Upstream, String> + Send + Sync + 'static,
+    observation_sink: Option<ObservationSink>,
+) -> Result<Gateway> {
+    Gateway::start_slot(
+        UpstreamSlot::deferred(refusal, Box::new(supplier)),
+        None,
+        None,
+        observation_sink,
+        None,
+    )
 }
 
 #[cfg(test)]

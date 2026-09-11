@@ -1505,7 +1505,7 @@ pub(crate) fn resume_session(
                     .and_then(|(_, _, gateway)| gateway.as_ref())
             })
             .flatten()
-            .map(|gateway| gateway.serving_provider());
+            .and_then(|gateway| gateway.serving_provider());
         let stored_is_broker = record.entitlement.as_deref().is_some_and(|name| {
             effective.configured_entitlements().is_ok_and(|entries| {
                 entries.iter().any(|entry| {
@@ -1515,7 +1515,7 @@ pub(crate) fn resume_session(
         });
         let lookup = if gateway_backed && (profile.entitlement.is_some() || stored_is_broker) {
             gateway_entitlement(&effective, &profile, record.entitlement.as_deref())
-        } else if let Some(provider) = gateway_provider {
+        } else if let Some(provider) = &gateway_provider {
             effective
                 .entitlement_for_provider(provider)
                 .map_err(Into::into)
@@ -1529,7 +1529,7 @@ pub(crate) fn resume_session(
                 crate::commands::routing_destinations::announce_entitlement(
                     entitlement.as_ref(),
                     &profile,
-                    gateway_provider,
+                    gateway_provider.as_deref(),
                 );
                 entitlement
             }

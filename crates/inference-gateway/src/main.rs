@@ -54,8 +54,9 @@ use inference_gateway::pool::{self, Pool};
 use inference_gateway::provider::cache::{
     ModelCache, ModelCatalogue, ModelEntry, now_unix_seconds,
 };
-use inference_gateway::secret::SecretStore;
-use inference_gateway::secret::native::PreferNativeSecretStore;
+use inference_gateway::secret::file::FileSecretStore;
+use inference_gateway::secret::native::{PreferNativeSecretStore, Presence, SourceKind};
+use inference_gateway::secret::{SecretRef, SecretStore};
 use inference_gateway::subscription::connect as flow;
 
 /// The gateway as its own process: one wire format in, many providers out.
@@ -99,6 +100,11 @@ enum Command {
         #[command(subcommand)]
         command: SubscriptionsCommand,
     },
+    /// Provider API keys this gateway stores and resolves.
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialsCommand,
+    },
     // Same rule as `Serve::listen`: this line is `--help` text. What a
     // standalone gateway can and cannot answer here is on [`routing_cost`].
     /// What routing has consumed, in the same JSON Lines a host emits.
@@ -128,6 +134,38 @@ enum SubscriptionsCommand {
         #[arg(long, value_name = "NAME")]
         entitlement: String,
         /// Emit each progress step as one JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialsCommand {
+    /// Where each provider's credential comes from. Names only, never a value.
+    List {
+        /// Print the versioned JSON document instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store a provider's API key, read from stdin, in this gateway's credential file.
+    Set {
+        /// The provider, as `credentials list` names it.
+        provider: String,
+        /// Which of the provider's variables to file it under; its first by default.
+        #[arg(long, value_name = "VAR")]
+        variable: Option<String>,
+        /// Print one JSON object instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a provider's API key from this gateway's credential file.
+    Remove {
+        /// The provider, as `credentials list` names it.
+        provider: String,
+        /// Which of the provider's variables to remove; its first by default.
+        #[arg(long, value_name = "VAR")]
+        variable: Option<String>,
+        /// Print one JSON object instead of prose.
         #[arg(long)]
         json: bool,
     },
@@ -183,6 +221,23 @@ fn run() -> Result<()> {
         } => {
             let config = load_config(&cli)?;
             connect(&config, &data_dir(&cli)?, *provider, entitlement, *json)
+        }
+        Command::Credentials { command } => {
+            let config = load_config(&cli)?;
+            let data_dir = data_dir(&cli)?;
+            match command {
+                CredentialsCommand::List { json } => credentials_list(&config, &data_dir, *json),
+                CredentialsCommand::Set {
+                    provider,
+                    variable,
+                    json,
+                } => credentials_set(&config, &data_dir, provider, variable.as_deref(), *json),
+                CredentialsCommand::Remove {
+                    provider,
+                    variable,
+                    json,
+                } => credentials_remove(&config, &data_dir, provider, variable.as_deref(), *json),
+            }
         }
         // Reads no configuration and needs no data directory: it answers
         // from a ledger, and this process has none.
@@ -253,38 +308,75 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
     }
 
     let providers = config::providers(config);
-    let secrets = PreferNativeSecretStore::detect();
+    let secrets = secret_store(data_dir);
     eprintln!("credentials resolve through {}", secrets.describe());
-    let Pool { upstream, notes } = pool::pool_from_catalogue(
-        &config.accounts,
-        &providers,
-        &secrets,
-        &|entitlement| config::broker_paths(data_dir, entitlement),
-        // No free-tier marking: a standalone gateway is told nothing about
-        // who pays, and `Cost::Metered` is that answer's fail-closed
-        // default.
-        &|_| false,
-    )?;
-    for note in notes {
-        eprintln!("{note}");
+    // Everything a rebuild needs, owned, so the supplier a deferred start
+    // keeps can run again on a later request — see `gateway::UpstreamSlot`.
+    let build = {
+        let accounts = config.accounts.clone();
+        let providers = providers.clone();
+        let data_dir = data_dir.to_path_buf();
+        move || {
+            pool::pool_from_catalogue(
+                &accounts,
+                &providers,
+                &secrets,
+                &|entitlement| config::broker_paths(&data_dir, entitlement),
+                // No free-tier marking: a standalone gateway is told nothing
+                // about who pays, and `Cost::Metered` is that answer's
+                // fail-closed default.
+                &|_| false,
+            )
+        }
+    };
+    let gateway = match build() {
+        Ok(Pool { upstream, notes }) => {
+            for note in notes {
+                eprintln!("{note}");
+            }
+            gateway::start_if_required_with_degrade_sink(
+                &[BackendDemand::LocalGateway],
+                || Ok(upstream),
+                None,
+                None,
+                // Nobody is listening, said out loud. A hosted gateway
+                // installs an emitter here; this one has no host and drops
+                // what it observes.
+                Some(null_sink()),
+                None,
+            )?
+            .context("a gateway was required and none was started")?
+        }
+        // Nothing to forward to yet. Listen anyway: the one flow that stores
+        // a credential — the client's own login control — needs the client
+        // running, and the client waits for this ready line. Every request
+        // is answered `503` with the refusal until a rebuild succeeds, and a
+        // credential stored meanwhile is picked up without a restart.
+        Err(refusal) => {
+            let refusal = refusal.to_string();
+            eprintln!("serving nothing yet: {refusal}");
+            gateway::start_awaiting_upstream(
+                refusal,
+                move || {
+                    build()
+                        .map(|Pool { upstream, notes }| {
+                            for note in notes {
+                                eprintln!("{note}");
+                            }
+                            upstream
+                        })
+                        .map_err(|refusal| refusal.to_string())
+                },
+                Some(null_sink()),
+            )?
+        }
+    };
+    if let Some(provider) = gateway.serving_provider() {
+        eprintln!(
+            "serving {provider} over {}",
+            gateway.served_protocols().join(", ")
+        );
     }
-
-    let gateway = gateway::start_if_required_with_degrade_sink(
-        &[BackendDemand::LocalGateway],
-        || Ok(upstream),
-        None,
-        None,
-        // Nobody is listening, said out loud. A hosted gateway installs an
-        // emitter here; this one has no host and drops what it observes.
-        Some(null_sink()),
-        None,
-    )?
-    .context("a gateway was required and none was started")?;
-    eprintln!(
-        "serving {} over {}",
-        gateway.serving_provider(),
-        gateway.served_protocols().join(", ")
-    );
 
     let listening = gateway.base_url();
     let line = serde_json::to_string(&Ready {
@@ -698,6 +790,177 @@ fn subscription_provider_for(
 /// Refuses a symlink or a non-directory rather than following it: the auth
 /// directory is private state, and reporting through a symlink would be
 /// reporting about a location the user did not choose.
+/// The store every command resolves through: the gateway's own credential
+/// file first, then the native store, then the process environment.
+fn secret_store(data_dir: &Path) -> PreferNativeSecretStore {
+    PreferNativeSecretStore::detect_with_file(config::credentials_path(data_dir))
+}
+
+/// One row per (provider, variable): where the credential comes from, never
+/// what it is. `native_store` is the diagnostic for the one state a user
+/// cannot otherwise see — an item that exists and is refused to this build.
+fn credentials_list(config: &GatewayConfig, data_dir: &Path, json: bool) -> Result<()> {
+    let store = secret_store(data_dir);
+    let mut rows = Vec::new();
+    for provider in config::providers(config) {
+        for var in &provider.credential_env {
+            let reference = SecretRef::Environment { var: var.clone() };
+            let source = store.source_kind(&reference);
+            let native_store = match store.native() {
+                Ok(native) => match native.presence(&reference) {
+                    Presence::Present => "present",
+                    Presence::Absent => "absent",
+                    Presence::Refused => "refused",
+                },
+                Err(_) => "unavailable",
+            };
+            rows.push((provider.name.clone(), var.clone(), source, native_store));
+        }
+    }
+    let mut stdout = std::io::stdout();
+    if json {
+        let providers: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(provider, variable, source, native_store)| {
+                serde_json::json!({
+                    "provider": provider,
+                    "variable": variable,
+                    "source": source.map(SourceKind::as_str),
+                    "native_store": native_store,
+                })
+            })
+            .collect();
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::json!({ "version": 1, "providers": providers })
+        )?;
+        return Ok(());
+    }
+    if rows.is_empty() {
+        writeln!(
+            stdout,
+            "no configured provider declares a credential variable"
+        )?;
+        return Ok(());
+    }
+    for (provider, variable, source, native_store) in rows {
+        let state = match source {
+            Some(kind) => format!("stored in {}", kind.describe()),
+            None if native_store == "refused" => {
+                "a native-store item exists that this build may not read; store it again".to_owned()
+            }
+            None => "not set".to_owned(),
+        };
+        writeln!(stdout, "{provider}\t{variable}\t{state}")?;
+    }
+    Ok(())
+}
+
+/// The variable a provider's key is filed under: the one `--variable`
+/// names, or the first the provider declares. A provider that declares
+/// none takes no key, and one that is not configured or built in is named
+/// as such rather than silently created.
+fn credential_variable(
+    config: &GatewayConfig,
+    provider: &str,
+    variable: Option<&str>,
+) -> Result<String> {
+    let providers = config::providers(config);
+    let Some(entry) = providers.iter().find(|entry| entry.name == provider) else {
+        bail!(
+            "`{provider}` is neither a configured provider nor a built-in template; \
+             `credentials list` names them"
+        );
+    };
+    if entry.credential_env.is_empty() {
+        bail!("`{provider}` declares no credential variable, so it takes no API key");
+    }
+    match variable {
+        None => Ok(entry.credential_env[0].clone()),
+        Some(var) if entry.credential_env.iter().any(|declared| declared == var) => {
+            Ok(var.to_owned())
+        }
+        Some(var) => bail!(
+            "`{provider}` reads {}, not `{var}`",
+            entry.credential_env.join(" or ")
+        ),
+    }
+}
+
+/// Store the key on stdin under the provider's variable. **Stdin and never
+/// an argument**: an argument is in every process listing and every shell
+/// history. The value is held for this call and printed by nothing.
+fn credentials_set(
+    config: &GatewayConfig,
+    data_dir: &Path,
+    provider: &str,
+    variable: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let variable = credential_variable(config, provider, variable)?;
+    let mut key = String::new();
+    std::io::stdin()
+        .read_to_string(&mut key)
+        .context("reading the key from stdin")?;
+    let key = key.trim_end_matches(['\r', '\n']);
+    if key.is_empty() {
+        bail!(
+            "no key arrived on stdin; pipe it in: `printf %s \"$KEY\" | inference-gateway \
+             credentials set {provider}`"
+        );
+    }
+    if key.chars().any(char::is_control) {
+        bail!("the key contains a line break or a control character; a key is one line");
+    }
+    let store = FileSecretStore::at(config::credentials_path(data_dir));
+    store.store(&variable, key)?;
+    let mut stdout = std::io::stdout();
+    if json {
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::json!({
+                "provider": provider,
+                "variable": variable,
+                "stored_in": store.path().display().to_string(),
+            })
+        )?;
+    } else {
+        writeln!(
+            stdout,
+            "stored {variable} for {provider} in {}",
+            store.path().display()
+        )?;
+    }
+    Ok(())
+}
+
+fn credentials_remove(
+    config: &GatewayConfig,
+    data_dir: &Path,
+    provider: &str,
+    variable: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let variable = credential_variable(config, provider, variable)?;
+    let store = FileSecretStore::at(config::credentials_path(data_dir));
+    let removed = store.remove(&variable)?;
+    let mut stdout = std::io::stdout();
+    if json {
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::json!({ "provider": provider, "variable": variable, "removed": removed })
+        )?;
+    } else if removed {
+        writeln!(stdout, "removed {variable} for {provider}")?;
+    } else {
+        writeln!(stdout, "nothing was stored for {provider} under {variable}")?;
+    }
+    Ok(())
+}
+
 fn credential_present(dir: &Path) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
