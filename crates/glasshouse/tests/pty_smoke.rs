@@ -799,6 +799,20 @@ fn windows_interrupt_trap_child() {
     if std::env::var_os("GLASSHOUSE_INTERRUPT_TRAP").is_none() {
         return;
     }
+    // A process inherits its ancestors' CTRL+C disposition: one created with
+    // `CREATE_NEW_PROCESS_GROUP` has CTRL+C disabled, and so does every
+    // descendant until one of them calls `SetConsoleCtrlHandler(NULL, FALSE)`.
+    // While it is disabled conhost never dispatches the event, so the handler
+    // installed below would never run. The sweep's bash Test step is such an
+    // ancestor: run 34595812074 had all three Windows interrupt tests red
+    // under it, in the run and rerun alone, after they were green under the
+    // PowerShell step the sweep before. This child wants the interrupt, so it
+    // says so before it says how.
+    assert_ne!(
+        unsafe { SetConsoleCtrlHandler(None, 0) },
+        0,
+        "could not restore normal CTRL+C processing"
+    );
     assert_ne!(
         unsafe { SetConsoleCtrlHandler(Some(note_console_interrupt), 1) },
         0,
