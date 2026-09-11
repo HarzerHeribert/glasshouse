@@ -20545,3 +20545,72 @@ the rename map is `git log --follow` and this section, not a rewrite of the
 record. `scripts/check-file-sizes.py` now walks every `crates/*/src`, which
 put three Pane files into the baseline at their current size; they may only
 shrink.
+
+### 2026-09-11 — a key the user enters is stored by the gateway, and the gateway listens before it has one
+
+**The ruling (user, 2026-09-11):** *"If there are no credentials in the shell,
+I should be able to configure in the pane TUI and forward to the gateway to
+save inside the gateway."* It came from the first standalone dogfood of the
+extraction: `pane` in an empty directory with no key exported died at start,
+because `inference-gateway serve` refused to listen with nothing to forward
+to, and Pane refuses when the gateway does. Two more findings from the same
+paste: the refusal had joined fourteen providers into one sentence written for
+a single provider; and a Groq key the user had filed in the Keychain through
+Glasshouse was invisible to the gateway.
+
+**The Keychain finding, measured.** `security dump-keychain -a` on that item:
+one trusted application (the `glasshouse` build that wrote it) and a
+`partition_id` of `cdhash:…` — the item is bound to that binary's code hash.
+Both binaries are ad-hoc, linker-signed, so every installed build has a new
+hash, and `native::silence_authorization_dialogs` turns the *Allow* dialog
+into a refusal. The native store therefore loses every key on every upgrade,
+silently. That is a property of unsigned CLI binaries against the legacy
+Keychain, not a bug in `keyring`, and it will not change until the binaries
+carry a stable signing identity.
+
+**Three decisions.**
+
+1. **A gateway listens before it has an upstream** (`gateway::UpstreamSlot`,
+   door `start_awaiting_upstream`). When the pool cannot be built at start the
+   binary prints the refusal to stderr, prints the ready line anyway, and
+   answers every request `503` with that refusal in the Anthropic error
+   shape — after the bearer check, so the rule is the same on both paths. A
+   request rebuilds the pool at once, a refused rebuild stands for a second
+   so a burst does not rebuild once each, and once a rebuild succeeds the
+   slot is filled for good. A host's gateway is never deferred:
+   every `start_if_required_*` door fills the slot before the listener
+   accepts, and `Gateway::upstream()` / `serving_provider()` now return
+   `Option` so the host says so in types rather than by convention.
+2. **The gateway owns a credential file** — `<data dir>/credentials.toml`,
+   flat variable-to-value TOML, created `0600` through a sibling temporary
+   and a rename (`secret::file`). The store chain is *file, then native,
+   then environment*: a key stored deliberately through the gateway beats a
+   Keychain item and beats the shell. The native store stays in the chain
+   for what a same-build item can still answer; nothing writes to it any
+   more from this binary.
+3. **`inference-gateway credentials list|set|remove`.** `set` reads the key
+   from **stdin and never an argument** (an argument is in every process
+   listing and shell history) and prints names only; `list --json` reports
+   per (provider, variable) the `source` that answers and the native store's
+   own `present|absent|refused|unavailable`, so the one state a user cannot
+   otherwise see — a Keychain item this build may not read — is named. Pane's
+   `/login` panel lists those rows, `/key <provider>` takes the key in a
+   masked modal prompt and pipes it to `set`, and a session that spawned its
+   gateway says once at start when nothing is stored.
+
+**Verified:** `tests/bin.rs::serve_listens_before_a_credential_exists_and_picks_one_up_when_stored`
+(503 with the fix named, 401 still refused, `set` on stdin, the running
+process forwards with exactly that key, clean exit), `credentials_list_set_and_remove_report_the_documented_shapes`
+(empty key and unknown provider store nothing; `0600`; remove idempotent),
+`gateway::tests::a_deferred_slot_paces_rebuilds_and_fills_once_its_supplier_answers`,
+`secret::file::tests` (round trip, mode, an unparsable file is never
+overwritten and never echoed). Pane's half is in `crates/pane/tests/session.rs`.
+
+**Residuals, each one line:** a gateway that already serves never rebuilds,
+so a subscription connected mid-session on a serving gateway still needs a
+restart (a deferred one picks it up); Glasshouse has no `credentials` forward
+yet, so a hosted Pane cannot enter a key; providers that declare no variable
+(`ollama`, `llama-cpp`, `litellm`, `opencode-zen`) cannot be served at all
+until the pool admits a credential-less backend — pre-existing, now named in
+the refusal; the legacy Keychain items stay unreadable and are reported as
+`refused` rather than migrated.
