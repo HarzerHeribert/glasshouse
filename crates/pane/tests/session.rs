@@ -5154,7 +5154,7 @@ case "$1" in
     exec sleep 120
     ;;
   entitlements)
-    echo '{"version":1,"accounts":[{"account":"work@example.com","provider":"anthropic","models":["claude-opus-5"],"scope":"user","selectable":true,"authenticated":false,"connect_with":"anthropic"}]}'
+    echo '{"version":1,"accounts":[{"account":"work@example.com","provider":"anthropic","models":["claude-opus-5"],"scope":"user","selectable":true,"authenticated":'"${FAKE_GATEWAY_AUTHENTICATED:-false}"',"connect_with":"anthropic"}]}'
     ;;
   subscriptions)
     echo '{"state":"connected","account":"work@example.com"}'
@@ -6046,4 +6046,50 @@ credential_env = ["PANE_E2E_ENTERED_KEY"]
             "the key leaked into {name}: {text}"
         );
     }
+}
+
+/// The start-up notice is for a gateway with nothing to serve. A connected
+/// subscription is something to serve even though no provider key is stored,
+/// so it silences the notice — measured 2026-09-11 on three serving
+/// subscriptions that were told nothing was stored.
+#[cfg(unix)]
+#[test]
+fn a_connected_subscription_silences_the_missing_credential_notice() {
+    let root = scratch_dir("notice-connected-root");
+    let record = root.join("gateway.record");
+    let gateway = write_fake_gateway(
+        &root,
+        "inference-gateway",
+        &record,
+        "http://127.0.0.1:9",
+        "fake-token",
+    );
+    let stderr_with = |authenticated: &str| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+            .arg("session")
+            .arg("--root")
+            .arg(&root)
+            .arg("--rollout")
+            .arg(root.join(format!("rollout-{authenticated}.jsonl")))
+            .arg("--session")
+            .arg(format!("sess-notice-{authenticated}"))
+            .arg("--gateway")
+            .arg(&gateway)
+            .env_remove("ANTHROPIC_BASE_URL")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("FAKE_GATEWAY_AUTHENTICATED", authenticated)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr).to_string()
+    };
+    assert!(
+        stderr_with("false").contains("No provider credential is stored yet"),
+        "no key stored and nothing connected: the notice"
+    );
+    assert!(
+        !stderr_with("true").contains("No provider credential is stored yet"),
+        "a connected subscription serves, so no notice"
+    );
 }

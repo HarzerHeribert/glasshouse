@@ -212,6 +212,23 @@ pub(super) fn announce_missing_credential(session: &Session<'_>, started_the_gat
     if !started_the_gateway || !crate::gateway::nothing_resolves(session.gateway) {
         return;
     }
+    // A connected subscription is a credential the gateway holds too --
+    // through its own login flow rather than a key, so `credentials list`
+    // does not see it, and a session serving one must not be told nothing
+    // is stored. Measured 2026-09-11 on three serving subscriptions.
+    let connected = session
+        .gateway
+        .run(&["entitlements", "--json"], None)
+        .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok())
+        .is_some_and(|catalogue| {
+            catalogue
+                .accounts
+                .iter()
+                .any(|entry| entry.authenticated == Some(true))
+        });
+    if connected {
+        return;
+    }
     if session.ui.is_some() {
         session_println!("{NOTICE}");
     } else {

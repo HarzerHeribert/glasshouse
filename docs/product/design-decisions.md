@@ -20614,3 +20614,31 @@ yet, so a hosted Pane cannot enter a key; providers that declare no variable
 until the pool admits a credential-less backend — pre-existing, now named in
 the refusal; the legacy Keychain items stay unreadable and are reported as
 `refused` rather than migrated.
+
+**Dogfooded on the installed binaries (2026-09-11, ~09:00) — and what the
+first real run found.** `pane` in an empty directory started, showed the
+notice, and the gateway listened; but it could not see the three
+subscriptions the user had connected through Glasshouse, because those live
+in Glasshouse's `config.toml` (`[entitlements.*]`) and Glasshouse's data
+directory, and the gateway reads only its own. *The logins were valid; the
+stores were two.* Bridged for the run: a `gateway.toml` mirroring the
+entitlement tables minus the harness-only keys (`native_harness`,
+`allow_harnesses` — the same `AccountEntry` type otherwise), and the
+gateway's data directory pointed at Glasshouse's through
+`INFERENCE_GATEWAY_DATA_DIR`, which works because the broker layout is
+identical by design. A symlinked broker directory is refused by
+`ensure_private_directory`, correctly. One real turn then completed
+standalone through `claude-max` in 1.4 s with Glasshouse not connected. Two
+defects fixed on the spot: Pane's start-up notice said nothing was stored
+while three subscriptions served (it now counts a connected account as a
+credential), and `config::cliproxyapi_executable` looked for a flat
+`tools/CLIProxyAPI` that no host-managed machine has (it now follows the
+`tools/cliproxyapi/current` release marker as the host does).
+
+**Next package, Red (it moves login state): one store.** The gateway's data
+directory becomes the home of accounts, brokers, the managed tool and
+credentials; Glasshouse keeps only its harness overlay keyed by account name
+and reads everything else from `gateway.toml`; a one-time migration moves
+the existing directories. Until it lands, standalone Pane on a subscription
+needs the bridge above (the orchestrator's launcher script sets the two
+variables), and the user's own store is unchanged.

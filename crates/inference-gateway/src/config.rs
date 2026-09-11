@@ -230,13 +230,41 @@ pub fn broker_auth_dir(data_dir: &Path, entitlement: &str) -> PathBuf {
 
 /// The managed CLIProxyAPI executable, unless `GLASSHOUSE_CLIPROXYAPI_BIN`
 /// names one — which the broker itself checks, so this is only the fallback.
+///
+/// Laid out exactly as a host lays it out, for the same reason the broker
+/// directories are: `tools/cliproxyapi/current` holds a `sha256-…` marker
+/// naming the extracted release directory, whose executable is
+/// `cliproxyapi`. The flat `tools/CLIProxyAPI` is what a data directory
+/// nothing managed has — a binary placed by hand. Measured 2026-09-11: the
+/// flat path alone never existed on a machine a host had managed, so every
+/// standalone subscription account failed to start its broker.
 fn cliproxyapi_executable(data_dir: &Path) -> PathBuf {
+    let root = data_dir.join("tools").join("cliproxyapi");
+    if let Ok(marker) = std::fs::read_to_string(root.join("current")) {
+        let version = marker.trim();
+        if valid_cliproxyapi_version(version) {
+            return root.join(version).join(if cfg!(windows) {
+                "cliproxyapi.exe"
+            } else {
+                "cliproxyapi"
+            });
+        }
+    }
     let name = if cfg!(windows) {
         "CLIProxyAPI.exe"
     } else {
         "CLIProxyAPI"
     };
     data_dir.join("tools").join(name)
+}
+
+/// A release marker is `sha256-` and sixty-four hex digits — the digest of
+/// the archive the directory was extracted from — and nothing else, so a
+/// marker can never name a path outside `tools/cliproxyapi`.
+fn valid_cliproxyapi_version(version: &str) -> bool {
+    version.strip_prefix("sha256-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 /// Where a model catalogue read back by `entitlements --json` is cached.
@@ -338,6 +366,40 @@ pub fn protocol_from_slug(slug: &str) -> Option<WireProtocol> {
 #[cfg(test)]
 mod tests {
     /// With no configuration at all, Anthropic's API is a provider through
+    /// The broker executable follows the managed layout's release marker,
+    /// and only a well-formed marker; anything else is the flat fallback.
+    #[test]
+    fn the_broker_executable_follows_a_managed_release_marker() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let data_dir = scratch.path();
+        let flat = data_dir.join("tools").join(if cfg!(windows) {
+            "CLIProxyAPI.exe"
+        } else {
+            "CLIProxyAPI"
+        });
+        assert_eq!(broker_paths(data_dir, "acct").executable, flat);
+
+        let root = data_dir.join("tools").join("cliproxyapi");
+        std::fs::create_dir_all(&root).expect("created");
+        std::fs::write(root.join("current"), "not-a-digest\n").expect("written");
+        assert_eq!(
+            broker_paths(data_dir, "acct").executable,
+            flat,
+            "a malformed marker cannot name a directory"
+        );
+
+        let digest = format!("sha256-{}", "ab".repeat(32));
+        std::fs::write(root.join("current"), format!("{digest}\n")).expect("written");
+        assert_eq!(
+            broker_paths(data_dir, "acct").executable,
+            root.join(&digest).join(if cfg!(windows) {
+                "cliproxyapi.exe"
+            } else {
+                "cliproxyapi"
+            })
+        );
+    }
+
     /// `ANTHROPIC_API_KEY`; a configured `[providers.anthropic]` replaces it.
     #[test]
     fn anthropics_api_is_a_provider_out_of_the_box_and_a_configured_one_replaces_it() {
