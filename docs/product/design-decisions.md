@@ -20642,3 +20642,115 @@ and reads everything else from `gateway.toml`; a one-time migration moves
 the existing directories. Until it lands, standalone Pane on a subscription
 needs the bridge above (the orchestrator's launcher script sets the two
 variables), and the user's own store is unchanged.
+
+### 2026-09-11 — one store: subscription, account and broker state is the gateway's; Glasshouse neither owns nor manages it
+
+**The ruling (user, 2026-09-11, verbatim):** *"Move all existing
+subscription/account/broker state from Glasshouse-owned storage to
+Gateway-owned storage. Glasshouse must neither own nor manage that state
+afterward. Its only relationship to Gateway is that sessions it supervises
+may use Gateway, and Glasshouse may record/display inference telemetry
+associated with those sessions. Glasshouse itself might use inference for
+intelligent activities."* It came out of the first standalone dogfood: the
+user's three connected subscriptions were valid and invisible to the
+standalone gateway, because they lived in Glasshouse's config and data
+directory (*"can you run pane? or are my logins invalid?"*).
+
+**The cut, by what a fact is about.** A fact about the *destination* — how
+an account authenticates (`kind`, `vendor`, `credential`,
+`subscription_broker`, `provider`) and where a provider is reached
+(`base_url`, `protocol`, `credential_env`, `headers`) — is the gateway's
+and lives in `gateway.toml`. A fact about *what Glasshouse thinks of a
+model or an account* — `native_harness`, allow/deny harnesses, tiers and
+job kinds, spend ceilings, headroom overrides, the context-firewall
+override; a provider's `enabled`, free and metered models, tool-call
+verdicts, model facts, ceilings and capabilities, prompt transform and
+money budget — is Glasshouse's and stays in `config.toml` as an **overlay
+keyed by the gateway's names**. Glasshouse's tables refuse the moved keys
+by name, and the refusal names the migration.
+
+**Where state lives.** The gateway's data directory holds the broker
+directories, the managed CLIProxyAPI (`tools/cliproxyapi/<digest>/`,
+marker `current`), the model catalogue cache (`model-catalogues/`), the
+credential file and the health/quota caches. Glasshouse's `RuntimePaths`
+derives every one of those from the gateway's data directory — the same
+default the standalone binary uses and the same `INFERENCE_GATEWAY_*`
+overrides — so a hosted session and a standalone one see one store. The
+broker refuses a symlinked private directory (`ensure_private_directory`),
+which is why the bridge of the morning could not stand and why the store
+is one directory rather than two linked ones.
+
+**Who does what.** `inference-gateway subscriptions connect|logout|adopt-binary`
+and `credentials set|remove|list` are the management surface. Glasshouse's
+`subscriptions connect|login|logout|adopt-binary` and `credentials
+store|remove` forward to that binary (resolved from `INFERENCE_GATEWAY_BIN`,
+beside its own executable, then `PATH`) and say so; `glasshouse
+entitlements`, `subscriptions status` and `credentials list` remain
+displays. Pane routes `entitlements`, `subscriptions` and `credentials`
+controls to the gateway binary in every session, hosted or not, and only
+`routing-cost` — usage telemetry — to Glasshouse when hosted.
+
+**Migration.** `glasshouse migrate-gateway-state [--dry-run]` reads the
+legacy tables, writes or merges `gateway.toml` (a differing name is refused
+by name), rewrites `config.toml` to the overlay with comments preserved
+after a dated backup, renames the four directories into the gateway's data
+directory (a non-empty destination is refused before anything is written),
+warns about brokers still running from the old paths, and is a no-op the
+second time. `glasshouse doctor` names legacy state until it is run.
+Executed on the user's machine on 2026-09-11 (below, when done).
+
+**Landed 2026-09-11 (Glasshouse half, worker `gh-one-store`; Pane half
+`eb0d470`; gateway half `3780be0`, `24a5dd7`).** Two things the worker
+decided and the orchestrator ratified. *One:* the provider **serving keys**
+(`template`, `base_url`, `credential_env`, `credential_store`, `headers`)
+stay in Glasshouse's `[providers.<name>]` for now, because the Settings
+provider editor and the onboarding wizard author them and moving the keys
+without those surfaces would break every configured provider on the next
+run. **Successor package:** the editor and the wizard stop authoring serving
+facts, `EffectiveConfig` resolves providers from the gateway's table (the
+readers exist and are tested), the five keys are refused, and the migration
+grows its provider half. Until then the standalone gateway needs any custom
+provider (`experiential`, a re-based `anyrouter`) written into
+`gateway.toml` by hand; the user's has both. *Two:* `glasshouse credentials
+store` now forwards to the gateway, so a key lands in the gateway's
+credential file rather than the OS keychain Glasshouse used — consistent
+with the morning's finding that keychain items written by one build are
+refused to the next; the two `#[ignore]`d keychain tests went with it. Path
+resolution has one rule worth knowing: a relocated Glasshouse (`--data-dir`,
+`--config-dir`, `GLASSHOUSE_*`) carries its gateway store with it
+(`<data>/gateway`, `<config>/gateway.toml`); only a platform install uses the
+gateway's platform locations — which is what keeps a hundred spawned-binary
+tests out of the developer's real accounts.
+
+**Executed on the user's machine, 2026-09-11 ~09:01 UTC.** `glasshouse
+migrate-gateway-state --dry-run`, then the real run: seven accounts already
+in `gateway.toml` with identical content (skipped), `config.toml` backed up
+to `config.toml.before-gateway-store-20260911T090103Z` and rewritten to the
+overlay (three tables keep `native_harness` and `allow_harnesses`; four
+api-key tables emptied and dropped), `subscription-brokers/`, `tools/`,
+`providers/` → `model-catalogues/` and `gateway-health/` renamed into the
+gateway's directory. Both binaries then read one store: `glasshouse
+entitlements` and `inference-gateway entitlements` list the same accounts,
+and the installed `pane` in an empty directory with no environment variable
+answered a real turn through `claude-max`. Two brokers of the user's own
+day-old sessions were still running against the old paths when the
+directories moved; the migration warned, and those sessions need a restart.
+
+**Gemini subscription: not through the broker — the user, 2026-09-11.**
+*"Don't use the Gemini subscription anymore: Google deliberately banned use
+of the subscription outside the Gemini CLI and intended tools."* The
+`[accounts.gemini-subscription]` table was removed from the user's
+`gateway.toml` with a note; its login state was left on disk (a `logout`
+removes it); the overlay's `native_harness = "antigravity"` still resolves
+the entitlement as Antigravity's own sign-in, which is the intended tool.
+Nothing in the code enforces this yet; a rule that refuses `kind = "gemini"`
+with `subscription_broker` is a product decision for the user to make.
+
+**Found and fixed on the way:** a session's end killed its gateway with
+`SIGKILL` right after closing its stdin, so the gateway never ran the
+shutdown that terminates its brokers, and three CLIProxyAPI processes were
+orphaned on every exit — `Serving::drop` now waits for the gateway to leave
+on its own before it kills. And Glasshouse's own launches resolved
+credentials from the Keychain and the shell only; they now read the gateway's
+credential file first, the same chain the gateway uses, so a key entered in
+Pane is what a hosted session gets.
