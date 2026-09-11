@@ -28,6 +28,10 @@ struct Fixture {
     base: tempfile::TempDir,
     root: tempfile::TempDir,
     gateway: std::path::PathBuf,
+    /// Read only by the forwarding tests, which drive a `/bin/sh` fake and
+    /// are unix-only; on Windows the field is filled and never read, which
+    /// `-D warnings` would otherwise refuse.
+    #[cfg_attr(not(unix), allow(dead_code))]
     record: std::path::PathBuf,
 }
 
@@ -47,7 +51,8 @@ impl Fixture {
     }
 
     /// What the fake gateway was asked to do, or the empty string when it
-    /// was never run.
+    /// was never run. Unix-only by use: the forwarding tests are.
+    #[cfg(unix)]
     fn forwarded(&self) -> String {
         std::fs::read_to_string(&self.record).unwrap_or_default()
     }
