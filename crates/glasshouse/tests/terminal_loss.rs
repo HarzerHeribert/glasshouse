@@ -95,7 +95,9 @@
 //! told the trees apart (fixed 0–1 of 8, reverted 0–2 of 8) and eight spinners
 //! alone left this host under threshold at 210µs — so neither [`MAX_STALLS`]'s
 //! 4ms tolerance nor the hangup retry gates on a slop measurement; both widen
-//! unconditionally, and the 500µs gap stays the proof that discriminates.
+//! unconditionally, and the 500µs gap stays the proof that discriminates —
+//! on a host that can carry it; GitHub's hosted macOS runners cannot, and
+//! `host_carries_the_proof` says why they only measure it.
 //!
 //! # A related exit-code defect proved elsewhere, on purpose
 //!
@@ -307,8 +309,30 @@ const MAX_STALLS: [usize; 2] = [3, 3];
 /// GitHub's macOS runners it has swallowed 2, then 5, of 8 judged
 /// keystrokes (runs 33980693956 and 34583872522), turning the cell red and
 /// stopping the job before its clippy and rustdoc steps ran. The 500µs gap
-/// is the proof, and stays asserted at its measured residual.
+/// is the proof, and stays asserted at its measured residual — on a host
+/// that can carry it, which is [`host_carries_the_proof`]'s question.
 const GAP_IS_A_PROOF: [bool; 2] = [false, true];
+
+/// Whether this host can carry the 500µs proof at all.
+///
+/// GitHub's hosted macOS runners cannot. With the **fixed** tree they
+/// swallowed 2, 5 and 4 of 8 judged keystrokes at 500µs (runs 34583872522
+/// and 34595812074, the last of those rerun alone under `--test-threads=1`),
+/// inside the 5–8 of 8 that the reverted rounding line produces on a quiet
+/// host. The ranges overlap, so on that runner the gap does not discriminate
+/// the two trees and a red there measures the runner, not this tree — the
+/// same finding that took the 4ms gap out of [`GAP_IS_A_PROOF`]. The
+/// residual the gap sits inside is the child's scheduling latency between
+/// the signal and its poll, and that runner's is several milliseconds: every
+/// keystroke either gap can send lands in it. [`measure_scheduling_slop`]
+/// cannot make this decision (its own doc: it is not a measure of load), so
+/// it is made by host: on a GitHub runner the gap is measured and printed,
+/// never failed on. The proof stays with the blocking gate, which runs on a
+/// machine measured to discriminate (CLAUDE.md: the local gate blocks, the
+/// GitHub sweep trails).
+fn host_carries_the_proof() -> bool {
+    std::env::var_os("GITHUB_ACTIONS").is_none()
+}
 
 /// How many *judged* resize-then-type trials `a_resize_does_not_swallow_the_
 /// keystroke_that_follows_it` wants, split evenly between
@@ -1015,11 +1039,18 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
             );
             continue;
         }
-        if !GAP_IS_A_PROOF[which] {
+        let not_a_proof_here = if !GAP_IS_A_PROOF[which] {
+            Some("GAP_IS_A_PROOF for why this gap does not decide the run")
+        } else if !host_carries_the_proof() {
+            Some("host_carries_the_proof for why a hosted runner cannot decide it")
+        } else {
+            None
+        };
+        if let Some(why) = not_a_proof_here {
             println!(
                 "NOTE: the {gap:?} gap is measured, not asserted: {} of the {} judged \
                  keystrokes were swallowed (trials {swallowed:?}); the tolerance it would be \
-                 held to is {}. See GAP_IS_A_PROOF for why this gap does not decide the run.",
+                 held to is {}. See {why}.",
                 swallowed.len(),
                 judged[which],
                 MAX_STALLS[which],
