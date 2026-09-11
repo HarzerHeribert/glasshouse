@@ -137,6 +137,19 @@ enum SubscriptionsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Forget one account's login: its broker auth directory is emptied.
+    Logout {
+        #[arg(value_enum)]
+        provider: SubscriptionProvider,
+        /// The `[accounts.<name>]` table to log out.
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+    },
+    /// Adopt a CLIProxyAPI executable into this gateway's managed tools, pinned by its digest.
+    AdoptBinary {
+        /// The executable to copy in.
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,6 +239,19 @@ fn run() -> Result<()> {
             let config = load_config(&cli)?;
             connect(&config, &data_dir(&cli)?, *provider, entitlement, *json)
         }
+        Command::Subscriptions {
+            command:
+                SubscriptionsCommand::Logout {
+                    provider,
+                    entitlement,
+                },
+        } => {
+            let config = load_config(&cli)?;
+            logout(&config, &data_dir(&cli)?, *provider, entitlement)
+        }
+        Command::Subscriptions {
+            command: SubscriptionsCommand::AdoptBinary { path },
+        } => adopt_binary(&data_dir(&cli)?, path),
         Command::Credentials { command } => {
             let config = load_config(&cli)?;
             let data_dir = data_dir(&cli)?;
@@ -629,21 +655,7 @@ fn connect(
     entitlement: &str,
     json: bool,
 ) -> Result<()> {
-    let Some(entry) = config.accounts.get(entitlement) else {
-        bail!("no `[accounts.{entitlement}]` table is configured, so there is nothing to connect");
-    };
-    // An account that states what it is must be connected with the flow that
-    // matches: writing an Anthropic credential into a ChatGPT account would
-    // produce a login that succeeded and a route that never worked.
-    if let Some(expected) = subscription_provider_for(entry.kind(), entry.vendor())
-        && expected != provider
-    {
-        bail!(
-            "account `{entitlement}` is connected with `{}`, not `{}`",
-            expected.as_str(),
-            provider.as_str()
-        );
-    }
+    broker_account(config, provider, entitlement)?;
 
     let mut out = std::io::stdout();
     let mut emit = |progress: &flow::Progress| {
@@ -985,6 +997,185 @@ fn credentials_remove(
         writeln!(stdout, "nothing was stored for {provider} under {variable}")?;
     }
     Ok(())
+}
+
+/// The account a login flow acts on: configured, broker-backed, and of the
+/// vendor the flow is for. Writing an Anthropic credential into a ChatGPT
+/// account would produce a login that succeeded and a route that never
+/// worked, so the mismatch is refused by name — for `connect` and `logout`
+/// alike.
+fn broker_account<'a>(
+    config: &'a GatewayConfig,
+    provider: SubscriptionProvider,
+    entitlement: &str,
+) -> Result<&'a inference_gateway::entitlement::AccountEntry> {
+    let Some(entry) = config.accounts.get(entitlement) else {
+        bail!("no `[accounts.{entitlement}]` table is configured, so there is nothing to connect");
+    };
+    if entry.subscription_broker().is_none() {
+        bail!("account `{entitlement}` is not backed by a subscription broker, so it has no login");
+    }
+    if let Some(expected) = subscription_provider_for(entry.kind(), entry.vendor())
+        && expected != provider
+    {
+        bail!(
+            "account `{entitlement}` is connected with `{}`, not `{}`",
+            expected.as_str(),
+            provider.as_str()
+        );
+    }
+    Ok(entry)
+}
+
+/// Forget an account's broker login. The auth directory is moved aside and
+/// deleted rather than emptied in place, so a broker mid-read never sees a
+/// half-removed directory, and it is recreated empty and private so the
+/// next `connect` has somewhere to write.
+fn logout(
+    config: &GatewayConfig,
+    data_dir: &Path,
+    provider: SubscriptionProvider,
+    entitlement: &str,
+) -> Result<()> {
+    broker_account(config, provider, entitlement)?;
+    let paths = config::broker_paths(data_dir, entitlement);
+    for dir in [&paths.brokers_dir, &paths.entitlement_dir] {
+        refuse_unless_real_directory_or_absent(dir)?;
+    }
+    let auth = &paths.auth_dir;
+    match std::fs::symlink_metadata(auth) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!(
+                "subscription auth location {} is not a private directory",
+                auth.display()
+            );
+        }
+        Ok(_) => {
+            let tombstone = auth.with_file_name(format!(
+                ".auth-removed-{}-{}",
+                std::process::id(),
+                now_unix_seconds()
+            ));
+            std::fs::rename(auth, &tombstone)
+                .with_context(|| format!("could not move {} aside", auth.display()))?;
+            std::fs::remove_dir_all(&tombstone)
+                .with_context(|| format!("could not remove {}", tombstone.display()))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", auth.display()));
+        }
+    }
+    private_directory(auth)?;
+    println!("{}\t{entitlement}\tabsent", provider.as_str());
+    Ok(())
+}
+
+/// Copy a CLIProxyAPI executable to `tools/cliproxyapi/sha256-<digest>/`
+/// and point the `current` marker at it — the layout
+/// `config::cliproxyapi_executable` reads, so the next broker start finds
+/// it with no environment variable. Pinned by digest, so two adoptions of
+/// one build share one copy and an adoption of another never overwrites it.
+fn adopt_binary(data_dir: &Path, source: &Path) -> Result<()> {
+    use sha2::Digest as _;
+    let metadata = std::fs::metadata(source).with_context(|| {
+        format!(
+            "CLIProxyAPI executable {} is not readable",
+            source.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        bail!(
+            "CLIProxyAPI executable {} is not a regular file",
+            source.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "CLIProxyAPI executable {} is not executable",
+                source.display()
+            );
+        }
+    }
+    let bytes =
+        std::fs::read(source).with_context(|| format!("could not read {}", source.display()))?;
+    let version = format!("sha256-{}", hex::encode(sha2::Sha256::digest(&bytes)));
+    let root = data_dir.join("tools").join("cliproxyapi");
+    let version_dir = root.join(&version);
+    private_directory(&root)?;
+    private_directory(&version_dir)?;
+    let destination = version_dir.join(if cfg!(windows) {
+        "cliproxyapi.exe"
+    } else {
+        "cliproxyapi"
+    });
+    if !destination.exists() {
+        let temporary = version_dir.join(format!(".adopt-{}", std::process::id()));
+        let placed = (|| -> Result<()> {
+            std::fs::write(&temporary, &bytes)?;
+            std::fs::set_permissions(&temporary, metadata.permissions())?;
+            std::fs::rename(&temporary, &destination)?;
+            Ok(())
+        })();
+        if placed.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        placed.with_context(|| format!("could not adopt into {}", version_dir.display()))?;
+    }
+    let marker = root.join("current");
+    let temporary = root.join(format!(".current-{}", std::process::id()));
+    std::fs::write(&temporary, version.as_bytes())
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temporary, &marker)
+        .with_context(|| format!("could not point {} at {version}", marker.display()))?;
+    println!("{}", destination.display());
+    Ok(())
+}
+
+/// Create `path` as a directory only its owner can enter, and refuse a
+/// symlink or a file in its place — the same rule the broker applies to
+/// every private directory it opens.
+fn private_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .with_context(|| format!("could not create {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+    refuse_unless_real_directory_or_absent(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("could not make {} private", path.display()))?;
+    }
+    Ok(())
+}
+
+fn refuse_unless_real_directory_or_absent(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => bail!(
+            "subscription broker private directory {} is not a real directory",
+            path.display()
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("could not inspect {}", path.display())),
+    }
 }
 
 fn credential_present(dir: &Path) -> Result<bool> {

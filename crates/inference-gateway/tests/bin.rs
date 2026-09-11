@@ -804,3 +804,140 @@ fn credentials_list_set_and_remove_report_the_documented_shapes() {
     let again: serde_json::Value = serde_json::from_slice(&again.stdout).expect("one JSON object");
     assert_eq!(again["removed"], false, "absent is not an error");
 }
+
+/// The broker's executable and an account's login are the gateway's to
+/// keep: `adopt-binary` files a copy under its digest and points the marker
+/// at it — the path `serve` starts brokers from — and `logout` empties an
+/// account's auth directory and leaves it private. A logout with the wrong
+/// vendor's flow is refused by name, exactly as `connect` refuses it.
+#[cfg(unix)]
+#[test]
+fn subscriptions_adopt_binary_pins_by_digest_and_logout_forgets_a_login() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        "[accounts.zeta]\nkind = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
+    )
+    .expect("the configuration is written");
+
+    let source = scratch.path().join("fake-cliproxyapi");
+    std::fs::write(&source, "#!/bin/sh\nexit 0\n").expect("written");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let adopted = gateway(&config_path, scratch.path())
+        .args(["subscriptions", "adopt-binary"])
+        .arg(&source)
+        .output()
+        .expect("the built binary runs");
+    assert!(
+        adopted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    let root = scratch.path().join("tools").join("cliproxyapi");
+    let marker = std::fs::read_to_string(root.join("current")).expect("the marker is written");
+    let digest = marker
+        .strip_prefix("sha256-")
+        .expect("the marker is a digest");
+    assert!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{marker}"
+    );
+    let destination = root.join(&marker).join("cliproxyapi");
+    assert_eq!(
+        String::from_utf8_lossy(&adopted.stdout).trim(),
+        destination.display().to_string(),
+        "adopt-binary prints where the copy landed"
+    );
+    assert_eq!(
+        std::fs::read(&destination).expect("the copy exists"),
+        std::fs::read(&source).expect("the source exists"),
+        "byte-identical copy"
+    );
+    assert_ne!(
+        std::fs::metadata(&destination)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o111,
+        0,
+        "the copy stays executable"
+    );
+    assert_eq!(
+        std::fs::metadata(root.join(&marker))
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the release directory is private"
+    );
+
+    // Logging out: a login present, then absent, then a private empty
+    // directory ready for the next connect.
+    let auth = scratch
+        .path()
+        .join("subscription-brokers")
+        .join(format!("entitlement-{}", hex_of("zeta")))
+        .join("auth");
+    std::fs::create_dir_all(&auth).expect("created");
+    std::fs::write(auth.join("claude-someone.json"), "{}").expect("a login file");
+    let refused = gateway(&config_path, scratch.path())
+        .args(["subscriptions", "logout", "openai", "--entitlement", "zeta"])
+        .output()
+        .expect("the built binary runs");
+    assert!(
+        !refused.status.success(),
+        "the wrong vendor's flow is refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("connected with `anthropic`, not `openai`"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        auth.join("claude-someone.json").exists(),
+        "a refusal removes nothing"
+    );
+    let out = gateway(&config_path, scratch.path())
+        .args([
+            "subscriptions",
+            "logout",
+            "anthropic",
+            "--entitlement",
+            "zeta",
+        ])
+        .output()
+        .expect("the built binary runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "anthropic\tzeta\tabsent\n"
+    );
+    assert!(
+        std::fs::read_dir(&auth)
+            .expect("the auth dir exists again")
+            .next()
+            .is_none(),
+        "the auth directory is empty"
+    );
+    assert_eq!(
+        std::fs::metadata(&auth)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}
+
+#[cfg(unix)]
+fn hex_of(text: &str) -> String {
+    text.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
