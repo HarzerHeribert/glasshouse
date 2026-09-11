@@ -10,15 +10,21 @@
 //! **Start, attach or go direct is decided once** ([`select`] then
 //! [`start_or_attach`]). A gateway was *handed over* when `ANTHROPIC_BASE_URL`
 //! names one and either `ANTHROPIC_AUTH_TOKEN` came with it or the host is
-//! loopback — Glasshouse's launch does exactly that — and pane attaches,
-//! starts nothing, and sends the three controls to Glasshouse's own commands
-//! for this project. Otherwise pane starts the gateway it was named (or
+//! loopback — Glasshouse's launch does exactly that — and pane attaches and
+//! starts nothing. Otherwise pane starts the gateway it was named (or
 //! `inference-gateway` on `PATH`) and owns its whole lifetime. The one
 //! fallback is loud, not silent: no gateway installed and none named means
 //! the session talks to the provider directly and says so; a gateway named
 //! by path that cannot be started is a startup refusal, because a request
 //! that skipped a gateway the user asked for would also skip the entitlement
 //! and cost controls that are the reason it exists.
+//!
+//! **The routing rule is one line**: `entitlements`, `subscriptions` and
+//! `credentials` always run the gateway binary, because account, subscription
+//! and credential state is the gateway's and belongs to no project, while
+//! `routing-cost` runs the variant's own executable — Glasshouse, scoped to
+//! this project, in a hosted session — because the usage a session ran up is
+//! telemetry Glasshouse records for the project it supervises.
 
 use std::io::Write;
 use std::io::{BufRead, BufReader, Read};
@@ -37,17 +43,16 @@ pub enum Gateway {
     None,
     /// Shells out to this executable. `PathBuf::from("inference-gateway")`
     /// lets the OS resolve it from `PATH` (`Command::new` maps to `execvp` on
-    /// a bare name); a test passes its own fake script's path instead, so no
-    /// production code here performs a `PATH` lookup of its own.
+    /// a bare name); a test passes its own fake script's path instead.
     Command {
         gateway: PathBuf,
     },
     /// Attached to a gateway Glasshouse started for this project: the serving
-    /// URL was handed over in the environment, and the three controls go to
-    /// Glasshouse's own commands scoped to `root`, exactly as they did before
-    /// the gateway was its own binary — so `/models`, `/login` and the cost
-    /// readout describe the catalogue and ledger of the project the session
-    /// runs in, not a standalone gateway's.
+    /// URL was handed over in the environment. The cost readout goes to
+    /// Glasshouse's own command scoped to `root`, so it describes the ledger
+    /// of the project the session runs in; the account, subscription and
+    /// credential controls go to the gateway binary, which is where that
+    /// state lives whoever started the gateway.
     Hosted {
         glasshouse: PathBuf,
         root: PathBuf,
@@ -59,10 +64,18 @@ impl Gateway {
     /// variant needs in front of `args` — every control, streamed or waited
     /// for, builds its command here so a hosted session's `--scope` cannot
     /// be forgotten at one call site.
+    ///
+    /// **An account, subscription or credential control runs the gateway
+    /// binary in every variant, and carries no `--scope`**: that state is the
+    /// gateway's, and the gateway has no projects to scope it to. A hosted
+    /// session resolves the binary with [`hosted_gateway_binary`], and `None`
+    /// — no gateway installed anywhere — is what every caller renders as
+    /// unreachable.
     pub(crate) fn control_command(&self, args: &[&str]) -> Option<Command> {
         let mut command = match self {
             Self::None => return None,
             Self::Command { gateway } => Command::new(gateway),
+            Self::Hosted { .. } if is_gateway_state(args) => Command::new(hosted_gateway_binary()?),
             Self::Hosted { glasshouse, root } => {
                 let mut command = Command::new(glasshouse);
                 command.arg("--scope").arg(root);
@@ -200,6 +213,44 @@ impl Gateway {
             token: ready.token.filter(|token| !token.is_empty()),
         })
     }
+}
+
+/// Whether these arguments ask about state the gateway owns — the accounts it
+/// can serve, the subscriptions behind them, and the credentials they use —
+/// rather than about what this project spent.
+fn is_gateway_state(args: &[&str]) -> bool {
+    args.first()
+        .is_some_and(|first| matches!(*first, "entitlements" | "subscriptions" | "credentials"))
+}
+
+/// The file names a gateway executable can have on this platform.
+#[cfg(windows)]
+const GATEWAY_NAMES: &[&str] = &["inference-gateway.exe", "inference-gateway"];
+#[cfg(not(windows))]
+const GATEWAY_NAMES: &[&str] = &["inference-gateway"];
+
+/// The gateway binary a hosted session's account controls run: the one
+/// `INFERENCE_GATEWAY_BIN` names, else one installed beside this executable,
+/// else the first on `PATH`.
+///
+/// **It is resolved here rather than left to `execvp` because "no gateway
+/// anywhere" has to be distinguishable from "the gateway refused".** A bare
+/// name handed to `Command::new` would fail at spawn either way, and the
+/// controls would report a reachable gateway that said no.
+fn hosted_gateway_binary() -> Option<PathBuf> {
+    if let Some(named) = std::env::var_os("INFERENCE_GATEWAY_BIN").filter(|value| !value.is_empty())
+    {
+        return Some(PathBuf::from(named));
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .into_iter()
+        .chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ))
+        .flat_map(|dir| GATEWAY_NAMES.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Why [`Gateway::serve`] could not start a gateway. The distinction exists

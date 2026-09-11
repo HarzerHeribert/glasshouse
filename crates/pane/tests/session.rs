@@ -419,9 +419,9 @@ fn run_session(
 /// subscription and routing-cost controls shell out to.
 ///
 /// `base_url` is set to a loopback host, so the session is **hosted**: it
-/// attaches rather than starting a gateway of its own, and its controls go
-/// to `glasshouse`, scoped to the project — which is why the usage-row tests
-/// pass their fake as `--glasshouse`. The standalone case -- an unset
+/// attaches rather than starting a gateway of its own, and its usage readout
+/// goes to `glasshouse`, scoped to the project — which is why the usage-row
+/// tests pass their fake as `--glasshouse`. The standalone case -- an unset
 /// `ANTHROPIC_BASE_URL` and a gateway pane starts itself -- is
 /// [`a_session_runs_standalone_against_a_gateway_it_started`].
 fn run_session_with_gateway(
@@ -3839,21 +3839,21 @@ fn slash_model_changes_the_slug_the_next_request_carries() {
 fn model_picker_names_the_active_slug_without_calling_the_provider() {
     let root = scratch_dir("model-report-root");
     let rollout = root.join("rollout.jsonl");
-    let record = root.join("glasshouse-argv.txt");
+    let record = root.join("gateway-argv.txt");
     let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
-    // Handed a loopback base URL, the session is hosted: its catalogue is
-    // Glasshouse's, so the fake goes in as `--glasshouse` and nothing on the
-    // developer's PATH can answer instead.
-    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &record);
+    // Handed a loopback base URL, the session is hosted: its catalogue is the
+    // gateway's, so the fake is what `INFERENCE_GATEWAY_BIN` names and nothing
+    // on the developer's PATH can answer instead.
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
 
-    let output = run_session_stdin(
+    let output = run_session_stdin_hosted(
         &root,
         &rollout,
         "sess-model-report",
         &["/model"],
         &base_url,
-        Some(&glasshouse),
-        false,
+        None,
+        &gateway,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -5181,7 +5181,9 @@ exit 0
 }
 
 /// [`write_fake_gateway`]'s script as a fake **Glasshouse**: the same
-/// answers, after the `--scope <root>` prefix every hosted control carries.
+/// answers, after the `--scope <root>` prefix a hosted session's usage
+/// readout carries. Its account controls go to the gateway binary instead,
+/// which is why nothing here answers `routing-cost`'s siblings for a project.
 #[cfg(unix)]
 fn write_fake_glasshouse(dir: &Path, name: &str, record: &Path) -> PathBuf {
     const SCRIPT: &str = r#"#!/bin/sh
@@ -5290,6 +5292,53 @@ fn run_session_stdin_with_gateway(
         .stderr(Stdio::piped());
     if let Some(base_url) = base_url {
         command.env("ANTHROPIC_BASE_URL", base_url);
+    }
+    let mut child = command.spawn().unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for line in inputs {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// [`run_session_stdin`] for a **hosted** session whose account controls must
+/// reach a gateway of this test's own choosing.
+///
+/// `PATH` is emptied of everything but the system directories and
+/// `INFERENCE_GATEWAY_BIN` names the fake, so the gateway a hosted control
+/// resolves is never whichever one the developer has installed.
+#[cfg(unix)]
+fn run_session_stdin_hosted(
+    root: &Path,
+    rollout: &Path,
+    session_id: &str,
+    inputs: &[&str],
+    base_url: &str,
+    glasshouse: Option<&Path>,
+    gateway_bin: &Path,
+) -> std::process::Output {
+    use std::process::Stdio;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
+    command
+        .arg("session")
+        .arg("--root")
+        .arg(root)
+        .arg("--rollout")
+        .arg(rollout)
+        .arg("--session")
+        .arg(session_id)
+        .env("ANTHROPIC_BASE_URL", base_url)
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("PATH", "/usr/bin:/bin")
+        .env("INFERENCE_GATEWAY_BIN", gateway_bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(glasshouse) = glasshouse {
+        command.arg("--glasshouse").arg(glasshouse);
     }
     let mut child = command.spawn().unwrap();
     {
@@ -5706,26 +5755,28 @@ fn the_login_panel_lists_api_key_rows_after_the_accounts() {
     );
 }
 
-/// A hosted session's keys live where its gateway does, which is not this
-/// machine: `/login` offers no key row, and `/key` says so rather than
-/// storing anything.
+/// A hosted session's keys are the gateway's keys: `/login` lists the API-key
+/// rows and `/key` stores one, through the gateway binary rather than through
+/// Glasshouse — and the key itself still exists in exactly one place
+/// afterwards, the gateway's own stdin.
 #[cfg(unix)]
 #[test]
-fn a_hosted_session_offers_no_key_entry() {
+fn a_hosted_session_enters_a_key_through_the_gateway_binary() {
+    const KEY: &str = "a-key-entered-in-a-hosted-session-and-kept-by-the-gateway";
     let root = scratch_dir("hosted-key-entry-root");
     let rollout = root.join("rollout.jsonl");
-    let glasshouse_record = root.join("glasshouse-argv.txt");
+    let record = root.join("gateway-argv.txt");
     let base_url = refused_base_url();
-    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &glasshouse_record);
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
 
-    let output = run_session_stdin(
+    let output = run_session_stdin_hosted(
         &root,
         &rollout,
         "sess-hosted-key",
-        &["/login", "/key anthropic"],
+        &["/login", "/key anthropic", KEY],
         &base_url,
-        Some(&glasshouse),
-        false,
+        None,
+        &gateway,
     );
     assert!(
         output.status.success(),
@@ -5735,31 +5786,47 @@ fn a_hosted_session_offers_no_key_entry() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("work@example.com · user"),
-        "a hosted /login still lists its accounts:\n{stdout}"
+        stdout.contains("anthropic · API key · not set"),
+        "a hosted /login must list the gateway's key rows:\n{stdout}"
+    );
+    let seen = fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.lines()
+            .any(|line| line == "credentials set anthropic --json"),
+        "/key must store through the gateway's own command: {seen}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("gateway-argv.txt.stdin")).unwrap(),
+        KEY,
+        "the gateway must receive the key itself, on stdin"
     );
     assert!(
-        !stdout.contains("· API key ·"),
-        "a hosted session must offer no key row:\n{stdout}"
+        stdout.contains("Stored the ANTHROPIC_API_KEY for anthropic in the gateway."),
+        "the variable it was stored under is what the session reports:\n{stdout}"
     );
-    assert!(
-        stdout.contains("API keys are entered where the gateway runs"),
-        "/key must say where the keys of a hosted session live:\n{stdout}"
-    );
-    let seen = fs::read_to_string(&glasshouse_record).unwrap_or_default();
-    assert!(
-        !seen.contains("credentials"),
-        "a hosted session must not try to store a key: {seen}"
-    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let replayed = fs::read_to_string(&rollout).unwrap_or_default();
+    for (place, text) in [
+        ("stdout", stdout.as_ref()),
+        ("stderr", stderr.as_ref()),
+        ("the rollout", replayed.as_str()),
+    ] {
+        assert!(
+            !text.contains(KEY),
+            "the key must never reach {place}:\n{text}"
+        );
+    }
 }
 
-/// **Hosted** controls: handed a gateway by Glasshouse (a base URL with a
-/// loopback host, as its launch passes), `/model` and `/login` go to
-/// Glasshouse's own commands scoped to this project — the catalogue that is
-/// actually serving — and the gateway binary is neither started nor asked.
+/// **Hosted** account controls: handed a gateway by Glasshouse (a base URL
+/// with a loopback host, as its launch passes), `/model`, `/login` and the
+/// key rows go to the **gateway binary** — the accounts, subscriptions and
+/// credentials are the gateway's wherever it was started — and none of them
+/// carries `--scope`, which the gateway does not accept.
 #[cfg(unix)]
 #[test]
-fn the_model_and_login_controls_of_a_hosted_session_reach_glasshouse_scoped_to_the_project() {
+fn the_model_and_login_controls_of_a_hosted_session_reach_the_gateway_binary() {
     let root = scratch_dir("hosted-controls-root");
     let rollout = root.join("rollout.jsonl");
     let gateway_record = root.join("gateway-argv.txt");
@@ -5768,42 +5835,257 @@ fn the_model_and_login_controls_of_a_hosted_session_reach_glasshouse_scoped_to_t
     let gateway = write_fake_gateway(&root, "fake_gateway.sh", &gateway_record, &base_url, "x");
     let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &glasshouse_record);
 
-    let output = run_session_stdin(
+    let output = run_session_stdin_hosted(
         &root,
         &rollout,
         "sess-hosted-controls",
-        &["/model", "/login work@example.com"],
+        &["/model", "/login", "/login work@example.com"],
         &base_url,
         Some(&glasshouse),
-        false,
+        &gateway,
     );
-    let _ = gateway;
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let seen = fs::read_to_string(&glasshouse_record).unwrap_or_default();
-    let scoped = format!("--scope {} entitlements --json --refresh", root.display());
+    let seen = fs::read_to_string(&gateway_record).unwrap();
     assert!(
-        seen.lines().any(|line| line == scoped),
-        "/model must refresh entitlements through Glasshouse, scoped: {seen}"
+        seen.lines()
+            .any(|line| line == "entitlements --json --refresh"),
+        "/model must refresh entitlements through the gateway binary: {seen}"
     );
     assert!(
-        seen.lines().any(|line| line
-            .ends_with("subscriptions connect anthropic --entitlement work@example.com --json")
-            && line.starts_with("--scope ")),
-        "/login must run the connect flow through Glasshouse, scoped: {seen}"
+        seen.lines().any(|line| line == "credentials list --json"),
+        "/login must read the key rows through the gateway binary: {seen}"
     );
     assert!(
-        !gateway_record.exists(),
-        "a hosted session neither starts nor asks the gateway binary"
+        seen.lines()
+            .any(|line| line
+                == "subscriptions connect anthropic --entitlement work@example.com --json"),
+        "/login must run the connect flow through the gateway binary: {seen}"
     );
+    assert!(
+        !seen.contains("--scope"),
+        "the gateway has no projects to scope a control to: {seen}"
+    );
+
+    let hosted = fs::read_to_string(&glasshouse_record).unwrap_or_default();
+    for control in ["entitlements", "subscriptions", "credentials"] {
+        assert!(
+            !hosted.contains(control),
+            "`{control}` is the gateway's, not Glasshouse's: {hosted}"
+        );
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("claude-opus-5"),
-        "the model panel must be built from Glasshouse's catalogue:\n{stdout}"
+        "the model panel must be built from the gateway's catalogue:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("connected as work@example.com"),
+        "the login flow's own progress must reach the panel:\n{stdout}"
+    );
+}
+
+/// The other half of the rule: what a session **spent** is Glasshouse's, so a
+/// hosted session's usage readout still runs `glasshouse --scope <root>
+/// routing-cost` and the gateway binary is never asked for it.
+#[cfg(unix)]
+#[test]
+fn the_usage_rows_of_a_hosted_session_still_reach_glasshouse_scoped_to_the_project() {
+    let root = scratch_dir("hosted-usage-root");
+    let rollout = root.join("rollout.jsonl");
+    let gateway_record = root.join("gateway-argv.txt");
+    let glasshouse_record = root.join("glasshouse-argv.txt");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &gateway_record, &base_url, "x");
+    let glasshouse = write_fake_glasshouse(&root, "fake_glasshouse.sh", &glasshouse_record);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(&rollout)
+        .arg("--session")
+        .arg("sess-hosted-usage")
+        .arg("--task")
+        .arg("hi")
+        .arg("--glasshouse")
+        .arg(&glasshouse)
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("PATH", "/usr/bin:/bin")
+        .env("INFERENCE_GATEWAY_BIN", &gateway)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1, "the turn must have run");
+
+    let hosted = fs::read_to_string(&glasshouse_record).unwrap_or_default();
+    let scoped = format!("--scope {} routing-cost --json --since", root.display());
+    assert!(
+        hosted.lines().any(|line| line.starts_with(&scoped)),
+        "the usage readout must stay Glasshouse's, scoped to the project: {hosted}"
+    );
+    let seen = fs::read_to_string(&gateway_record).unwrap_or_default();
+    assert!(
+        !seen.contains("routing-cost"),
+        "the gateway binary must not be asked what this project spent: {seen}"
+    );
+}
+
+/// The resolution the hosted account controls do, at its failing end: nothing
+/// named in `INFERENCE_GATEWAY_BIN`, nothing beside the executable, nothing on
+/// `PATH`. The control says the gateway is not reachable rather than reporting
+/// an empty catalogue as though the gateway had answered with one.
+///
+/// **The binary is copied into this test's own directory first**: the build
+/// directory `CARGO_BIN_EXE_pane` points into has an `inference-gateway` beside
+/// `pane` (see [`real_gateway_binary`]), which is exactly what the second step
+/// of the resolution finds.
+#[cfg(unix)]
+#[test]
+fn a_hosted_session_with_no_gateway_anywhere_says_it_is_not_reachable() {
+    use std::process::Stdio;
+    let root = scratch_dir("hosted-no-gateway-root");
+    let rollout = root.join("rollout.jsonl");
+    let base_url = refused_base_url();
+    let pane = root.join("pane");
+    fs::copy(env!("CARGO_BIN_EXE_pane"), &pane).unwrap();
+
+    let mut child = Command::new(&pane)
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(&rollout)
+        .arg("--session")
+        .arg("sess-hosted-no-gateway")
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("INFERENCE_GATEWAY_BIN")
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "/login").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("The inference gateway is not reachable."),
+        "no gateway resolves anywhere, and the panel must say so:\n{stdout}"
+    );
+}
+
+/// The other two steps of that resolution, and their order: with nothing in
+/// `INFERENCE_GATEWAY_BIN`, a hosted control runs the gateway installed beside
+/// the binary, and falls back to the first one on `PATH`.
+///
+/// **The order is the point.** An install ships `pane` and `inference-gateway`
+/// together, and a session must ask the gateway it was installed with rather
+/// than whichever older one a shell happens to resolve first.
+#[cfg(unix)]
+#[test]
+fn a_hosted_session_prefers_the_gateway_beside_the_binary_to_the_one_on_path() {
+    use std::process::Stdio;
+    let root = scratch_dir("hosted-gateway-resolution-root");
+    let base_url = refused_base_url();
+    let bin = root.join("bin");
+    let on_path = root.join("path");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&on_path).unwrap();
+    let pane = bin.join("pane");
+    fs::copy(env!("CARGO_BIN_EXE_pane"), &pane).unwrap();
+    let path_record = root.join("on-path-argv.txt");
+    write_fake_gateway(
+        &on_path,
+        "inference-gateway",
+        &path_record,
+        &base_url,
+        "unused",
+    );
+
+    let login = |session: &str| {
+        let mut child = Command::new(&pane)
+            .arg("session")
+            .arg("--root")
+            .arg(&root)
+            .arg("--rollout")
+            .arg(root.join(format!("{session}.jsonl")))
+            .arg("--session")
+            .arg(session)
+            .env("ANTHROPIC_BASE_URL", &base_url)
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("INFERENCE_GATEWAY_BIN")
+            .env("PATH", format!("{}:/usr/bin:/bin", on_path.display()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.as_mut().unwrap(), "/login").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let stdout = login("sess-gateway-on-path");
+    assert!(
+        stdout.contains("work@example.com · user"),
+        "the gateway on PATH must have answered the catalogue:\n{stdout}"
+    );
+    let asked_on_path = fs::read_to_string(&path_record).unwrap();
+    assert!(
+        asked_on_path.contains("entitlements --json"),
+        "the gateway on PATH is what a hosted control resolves: {asked_on_path}"
+    );
+
+    // And now one beside the binary, which must take it instead.
+    let beside_record = root.join("beside-argv.txt");
+    write_fake_gateway(
+        &bin,
+        "inference-gateway",
+        &beside_record,
+        &base_url,
+        "unused",
+    );
+    let stdout = login("sess-gateway-beside");
+    assert!(
+        stdout.contains("work@example.com · user"),
+        "the gateway beside the binary must have answered:\n{stdout}"
+    );
+    assert!(
+        fs::read_to_string(&beside_record)
+            .unwrap()
+            .contains("entitlements --json"),
+        "a gateway installed beside the binary is the one a hosted control asks"
+    );
+    assert_eq!(
+        fs::read_to_string(&path_record).unwrap(),
+        asked_on_path,
+        "and the one on PATH must not have been asked a second time"
     );
 }
 

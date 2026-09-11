@@ -75,11 +75,14 @@ impl App {
             command.arg(&root);
             command.args(["--model", "fixture-model", "--glasshouse"]);
             command.arg(root.join("no-glasshouse"));
-            // Absent: the base URL below is a loopback host, so this session
-            // is *hosted* and its controls — the model picker's catalogue —
-            // go to `--glasshouse`, which a picker test writes a script at.
             command.arg("--gateway");
             command.arg(root.join("no-gateway"));
+            // Absent: the base URL below is a loopback host, so this session
+            // is *hosted*, and a hosted session's catalogue is the gateway
+            // binary's. Naming the absent path pins the resolution here
+            // rather than at whatever gateway the developer has installed;
+            // a picker test writes its script at that path.
+            command.env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"));
         }
         command.env("ANTHROPIC_BASE_URL", base);
         command.env_remove("ANTHROPIC_API_KEY");
@@ -620,7 +623,7 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
-    let executable = app.root.join("no-glasshouse");
+    let executable = app.root.join("no-gateway");
     std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '{\"version\":1,\"accounts\":[{\"account\":\"z-account\",\"provider\":\"fixture\",\"models\":[\"z-model\"],\"scope\":\"provider-declared\"},{\"account\":\"a-account\",\"provider\":\"fixture\",\"models\":[\"b-model\",\"a-model\"],\"scope\":\"provider-declared\"}]}'\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/model\r");
@@ -659,7 +662,7 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
         {"account":"openai-sub", "provider":"openai", "scope":"subscription", "models":["gpt/exact"]}
     ]});
     std::fs::write(app.root.join("catalogue.json"), catalogue.to_string()).unwrap();
-    let executable = app.root.join("no-glasshouse");
+    let executable = app.root.join("no-gateway");
     std::fs::write(
         &executable,
         format!(

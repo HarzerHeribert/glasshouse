@@ -192,13 +192,11 @@ pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
     stream_connect(session, &provider, account);
 }
 
-/// The gateway's credential table, for a session whose gateway is a binary
-/// this machine runs. A hosted session's keys live where its gateway does,
-/// which is not here, so it is never asked.
+/// The gateway's credential table. **Every session asks, hosted or not**: the
+/// credentials belong to the gateway whoever started it, so a session
+/// Glasshouse handed a gateway to sees and enters the same keys as one that
+/// started its own. Empty is what a gateway that could not be asked leaves.
 fn api_keys(session: &Session<'_>) -> Vec<crate::gateway::CredentialRow> {
-    if !matches!(session.gateway, Gateway::Command { .. }) {
-        return Vec::new();
-    }
     crate::gateway::credentials(session.gateway).unwrap_or_default()
 }
 
@@ -312,17 +310,6 @@ pub(super) fn key(session: &Session<'_>, provider: Option<&str>) {
         );
         return;
     };
-    if matches!(session.gateway, Gateway::Hosted { .. }) {
-        show(
-            session,
-            Panel::text(
-                "API key",
-                "API keys are entered where the gateway runs; this session's gateway is \
-                 hosted by Glasshouse.",
-            ),
-        );
-        return;
-    }
     let Some(value) = entered_secret(session, provider).filter(|value| !value.is_empty()) else {
         session_println!("no key entered");
         return;
