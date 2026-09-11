@@ -6375,3 +6375,45 @@ fn a_connected_subscription_silences_the_missing_credential_notice() {
         "a connected subscription serves, so no notice"
     );
 }
+
+/// Ending a session ends its gateway the polite way first: stdin closes,
+/// the gateway gets a moment to shut down — which is what terminates the
+/// subscription brokers it started — and only then is it killed. Measured
+/// 2026-09-11: a kill without the wait left three broker sidecars orphaned
+/// on every session exit.
+#[cfg(unix)]
+#[test]
+fn ending_a_session_lets_its_gateway_shut_down_before_it_is_killed() {
+    let root = scratch_dir("gateway-polite-shutdown");
+    let marker = root.join("gateway-stopped-cleanly");
+    let script = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  serve)\n    echo '{{\"listening\":\"http://127.0.0.1:9\",\"token\":\"t\"}}'\n    while read -r _line; do :; done\n    echo stopped > \"{}\"\n    exit 0\n    ;;\n  credentials)\n    echo '{{\"version\":1,\"providers\":[]}}'\n    ;;\n  entitlements)\n    echo '{{\"version\":1,\"accounts\":[]}}'\n    ;;\nesac\nexit 0\n",
+        marker.display()
+    );
+    let gateway = write_script(&root, "inference-gateway", &script);
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(root.join("rollout.jsonl"))
+        .arg("--session")
+        .arg("sess-polite-shutdown")
+        .arg("--gateway")
+        .arg(&gateway)
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        marker.exists(),
+        "the gateway must have read EOF and exited on its own before pane killed it"
+    );
+}

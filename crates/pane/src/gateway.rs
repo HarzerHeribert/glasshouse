@@ -313,13 +313,30 @@ impl Serving {
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        // Closing stdin is the contract's polite shutdown; the kill is the one
-        // that does not depend on the child ever reading it.
+        // Closing stdin is the contract's polite shutdown, and the gateway
+        // needs a moment to honour it: its own exit is what terminates the
+        // subscription brokers it started. A kill that followed the close
+        // at once left three broker sidecars orphaned on every session end
+        // (measured 2026-09-11). The kill stays as the bound for a gateway
+        // that never reads its stdin.
         drop(self.child.stdin.take());
+        let deadline = std::time::Instant::now() + GATEWAY_SHUTDOWN_GRACE;
+        while std::time::Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
+
+/// How long a gateway gets to leave on its own after its stdin closes
+/// before it is killed. Long enough for it to stop its brokers; short
+/// enough that a session's end never feels like a hang.
+const GATEWAY_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Attaches to a gateway that is already serving, or starts one.
 ///
