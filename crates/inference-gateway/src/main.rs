@@ -147,22 +147,26 @@ enum CredentialsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Store a provider's API key, read from stdin, in this gateway's credential file.
+    /// Store an API key, read from stdin, in this gateway's credential file.
     Set {
-        /// The provider, as `credentials list` names it.
-        provider: String,
-        /// Which of the provider's variables to file it under; its first by default.
+        /// The provider, as `credentials list` names it. Optional when
+        /// `--variable` names the variable directly.
+        #[arg(required_unless_present = "variable")]
+        provider: Option<String>,
+        /// The variable to file it under; the provider's first by default.
         #[arg(long, value_name = "VAR")]
         variable: Option<String>,
         /// Print one JSON object instead of prose.
         #[arg(long)]
         json: bool,
     },
-    /// Remove a provider's API key from this gateway's credential file.
+    /// Remove an API key from this gateway's credential file.
     Remove {
-        /// The provider, as `credentials list` names it.
-        provider: String,
-        /// Which of the provider's variables to remove; its first by default.
+        /// The provider, as `credentials list` names it. Optional when
+        /// `--variable` names the variable directly.
+        #[arg(required_unless_present = "variable")]
+        provider: Option<String>,
+        /// The variable to remove; the provider's first by default.
         #[arg(long, value_name = "VAR")]
         variable: Option<String>,
         /// Print one JSON object instead of prose.
@@ -231,12 +235,24 @@ fn run() -> Result<()> {
                     provider,
                     variable,
                     json,
-                } => credentials_set(&config, &data_dir, provider, variable.as_deref(), *json),
+                } => credentials_set(
+                    &config,
+                    &data_dir,
+                    provider.as_deref(),
+                    variable.as_deref(),
+                    *json,
+                ),
                 CredentialsCommand::Remove {
                     provider,
                     variable,
                     json,
-                } => credentials_remove(&config, &data_dir, provider, variable.as_deref(), *json),
+                } => credentials_remove(
+                    &config,
+                    &data_dir,
+                    provider.as_deref(),
+                    variable.as_deref(),
+                    *json,
+                ),
             }
         }
         // Reads no configuration and needs no data directory: it answers
@@ -863,9 +879,17 @@ fn credentials_list(config: &GatewayConfig, data_dir: &Path, json: bool) -> Resu
 /// as such rather than silently created.
 fn credential_variable(
     config: &GatewayConfig,
-    provider: &str,
+    provider: Option<&str>,
     variable: Option<&str>,
 ) -> Result<String> {
+    // A bare `--variable` files the key under that name and validates
+    // nothing: a host migrating a store keyed by variable name has no
+    // provider to name, and the name is what resolution reads anyway.
+    let Some(provider) = provider else {
+        return variable
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("name a provider or `--variable`"));
+    };
     let providers = config::providers(config);
     let Some(entry) = providers.iter().find(|entry| entry.name == provider) else {
         bail!(
@@ -894,11 +918,12 @@ fn credential_variable(
 fn credentials_set(
     config: &GatewayConfig,
     data_dir: &Path,
-    provider: &str,
+    provider: Option<&str>,
     variable: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let variable = credential_variable(config, provider, variable)?;
+    let provider = provider.unwrap_or("-");
     let mut key = String::new();
     std::io::stdin()
         .read_to_string(&mut key)
@@ -939,11 +964,12 @@ fn credentials_set(
 fn credentials_remove(
     config: &GatewayConfig,
     data_dir: &Path,
-    provider: &str,
+    provider: Option<&str>,
     variable: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let variable = credential_variable(config, provider, variable)?;
+    let provider = provider.unwrap_or("-");
     let store = FileSecretStore::at(config::credentials_path(data_dir));
     let removed = store.remove(&variable)?;
     let mut stdout = std::io::stdout();
