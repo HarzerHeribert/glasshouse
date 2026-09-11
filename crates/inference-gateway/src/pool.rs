@@ -91,7 +91,7 @@ pub enum PoolRefusal {
     },
 
     /// Every account in the catalogue was skipped, and this says why each
-    /// one was. Distinct from [`Self::CredentialUnavailable`] because a
+    /// one was. Distinct from [`Self::NoCredentialResolves`] because a
     /// catalogue can fail for reasons a raw provider list cannot: an
     /// account naming a provider nothing declares, or a broker that would
     /// not start.

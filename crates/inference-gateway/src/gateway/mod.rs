@@ -339,7 +339,7 @@ impl fmt::Debug for GatewayToken {
 /// flow that stores a credential — the client's own login control — runs
 /// through a session that needs the gateway listening first. So a slot may
 /// start empty; the first request asks its supplier again at once, a
-/// refused rebuild stands for [`REBUILD_INTERVAL`] so a burst does not
+/// refused rebuild stands for `REBUILD_INTERVAL` so a burst does not
 /// rebuild once each, and every refused request is answered `503` with the
 /// refusal that stands.
 /// A host's gateway is never deferred: every `start_if_required_*` door
