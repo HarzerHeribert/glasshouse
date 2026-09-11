@@ -23,6 +23,15 @@ struct App {
     output: mpsc::Receiver<Vec<u8>>,
     screen: vt100::Parser,
     bytes: Vec<u8>,
+    /// Every byte the reader thread has taken off the pty, and how many it
+    /// had taken when the last `send` was made: a timed-out `wait` reports
+    /// the difference, which is what tells a session that never answered
+    /// from a fixture that stopped listening.
+    received: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    received_at_send: usize,
+    sent_at: Instant,
+    first_after_send: Option<Duration>,
+    reader_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
     root: PathBuf,
     #[cfg(unix)]
     terminal_flags: Vec<u8>,
@@ -102,18 +111,24 @@ impl App {
         let mut reader = pair.master.try_clone_reader().unwrap();
         let input = pair.master.take_writer().unwrap();
         let (sender, output) = mpsc::channel();
+        let received = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader_ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let counted = std::sync::Arc::clone(&received);
+        let ended = std::sync::Arc::clone(&reader_ended);
         thread::spawn(move || {
             let mut buf = [0; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        counted.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
                         if sender.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
                     }
                 }
             }
+            ended.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         Self {
             master: pair.master,
@@ -122,12 +137,20 @@ impl App {
             output,
             screen: vt100::Parser::new(30, 80, 1000),
             bytes: Vec::new(),
+            received,
+            received_at_send: 0,
+            sent_at: Instant::now(),
+            first_after_send: None,
+            reader_ended,
             root,
             #[cfg(unix)]
             terminal_flags,
         }
     }
     fn send(&mut self, bytes: &[u8]) {
+        self.received_at_send = self.received.load(std::sync::atomic::Ordering::SeqCst);
+        self.sent_at = Instant::now();
+        self.first_after_send = None;
         self.input.write_all(bytes).unwrap();
         self.input.flush().unwrap();
     }
@@ -139,10 +162,18 @@ impl App {
             }
             assert!(
                 Instant::now() < deadline,
-                "{description}:\n{}",
-                self.screen.screen().contents()
+                "{description}:\n{}\n--- {} bytes arrived after the last send (the first of them {:?} \
+                 after it); reader thread ended: {}; the last bytes received: {:?} ---",
+                self.screen.screen().contents(),
+                self.received.load(std::sync::atomic::Ordering::SeqCst) - self.received_at_send,
+                self.first_after_send,
+                self.reader_ended.load(std::sync::atomic::Ordering::SeqCst),
+                String::from_utf8_lossy(&self.bytes[self.bytes.len().saturating_sub(240)..]),
             );
             if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(25)) {
+                if self.first_after_send.is_none() {
+                    self.first_after_send = Some(self.sent_at.elapsed());
+                }
                 self.answer_cursor_query(&bytes);
                 self.screen.process(&bytes);
                 self.bytes.extend(bytes);
@@ -198,7 +229,22 @@ impl App {
         thread::sleep(gap);
         self.send(tail);
     }
+    /// Resize the terminal and return once pane has begun redrawing for the
+    /// new size.
+    ///
+    /// **Returning earlier races the resize itself.** The emulator keeps its
+    /// contents across `set_size`, so a caller's next `wait` can pass on the
+    /// old frame and its next key is sent while pane still has the `SIGWINCH`
+    /// in hand — and crossterm's Unix source returns from a resize without
+    /// reading the tty bytes the same poll reported, so that key is stranded
+    /// until the one after it (measured: 5 of 12 runs of the telemetry test
+    /// under 12 busy loops; the same crossterm defect Glasshouse's
+    /// `tui/event.rs` narrows in its own loop, and a pane packet of its own).
+    /// Ratatui begins every post-resize redraw with a clear, so the clear is
+    /// what "begun redrawing" means here; the caller still waits for the
+    /// content it needs.
     fn resize(&mut self, width: u16) {
+        let mark = self.bytes.len();
         self.screen.screen_mut().set_size(30, width);
         self.master
             .resize(PtySize {
@@ -208,6 +254,22 @@ impl App {
                 pixel_height: 0,
             })
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.bytes[mark..]
+            .windows(4)
+            .any(|window| window == b"\x1b[2J")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "pane did not begin a redraw (a clear) within 10s of a resize to {width} columns:\n{}",
+                self.screen.screen().contents()
+            );
+            if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(25)) {
+                self.answer_cursor_query(&bytes);
+                self.screen.process(&bytes);
+                self.bytes.extend(bytes);
+            }
+        }
     }
     fn exited(&mut self) -> u32 {
         let deadline = Instant::now() + Duration::from_secs(10);
