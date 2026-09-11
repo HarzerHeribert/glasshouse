@@ -232,43 +232,42 @@ impl<'de> Deserialize<'de> for ConfiguredHeadroomBand {
         })
     }
 }
-/// One configured entitlement — a specific subscription or API-credit
-/// account, the unit of capacity — as stored in an `[entitlements.<name>]`
-/// table. Map lines 1946, 1947, 1962 and 1963. Backed by exactly one of
-/// `native_harness` (the harness's own sign-in, no `credential` of its own)
-/// or `provider` (the account behind a configured provider); naming both is
-/// refused ([`EntitlementLookupError::TwoBackings`]), naming neither makes a
-/// pool member ([`EffectiveConfig::entitlement_resources`]) no launch
-/// profile charges yet. A `subscription_broker` is a third backing, and may
-/// be paired with `native_harness` because those are two routes to one
-/// subscription account. A provider remains mutually exclusive with both.
+/// Glasshouse's **policy overlay** on one gateway account — what an account
+/// may be used *for*, keyed by the name the gateway files it under.
 ///
-/// Sits in a stack of five separately replaceable layers — harness, protocol
-/// adapter, authentication (`credential`), this entry, and inference model —
-/// owning only authentication and itself, so replacing any other layer
-/// leaves this entitlement's capacity where it was: the entitlement, not the
-/// vendor or harness, is the unit of capacity.
+/// User ruling, 2026-09-11: the account itself — its plan, its billing
+/// vendor, its credential reference, its broker and its provider — is the
+/// gateway's, and lives in `gateway.toml`'s `[accounts.<name>]`
+/// ([`AccountEntry`]). Any of those five keys written here is **refused**
+/// with the name of the command that moves them; see this type's
+/// `Deserialize`. What stays is the half a gateway has no opinion about:
+/// which harnesses, tiers and job kinds the account may serve, the spend
+/// ceiling, the headroom correction, and the context-firewall choice.
+///
+/// `native_harness` stays too, and is not an exception to that rule: it says
+/// that *a harness's own sign-in is a route to this account*, which is a
+/// statement about Glasshouse's harnesses and about nothing the gateway
+/// serves. It is still one of the three backings
+/// ([`EntitlementBacking`]) — paired with the account's
+/// `subscription_broker` because those are two routes to one subscription,
+/// and mutually exclusive with its `provider`
+/// ([`EntitlementLookupError::TwoBackings`]).
+///
+/// An overlay naming an account the gateway does not have is refused by
+/// [`ConfigError::UnknownGatewayAccount`] rather than dropped: a rule the
+/// user believes is in force and that matches nothing is the silent kind of
+/// wrong this project keeps paying for.
 ///
 /// Rules resolve through [`crate::routing::EntitlementRules`] and nowhere
 /// else — deny wins over allow, and `deny_unknown_fields` keeps an
 /// unrecognised rule from being silently read as "no rule".
 ///
 /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", entitlement.rs module doc `EntitlementConfig`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntitlementConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    kind: Option<EntitlementKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    vendor: Option<EntitlementVendor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    credential: Option<EntitlementCredential>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     native_harness: Option<ConfiguredHarness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    subscription_broker: Option<SubscriptionBroker>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allow_harnesses: Vec<ConfiguredHarness>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -337,57 +336,12 @@ pub struct EntitlementConfig {
     context_firewall: firewall::ContextFirewallOverride,
 }
 impl EntitlementConfig {
-    pub fn kind(&self) -> Option<EntitlementKind> {
-        self.kind
-    }
-
-    pub fn set_kind(&mut self, value: Option<EntitlementKind>) -> &mut Self {
-        self.kind = value;
-        self
-    }
-
-    pub fn vendor(&self) -> Option<EntitlementVendor> {
-        self.vendor
-    }
-
-    pub fn set_vendor(&mut self, value: Option<EntitlementVendor>) -> &mut Self {
-        self.vendor = value;
-        self
-    }
-
-    pub fn credential(&self) -> Option<&EntitlementCredential> {
-        self.credential.as_ref()
-    }
-
-    pub fn set_credential(&mut self, value: Option<EntitlementCredential>) -> &mut Self {
-        self.credential = value;
-        self
-    }
-
     pub fn native_harness(&self) -> Option<IntegrationId> {
         self.native_harness.map(ConfiguredHarness::id)
     }
 
     pub fn set_native_harness(&mut self, value: Option<IntegrationId>) -> &mut Self {
         self.native_harness = value.map(ConfiguredHarness::new);
-        self
-    }
-
-    pub fn subscription_broker(&self) -> Option<SubscriptionBroker> {
-        self.subscription_broker
-    }
-
-    pub fn set_subscription_broker(&mut self, value: Option<SubscriptionBroker>) -> &mut Self {
-        self.subscription_broker = value;
-        self
-    }
-
-    pub fn provider(&self) -> Option<&str> {
-        self.provider.as_deref()
-    }
-
-    pub fn set_provider(&mut self, value: Option<String>) -> &mut Self {
-        self.provider = value;
         self
     }
 
@@ -498,39 +452,45 @@ impl EntitlementConfig {
             .with_spend_ceiling_tokens(self.spend_ceiling_tokens)
     }
 
-    /// This entry's catalogue half — the six keys that say what the account
-    /// is and what it can serve, with nothing about who may use it. The
-    /// shape a gateway reads from its own configuration file; see
-    /// [`AccountEntry`].
+    /// [`Self::rules`] with the gateway account's own spend ceiling standing
+    /// in when this overlay states none.
     ///
-    /// A projection, not a view: the policy table above stays the one thing
-    /// `[entitlements.<name>]` deserialises into, so the file's parse
-    /// behaviour — `deny_unknown_fields` included — is untouched by the
-    /// split.
-    pub fn account(&self) -> AccountEntry {
-        let mut entry = AccountEntry::default();
-        entry
-            .set_kind(self.kind)
-            .set_vendor(self.vendor)
-            .set_credential(self.credential.clone())
-            .set_subscription_broker(self.subscription_broker)
-            .set_provider(self.provider.clone())
-            .set_spend_ceiling_tokens(self.spend_ceiling_tokens);
-        entry
+    /// Both files can carry `spend_ceiling_tokens`, and they mean the same
+    /// thing: the gateway's is what the account itself is held to, and an
+    /// overlay's is the narrower ceiling a user set on top. The overlay wins
+    /// when it states one, because it is the more specific statement; the
+    /// account's applies otherwise, so a ceiling written only in
+    /// `gateway.toml` is not quietly dropped on the way through.
+    pub fn rules_over(&self, account: &AccountEntry) -> crate::routing::EntitlementRules {
+        let ceiling = self.spend_ceiling_tokens.or(account.spend_ceiling_tokens());
+        self.rules().with_spend_ceiling_tokens(ceiling)
     }
 
-    /// The resolved value, named `name` — the key this entry was stored
-    /// under — and attributed to `layer`.
+    /// The rules a gateway account with **no** overlay resolves under —
+    /// unrestricted, carrying only the account's own ceiling. The default
+    /// half of "rules from the overlay or the defaults".
+    pub fn default_rules_for(account: &AccountEntry) -> crate::routing::EntitlementRules {
+        crate::routing::EntitlementRules::UNRESTRICTED
+            .with_spend_ceiling_tokens(account.spend_ceiling_tokens())
+    }
+
+    /// The resolved value for the gateway account `account`, named `name` —
+    /// the key the gateway files it under — and attributed to `layer`.
+    ///
+    /// **The account comes from the gateway, never from this table.** That
+    /// is the 2026-09-11 ruling in one signature: Glasshouse cannot resolve
+    /// an entitlement it was not handed an account for, so it cannot invent
+    /// one.
     pub fn to_resolved(
         &self,
         name: &str,
+        account: &AccountEntry,
         layer: Layer,
     ) -> Result<ResolvedEntitlement, EntitlementLookupError> {
         // The backing is the one decision that reads both halves: the
-        // catalogue says which provider or broker serves the account, and
+        // gateway's account says which provider or broker serves it, and
         // `native_harness` — a harness identity, and so policy — says
         // whether the harness's own sign-in is a route to it.
-        let account = self.account();
         let backing = match (
             self.native_harness,
             account.subscription_broker(),
@@ -558,13 +518,14 @@ impl EntitlementConfig {
         // be two accounts wearing one name — map line 1973's isolation,
         // refused rather than resolved by guessing which authentication
         // counts.
-        if matches!(backing, EntitlementBacking::NativeHarness(_)) && self.credential.is_some() {
+        if matches!(backing, EntitlementBacking::NativeHarness(_)) && account.credential().is_some()
+        {
             return Err(EntitlementLookupError::NativeSignInWithOwnCredential {
                 name: name.to_owned(),
             });
         }
         if matches!(backing, EntitlementBacking::SubscriptionBroker { .. })
-            && self.credential.is_some()
+            && account.credential().is_some()
         {
             return Err(
                 EntitlementLookupError::SubscriptionBrokerWithOwnCredential {
@@ -573,9 +534,9 @@ impl EntitlementConfig {
             );
         }
         Ok(ResolvedEntitlement {
-            account: ResolvedAccount::resolve(name, &account),
+            account: ResolvedAccount::resolve(name, account),
             backing,
-            rules: self.rules(),
+            rules: self.rules_over(account),
             layer,
             headroom_estimate: None,
             headroom_override: self.headroom_override(),
@@ -584,6 +545,170 @@ impl EntitlementConfig {
         })
     }
 }
+/// The five `[entitlements.<name>]` keys the gateway owns since the
+/// 2026-09-11 ruling, in the order a refusal checks them.
+///
+/// Spelled once, here, and read by three things that must agree: the
+/// `Deserialize` refusal below, [`LegacyEntitlementConfig`] (which is the
+/// only thing that still *reads* them, for the migration), and
+/// `glasshouse doctor`'s legacy report.
+pub const GATEWAY_ACCOUNT_KEYS: [&str; 5] = [
+    "kind",
+    "vendor",
+    "credential",
+    "subscription_broker",
+    "provider",
+];
+
+/// The sentence a legacy account key gets. Names the key and the command
+/// that moves it, and **never what was written** — one of these keys is a
+/// credential reference, and a refusal that echoed its table would be the
+/// one thing `EntitlementCredential`'s own refusal exists to avoid.
+fn account_key_is_the_gateways(key: &str) -> String {
+    format!(
+        "`{key}` under `[entitlements]` is the gateway's: an account's plan, billing vendor, \
+         credential reference, subscription broker and provider live in the gateway's \
+         `gateway.toml` under `[accounts.<name>]`, and Glasshouse's `[entitlements.<name>]` \
+         table states only policy about an account the gateway already has. Run `{}` to move \
+         them; it writes `gateway.toml` and rewrites this file in place after taking a backup",
+        crate::config::MIGRATE_COMMAND
+    )
+}
+
+/// The wire shape `[entitlements.<name>]` is read through: every policy key,
+/// plus the five the gateway owns — present **only so that they can be
+/// refused by name**. `serde::de::IgnoredAny` because presence is the whole
+/// of what this needs; the value is never built, so it can never be echoed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntitlementOverlayWire {
+    #[serde(default)]
+    kind: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    vendor: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    credential: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    subscription_broker: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    provider: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    native_harness: Option<ConfiguredHarness>,
+    #[serde(default)]
+    allow_harnesses: Vec<ConfiguredHarness>,
+    #[serde(default)]
+    deny_harnesses: Vec<ConfiguredHarness>,
+    #[serde(default)]
+    allow_tiers: Vec<ConfiguredWorkloadTier>,
+    #[serde(default)]
+    deny_tiers: Vec<ConfiguredWorkloadTier>,
+    #[serde(default)]
+    allow_job_kinds: Vec<ConfiguredJobKind>,
+    #[serde(default)]
+    deny_job_kinds: Vec<ConfiguredJobKind>,
+    #[serde(default)]
+    spend_ceiling_tokens: Option<u64>,
+    #[serde(default)]
+    headroom_override: Option<ConfiguredHeadroomBand>,
+    #[serde(default)]
+    disable_headroom_estimate: bool,
+    #[serde(default)]
+    context_firewall: firewall::ContextFirewallOverride,
+}
+impl<'de> Deserialize<'de> for EntitlementConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let wire = EntitlementOverlayWire::deserialize(deserializer)?;
+        for (present, key) in [
+            (wire.kind.is_some(), GATEWAY_ACCOUNT_KEYS[0]),
+            (wire.vendor.is_some(), GATEWAY_ACCOUNT_KEYS[1]),
+            (wire.credential.is_some(), GATEWAY_ACCOUNT_KEYS[2]),
+            (wire.subscription_broker.is_some(), GATEWAY_ACCOUNT_KEYS[3]),
+            (wire.provider.is_some(), GATEWAY_ACCOUNT_KEYS[4]),
+        ] {
+            if present {
+                return Err(D::Error::custom(account_key_is_the_gateways(key)));
+            }
+        }
+        Ok(Self {
+            native_harness: wire.native_harness,
+            allow_harnesses: wire.allow_harnesses,
+            deny_harnesses: wire.deny_harnesses,
+            allow_tiers: wire.allow_tiers,
+            deny_tiers: wire.deny_tiers,
+            allow_job_kinds: wire.allow_job_kinds,
+            deny_job_kinds: wire.deny_job_kinds,
+            spend_ceiling_tokens: wire.spend_ceiling_tokens,
+            headroom_override: wire.headroom_override,
+            disable_headroom_estimate: wire.disable_headroom_estimate,
+            context_firewall: wire.context_firewall,
+        })
+    }
+}
+
+/// `[entitlements.<name>]` as it was written **before** the 2026-09-11
+/// ruling, read by exactly two callers: `glasshouse migrate-gateway-state`,
+/// which moves the five account keys into `gateway.toml`, and `glasshouse
+/// doctor`, which reports that they are still there.
+///
+/// Nothing resolves through this type and nothing routes on it. It exists so
+/// that the migration can read a file the loader now refuses — which is the
+/// only way a migration can ever work.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LegacyEntitlementConfig {
+    #[serde(default)]
+    pub kind: Option<EntitlementKind>,
+    #[serde(default)]
+    pub vendor: Option<EntitlementVendor>,
+    #[serde(default)]
+    pub credential: Option<EntitlementCredential>,
+    #[serde(default)]
+    pub subscription_broker: Option<SubscriptionBroker>,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+impl LegacyEntitlementConfig {
+    /// Whether this entry carries any of the five keys — the question both
+    /// the migration's plan and the doctor's report ask.
+    pub fn has_account_keys(&self) -> bool {
+        self.kind.is_some()
+            || self.vendor.is_some()
+            || self.credential.is_some()
+            || self.subscription_broker.is_some()
+            || self.provider.is_some()
+    }
+
+    /// Which of the five are present, by name, in
+    /// [`GATEWAY_ACCOUNT_KEYS`] order.
+    pub fn account_keys_present(&self) -> Vec<&'static str> {
+        let mut present = Vec::new();
+        for (there, key) in [
+            (self.kind.is_some(), GATEWAY_ACCOUNT_KEYS[0]),
+            (self.vendor.is_some(), GATEWAY_ACCOUNT_KEYS[1]),
+            (self.credential.is_some(), GATEWAY_ACCOUNT_KEYS[2]),
+            (self.subscription_broker.is_some(), GATEWAY_ACCOUNT_KEYS[3]),
+            (self.provider.is_some(), GATEWAY_ACCOUNT_KEYS[4]),
+        ] {
+            if there {
+                present.push(key);
+            }
+        }
+        present
+    }
+
+    /// This entry as the gateway's own `[accounts.<name>]` table.
+    pub fn to_account(&self) -> AccountEntry {
+        let mut entry = AccountEntry::default();
+        entry
+            .set_kind(self.kind)
+            .set_vendor(self.vendor)
+            .set_credential(self.credential.clone())
+            .set_subscription_broker(self.subscription_broker)
+            .set_provider(self.provider.clone());
+        entry
+    }
+}
+
 /// A map of configured entitlements, keyed by name — `[entitlements.<name>]`.
 ///
 /// Configuration, never a credential store: see [`EntitlementConfig`].
@@ -1222,6 +1347,30 @@ pub enum EntitlementLookupError {
          contain only the broker reference"
     )]
     SubscriptionBrokerWithOwnCredential { name: String },
+    /// A `[entitlements.<name>]` overlay states policy for an account the
+    /// gateway's catalogue does not hold, and does not name a harness's own
+    /// sign-in either — so there is nothing for it to be policy *about*.
+    ///
+    /// Refused rather than dropped: a rule the user believes is in force and
+    /// that matches nothing is the silent kind of wrong this project keeps
+    /// paying for. The message names both files, because the fix is in one
+    /// of them and the reader cannot tell which without being told what the
+    /// other holds.
+    #[error(
+        "`[entitlements.{name}]` states policy for an account the gateway does not have. \
+         Accounts live in `{gateway_path}`, which configures {}; an overlay may also stand \
+         alone when it names `native_harness`, which this one does not. Connect the account \
+         with `glasshouse subscriptions connect`, add it to that file, or remove the overlay",
+        if .known.is_empty() { "no accounts".to_owned() } else { .known.join(", ") }
+    )]
+    UnknownAccount {
+        name: String,
+        /// The gateway configuration file this catalogue was read from.
+        gateway_path: String,
+        /// The account names the gateway does have.
+        known: Vec<String>,
+    },
+
     #[error(
         "entitlements {} all name the same credential ({reference}); one credential is one \
          account, and map line 1963 gives each entitlement its own — give each entry its own \
@@ -1237,40 +1386,87 @@ pub enum EntitlementLookupError {
 }
 
 #[cfg(test)]
-mod subscription_broker_tests {
+mod overlay_tests {
     use super::*;
 
-    #[test]
-    fn broker_configuration_is_a_typed_reference_and_serializes_no_credentials() {
-        let config: EntitlementConfig =
-            toml::from_str("subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n")
-                .expect("the supported broker reference parses");
-        assert_eq!(
-            config.subscription_broker(),
-            Some(SubscriptionBroker::CliProxyApi)
-        );
-        assert_eq!(config.native_harness(), Some(IntegrationId::Codex));
-
-        let written = toml::to_string(&config).expect("broker config serializes");
-        assert!(written.contains("subscription_broker = \"cliproxyapi\""));
-        assert!(written.contains("native_harness = \"codex\""));
-        assert!(!written.contains("credential"), "{written}");
-        assert!(!written.contains("token"), "{written}");
-
-        toml::from_str::<EntitlementConfig>("subscription_broker = \"other\"\n")
-            .expect_err("unknown broker names are refused at the typed boundary");
-        toml::from_str::<EntitlementConfig>(
-            "subscription_broker = { name = \"cliproxyapi\", token = \"planted\" }\n",
-        )
-        .expect_err("a broker reference cannot contain credentials");
+    /// An account's own keys parse as the gateway's.
+    fn account(text: &str) -> AccountEntry {
+        toml::from_str(text).expect("the gateway's `[accounts.<name>]` shape parses")
     }
 
+    /// **Each of the five account keys is refused by name, and the refusal
+    /// names the command that moves it.** The user ruling of 2026-09-11 in
+    /// one test: a `[entitlements.<name>]` table may state policy and
+    /// nothing about the account itself.
+    #[test]
+    fn every_account_key_in_an_entitlements_table_is_refused_by_name() {
+        for (key, line) in [
+            ("kind", "kind = \"claude\"\n"),
+            ("vendor", "vendor = \"claude\"\n"),
+            ("credential", "credential = { env = \"CLAUDE_A_TOKEN\" }\n"),
+            (
+                "subscription_broker",
+                "subscription_broker = \"cliproxyapi\"\n",
+            ),
+            ("provider", "provider = \"openrouter\"\n"),
+        ] {
+            let error = toml::from_str::<EntitlementConfig>(line)
+                .expect_err("an account key is the gateway's");
+            let rendered = error.message().to_owned();
+            assert!(rendered.contains(key), "the key is named: {rendered}");
+            assert!(
+                rendered.contains(crate::config::MIGRATE_COMMAND),
+                "the refusal names the command that moves it: {rendered}"
+            );
+            assert!(
+                rendered.contains("gateway.toml"),
+                "and where it goes: {rendered}"
+            );
+        }
+        // And the refusal never repeats what was written — a credential
+        // reference is one of the five.
+        let error = toml::from_str::<EntitlementConfig>(
+            "credential = { env = \"A_VERY_DISTINCTIVE_NAME\" }\n",
+        )
+        .expect_err("refused");
+        assert!(
+            !error.message().contains("A_VERY_DISTINCTIVE_NAME"),
+            "{}",
+            error.message()
+        );
+    }
+
+    /// The policy half still parses and still serialises, and what it
+    /// serialises is policy only.
+    #[test]
+    fn the_overlay_parses_and_serialises_policy_only() {
+        let config: EntitlementConfig = toml::from_str(
+            "native_harness = \"codex\"\ndeny_harnesses = [\"pane\"]\n\
+             spend_ceiling_tokens = 42\nheadroom_override = \"low\"\n",
+        )
+        .expect("the policy shape parses");
+        assert_eq!(config.native_harness(), Some(IntegrationId::Codex));
+        assert_eq!(config.spend_ceiling_tokens(), Some(42));
+
+        let written = toml::to_string(&config).expect("the overlay serialises");
+        assert!(written.contains("native_harness = \"codex\""), "{written}");
+        for account_key in GATEWAY_ACCOUNT_KEYS {
+            assert!(
+                !written.contains(account_key),
+                "`{account_key}` is the gateway's and must not be written here:\n{written}"
+            );
+        }
+    }
+
+    /// A broker account and a native route are one subscription; a broker
+    /// account that also names a provider, or a credential, is refused —
+    /// and every one of those facts now comes from the **gateway's**
+    /// account, not from Glasshouse's table.
     #[test]
     fn broker_and_native_are_one_subscription_while_provider_or_credentials_are_refused() {
-        let dual: EntitlementConfig =
-            toml::from_str("subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n")
-                .unwrap();
-        let resolved = dual.to_resolved("chatgpt-a", Layer::User).unwrap();
+        let broker = account("subscription_broker = \"cliproxyapi\"\n");
+        let dual: EntitlementConfig = toml::from_str("native_harness = \"codex\"\n").unwrap();
+        let resolved = dual.to_resolved("chatgpt-a", &broker, Layer::User).unwrap();
         assert_eq!(
             resolved.backing().source(),
             crate::routing::EntitlementSource::Subscription
@@ -1285,44 +1481,47 @@ mod subscription_broker_tests {
             Some(SubscriptionBroker::CliProxyApi)
         );
 
-        for invalid in [
-            "subscription_broker = \"cliproxyapi\"\nprovider = \"openai\"\n",
-            "subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\nprovider = \"openai\"\n",
-        ] {
-            let config: EntitlementConfig = toml::from_str(invalid).unwrap();
+        let both = account("subscription_broker = \"cliproxyapi\"\nprovider = \"openai\"\n");
+        for overlay in ["", "native_harness = \"codex\"\n"] {
+            let config: EntitlementConfig = toml::from_str(overlay).unwrap();
             assert!(matches!(
-                config.to_resolved("mixed", Layer::User),
+                config.to_resolved("mixed", &both, Layer::User),
                 Err(EntitlementLookupError::TwoBackings { .. })
             ));
         }
 
-        let with_credential: EntitlementConfig = toml::from_str(
+        let with_credential = account(
             "subscription_broker = \"cliproxyapi\"\ncredential = { env = \"BROKER_TOKEN\" }\n",
-        )
-        .unwrap();
+        );
+        let bare: EntitlementConfig = toml::from_str("").unwrap();
         assert!(matches!(
-            with_credential.to_resolved("mixed", Layer::User),
+            bare.to_resolved("mixed", &with_credential, Layer::User),
             Err(EntitlementLookupError::SubscriptionBrokerWithOwnCredential { .. })
         ));
     }
 
+    /// Layering, rules and account-scoped telemetry all still work — with
+    /// the account read from the gateway's catalogue and the rules from
+    /// Glasshouse's two layers.
     #[test]
     fn broker_entitlements_keep_layering_rules_and_account_scoped_telemetry_facets() {
         use crate::provider::cache::{ModelCache, ModelCatalogue, ModelEntry};
         use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 
+        let gateway = GatewayCatalogue::from_toml(
+            "[accounts.chatgpt-a]\nsubscription_broker = \"cliproxyapi\"\n",
+        )
+        .expect("the gateway's catalogue parses");
         let user: UserConfig = toml::from_str(
-            "version = 1\n\n[entitlements.chatgpt-a]\n\
-             subscription_broker = \"cliproxyapi\"\ndeny_harnesses = [\"pane\"]\n",
+            "version = 1\n\n[entitlements.chatgpt-a]\ndeny_harnesses = [\"pane\"]\n",
         )
         .unwrap();
         let project: ProjectConfig = toml::from_str(
-            "version = 1\n\n[entitlements.chatgpt-a]\n\
-             subscription_broker = \"cliproxyapi\"\nnative_harness = \"codex\"\n\
+            "version = 1\n\n[entitlements.chatgpt-a]\nnative_harness = \"codex\"\n\
              allow_harnesses = [\"pane\"]\nspend_ceiling_tokens = 42\n",
         )
         .unwrap();
-        let effective = EffectiveConfig::new(&user, Some(&project));
+        let effective = EffectiveConfig::with_gateway(&user, Some(&project), &gateway);
 
         let native = effective
             .entitlement_for(
@@ -1375,78 +1574,71 @@ mod subscription_broker_tests {
                 if models == &["gpt-account-model".to_owned()]
         ));
     }
-}
 
-#[cfg(test)]
-mod catalogue_projection_tests {
-    use super::*;
-
-    /// **The catalogue projection carries every serving fact and no policy.**
-    /// [`EntitlementConfig::account`] is hand-written, so a field silently
-    /// dropped from it would leave the gateway-side view of an account
-    /// missing a key that the Glasshouse-side table plainly states. Written
-    /// against a table that sets all six catalogue keys *and* four policy
-    /// ones, so the test fails both ways: on a lost serving fact, and on a
-    /// harness rule leaking across the boundary.
+    /// **An account the gateway has resolves with no overlay at all**, at
+    /// [`Layer::User`] and under the defaults — and an overlay for an
+    /// account the gateway does *not* have is refused, naming both files.
     #[test]
-    fn account_carries_every_serving_fact_and_no_policy() {
-        let config: EntitlementConfig = toml::from_str(
-            "kind = \"claude\"\nvendor = \"claude\"\n\
-             credential = { env = \"CLAUDE_A_TOKEN\" }\n\
-             provider = \"alpha-probe\"\nspend_ceiling_tokens = 250000\n\
-             allow_harnesses = [\"codex\"]\ndeny_job_kinds = [\"reranking\"]\n\
-             headroom_override = \"low\"\ndisable_headroom_estimate = true\n",
+    fn an_account_resolves_without_an_overlay_and_an_orphan_overlay_is_refused() {
+        let gateway = GatewayCatalogue::from_toml(
+            "[accounts.claude-a]\nkind = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n\
+             spend_ceiling_tokens = 900\n",
         )
-        .expect("a table stating both halves parses");
-
-        let account = config.account();
-        assert_eq!(account.kind(), Some(EntitlementKind::Claude));
-        assert_eq!(account.vendor(), Some(EntitlementVendor::Claude));
+        .expect("parses");
+        let empty = UserConfig::default();
+        let effective = EffectiveConfig::with_gateway(&empty, None, &gateway);
+        let configured = effective.configured_entitlements().expect("resolves");
+        let entry = configured
+            .iter()
+            .find(|entry| entry.name() == "claude-a")
+            .expect("a gateway account is an entitlement even with no overlay");
+        assert_eq!(entry.layer(), Layer::User);
+        assert_eq!(entry.kind(), Some(EntitlementKind::Claude));
         assert_eq!(
-            account.credential(),
-            Some(&EntitlementCredential::environment("CLAUDE_A_TOKEN"))
+            entry.rules().spend_ceiling_tokens(),
+            Some(900),
+            "the account's own ceiling applies when no overlay states one"
         );
-        assert_eq!(account.provider(), Some("alpha-probe"));
-        assert_eq!(account.subscription_broker(), None);
-        assert_eq!(account.spend_ceiling_tokens(), Some(250_000));
 
-        // The written form is the gateway's own file: the six serving keys,
-        // and not one of the four policy keys the same table stated.
-        let written = toml::to_string(&account).expect("the catalogue entry serialises");
-        for serving in [
-            "kind",
-            "vendor",
-            "credential",
-            "provider",
-            "spend_ceiling_tokens",
-        ] {
-            assert!(
-                written.contains(serving),
-                "{serving} missing from:\n{written}"
-            );
-        }
-        for policy in [
-            "allow_harnesses",
-            "deny_job_kinds",
-            "headroom_override",
-            "disable_headroom_estimate",
-        ] {
-            assert!(
-                !written.contains(policy),
-                "{policy} is policy and must not cross into the catalogue:\n{written}"
-            );
-        }
+        let orphan: UserConfig = toml::from_str(
+            "version = 1\n\n[entitlements.not-an-account]\ndeny_harnesses = [\"pane\"]\n",
+        )
+        .unwrap();
+        let error = EffectiveConfig::with_gateway(&orphan, None, &gateway)
+            .entitlements()
+            .expect_err("an overlay with no account behind it describes nothing");
+        let rendered = error.to_string();
+        assert!(rendered.contains("not-an-account"), "{rendered}");
+        assert!(rendered.contains("claude-a"), "{rendered}");
+        assert!(
+            rendered.contains("gateway.toml"),
+            "the refusal names the gateway's file: {rendered}"
+        );
+    }
 
-        // And the resolved catalogue value is that entry under its name,
-        // with every telemetry facet still unknown.
-        let resolved = config
-            .to_resolved("claude-a", Layer::User)
-            .expect("a provider-backed entry with its own credential resolves");
-        assert_eq!(resolved.account().name(), "claude-a");
-        assert_eq!(resolved.account().kind(), Some(EntitlementKind::Claude));
-        assert!(resolved.account().credential().is_some());
-        assert!(resolved.account().remaining_capacity().is_none());
-        assert!(resolved.account().models().is_none());
-        assert!(resolved.account().spend().is_none());
+    /// The one overlay that stands alone: a harness's own sign-in is not an
+    /// account the gateway serves, so an entry naming `native_harness`
+    /// needs no `[accounts.<name>]` at all.
+    #[test]
+    fn a_native_sign_in_overlay_needs_no_gateway_account() {
+        let gateway = GatewayCatalogue::from_toml("").expect("an empty catalogue");
+        let user: UserConfig = toml::from_str(
+            "version = 1\n\n[entitlements.my-claude]\nnative_harness = \"claude-code\"\n\
+             deny_tiers = [\"frontier\"]\n",
+        )
+        .unwrap();
+        let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
+        let entry = effective
+            .configured_entitlements()
+            .expect("resolves")
+            .into_iter()
+            .find(|entry| entry.name() == "my-claude")
+            .expect("a native sign-in stands alone");
+        assert!(
+            entry
+                .backing()
+                .matches_native_harness(IntegrationId::ClaudeCode)
+        );
+        assert!(entry.credential().is_none());
     }
 }

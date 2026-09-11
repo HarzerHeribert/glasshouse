@@ -121,6 +121,14 @@ impl Fixture {
         self.base.join("data")
     }
 
+    /// Where the gateway's own caches live: `RuntimePaths::resolve` derives
+    /// the gateway's data directory from the `--data-dir` this fixture
+    /// passes, because a relocated Glasshouse never reaches into the
+    /// machine's default gateway store (user ruling 2026-09-11).
+    fn gateway_data_dir(&self) -> PathBuf {
+        self.data_dir().join("gateway")
+    }
+
     fn both_streams(output: &Output) -> String {
         format!(
             "{}{}",
@@ -1738,7 +1746,7 @@ fn now_unix() -> i64 {
 /// resolves one from this run's `--data-dir`, and prove it landed.
 fn plant_quota(fixture: &Fixture, provider: &str, remaining: i64, limit: i64) {
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(
-        fixture.data_dir().join("gateway-quota"),
+        fixture.gateway_data_dir().join("gateway-quota"),
     );
     cache.store(
         provider,
@@ -1801,7 +1809,7 @@ fn plant_health(
     readings: &[glasshouse::provider::telemetry::GatewayHealthReading],
 ) {
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(
-        fixture.data_dir().join("gateway-health"),
+        fixture.gateway_data_dir().join("gateway-health"),
     );
     cache.store(provider, readings, now_unix());
     assert_eq!(
@@ -2260,7 +2268,7 @@ fn a_persisted_provider_health_reading_reaches_the_launch_paths_router() {
     // config-only provider, so that half is planted under a registry name —
     // same cache, same run — and it comes back rendered.
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(
-        fixture.data_dir().join("gateway-health"),
+        fixture.gateway_data_dir().join("gateway-health"),
     );
     cache.store(
         "anyrouter",

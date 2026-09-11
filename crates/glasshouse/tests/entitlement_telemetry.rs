@@ -34,6 +34,10 @@ use glasshouse::config::{
 use glasshouse::provider::cache::{ModelCache, ModelCatalogue, ModelEntry};
 use glasshouse::provider::quota::{CapacityBand, CapacityBandThresholds};
 use glasshouse::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
+
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
 use glasshouse::routing::evidence::{
     CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger, FailureClass, NewObservation, Outcome,
 };
@@ -61,7 +65,15 @@ fn pool_config() -> String {
 }
 
 fn user_config() -> UserConfig {
-    toml::from_str(&format!("version = 1\n\n{}", pool_config())).expect("the fixture parses")
+    let (config, _) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    toml::from_str(&config).expect("the fixture parses")
+}
+
+/// The same fixture's **gateway** half: the accounts themselves, which are
+/// the gateway's since the 2026-09-11 ruling.
+fn gateway_catalogue() -> glasshouse::config::GatewayCatalogue {
+    let (_, gateway) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    glasshouse::config::GatewayCatalogue::from_toml(&gateway).expect("the gateway half parses")
 }
 
 /// AnyRouter's real header shape with both halves stated: 240 of 300 left
@@ -85,12 +97,13 @@ fn planted_headers() -> RateLimitHeaders {
 #[test]
 fn two_entitlements_of_one_provider_share_the_same_provider_wide_capacity_reading() {
     let tmp = tempfile::tempdir().unwrap();
-    let quota = GatewayQuotaCache::at(tmp.path().join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(tmp.path().join("gateway").join("gateway-quota"));
     let now = 1_800_000_000_i64;
     quota.store("alpha-probe", &planted_headers(), now - 30);
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now).with_gateway_quota(&quota);
     let entries = effective
         .configured_entitlements_with_telemetry(&telemetry)
@@ -147,7 +160,8 @@ fn two_entitlements_of_one_provider_share_the_same_provider_wide_capacity_readin
 #[test]
 fn an_entitlement_with_no_telemetry_stays_unknown_on_every_facet() {
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let now = 1_800_000_000_i64;
 
     let blind = effective
@@ -165,7 +179,7 @@ fn an_entitlement_with_no_telemetry_stays_unknown_on_every_facet() {
     }
 
     let tmp = tempfile::tempdir().unwrap();
-    let quota = GatewayQuotaCache::at(tmp.path().join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(tmp.path().join("gateway").join("gateway-quota"));
     let models = ModelCache::at(tmp.path().join("providers"));
     let telemetry = EntitlementTelemetry::new(now)
         .with_gateway_quota(&quota)
@@ -209,7 +223,8 @@ fn the_models_facet_reads_the_declared_catalogue_and_never_invents_one_for_nativ
         .expect("the catalogue stores");
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(1_800_000_000).with_model_catalogues(&models);
     let entries = effective
         .configured_entitlements_with_telemetry(&telemetry)
@@ -256,11 +271,12 @@ impl Fixture {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!("version = 1\n\n{}", pool_config()),
-        )
-        .unwrap();
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) =
+            split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+        std::fs::write(config_dir.join("config.toml"), config_text).unwrap();
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).unwrap();
 
         let cli = glasshouse::Cli::try_parse_from([
             "glasshouse",
@@ -357,7 +373,8 @@ fn the_throttle_facet_narrows_to_the_account_and_reads_only_this_providers_rows(
         .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
         .expect("the window reads");
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now).with_observations(&rows);
     let entries = effective
         .configured_entitlements_with_telemetry(&telemetry)
@@ -422,7 +439,8 @@ fn a_contextless_throttle_widens_both_accounts_readings_to_provider_scope() {
         .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
         .expect("the window reads");
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now).with_observations(&rows);
     let entries = effective
         .configured_entitlements_with_telemetry(&telemetry)
@@ -483,20 +501,27 @@ fn status_shows_all_four_facets_with_their_scope_through_the_shipped_binary() {
 
     // The gateway-quota cache, at the exact directory `GatewayQuotaCache::new`
     // resolves from the binary's `--data-dir`.
-    GatewayQuotaCache::at(tmp.path().join("data").join("gateway-quota")).store(
+    GatewayQuotaCache::at(
+        tmp.path()
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    )
+    .store("alpha-probe", &planted_headers(), now);
+    ModelCache::at(
+        tmp.path()
+            .join("data")
+            .join("gateway")
+            .join("model-catalogues"),
+    )
+    .store(&ModelCatalogue::new(
         "alpha-probe",
-        &planted_headers(),
+        "https://alpha-probe.example/api/v1",
+        "https://alpha-probe.example/api/v1/models",
         now,
-    );
-    ModelCache::at(tmp.path().join("data").join("providers"))
-        .store(&ModelCatalogue::new(
-            "alpha-probe",
-            "https://alpha-probe.example/api/v1",
-            "https://alpha-probe.example/api/v1/models",
-            now,
-            vec![ModelEntry::new("alpha-m1"), ModelEntry::new("alpha-m2")],
-        ))
-        .expect("the catalogue stores");
+        vec![ModelEntry::new("alpha-m1"), ModelEntry::new("alpha-m2")],
+    ))
+    .expect("the catalogue stores");
     let ledger = fixture.ledger();
     for i in 0..2 {
         ledger
@@ -611,7 +636,7 @@ fn status_spells_unknown_for_an_entitlement_nothing_measured() {
 fn entitlement_json_exposes_sorted_catalogues_without_credentials() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path());
-    ModelCache::at(tmp.path().join("data/providers"))
+    ModelCache::at(tmp.path().join("data/gateway/model-catalogues"))
         .store(&ModelCatalogue::new(
             "alpha-probe",
             "https://alpha-probe.example/api/v1",
@@ -650,16 +675,18 @@ fn entitlement_json_exposes_sorted_catalogues_without_credentials() {
 fn broker_catalogues_keep_provider_and_account_identity_and_lock_other_routes() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path());
-    std::fs::write(
-        fixture.base.join("config/config.toml"),
+    // Both accounts are the gateway's; the native routes are Glasshouse's
+    // policy about them.
+    let (config_text, gateway_text) = split_gateway_state(
         "version = 1\n\n\
          [entitlements.claude-sub]\nkind = \"claude\"\nvendor = \"claude\"\n\
          subscription_broker = \"cliproxyapi\"\nnative_harness = \"claude-code\"\n\n\
          [entitlements.gemini-sub]\nkind = \"gemini\"\nvendor = \"google\"\n\
          subscription_broker = \"cliproxyapi\"\nnative_harness = \"antigravity\"\n",
-    )
-    .unwrap();
-    let cache = ModelCache::at(tmp.path().join("data/providers"));
+    );
+    std::fs::write(fixture.base.join("config/config.toml"), config_text).unwrap();
+    std::fs::write(fixture.base.join("config/gateway.toml"), gateway_text).unwrap();
+    let cache = ModelCache::at(tmp.path().join("data/gateway/model-catalogues"));
     cache
         .store(&ModelCatalogue::new(
             "claude-sub",

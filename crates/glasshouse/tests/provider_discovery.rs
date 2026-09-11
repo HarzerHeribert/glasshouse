@@ -978,7 +978,7 @@ fn a_planted_gateway_reading_now_reaches_the_shipped_binarys_report() {
     // `BinaryFixture::run` points both `--data-dir` and `--config-dir` at
     // `fixture.config`, so this is the exact directory
     // `GatewayQuotaCache::new` resolves from `runtime.paths().data_dir()`.
-    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let quota_cache_dir = fixture.config.path().join("gateway").join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
         "anyrouter",
@@ -1030,7 +1030,7 @@ fn a_planted_gateway_reading_now_reaches_the_shipped_binarys_report() {
 #[test]
 fn groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq() {
     let fixture = BinaryFixture::new();
-    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let quota_cache_dir = fixture.config.path().join("gateway").join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
         "groq",
@@ -1074,7 +1074,7 @@ fn groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq() {
 #[test]
 fn groqs_own_real_headers_populate_both_native_unit_pools_in_the_shipped_binarys_report() {
     let fixture = BinaryFixture::new();
-    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let quota_cache_dir = fixture.config.path().join("gateway").join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
         "groq",
@@ -1174,7 +1174,7 @@ fn a_resource_with_no_health_observation_reports_unknown_through_the_shipped_bin
 #[test]
 fn a_planted_gateway_health_reading_now_reaches_the_shipped_binarys_report() {
     let fixture = BinaryFixture::new();
-    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let health_cache_dir = fixture.config.path().join("gateway").join("gateway-health");
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
     cache.store(
         "anyrouter",
@@ -1217,7 +1217,7 @@ fn a_planted_gateway_health_reading_now_reaches_the_shipped_binarys_report() {
 #[test]
 fn a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary() {
     let fixture = BinaryFixture::new();
-    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let health_cache_dir = fixture.config.path().join("gateway").join("gateway-health");
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
     cache.store(
         "anyrouter",
@@ -1253,7 +1253,7 @@ fn a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary() {
 #[test]
 fn a_corrupt_gateway_health_cache_file_leaves_the_shipped_binary_working() {
     let fixture = BinaryFixture::new();
-    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let health_cache_dir = fixture.config.path().join("gateway").join("gateway-health");
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
     cache.store(
         "anyrouter",
@@ -1304,7 +1304,7 @@ fn a_corrupt_gateway_health_cache_file_leaves_the_shipped_binary_working() {
 #[test]
 fn groqs_own_real_headers_populate_the_rolling_windows_reset_time_in_the_shipped_binarys_report() {
     let fixture = BinaryFixture::new();
-    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let quota_cache_dir = fixture.config.path().join("gateway").join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
         "groq",
@@ -1824,7 +1824,7 @@ fn with_no_routing_model_configured_the_block_names_no_model() {
 #[test]
 fn an_unhealthy_resource_is_not_the_one_automatic_routing_would_select() {
     let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
-    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let health_cache_dir = fixture.config.path().join("gateway").join("gateway-health");
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
     cache.store(
         "zeta-runner",
@@ -1861,7 +1861,7 @@ fn an_unhealthy_resource_is_not_the_one_automatic_routing_would_select() {
 #[test]
 fn a_cooling_down_resource_is_not_the_one_automatic_routing_would_select() {
     let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
-    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let health_cache_dir = fixture.config.path().join("gateway").join("gateway-health");
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
     let now = wall_clock_now_unix();
     cache.store(

@@ -119,7 +119,11 @@ pub(super) fn spawn_session(
         Ok(project_config) => project_config,
         Err(err) => return Response::err(err),
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     let selection = match glasshouse::session::select(Some(harness), effective) {
         Ok(selection) => selection,
         Err(err) => return Response::err(err),
@@ -575,7 +579,8 @@ fn policy_delivery_enabled(runtime: &Runtime) -> bool {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return true;
     };
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .implementation_policy_enabled()
         .value
 }

@@ -85,38 +85,44 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             SubscriptionsCommand::Status => {
                 print!("{}", crate::commands::subscriptions::status(&runtime)?);
             }
+            // The four write verbs are the gateway's, and its exit status is
+            // this process's — see `commands::gateway_forward`.
             SubscriptionsCommand::Login {
                 provider,
                 entitlement,
             } => {
-                print!(
-                    "{}",
-                    crate::commands::subscriptions::login(&runtime, *provider, entitlement,)?
-                );
+                return crate::commands::subscriptions::login(&runtime, *provider, entitlement);
             }
             SubscriptionsCommand::Connect {
                 provider,
                 entitlement,
                 json,
             } => {
-                crate::commands::subscriptions::connect(&runtime, *provider, entitlement, *json)?;
+                return crate::commands::subscriptions::connect(
+                    &runtime,
+                    *provider,
+                    entitlement,
+                    *json,
+                );
             }
             SubscriptionsCommand::Logout {
                 provider,
                 entitlement,
             } => {
-                print!(
-                    "{}",
-                    crate::commands::subscriptions::logout(&runtime, *provider, entitlement,)?
-                );
+                return crate::commands::subscriptions::logout(&runtime, *provider, entitlement);
             }
             SubscriptionsCommand::AdoptBinary { path } => {
-                crate::commands::subscriptions::adopt_binary(&runtime, path)?;
-                println!("CLIProxyAPI adopted");
+                return crate::commands::subscriptions::adopt_binary(&runtime, path);
             }
         },
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
+        }
+        Some(Command::MigrateGatewayState { dry_run }) => {
+            print!(
+                "{}",
+                crate::commands::migrate_gateway_state::migrate(&runtime, *dry_run)?
+            );
         }
         // The value is read inside `commands::credentials` and nowhere
         // else: nothing on this line, and nothing in `cli`, can hold one.
@@ -125,8 +131,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 var,
                 stdin,
                 value_on_argv,
-            } => crate::commands::credentials::store(var, *stdin, value_on_argv)?,
-            CredentialsCommand::Remove { var } => crate::commands::credentials::remove(var)?,
+            } => {
+                return crate::commands::credentials::store(&runtime, var, *stdin, value_on_argv);
+            }
+            CredentialsCommand::Remove { var } => {
+                return crate::commands::credentials::remove(&runtime, var);
+            }
             CredentialsCommand::List => crate::commands::credentials::list(&runtime)?,
         },
         Some(Command::Gateway { command }) => match command {
@@ -145,7 +155,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Pairing { model, harness }) => {
             let user = UserConfig::load(runtime.paths())?;
             let project = config::load_project_config(runtime.project())?;
-            let effective = EffectiveConfig::new(&user, project.as_ref());
+            let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+            let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
             print!(
                 "{}",
                 config::pairing::report(&effective, model.as_deref(), harness.as_deref())
@@ -162,7 +173,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }) => {
             let user = UserConfig::load(runtime.paths())?;
             let project = config::load_project_config(runtime.project())?;
-            let effective = EffectiveConfig::new(&user, project.as_ref());
+            let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+            let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
             let request = match crate::commands::response::response_request(
                 role.as_deref(),
                 session.clone(),
@@ -222,7 +234,10 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 config::load_project_config(runtime.project()),
             ) {
                 (Ok(user), Ok(project)) => {
-                    let effective = EffectiveConfig::new(&user, project.as_ref());
+                    let gateway =
+                        config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+                    let effective =
+                        EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
                     crate::commands::routing_classification::classification_cache_resolution_tag(
                         &effective.routing_model_resolution().value,
                     )

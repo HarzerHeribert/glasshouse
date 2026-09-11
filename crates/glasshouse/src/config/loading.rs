@@ -782,7 +782,7 @@ impl ProjectConfig {
 /// through a symlink planted at `.glasshouse` (or anywhere along it), and it
 /// keeps this module honest with every other component that touches a
 /// project-relative path.
-fn project_config_path(project: &Project) -> Result<PathBuf, ConfigError> {
+pub fn project_config_path(project: &Project) -> Result<PathBuf, ConfigError> {
     project
         .scope()
         .resolve(PROJECT_CONFIG_RELATIVE_PATH)
@@ -833,6 +833,36 @@ pub fn write_project_config_with_consent(
     let dir = path.parent().unwrap_or(&path).to_path_buf();
     write_atomic_toml(&dir, &path, config)
 }
+/// The three things every entitlement resolution reads: the user's
+/// configuration, the project's if it has one, and the **gateway's**
+/// catalogue of accounts and providers.
+///
+/// One type because the three are always loaded together and always in the
+/// same order, and because a caller that loaded two of them and layered
+/// without the third would resolve a user's accounts as though they had
+/// none — the silent kind of wrong. [`Layers::effective`] is the only way
+/// this is read, so the borrow is checked rather than remembered.
+pub struct Layers {
+    pub user: UserConfig,
+    pub project: Option<ProjectConfig>,
+    pub gateway: GatewayCatalogue,
+}
+impl Layers {
+    /// Load all three for `runtime`.
+    pub fn load(runtime: &crate::Runtime) -> Result<Self, ConfigError> {
+        Ok(Self {
+            user: UserConfig::load(runtime.paths())?,
+            project: load_project_config(runtime.project())?,
+            gateway: GatewayCatalogue::for_paths(runtime.paths())?,
+        })
+    }
+
+    /// The layering itself.
+    pub fn effective(&self) -> EffectiveConfig<'_> {
+        EffectiveConfig::with_gateway(&self.user, self.project.as_ref(), &self.gateway)
+    }
+}
+
 /// Which configuration layer supplied a resolved value. Surfaced so the
 /// Phase 2D settings view can visibly distinguish a user-level default from
 /// a project-level override, as required.
@@ -889,9 +919,25 @@ fn parse_toml<T: serde::de::DeserializeOwned>(
     path: &Path,
     contents: &str,
 ) -> Result<T, ConfigError> {
-    toml::from_str(contents).map_err(|source| ConfigError::Parse {
-        path: path.to_path_buf(),
-        source: Box::new(source),
+    toml::from_str(contents).map_err(|source| {
+        // A table still holding a key the gateway owns is refused by
+        // `EntitlementConfig`/`ProviderConfig`'s own `Deserialize`, which can
+        // only raise a deserialisation error. Reported as what it is rather
+        // than as "not valid TOML", which would send the reader hunting for a
+        // syntax error in a file whose syntax is fine. The message is the
+        // custom one and never toml's own rendering, which quotes the
+        // offending line — see `ConfigError::Parse` for why that matters.
+        let message = source.message();
+        if message.contains(MIGRATE_COMMAND) {
+            return ConfigError::LegacyGatewayState {
+                path: path.to_path_buf(),
+                message: crate::secret::redact(message),
+            };
+        }
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }
     })
 }
 /// Monotonic counter mixed into temporary file names so that two saves

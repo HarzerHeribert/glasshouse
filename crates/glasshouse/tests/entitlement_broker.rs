@@ -46,6 +46,10 @@ use glasshouse::routing::{
 };
 use glasshouse::secret::SecretRef;
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 // ===========================================================================
 // Half one — the score, through `SessionRouter::choose`.
 // ===========================================================================
@@ -609,15 +613,15 @@ impl Binary {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!(
-                "version = 1\n\n\
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) = split_gateway_state(&format!(
+            "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\
                  {extra}"
-            ),
-        )
-        .expect("write user config");
+        ));
+        std::fs::write(config_dir.join("config.toml"), config_text).expect("write user config");
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).expect("write user config");
 
         Self {
             _tmp: tmp,
@@ -905,7 +909,13 @@ fn route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one() {
     // Example 1: prov-a at 25% (tight) resetting in 4800s — burn it.
     let burning = Binary::with_config(&two_provider_config());
     let now = now_unix();
-    let quota = GatewayQuotaCache::at(burning.base.join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        burning
+            .base
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     quota.store("prov-a", &headers("300", "75", "4800"), now);
     quota.store("prov-b", &headers("300", "165", "345600"), now);
     let out = burning.glasshouse(&["route"]);
@@ -920,7 +930,13 @@ fn route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one() {
     // Example 2: the same account resetting in 4 days — preserve it.
     let preserving = Binary::with_config(&two_provider_config());
     let now = now_unix();
-    let quota = GatewayQuotaCache::at(preserving.base.join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        preserving
+            .base
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     quota.store("prov-a", &headers("300", "75", "345600"), now);
     quota.store("prov-b", &headers("300", "165", "345600"), now);
     let out = preserving.glasshouse(&["route"]);
@@ -1152,7 +1168,7 @@ fn the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured(
 
     {
         let runtime = binary.runtime();
-        let quota = GatewayQuotaCache::new(runtime.paths().data_dir());
+        let quota = GatewayQuotaCache::new(runtime.paths().gateway_data_dir());
         let now = now_unix();
         quota.store(
             "alpha-probe",
@@ -2106,49 +2122,53 @@ fn a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind() {
 /// misdescribes an entitlement and still never misroutes one.
 #[test]
 fn the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant() {
-    use glasshouse::config::{EntitlementConfig, EntitlementKind, Layer};
+    use glasshouse::config::{AccountEntry, EntitlementConfig, Layer};
 
-    let routing_of = |config: &EntitlementConfig| {
+    // The account is the gateway's since the 2026-09-11 ruling; the overlay
+    // is Glasshouse's. `to_resolved` reads both, which is why this reads
+    // both.
+    let account = |toml_text: &str| -> AccountEntry {
+        toml::from_str(toml_text).expect("the gateway's account shape parses")
+    };
+    let routing_of = |config: &EntitlementConfig, account: &AccountEntry| {
         config
-            .to_resolved("an-account", Layer::User)
+            .to_resolved("an-account", account, Layer::User)
             .expect("the entry resolves")
             .to_routing()
     };
 
+    let none = account("");
     let mut native = EntitlementConfig::default();
     native.set_native_harness(Some(IntegrationId::ClaudeCode));
     assert_eq!(
-        routing_of(&native).source(),
+        routing_of(&native, &none).source(),
         EntitlementSource::Subscription,
         "a harness's own sign-in authenticates through the harness — that is a subscription"
     );
 
-    let mut api = EntitlementConfig::default();
-    api.set_provider(Some("alpha-probe".to_owned()));
+    let api_account = account("provider = \"alpha-probe\"\n");
     assert_eq!(
-        routing_of(&api).source(),
+        routing_of(&EntitlementConfig::default(), &api_account).source(),
         EntitlementSource::ApiCredits,
         "a `[providers.<name>]` backing carries a credential of its own — that is an API key"
     );
 
     assert_eq!(
-        routing_of(&EntitlementConfig::default()).source(),
+        routing_of(&EntitlementConfig::default(), &none).source(),
         EntitlementSource::Unstated,
         "an entry naming neither is listed, never matched, never charged"
     );
 
-    let mut mislabelled = native.clone();
-    mislabelled.set_kind(Some(EntitlementKind::ApiKey));
-    let mut labelled = native.clone();
-    labelled.set_kind(Some(EntitlementKind::Claude));
+    let mislabelled = account("kind = \"api-key\"\n");
+    let labelled = account("kind = \"claude\"\n");
     assert_eq!(
-        routing_of(&mislabelled),
-        routing_of(&labelled),
+        routing_of(&native, &mislabelled),
+        routing_of(&native, &labelled),
         "the router's value does not depend on `kind` — including when `kind` is wrong"
     );
     assert_eq!(
-        routing_of(&mislabelled),
-        routing_of(&native),
+        routing_of(&native, &mislabelled),
+        routing_of(&native, &none),
         "and stating no kind at all is the same value again"
     );
 }
@@ -2162,10 +2182,9 @@ fn the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignifica
 fn a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules() {
     use glasshouse::config::EntitlementConfig;
 
-    let parsed: EntitlementConfig = toml::from_str(
-        "provider = \"alpha-probe\"\nspend_ceiling_tokens = 250000\ndeny_harnesses = [\"codex\"]\n",
-    )
-    .expect("the ceiling is a recognised key on an entitlement entry");
+    let parsed: EntitlementConfig =
+        toml::from_str("spend_ceiling_tokens = 250000\ndeny_harnesses = [\"codex\"]\n")
+            .expect("the ceiling is a recognised key on an entitlement entry");
     assert_eq!(parsed.spend_ceiling_tokens(), Some(250_000));
     assert_eq!(parsed.rules().spend_ceiling_tokens(), Some(250_000));
 
@@ -2176,11 +2195,23 @@ fn a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules() {
     );
 
     let stated_none: EntitlementConfig =
-        toml::from_str("provider = \"alpha-probe\"\n").expect("parses");
+        toml::from_str("deny_harnesses = [\"codex\"]\n").expect("parses");
     assert_eq!(
         stated_none.rules().spend_ceiling_tokens(),
         None,
         "no ceiling stated is `None` and never a zero"
+    );
+
+    // And `provider` — an account key since the 2026-09-11 ruling — is
+    // refused here rather than read, naming the command that moves it.
+    let refused = toml::from_str::<EntitlementConfig>("provider = \"alpha-probe\"\n")
+        .expect_err("`provider` is the gateway's");
+    assert!(
+        refused
+            .message()
+            .contains("glasshouse migrate-gateway-state"),
+        "{}",
+        refused.message()
     );
 }
 
@@ -2227,7 +2258,13 @@ fn two_provider_config_on_one_model() -> String {
 fn route_falls_back_from_a_throttled_winner_and_names_the_reason() {
     let binary = Binary::with_config(&two_provider_config_on_one_model());
     let now = now_unix();
-    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        binary
+            .base
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     // prov-a nearly untouched (plenty), prov-b at 25% with a distant reset
     // (tight, and preserved rather than burned).
     quota.store("prov-a", &headers("300", "290", "345600"), now);
@@ -2281,7 +2318,13 @@ fn route_falls_back_from_a_throttled_winner_and_names_the_reason() {
 fn a_launch_that_falls_back_records_the_fallback_with_its_reason() {
     let binary = Binary::with_config(&two_provider_config_on_one_model());
     let now = now_unix();
-    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        binary
+            .base
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     quota.store("prov-a", &headers("300", "290", "345600"), now);
     quota.store("prov-b", &headers("300", "75", "345600"), now);
     {
@@ -2354,7 +2397,13 @@ fn a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost() {
     .expect("write pricing.toml");
 
     let now = now_unix();
-    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        binary
+            .base
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     quota.store("prov-a", &headers("300", "290", "345600"), now);
     quota.store("prov-b", &headers("300", "75", "345600"), now);
     {

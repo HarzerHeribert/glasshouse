@@ -384,12 +384,20 @@ impl RouteFixture {
         self.base.join("data")
     }
 
+    /// Where the gateway's own caches live: `RuntimePaths::resolve` derives
+    /// the gateway's data directory from the `--data-dir` this fixture
+    /// passes, because a relocated Glasshouse never reaches into the
+    /// machine's default gateway store (user ruling 2026-09-11).
+    fn gateway_data_dir(&self) -> PathBuf {
+        self.data_dir().join("gateway")
+    }
+
     /// A request-pool reading with a real limit and remaining count, and
     /// `window_seconds` only when `stated_window` names one — the same
     /// header shape `tests/route_command.rs::plant_quota` plants, extended
     /// with `x-ratelimit-window`.
     fn plant_quota(&self, provider: &str, remaining: i64, limit: i64, stated_window: Option<i64>) {
-        let cache = GatewayQuotaCache::at(self.data_dir().join("gateway-quota"));
+        let cache = GatewayQuotaCache::at(self.gateway_data_dir().join("gateway-quota"));
         let limit_s = limit.to_string();
         let remaining_s = remaining.to_string();
         let window_s = stated_window.map(|seconds| seconds.to_string());

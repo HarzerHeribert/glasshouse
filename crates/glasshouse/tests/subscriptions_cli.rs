@@ -20,9 +20,17 @@ impl Fixture {
         let config = temp.path().join("config");
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::create_dir_all(&config).unwrap();
+        // The account is the gateway's since the 2026-09-11 ruling; the
+        // native route is Glasshouse's policy about it.
         fs::write(
             config.join("config.toml"),
-            "[entitlements.personal]\nkind = \"claude\"\nvendor = \"claude\"\nnative_harness = \"claude-code\"\nsubscription_broker = \"cliproxyapi\"\n",
+            "[entitlements.personal]\nnative_harness = \"claude-code\"\n",
+        )
+        .unwrap();
+        fs::write(
+            config.join("gateway.toml"),
+            "[accounts.personal]\nkind = \"claude\"\nvendor = \"claude\"\n\
+             subscription_broker = \"cliproxyapi\"\n",
         )
         .unwrap();
         Self {
@@ -34,7 +42,22 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str], broker: Option<&Path>) -> Output {
+        self.run_with_gateway(args, broker, None)
+    }
+
+    /// `gateway` names the `inference-gateway` a forward should run — always
+    /// a fake here, because a forward with none set would find whichever one
+    /// is installed on the machine running the test.
+    fn run_with_gateway(
+        &self,
+        args: &[&str],
+        broker: Option<&Path>,
+        gateway: Option<&Path>,
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_glasshouse"));
+        if let Some(gateway) = gateway {
+            command.env("INFERENCE_GATEWAY_BIN", gateway);
+        }
         command.args([
             "--scope",
             self.root.to_str().unwrap(),
@@ -56,22 +79,30 @@ impl Fixture {
     }
 }
 
+/// **`subscriptions login` is a forward, and `status` is still a read.**
+///
+/// The login half asserts the shape the gateway is handed and that the child
+/// is pointed at the same store this process resolved. The status half plants
+/// an auth directory by hand — the layout is the gateway's and Glasshouse
+/// only looks at it — and proves the read reports presence without ever
+/// reading a token's contents.
 #[test]
-fn login_dispatch_and_status_expose_no_child_output_or_token_contents() {
+fn login_forwards_to_the_gateway_and_status_reads_presence_without_token_contents() {
     let fixture = Fixture::new();
-    let record = fixture._temp.path().join("argv");
-    let fake = fixture._temp.path().join("cliproxyapi");
+    let record = fixture._temp.path().join("forwarded");
+    let fake_gateway = fixture._temp.path().join("inference-gateway");
     fs::write(
-        &fake,
+        &fake_gateway,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nauth_dir=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"auth-dir\"])' \"$2\")\nmkdir -p \"$auth_dir\"\nprintf '{{\"account\":\"fixture\"}}' > \"$auth_dir/account.json\"\n",
+            "#!/bin/sh\n{{ printf 'argv:%s\\n' \"$*\"; printf 'config:%s\\n' \
+             \"$INFERENCE_GATEWAY_CONFIG\"; }} > '{}'\nexit 0\n",
             record.display()
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&fake_gateway, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let output = fixture.run(
+    let output = fixture.run_with_gateway(
         &[
             "subscriptions",
             "login",
@@ -79,23 +110,37 @@ fn login_dispatch_and_status_expose_no_child_output_or_token_contents() {
             "--entitlement",
             "personal",
         ],
-        Some(&fake),
+        None,
+        Some(&fake_gateway),
     );
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "anthropic\tpersonal\tpresent\n"
+    let forwarded = fs::read_to_string(&record).unwrap();
+    assert!(
+        forwarded.contains("argv:subscriptions login anthropic --entitlement personal"),
+        "{forwarded}"
     );
-    let argv = fs::read_to_string(record).unwrap();
-    assert!(argv.starts_with("-config\n"), "{argv}");
-    assert!(argv.ends_with("\n-claude-login\n"), "{argv}");
+    assert!(
+        forwarded.contains(&format!(
+            "config:{}",
+            fixture.config.join("gateway.toml").display()
+        )),
+        "the child reads the store this process resolved: {forwarded}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("is the gateway's; forwarding to"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
+    // The read half: an auth directory laid out the way the broker lays it
+    // out, and a status that reports presence and nothing inside it.
     let auth = fixture.auth_dir();
-    assert!(auth.join("account.json").is_file());
+    fs::create_dir_all(&auth).unwrap();
+    fs::write(auth.join("account.json"), b"{\"account\":\"fixture\"}").unwrap();
     fs::write(auth.join("opaque.json"), b"token-contents-must-not-be-read").unwrap();
     let status = fixture.run(&["subscriptions", "status"], None);
     assert!(
@@ -111,18 +156,30 @@ fn login_dispatch_and_status_expose_no_child_output_or_token_contents() {
     assert!(!report.contains("token-contents"));
 }
 
+/// **`logout` is the gateway's too.** Removing an auth directory is writing
+/// broker state, and Glasshouse neither owns nor manages it since the
+/// 2026-09-11 ruling — so what this asserts is the forward, and that
+/// Glasshouse touched nothing on its way there.
 #[test]
-fn logout_removes_only_the_selected_accounts_auth_directory() {
+fn logout_forwards_to_the_gateway_and_removes_nothing_itself() {
     let fixture = Fixture::new();
     let selected = fixture.auth_dir();
     fs::create_dir_all(&selected).unwrap();
     fs::write(selected.join("opaque.json"), b"selected-secret").unwrap();
-    let other = glasshouse::RuntimePaths::new(&fixture.data, &fixture.config)
-        .subscription_broker_auth_dir("other");
-    fs::create_dir_all(&other).unwrap();
-    fs::write(other.join("opaque.json"), b"other-secret").unwrap();
 
-    let output = fixture.run(
+    let record = fixture._temp.path().join("forwarded");
+    let fake_gateway = fixture._temp.path().join("inference-gateway");
+    fs::write(
+        &fake_gateway,
+        format!(
+            "#!/bin/sh\nprintf 'argv:%s\\n' \"$*\" > '{}'\nexit 0\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gateway, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = fixture.run_with_gateway(
         &[
             "subscriptions",
             "logout",
@@ -131,21 +188,23 @@ fn logout_removes_only_the_selected_accounts_auth_directory() {
             "personal",
         ],
         None,
+        Some(&fake_gateway),
     );
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "anthropic\tpersonal\tabsent\n"
+    assert!(
+        fs::read_to_string(&record)
+            .unwrap()
+            .contains("argv:subscriptions logout anthropic --entitlement personal"),
+        "the gateway is the one asked to disconnect"
     );
-    assert!(selected.is_dir());
-    assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
     assert_eq!(
-        fs::read(other.join("opaque.json")).unwrap(),
-        b"other-secret"
+        fs::read(selected.join("opaque.json")).unwrap(),
+        b"selected-secret",
+        "Glasshouse must not remove broker state itself"
     );
 }
 

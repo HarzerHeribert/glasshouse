@@ -344,6 +344,8 @@ fn disposable_jobs_serve_classification_extraction_reranking_and_reduction_in_pr
         include_str!("../src/commands/routing_destinations.rs"),
         include_str!("../src/commands/routing_classification.rs"),
         include_str!("../src/commands/shared.rs"),
+        include_str!("../src/commands/gateway_forward.rs"),
+        include_str!("../src/commands/migrate_gateway_state.rs"),
     ]
     .join("\n");
     let main_source = main_source.as_str();

@@ -27,6 +27,7 @@ pub mod capability;
 pub mod effective;
 pub mod entitlement;
 pub mod firewall;
+pub mod gateway_store;
 pub mod hooks;
 pub mod loading;
 pub mod pairing;
@@ -53,10 +54,11 @@ pub use entitlement::{
     EntitlementLookupError, EntitlementModels, EntitlementTelemetry, EntitlementVendor,
     ResolvedEntitlement, SubscriptionBroker, TelemetryScope,
 };
+pub use gateway_store::{GATEWAY_OWNED_DIRECTORIES, GatewayCatalogue};
 pub use hooks::{IntegrationConfig, IntegrationTable};
 pub use inference_gateway::entitlement::{AccountEntry, ResolvedAccount};
 pub use loading::{
-    Layer, Layered, ProjectConfig, UserConfig, load_project_config,
+    Layer, Layered, Layers, ProjectConfig, UserConfig, load_project_config, project_config_path,
     write_project_config_with_consent,
 };
 pub use profile::{ProfileApproval, ProfileBackend, ProfileConfig, ProfileTable};
@@ -137,6 +139,22 @@ pub enum ConfigError {
         supported: u32,
     },
 
+    /// A `[entitlements.<name>]` or `[providers.<name>]` table still holds a
+    /// key the gateway owns since the 2026-09-11 ruling — the account's plan,
+    /// vendor, credential, broker or provider, or a provider's template, base
+    /// URL, credential names or headers.
+    ///
+    /// Refused rather than ignored: a build that read those keys and did
+    /// nothing with them would leave a user looking at an account Glasshouse
+    /// says it has and the gateway has never heard of. The message names
+    /// `glasshouse migrate-gateway-state`, which moves them.
+    #[error("configuration file `{path}`: {message}")]
+    LegacyGatewayState { path: PathBuf, message: String },
+
+    /// The gateway's own `gateway.toml` could not be read.
+    #[error("could not read the gateway's configuration `{path}`: {message}")]
+    GatewayStore { path: PathBuf, message: String },
+
     /// The project-level configuration path did not resolve inside the
     /// project root. See [`load_project_config`] and
     /// [`write_project_config_with_consent`] for why this can never
@@ -144,6 +162,12 @@ pub enum ConfigError {
     #[error("project configuration path could not be resolved inside the project root: {0}")]
     Scope(#[from] ScopeError),
 }
+
+/// Every legacy-key refusal carries this phrase, because it is the command
+/// that fixes it — and because [`loading::parse_toml`] recognises a refusal
+/// by it and reports [`ConfigError::LegacyGatewayState`] rather than a
+/// "not valid TOML" that would send the reader looking for a syntax error.
+pub(crate) const MIGRATE_COMMAND: &str = "glasshouse migrate-gateway-state";
 
 /// A `bool` that is only worth writing when it is `true`.
 ///

@@ -241,6 +241,14 @@ impl Fixture {
         self.base.join("data")
     }
 
+    /// Where the gateway's own caches live: `RuntimePaths::resolve` derives
+    /// the gateway's data directory from the `--data-dir` this fixture
+    /// passes, because a relocated Glasshouse never reaches into the
+    /// machine's default gateway store (user ruling 2026-09-11).
+    fn gateway_data_dir(&self) -> PathBuf {
+        self.data_dir().join("gateway")
+    }
+
     fn glasshouse(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_glasshouse"))
             .current_dir(self.runtime.project().root())
@@ -694,7 +702,7 @@ fn a_stale_health_reading_is_recorded_as_stale_and_a_pre_change_reading_as_absen
 
     // --- fresh -------------------------------------------------------------
     let fixture = Fixture::new();
-    let cache = GatewayHealthCache::at(fixture.data_dir().join("gateway-health"));
+    let cache = GatewayHealthCache::at(fixture.gateway_data_dir().join("gateway-health"));
     cache.store(PROVIDER, &[health_reading()], now_unix());
     assert_eq!(
         cache.load(PROVIDER).len(),
@@ -713,7 +721,7 @@ fn a_stale_health_reading_is_recorded_as_stale_and_a_pre_change_reading_as_absen
 
     // --- stale -------------------------------------------------------------
     let fixture = Fixture::new();
-    let cache = GatewayHealthCache::at(fixture.data_dir().join("gateway-health"));
+    let cache = GatewayHealthCache::at(fixture.gateway_data_dir().join("gateway-health"));
     let long_ago = now_unix() - HEALTH_EVIDENCE_HORIZON_SECONDS - 60;
     cache.store(PROVIDER, &[health_reading()], long_ago);
     let session = fixture.launch(&["--profile", "metered"]);
@@ -734,7 +742,7 @@ fn a_stale_health_reading_is_recorded_as_stale_and_a_pre_change_reading_as_absen
     // `absent`, which is what "a reading whose age is unknown is never
     // fresh" means in practice.
     let fixture = Fixture::new();
-    let health_dir = fixture.data_dir().join("gateway-health");
+    let health_dir = fixture.gateway_data_dir().join("gateway-health");
     std::fs::create_dir_all(&health_dir).unwrap();
     std::fs::write(
         health_dir.join(format!("{PROVIDER}.json")),

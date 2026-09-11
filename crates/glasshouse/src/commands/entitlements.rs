@@ -26,7 +26,7 @@ pub(crate) fn entitlement_pool_with_telemetry(
 ) -> anyhow::Result<Vec<glasshouse::config::ResolvedEntitlement>> {
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let quota_cache =
-        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir());
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().gateway_data_dir());
     let model_cache =
         glasshouse::provider::cache::ModelCache::new(&runtime.paths().provider_cache_dir());
     let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
@@ -87,7 +87,8 @@ pub(crate) fn entitlements_report(runtime: &Runtime) -> anyhow::Result<String> {
 
     let user = UserConfig::load(runtime.paths())?;
     let project_config = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     let entitlements = entitlement_pool_with_telemetry(runtime, &effective)?;
 
     // What each account served, from migration 22's column. One pass over
@@ -383,7 +384,8 @@ pub(crate) fn entitlements_json(runtime: &Runtime, refresh: bool) -> anyhow::Res
     use glasshouse::config::{EntitlementBacking, EntitlementModels};
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     if refresh {
         refresh_missing_catalogues(runtime, &effective)?;
     }

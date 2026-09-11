@@ -31,6 +31,10 @@ use glasshouse::routing::evidence::{
 };
 use glasshouse::session::{NewSession, ProjectSessions};
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 const PROVIDER: &str = "sub-est-probe";
 const VAR_A: &str = "GLASSHOUSE_SUB_EST_KEY_A";
 const VAR_B: &str = "GLASSHOUSE_SUB_EST_KEY_B";
@@ -49,7 +53,15 @@ fn pool_config() -> String {
 }
 
 fn user_config() -> UserConfig {
-    toml::from_str(&format!("version = 1\n\n{}", pool_config())).expect("the fixture parses")
+    let (config, _) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    toml::from_str(&config).expect("the fixture parses")
+}
+
+/// The same fixture's **gateway** half: the two accounts themselves, which
+/// are the gateway's since the 2026-09-11 ruling.
+fn gateway_catalogue() -> glasshouse::config::GatewayCatalogue {
+    let (_, gateway) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    glasshouse::config::GatewayCatalogue::from_toml(&gateway).expect("the gateway half parses")
 }
 
 /// A bootstrapped project inside `base` — `tests/entitlement_telemetry.rs`'s
@@ -76,11 +88,12 @@ impl Fixture {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!("version = 1\n\n{pool_config}"),
-        )
-        .unwrap();
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) =
+            split_gateway_state(&format!("version = 1\n\n{pool_config}"));
+        std::fs::write(config_dir.join("config.toml"), config_text).unwrap();
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).unwrap();
 
         let cli = glasshouse::Cli::try_parse_from([
             "glasshouse",
@@ -554,7 +567,7 @@ fn test_1249_thin_evidence_renders_undistinguished_not_a_guessed_bucket() {
 #[test]
 fn required_behavior_authoritative_capacity_reading_is_never_displaced() {
     let tmp = tempfile::tempdir().unwrap();
-    let quota = GatewayQuotaCache::at(tmp.path().join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(tmp.path().join("gateway").join("gateway-quota"));
     let now = 1_800_000_000_i64;
     // 240 of 300 left — a real, exact, provider-wide reading.
     quota.store(
@@ -568,7 +581,8 @@ fn required_behavior_authoritative_capacity_reading_is_never_displaced() {
     );
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now).with_gateway_quota(&quota);
     let entries = effective
         .configured_entitlements_with_telemetry(&telemetry)
@@ -612,7 +626,12 @@ fn required_behavior_authoritative_capacity_reading_is_never_displaced() {
 fn required_behavior_the_estimate_populates_beside_a_provider_wide_reading() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path());
-    let quota = GatewayQuotaCache::at(tmp.path().join("data").join("gateway-quota"));
+    let quota = GatewayQuotaCache::at(
+        tmp.path()
+            .join("data")
+            .join("gateway")
+            .join("gateway-quota"),
+    );
     let now = 1_800_000_000_i64;
     quota.store(
         PROVIDER,
@@ -632,7 +651,8 @@ fn required_behavior_the_estimate_populates_beside_a_provider_wide_reading() {
         .unwrap();
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now)
         .with_gateway_quota(&quota)
         .with_observations(&rows);

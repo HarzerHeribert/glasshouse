@@ -1631,14 +1631,15 @@ mod project_overview_capacity_tests {
         user.save(runtime.paths()).unwrap();
 
         let now_unix = crate::provider::cache::now_unix_seconds();
-        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()).store(
-            "overview-capacity-test-provider",
-            &crate::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "100"),
-                ("x-ratelimit-remaining-requests", "82"),
-            ]),
-            now_unix,
-        );
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().gateway_data_dir())
+            .store(
+                "overview-capacity-test-provider",
+                &crate::provider::telemetry::RateLimitHeaders::read(vec![
+                    ("x-ratelimit-limit-requests", "100"),
+                    ("x-ratelimit-remaining-requests", "82"),
+                ]),
+                now_unix,
+            );
 
         let lines = build_project_overview_capacity(&runtime);
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -1770,14 +1771,15 @@ mod project_overview_capacity_tests {
         user.save(runtime.paths()).unwrap();
 
         let now_unix = crate::provider::cache::now_unix_seconds();
-        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()).store(
-            "overview-capacity-test-provider",
-            &crate::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "100"),
-                ("x-ratelimit-remaining-requests", "82"),
-            ]),
-            now_unix,
-        );
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths().gateway_data_dir())
+            .store(
+                "overview-capacity-test-provider",
+                &crate::provider::telemetry::RateLimitHeaders::read(vec![
+                    ("x-ratelimit-limit-requests", "100"),
+                    ("x-ratelimit-remaining-requests", "82"),
+                ]),
+                now_unix,
+            );
 
         let lines = build_project_overview_capacity(&runtime);
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -3267,12 +3269,12 @@ mod route_health_tests {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
 
-        GatewayHealthCache::new(runtime.paths().data_dir()).store(
+        GatewayHealthCache::new(runtime.paths().gateway_data_dir()).store(
             "anyrouter",
             &[reading("claude-opus-4-1", 0, Some(now + 300), true)],
             now,
         );
-        GatewayQuotaCache::new(runtime.paths().data_dir()).store(
+        GatewayQuotaCache::new(runtime.paths().gateway_data_dir()).store(
             "anyrouter",
             &RateLimitHeaders::read([
                 ("ratelimit-limit", "300"),
@@ -3321,7 +3323,7 @@ mod route_health_tests {
     fn a_provider_that_stated_no_headers_leaves_every_stated_field_none() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        GatewayHealthCache::new(runtime.paths().data_dir()).store(
+        GatewayHealthCache::new(runtime.paths().gateway_data_dir()).store(
             "openrouter",
             &[reading("some-free-model", 2, None, false)],
             now,
@@ -3345,7 +3347,7 @@ mod route_health_tests {
     fn two_resources_on_one_provider_are_shared_and_never_independent() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        let health = GatewayHealthCache::new(runtime.paths().data_dir());
+        let health = GatewayHealthCache::new(runtime.paths().gateway_data_dir());
         health.store(
             "anyrouter",
             &[
@@ -3385,7 +3387,7 @@ mod route_health_tests {
     fn opening_the_route_health_view_shows_real_gateway_telemetry() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();
         let now = crate::provider::cache::now_unix_seconds();
-        GatewayHealthCache::new(runtime.paths().data_dir()).store(
+        GatewayHealthCache::new(runtime.paths().gateway_data_dir()).store(
             "anyrouter",
             &[reading("claude-opus-4-1", 3, None, false)],
             now,
@@ -3865,15 +3867,27 @@ mod shell_entitlement_scrub_tests {
             format!(
                 "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
-                 [entitlements.claude-a]\nvendor = \"claude\"\nnative_harness = \"claude-code\"\n\n\
-                 [entitlements.claude-b]\nvendor = \"claude\"\nnative_harness = \"claude-code\"\n\n\
-                 [entitlements.foreign-a]\nprovider = \"unused-a\"\n\
-                 credential = {{ env = \"{NATIVE_VAR_A}\" }}\n\n\
-                 [entitlements.foreign-b]\nprovider = \"unused-b\"\n\
-                 credential = {{ env = \"{NATIVE_VAR_B}\" }}\n"
+                 [entitlements.claude-a]\nnative_harness = \"claude-code\"\n\n\
+                 [entitlements.claude-b]\nnative_harness = \"claude-code\"\n"
             ),
         )
         .expect("write user config");
+        // The accounts themselves — plan, vendor, provider, credential
+        // reference — are the gateway's since the 2026-09-11 ruling.
+        // `--data-dir`/`--config-dir` relocate the gateway with Glasshouse,
+        // so this file is the one the binary reads.
+        std::fs::write(
+            data.path().join("gateway.toml"),
+            format!(
+                "[accounts.claude-a]\nvendor = \"claude\"\n\n\
+                 [accounts.claude-b]\nvendor = \"claude\"\n\n\
+                 [accounts.foreign-a]\nprovider = \"unused-a\"\n\
+                 credential = {{ env = \"{NATIVE_VAR_A}\" }}\n\n\
+                 [accounts.foreign-b]\nprovider = \"unused-b\"\n\
+                 credential = {{ env = \"{NATIVE_VAR_B}\" }}\n"
+            ),
+        )
+        .expect("write the gateway catalogue");
 
         let cli = crate::Cli::try_parse_from([
             "glasshouse",
@@ -3915,14 +3929,21 @@ mod shell_entitlement_scrub_tests {
                  [providers.beta]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR_B}\"]\n\n\
                  [profiles.economy]\nharness = \"claude-code\"\nmodel = \"anthropic/claude-sonnet-4\"\n\
                  expected_protocol = \"anthropic-messages\"\n\n\
-                 [profiles.economy.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-                 [entitlements.alpha-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
-                 provider = \"alpha\"\ncredential = {{ env = \"{VAR_A}\" }}\n\n\
-                 [entitlements.beta-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
-                 provider = \"beta\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
+                 [profiles.economy.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n"
             ),
         )
         .expect("write user config");
+        // Both accounts are the gateway's — see the fixture above.
+        std::fs::write(
+            data.path().join("gateway.toml"),
+            format!(
+                "[accounts.alpha-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
+                 provider = \"alpha\"\ncredential = {{ env = \"{VAR_A}\" }}\n\n\
+                 [accounts.beta-account]\nkind = \"api-key\"\nvendor = \"openrouter\"\n\
+                 provider = \"beta\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
+            ),
+        )
+        .expect("write the gateway catalogue");
 
         let cli = crate::Cli::try_parse_from([
             "glasshouse",
@@ -4030,7 +4051,9 @@ mod shell_entitlement_scrub_tests {
 
         let user = UserConfig::load(runtime.paths()).expect("load user config");
         let project = config::load_project_config(runtime.project()).expect("load project config");
-        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let gateway = crate::config::GatewayCatalogue::for_paths(runtime.paths())
+            .expect("the gateway catalogue this fixture wrote");
+        let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
         assert!(matches!(
             effective.entitlement_for(
                 IntegrationId::ClaudeCode,

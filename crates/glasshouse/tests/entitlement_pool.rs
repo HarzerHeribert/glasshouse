@@ -27,9 +27,9 @@ use clap::Parser as _;
 
 use glasshouse::RuntimePaths;
 use glasshouse::config::{
-    ConfigError, EffectiveConfig, EntitlementBacking, EntitlementCredential, EntitlementKind,
-    EntitlementLookupError, EntitlementVendor, ProjectConfig, UserConfig,
-    write_project_config_with_consent,
+    AccountEntry, ConfigError, EffectiveConfig, EntitlementBacking, EntitlementCredential,
+    EntitlementKind, EntitlementLookupError, EntitlementVendor, GatewayCatalogue, ProjectConfig,
+    UserConfig, write_project_config_with_consent,
 };
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::BackendResource;
@@ -42,6 +42,10 @@ use glasshouse::routing::free::{FreePool, FreePreferences};
 use glasshouse::routing::{Cost, CredentialId, Entitlement, EntitlementRules};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 // ===========================================================================
 // Half one — configuration: the entry is an account (1962, 1963, 1973a-d).
 // ===========================================================================
@@ -53,14 +57,24 @@ const TWO_CLAUDE_ACCOUNTS: &str = "version = 1\n\n\
      [providers.alpha-probe]\ntemplate = \"openrouter\"\n\
      credential_env = [\"GLASSHOUSE_POOL_TEST_KEY_A\"]\n\n\
      [providers.beta-probe]\ntemplate = \"openrouter\"\n\
-     credential_env = [\"GLASSHOUSE_POOL_TEST_KEY_B\"]\n\n\
-     [entitlements.claude-a]\nkind = \"claude\"\nvendor = \"claude\"\n\
+     credential_env = [\"GLASSHOUSE_POOL_TEST_KEY_B\"]\n";
+
+/// The two accounts themselves, in the **gateway's** own file — user ruling
+/// 2026-09-11: a plan, a vendor, a credential reference and the provider
+/// behind an account are the gateway's, and Glasshouse's
+/// `[entitlements.<name>]` states only policy about them.
+const TWO_CLAUDE_ACCOUNTS_GATEWAY: &str = "\
+     [accounts.claude-a]\nkind = \"claude\"\nvendor = \"claude\"\n\
      provider = \"alpha-probe\"\ncredential = { env = \"GLASSHOUSE_POOL_TEST_KEY_A\" }\n\n\
-     [entitlements.claude-b]\nkind = \"claude\"\nvendor = \"claude\"\n\
+     [accounts.claude-b]\nkind = \"claude\"\nvendor = \"claude\"\n\
      provider = \"beta-probe\"\ncredential = { env = \"GLASSHOUSE_POOL_TEST_KEY_B\" }\n";
 
 fn two_accounts() -> UserConfig {
     toml::from_str(TWO_CLAUDE_ACCOUNTS).expect("the two-account fixture parses")
+}
+
+fn two_accounts_gateway() -> GatewayCatalogue {
+    GatewayCatalogue::from_toml(TWO_CLAUDE_ACCOUNTS_GATEWAY).expect("the gateway fixture parses")
 }
 
 /// **Line 1963.** Two entries of one vendor and one kind coexist: both are
@@ -71,7 +85,8 @@ fn two_accounts() -> UserConfig {
 #[test]
 fn two_entitlements_of_one_vendor_and_kind_coexist_as_distinct_resources() {
     let user = two_accounts();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts_gateway();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
 
     let configured = effective
         .configured_entitlements()
@@ -133,29 +148,19 @@ fn two_entitlements_of_one_vendor_and_kind_coexist_as_distinct_resources() {
 #[test]
 fn only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name() {
     // The two shapes that must parse.
-    let env: UserConfig = toml::from_str(
-        "version = 1\n\n[entitlements.a]\ncredential = { env = \"POOL_ONLY_SHAPE_A\" }\n",
-    )
-    .expect("an environment reference parses");
+    let env: AccountEntry = toml::from_str("credential = { env = \"POOL_ONLY_SHAPE_A\" }\n")
+        .expect("an environment reference parses");
     assert_eq!(
-        env.entitlements()
-            .get("a")
-            .and_then(|e| e.credential())
-            .map(EntitlementCredential::secret_ref),
+        env.credential().map(EntitlementCredential::secret_ref),
         Some(&SecretRef::Environment {
             var: "POOL_ONLY_SHAPE_A".to_owned()
         })
     );
-    let os: UserConfig = toml::from_str(
-        "version = 1\n\n[entitlements.a]\n\
-         credential = { service = \"glasshouse\", account = \"a\" }\n",
-    )
-    .expect("an OS-credential reference parses");
+    let os: AccountEntry =
+        toml::from_str("credential = { service = \"glasshouse\", account = \"a\" }\n")
+            .expect("an OS-credential reference parses");
     assert_eq!(
-        os.entitlements()
-            .get("a")
-            .and_then(|e| e.credential())
-            .map(EntitlementCredential::secret_ref),
+        os.credential().map(EntitlementCredential::secret_ref),
         Some(&SecretRef::OsCredential {
             service: "glasshouse".to_owned(),
             account: "a".to_owned()
@@ -164,18 +169,14 @@ fn only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name() {
 
     // A bare string — the value-shaped mistake — is refused by the rule's
     // name.
-    let value = toml::from_str::<UserConfig>(
-        "version = 1\n\n[entitlements.a]\n\
-         credential = \"fake-not-a-real-key-0123456789\"\n",
-    )
-    .expect_err("a bare string must not deserialise");
+    let value = toml::from_str::<AccountEntry>("credential = \"fake-not-a-real-key-0123456789\"\n")
+        .expect_err("a bare string must not deserialise");
     assert!(value.to_string().contains("never a value"), "{value}");
 
     // A map smuggling a value under another key is refused by that key's
     // name.
-    let keyed = toml::from_str::<UserConfig>(
-        "version = 1\n\n[entitlements.a]\n\
-         credential = { value = \"fake-not-a-real-key-0123456789\" }\n",
+    let keyed = toml::from_str::<AccountEntry>(
+        "credential = { value = \"fake-not-a-real-key-0123456789\" }\n",
     )
     .expect_err("a `value` key must not deserialise");
     assert!(
@@ -187,12 +188,26 @@ fn only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name() {
 
     // The two shapes cannot be mixed, and half a shape is not a shape.
     for broken in [
-        "version = 1\n\n[entitlements.a]\ncredential = { env = \"V\", service = \"s\" }\n",
-        "version = 1\n\n[entitlements.a]\ncredential = { service = \"s\" }\n",
-        "version = 1\n\n[entitlements.a]\ncredential = { account = \"a\" }\n",
+        "credential = { env = \"V\", service = \"s\" }\n",
+        "credential = { service = \"s\" }\n",
+        "credential = { account = \"a\" }\n",
     ] {
-        toml::from_str::<UserConfig>(broken).expect_err(broken);
+        toml::from_str::<AccountEntry>(broken).expect_err(broken);
     }
+
+    // And the whole of it is refused in Glasshouse's own table, by the key's
+    // name and with the command that moves it.
+    let misplaced = toml::from_str::<UserConfig>(
+        "version = 1\n\n[entitlements.a]\ncredential = { env = \"POOL_ONLY_SHAPE_A\" }\n",
+    )
+    .expect_err("a credential is the gateway's");
+    assert!(
+        misplaced
+            .message()
+            .contains("glasshouse migrate-gateway-state"),
+        "{}",
+        misplaced.message()
+    );
 }
 
 /// A mistyped rule key is refused, not read as "no rule". The six rule
@@ -220,10 +235,8 @@ fn a_mistyped_rule_key_is_refused_rather_than_read_as_no_rule() {
 #[test]
 fn an_env_value_shaped_like_a_credential_is_refused_without_being_echoed() {
     const PLANTED: &str = "sk-ant-api03-FAKEFAKE";
-    let err = toml::from_str::<UserConfig>(&format!(
-        "version = 1\n\n[entitlements.a]\ncredential = {{ env = \"{PLANTED}\" }}\n"
-    ))
-    .expect_err("a value pasted into `env` must not deserialise");
+    let err = toml::from_str::<AccountEntry>(&format!("credential = {{ env = \"{PLANTED}\" }}\n"))
+        .expect_err("a value pasted into `env` must not deserialise");
     assert!(
         err.message().contains("NAME"),
         "expected the env-is-not-a-value refusal, got: {}",
@@ -245,10 +258,8 @@ fn an_env_value_shaped_like_a_credential_is_refused_without_being_echoed() {
 #[test]
 fn the_refusal_message_this_crate_writes_never_contains_the_value() {
     const PLANTED: &str = "fake-planted-value-a1b2c3d4e5f6a1b2c3d4";
-    let err = toml::from_str::<UserConfig>(&format!(
-        "version = 1\n\n[entitlements.a]\ncredential = \"{PLANTED}\"\n"
-    ))
-    .expect_err("a bare string must not deserialise");
+    let err = toml::from_str::<AccountEntry>(&format!("credential = \"{PLANTED}\"\n"))
+        .expect_err("a bare string must not deserialise");
     assert!(err.message().contains("never a value"), "{}", err.message());
     assert!(
         !err.message().contains(PLANTED),
@@ -306,19 +317,20 @@ fn debug_of_every_entitlement_type_never_contains_a_resolved_value() {
     }
 
     let credential = EntitlementCredential::environment(VAR);
-    let mut config = glasshouse::config::EntitlementConfig::default();
-    config
+    let mut account = AccountEntry::default();
+    account
         .set_kind(Some(EntitlementKind::Claude))
         .set_vendor(Some(EntitlementVendor::Claude))
         .set_credential(Some(credential.clone()))
         .set_provider(Some("alpha-probe".to_owned()));
+    let config = glasshouse::config::EntitlementConfig::default();
     let resolved = config
-        .to_resolved("claude-a", glasshouse::config::Layer::User)
-        .expect("a provider-backed entry with its own credential resolves");
+        .to_resolved("claude-a", &account, glasshouse::config::Layer::User)
+        .expect("a provider-backed account with its own credential resolves");
     let routing = resolved.to_routing();
 
     let rendered = format!(
-        "{credential:?}\n{config:?}\n{resolved:?}\n{routing:?}\n{}\n{}",
+        "{credential:?}\n{account:?}\n{config:?}\n{resolved:?}\n{routing:?}\n{}\n{}",
         resolved.describe(),
         glasshouse::routing::Entitlement::new("claude-a", EntitlementRules::UNRESTRICTED).name(),
     );
@@ -348,13 +360,13 @@ fn resolving_two_entitlements_yields_each_its_own_value_and_never_the_others() {
     const VALUE_A: &str = "fake-resolve-a-0123456789abcdef";
     const VALUE_B: &str = "fake-resolve-b-fedcba9876543210";
 
-    let user: UserConfig = toml::from_str(&format!(
-        "version = 1\n\n\
-         [entitlements.claude-a]\nvendor = \"claude\"\ncredential = {{ env = \"{VAR_A}\" }}\n\n\
-         [entitlements.claude-b]\nvendor = \"claude\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
+    let gateway = GatewayCatalogue::from_toml(&format!(
+        "[accounts.claude-a]\nvendor = \"claude\"\ncredential = {{ env = \"{VAR_A}\" }}\n\n\
+         [accounts.claude-b]\nvendor = \"claude\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
     ))
     .expect("two own-credential accounts parse");
-    let effective = EffectiveConfig::new(&user, None);
+    let user = UserConfig::default();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let configured = effective
         .configured_entitlements()
         .expect("two accounts resolve");
@@ -399,17 +411,16 @@ fn the_project_config_writer_serialises_references_and_never_values() {
     std::fs::create_dir_all(&root).expect("create project root");
     let project = Project::discover(&root, None, false).expect("a temp dir is a usable project");
 
+    // Since the 2026-09-11 ruling the project writer cannot express a
+    // credential at all — `EntitlementConfig` has no such field — so this
+    // asserts the stronger property: what it writes is policy, and the two
+    // planted values do not appear whatever else it writes.
     let mut config = ProjectConfig::default();
     let mut a = glasshouse::config::EntitlementConfig::default();
-    a.set_vendor(Some(EntitlementVendor::Claude))
-        .set_credential(Some(EntitlementCredential::environment(VAR_A)));
+    a.set_deny_harnesses([IntegrationId::Pane]);
     config.entitlements_mut().set("claude-a", a);
     let mut b = glasshouse::config::EntitlementConfig::default();
-    b.set_vendor(Some(EntitlementVendor::Claude))
-        .set_credential(Some(EntitlementCredential::os_credential(
-            "glasshouse",
-            VAR_B,
-        )));
+    b.set_deny_harnesses([IntegrationId::Codex]);
     config.entitlements_mut().set("claude-b", b);
 
     // SAFETY: unique to this test; removed below. The values are in the
@@ -428,8 +439,11 @@ fn the_project_config_writer_serialises_references_and_never_values() {
     let written = std::fs::read_to_string(root.join(".glasshouse/config.toml"))
         .expect("the project config was written");
     assert!(written.contains("[entitlements.claude-a]"), "{written}");
-    assert!(written.contains(VAR_A), "{written}");
-    assert!(written.contains(VAR_B), "{written}");
+    assert!(written.contains("deny_harnesses"), "{written}");
+    assert!(
+        !written.contains("credential"),
+        "a credential reference is the gateway's and must not be writable here:\n{written}"
+    );
     assert!(
         !written.contains(VALUE_A) && !written.contains(VALUE_B),
         "a credential value reached a configuration file:\n{written}"
@@ -443,13 +457,13 @@ fn the_project_config_writer_serialises_references_and_never_values() {
 /// references' names and nothing else.
 #[test]
 fn shared_credentials_and_native_sign_ins_with_credentials_are_refused_by_name() {
-    let shared: UserConfig = toml::from_str(
-        "version = 1\n\n\
-         [entitlements.claude-a]\ncredential = { env = \"POOL_SHARED_VAR\" }\n\n\
-         [entitlements.claude-b]\ncredential = { env = \"POOL_SHARED_VAR\" }\n",
+    let shared = GatewayCatalogue::from_toml(
+        "[accounts.claude-a]\ncredential = { env = \"POOL_SHARED_VAR\" }\n\n\
+         [accounts.claude-b]\ncredential = { env = \"POOL_SHARED_VAR\" }\n",
     )
     .expect("parses; the contradiction is a resolution fact");
-    let err = EffectiveConfig::new(&shared, None)
+    let empty = UserConfig::default();
+    let err = EffectiveConfig::with_gateway(&empty, None, &shared)
         .entitlements()
         .expect_err("one reference under two names is two names on one account");
     assert!(
@@ -462,12 +476,13 @@ fn shared_credentials_and_native_sign_ins_with_credentials_are_refused_by_name()
     );
     assert!(err.to_string().contains("POOL_SHARED_VAR"), "{err}");
 
-    let native: UserConfig = toml::from_str(
-        "version = 1\n\n[entitlements.max]\nnative_harness = \"claude-code\"\n\
-         credential = { env = \"POOL_NATIVE_VAR\" }\n",
-    )
-    .expect("parses; the contradiction is a resolution fact");
-    let err = EffectiveConfig::new(&native, None)
+    let native_account =
+        GatewayCatalogue::from_toml("[accounts.max]\ncredential = { env = \"POOL_NATIVE_VAR\" }\n")
+            .expect("parses; the contradiction is a resolution fact");
+    let native: UserConfig =
+        toml::from_str("version = 1\n\n[entitlements.max]\nnative_harness = \"claude-code\"\n")
+            .expect("the overlay parses");
+    let err = EffectiveConfig::with_gateway(&native, None, &native_account)
         .entitlements()
         .expect_err("a harness's own sign-in has no credential of Glasshouse's to carry");
     assert!(
@@ -484,7 +499,8 @@ fn shared_credentials_and_native_sign_ins_with_credentials_are_refused_by_name()
 #[test]
 fn the_same_entitlement_serves_two_harnesses() {
     let user = two_accounts();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts_gateway();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let backend = BackendResource::DirectProvider {
         provider: "alpha-probe".to_owned(),
     };
@@ -512,7 +528,8 @@ fn the_same_entitlement_serves_two_harnesses() {
 #[test]
 fn the_same_harness_runs_under_two_entitlements() {
     let user = two_accounts();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts_gateway();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
 
     let under_a = effective
         .entitlement_for(
@@ -547,7 +564,8 @@ fn the_same_harness_runs_under_two_entitlements() {
 #[test]
 fn the_same_entitlement_serves_two_models() {
     let user = two_accounts();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts_gateway();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
 
     let mut on_sonnet = glasshouse::profile::LaunchProfile::native(IntegrationId::ClaudeCode);
     on_sonnet.backend = BackendResource::DirectProvider {
@@ -578,7 +596,8 @@ fn the_same_entitlement_serves_two_models() {
 #[test]
 fn one_vendor_and_protocol_stand_behind_two_credentials() {
     let user = two_accounts();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts_gateway();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let configured = effective.configured_entitlements().expect("resolvable");
     let (a, b) = (&configured[0], &configured[1]);
 
@@ -808,15 +827,16 @@ impl Binary {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!(
-                "version = 1\n\n\
-                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\
-                 {extra}"
-            ),
-        )
-        .expect("write user config");
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) = split_gateway_state(&format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\
+             {extra}"
+        ));
+        std::fs::write(config_dir.join("config.toml"), config_text).expect("write user config");
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text)
+            .expect("write the gateway catalogue");
 
         Self {
             _tmp: tmp,

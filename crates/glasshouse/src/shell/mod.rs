@@ -1010,7 +1010,8 @@ fn resume_session(
 
     let user = UserConfig::load(app_runtime.paths())?;
     let project_config = config::load_project_config(app_runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(app_runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     // The record's own harness, not whatever is configured now — resuming a
     // Codex conversation in Claude Code would be nonsense; same rule
     // `main.rs::resume_session` states for the CLI path.
@@ -1227,7 +1228,11 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
         Ok(project_config) => project_config,
         Err(err) => return vec![format!("  resource configuration unavailable: {err:#}")],
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return vec![format!("  resource configuration unavailable: {err:#}")],
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
 
     let providers = effective.provider_names();
     if providers.is_empty() {
@@ -1236,7 +1241,7 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
 
     let now_unix = crate::provider::cache::now_unix_seconds();
     let telemetry = GatheredTelemetry::new()
-        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().data_dir()));
+        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().gateway_data_dir()));
     let base_thresholds = effective.capacity_band_thresholds().value;
 
     // **Line 1283's producer.** The rows a burn rate counts, read once for
@@ -1358,7 +1363,8 @@ fn build_project_overview_routing(runtime: &Runtime) -> String {
         Ok(project_config) => project_config,
         Err(err) => return format!("  routing model  unavailable: {err:#}"),
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     let resolution = effective.routing_model_resolution().value;
     let label = routing_resolution_label(&resolution);
 
@@ -1835,14 +1841,16 @@ fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
     let quota: std::collections::HashMap<
         String,
         (crate::provider::telemetry::RateLimitHeaders, i64),
-    > = GatewayQuotaCache::new(runtime.paths().data_dir())
+    > = GatewayQuotaCache::new(runtime.paths().gateway_data_dir())
         .load_all()
         .into_iter()
         .map(|(provider, headers, observed_at)| (provider, (headers, observed_at)))
         .collect();
 
     let mut rows = Vec::new();
-    for (provider, readings) in GatewayHealthCache::new(runtime.paths().data_dir()).load_all() {
+    for (provider, readings) in
+        GatewayHealthCache::new(runtime.paths().gateway_data_dir()).load_all()
+    {
         // Concept 5's only honest signal. `FailureDomain::between` compares
         // two `Backend`s and neither cache stores one, so this uses the
         // identity that comparison would use — the provider name. The
@@ -1893,7 +1901,8 @@ fn account_summary(runtime: &Runtime) -> crate::subscription::Summary {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return crate::subscription::Summary::unknown();
     };
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     crate::subscription::summarise(runtime.paths(), &effective)
 }
 
@@ -1910,7 +1919,8 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let model_cache = ModelCache::new(&runtime.paths().provider_cache_dir());
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     let mut harnesses = Vec::new();
     let mut integrations = Vec::new();

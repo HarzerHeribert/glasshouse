@@ -52,7 +52,8 @@ pub(super) fn launch_profiles(
 ) -> anyhow::Result<Vec<LaunchProfile>> {
     let user = UserConfig::load(app_runtime.paths())?;
     let project = config::load_project_config(app_runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(app_runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let selection = session::select::select(harness.map(IntegrationId::slug), effective)?;
     session::launch_profile::enabled_profiles(&effective, selection.id())
 }
@@ -195,7 +196,8 @@ pub(super) fn start_session_with_profile(
 ) -> anyhow::Result<SessionId> {
     let user = UserConfig::load(app_runtime.paths())?;
     let project_config = config::load_project_config(app_runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(app_runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     let selection = session::select::select(harness.map(IntegrationId::slug), effective)?;
 
     if !effective.profile_enabled(profile_name).value {
@@ -252,10 +254,10 @@ pub(super) fn start_session_with_profile(
             )
         },
         Some(crate::provider::telemetry::GatewayQuotaCache::new(
-            app_runtime.paths().data_dir(),
+            app_runtime.paths().gateway_data_dir(),
         )),
         Some(crate::provider::telemetry::GatewayHealthCache::new(
-            app_runtime.paths().data_dir(),
+            app_runtime.paths().gateway_data_dir(),
         )),
         crate::routing::evidence::EvidenceLedger::open(app_runtime)
             .map(Arc::new)

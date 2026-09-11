@@ -38,6 +38,10 @@ use glasshouse::routing::evidence::{
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -491,7 +495,15 @@ fn pool_config() -> String {
 }
 
 fn user_config() -> UserConfig {
-    toml::from_str(&format!("version = 1\n\n{}", pool_config())).expect("the fixture parses")
+    let (config, _) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    toml::from_str(&config).expect("the fixture parses")
+}
+
+/// The same fixture's **gateway** half: the account itself, which is the
+/// gateway's since the 2026-09-11 ruling.
+fn gateway_catalogue() -> glasshouse::config::GatewayCatalogue {
+    let (_, gateway) = split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+    glasshouse::config::GatewayCatalogue::from_toml(&gateway).expect("the gateway half parses")
 }
 
 /// A bootstrapped project inside `base` — `subscription_estimator.rs`'s own
@@ -510,11 +522,12 @@ impl Fixture {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!("version = 1\n\n{}", pool_config()),
-        )
-        .unwrap();
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) =
+            split_gateway_state(&format!("version = 1\n\n{}", pool_config()));
+        std::fs::write(config_dir.join("config.toml"), config_text).unwrap();
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).unwrap();
 
         let cli = glasshouse::Cli::try_parse_from([
             "glasshouse",
@@ -596,7 +609,11 @@ fn the_floor_keeps_only_rows_at_or_after_the_regime_change_and_the_render_says_s
     let fixture = Fixture::new(tmp.path());
     let now = now_unix();
 
-    let quota_dir = tmp.path().join("data").join("gateway-quota");
+    let quota_dir = tmp
+        .path()
+        .join("data")
+        .join("gateway")
+        .join("gateway-quota");
     let quota = GatewayQuotaCache::at(&quota_dir);
     quota.store(
         RESOLVER_PROVIDER,
@@ -647,7 +664,8 @@ fn the_floor_keeps_only_rows_at_or_after_the_regime_change_and_the_render_says_s
     );
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now)
         .with_gateway_quota(&quota)
         .with_observations(&rows);
@@ -703,7 +721,11 @@ fn a_reading_file_written_before_this_field_existed_loads_as_no_change_recorded_
     let fixture = Fixture::new(tmp.path());
     let now = now_unix();
 
-    let quota_dir = tmp.path().join("data").join("gateway-quota");
+    let quota_dir = tmp
+        .path()
+        .join("data")
+        .join("gateway")
+        .join("gateway-quota");
     let quota = GatewayQuotaCache::at(&quota_dir);
     quota.store(
         RESOLVER_PROVIDER,
@@ -755,7 +777,8 @@ fn a_reading_file_written_before_this_field_existed_loads_as_no_change_recorded_
         .unwrap();
 
     let user = user_config();
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = gateway_catalogue();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let telemetry = EntitlementTelemetry::new(now)
         .with_gateway_quota(&quota)
         .with_observations(&rows);

@@ -91,7 +91,8 @@ pub(crate) fn route_report(
 
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     let recommendation = route_recommendation(runtime, &effective, parsed, to, fresh, now, task)?;
     let mut report = render_route_recommendation(&recommendation);

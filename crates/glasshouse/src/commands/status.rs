@@ -80,7 +80,8 @@ pub(crate) fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
     // different provider-wide readings.
     let user = UserConfig::load(runtime.paths())?;
     let project_config = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     // One resolver, one set of sources — `entitlement_pool_with_telemetry`,
     // which `glasshouse entitlements` reads through as well so the two
     // commands cannot describe one account differently.

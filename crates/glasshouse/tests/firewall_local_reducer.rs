@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use clap::Parser;
+use glasshouse::config::UserConfig;
 use glasshouse::config::firewall::LocalReducerConfig;
-use glasshouse::config::{EntitlementConfig, EntitlementCredential, UserConfig};
 use glasshouse::{Cli, Runtime};
 use rusqlite::Connection;
 
@@ -101,18 +101,27 @@ impl Fixture {
         self.save(user);
     }
 
-    /// An entitlement naming `CREDENTIAL_VAR` as its credential — the exact
-    /// shape `EffectiveConfig::foreign_entitlement_credential_vars` scrubs.
-    /// Plants the one thing test (f) proves a local reducer's subprocess
-    /// never receives.
+    /// A **gateway account** naming `CREDENTIAL_VAR` as its credential — the
+    /// exact shape `EffectiveConfig::foreign_entitlement_credential_vars`
+    /// scrubs. Plants the one thing test (f) proves a local reducer's
+    /// subprocess never receives.
+    ///
+    /// Written to the gateway's own `gateway.toml`, because an account is
+    /// the gateway's since the 2026-09-11 ruling. The binary under test
+    /// finds it because `--data-dir`/`--config-dir` relocate the gateway
+    /// with Glasshouse (`RuntimePaths::resolve`), so this fixture is
+    /// self-contained and never reads the developer's own accounts.
     fn add_entitlement_with_credential(&self, name: &str) {
-        let mut user = self.config();
-        let mut entitlement = EntitlementConfig::default();
-        entitlement
-            .set_provider(Some("unused-provider".to_owned()))
-            .set_credential(Some(EntitlementCredential::environment(CREDENTIAL_VAR)));
-        user.entitlements_mut().set(name, entitlement);
-        self.save(user);
+        let path = self.runtime.paths().gateway_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "[accounts.{name}]\nprovider = \"unused-provider\"\n\
+                 credential = {{ env = \"{CREDENTIAL_VAR}\" }}\n"
+            ),
+        )
+        .unwrap();
     }
 
     fn run(&self, args: &[&str], stdin_bytes: &[u8]) -> Output {

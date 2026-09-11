@@ -78,7 +78,9 @@ fn guardrail_policy(runtime: &Runtime) -> Result<guardrails::Policy, String> {
     let user = UserConfig::load(runtime.paths()).map_err(|err| err.to_string())?;
     let project_config =
         config::load_project_config(runtime.project()).map_err(|err| err.to_string())?;
-    Ok(EffectiveConfig::new(&user, project_config.as_ref()).guardrail_policy())
+    let gateway =
+        config::GatewayCatalogue::for_paths(runtime.paths()).map_err(|err| err.to_string())?;
+    Ok(EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway).guardrail_policy())
 }
 
 /// `Request::Preflight` — see the protocol's own doc comment for the

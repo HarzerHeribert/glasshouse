@@ -388,10 +388,10 @@ fn resolve_resume_overlay(
             )
         },
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            runtime.paths().data_dir(),
+            runtime.paths().gateway_data_dir(),
         )),
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths().data_dir(),
+            runtime.paths().gateway_data_dir(),
         )),
         glasshouse::routing::evidence::optional_observation_sink(
             evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
@@ -1246,7 +1246,8 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return;
     };
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     let Ok(destinations) = crate::commands::routing_destinations::routing_destinations(
         runtime,
@@ -1365,7 +1366,8 @@ pub(crate) fn resume_session(
 
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let selection = session::select::select(Some(resumable.harness.as_str()), effective)?;
     validate_recorded_broker_resume(
         &effective,
@@ -1742,6 +1744,8 @@ mod broker_selection_tests {
     use super::*;
     use glasshouse::integrations::IntegrationId;
 
+    use glasshouse::config::GatewayCatalogue;
+
     fn effective(text: &str) -> (UserConfig, glasshouse::profile::LaunchProfile) {
         let user: UserConfig = toml::from_str(text).unwrap();
         let profile = EffectiveConfig::new(&user, None)
@@ -1749,6 +1753,12 @@ mod broker_selection_tests {
             .unwrap()
             .value;
         (user, profile)
+    }
+
+    /// The gateway's own accounts, which a broker entitlement now comes
+    /// from — user ruling 2026-09-11.
+    fn accounts(text: &str) -> GatewayCatalogue {
+        GatewayCatalogue::from_toml(text).expect("the gateway catalogue parses")
     }
 
     #[test]
@@ -1766,13 +1776,18 @@ mod broker_selection_tests {
     #[test]
     fn gateway_pin_resolves_exact_broker_and_rejects_an_api_credit_account() {
         let (user, profile) = effective(
-            "version = 1\n\n[profiles.gateway]\nharness = \"pane\"\nbackend = { kind = \"glasshouse-gateway\" }\nentitlement = \"work\"\n\n[entitlements.work]\nsubscription_broker = \"cliproxyapi\"\nallow_harnesses = [\"pane\"]\n\n[entitlements.api]\nprovider = \"openrouter\"\n",
+            "version = 1\n\n[profiles.gateway]\nharness = \"pane\"\nbackend = { kind = \"glasshouse-gateway\" }\nentitlement = \"work\"\n\n[entitlements.work]\nallow_harnesses = [\"pane\"]\n",
         );
-        let selected = gateway_entitlement(&EffectiveConfig::new(&user, None), &profile, None)
+        let gateway = accounts(
+            "[accounts.work]\nsubscription_broker = \"cliproxyapi\"\n\n\
+             [accounts.api]\nprovider = \"openrouter\"\n",
+        );
+        let layered = EffectiveConfig::with_gateway(&user, None, &gateway);
+        let selected = gateway_entitlement(&layered, &profile, None)
             .unwrap()
             .unwrap();
         assert_eq!(selected.name(), "work");
-        let error = gateway_entitlement(&EffectiveConfig::new(&user, None), &profile, Some("api"))
+        let error = gateway_entitlement(&layered, &profile, Some("api"))
             .unwrap_err()
             .to_string();
         assert!(error.contains("no longer matches") || error.contains("not backed"));
@@ -1780,12 +1795,12 @@ mod broker_selection_tests {
 
     #[test]
     fn stored_broker_entitlement_refuses_a_deleted_profile_before_fallback() {
-        let user: UserConfig = toml::from_str(
-            "version = 1\n\n[entitlements.work]\nsubscription_broker = \"cliproxyapi\"\nallow_harnesses = [\"pane\"]\n",
-        )
-        .unwrap();
+        let user: UserConfig =
+            toml::from_str("version = 1\n\n[entitlements.work]\nallow_harnesses = [\"pane\"]\n")
+                .unwrap();
+        let gateway = accounts("[accounts.work]\nsubscription_broker = \"cliproxyapi\"\n");
         let error = validate_recorded_broker_resume(
-            &EffectiveConfig::new(&user, None),
+            &EffectiveConfig::with_gateway(&user, None, &gateway),
             Some("deleted"),
             Some("work"),
             IntegrationId::Pane,

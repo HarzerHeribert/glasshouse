@@ -259,7 +259,11 @@ pub(super) fn render_subscription_rows(
         lines.push(Line::default());
         for (index, step) in [
             crate::subscription::ADOPT_BINARY_COMMAND.to_owned(),
-            "add an [entitlements.<name>] table with subscription_broker = \"cliproxyapi\""
+            // The account table is the gateway's since the 2026-09-11
+            // ruling; Glasshouse's own `[entitlements.<name>]` states only
+            // the rules an account is used under.
+            "add an [accounts.<name>] table with subscription_broker = \"cliproxyapi\" to the \
+             gateway's gateway.toml"
                 .to_owned(),
             "glasshouse subscriptions login <anthropic|openai|google> --entitlement <name>"
                 .to_owned(),

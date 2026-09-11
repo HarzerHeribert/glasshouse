@@ -991,6 +991,10 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     write_configured_providers_report(&mut out, runtime, &secrets);
     let _ = writeln!(out);
 
+    let _ = writeln!(out, "Gateway-owned state");
+    write_gateway_state_report(&mut out, runtime);
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "Problems");
     let problems = discovery.problems();
     if problems.is_empty() {
@@ -1008,6 +1012,91 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     );
 
     out
+}
+
+/// Where the gateway's store is, and whether any of it is still in
+/// Glasshouse's — the 2026-09-11 ruling's own diagnostic.
+///
+/// Two kinds of leftover, and both name `glasshouse migrate-gateway-state`
+/// because that is the one command that moves them: an `[entitlements.*]`
+/// table in either configuration layer that still states one of the five
+/// account keys, and a directory under Glasshouse's own data directory that
+/// the gateway now owns. A leftover is reported and never acted on: `doctor`
+/// reads.
+///
+/// Read through [`crate::config::entitlement::LegacyEntitlementConfig`],
+/// which exists for exactly this and for the migration, because the ordinary
+/// loader refuses these files rather than parsing them.
+fn write_gateway_state_report(out: &mut String, runtime: &crate::Runtime) {
+    use std::fmt::Write as _;
+
+    let paths = runtime.paths();
+    let _ = writeln!(
+        out,
+        "  configuration: {}",
+        paths.gateway_config_path().display()
+    );
+    let _ = writeln!(
+        out,
+        "  data:          {}",
+        paths.gateway_data_dir().display()
+    );
+
+    let mut leftovers = Vec::new();
+    let mut files = vec![paths.user_config_file()];
+    if let Ok(project) = crate::config::project_config_path(runtime.project()) {
+        files.push(project);
+    }
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(layer) = toml::from_str::<LegacyEntitlementLayer>(&text) else {
+            continue;
+        };
+        for (name, entry) in &layer.entitlements {
+            let present = entry.account_keys_present();
+            if present.is_empty() {
+                continue;
+            }
+            leftovers.push(format!(
+                "`[entitlements.{name}]` in {} still states {}",
+                path.display(),
+                present.join(", ")
+            ));
+        }
+    }
+    for (from, _) in crate::config::GATEWAY_OWNED_DIRECTORIES {
+        let legacy = paths.data_dir().join(from);
+        if legacy == paths.gateway_data_dir().join(from) {
+            continue;
+        }
+        if legacy.is_dir() {
+            leftovers.push(format!("{} is the gateway's now", legacy.display()));
+        }
+    }
+
+    if leftovers.is_empty() {
+        let _ = writeln!(out, "  left in Glasshouse's own store: (none)");
+        return;
+    }
+    let _ = writeln!(out, "  left in Glasshouse's own store:");
+    for leftover in leftovers {
+        let _ = writeln!(out, "    - {leftover}");
+    }
+    let _ = writeln!(
+        out,
+        "    run `glasshouse migrate-gateway-state` to move them (`--dry-run` first)"
+    );
+}
+
+/// Just enough of a configuration file to find the legacy account keys —
+/// see [`write_gateway_state_report`].
+#[derive(Default, serde::Deserialize)]
+struct LegacyEntitlementLayer {
+    #[serde(default)]
+    entitlements:
+        std::collections::BTreeMap<String, crate::config::entitlement::LegacyEntitlementConfig>,
 }
 
 fn write_integration_line(out: &mut String, d: &DetectedIntegration, status_width: usize) {
@@ -1251,7 +1340,8 @@ fn write_configured_providers_report(
             return;
         }
     };
-    let effective = crate::config::EffectiveConfig::new(&user, project.as_ref());
+    let gateway = crate::config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = crate::config::EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     let names = effective.provider_names();
     if names.is_empty() {

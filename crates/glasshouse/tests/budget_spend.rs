@@ -62,6 +62,16 @@ impl Binary {
         }
     }
 
+    /// The gateway's own `gateway.toml`, beside Glasshouse's config —
+    /// where an account lives since the 2026-09-11 ruling.
+    /// `--data-dir`/`--config-dir` relocate the gateway with Glasshouse, so
+    /// this is the file the binary reads.
+    fn with_gateway(self, toml: &str) -> Self {
+        std::fs::write(self.base.join("config").join("gateway.toml"), toml)
+            .expect("write gateway.toml");
+        self
+    }
+
     fn with_pricing(self, toml: &str) -> Self {
         std::fs::write(self.base.join("config").join("pricing.toml"), toml)
             .expect("write pricing.toml");
@@ -339,9 +349,16 @@ fn two_provider_route_config() -> String {
          [profiles.alpha.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
          [profiles.beta]\nharness = \"claude-code\"\nexpected_protocol = \"anthropic-messages\"\n\n\
          [profiles.beta.backend]\nkind = \"direct-provider\"\nprovider = \"beta\"\n\n\
-         [entitlements.acct-alpha]\nprovider = \"alpha\"\ncredential = {{ env = \"{VAR}\" }}\n\n\
-         [entitlements.acct-beta]\nprovider = \"beta\"\ncredential = {{ env = \"{FREE_VAR}\" }}\n",
+         [entitlements.acct-alpha]\nallow_harnesses = [\"claude-code\"]\n",
         provider_with_budget("alpha", VAR, 10_000_000),
+    )
+}
+
+/// The two accounts the routing fixture above states policy about.
+fn two_route_accounts() -> String {
+    format!(
+        "[accounts.acct-alpha]\nprovider = \"alpha\"\ncredential = {{ env = \"{VAR}\" }}\n\n\
+         [accounts.acct-beta]\nprovider = \"beta\"\ncredential = {{ env = \"{FREE_VAR}\" }}\n"
     )
 }
 
@@ -373,6 +390,7 @@ fn glasshouse_route_refuses_the_exhausted_destination_by_name() {
         "[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n{}",
         two_provider_route_config()
     ))
+    .with_gateway(&two_route_accounts())
     .with_pricing(&pricing_toml("alpha", "m", 6.0, 6.0));
     // 1,000,000 input + 1,000,000 output @ $6/M each = $12 >= the $10 budget.
     binary.plant_exchange("alpha", "m", 1_000_000, 1_000_000, 60);

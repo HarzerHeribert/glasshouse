@@ -157,7 +157,7 @@ impl BinaryFixture {
     /// The directory `GatewayQuotaCache::new` would resolve its own root
     /// under, for a test planting a reading directly.
     fn quota_cache(&self) -> GatewayQuotaCache {
-        GatewayQuotaCache::at(self.home.path().join("gateway-quota"))
+        GatewayQuotaCache::at(self.home.path().join("gateway").join("gateway-quota"))
     }
 
     /// Run the shipped binary and return `(stdout, exit success)`.

@@ -136,7 +136,7 @@ impl Fixture {
     /// a network.
     fn plant_reserve_band(&self) {
         let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(
-            self.base.join("data").join("gateway-quota"),
+            self.base.join("data").join("gateway").join("gateway-quota"),
         );
         let limit = RESERVE_BAND_LIMIT.to_string();
         let remaining = RESERVE_BAND_REMAINING.to_string();
@@ -991,7 +991,7 @@ impl RouteBinary {
 
     fn plant_reserve_band(&self, provider: &str) {
         let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(
-            self.base.join("data").join("gateway-quota"),
+            self.base.join("data").join("gateway").join("gateway-quota"),
         );
         let limit = RESERVE_BAND_LIMIT.to_string();
         let remaining = RESERVE_BAND_REMAINING.to_string();

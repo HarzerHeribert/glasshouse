@@ -22,10 +22,49 @@ use super::*;
 pub struct EffectiveConfig<'a> {
     pub(super) user: &'a UserConfig,
     pub(super) project: Option<&'a ProjectConfig>,
+    /// The gateway's own accounts and providers — read, never written.
+    ///
+    /// User ruling, 2026-09-11: an inference account is the gateway's, and
+    /// Glasshouse's `[entitlements.<name>]` tables are policy *about* one.
+    /// So the account half of every resolution below comes from here and the
+    /// rule half from the two layers above, and neither file can state the
+    /// other's.
+    pub(super) gateway: &'a GatewayCatalogue,
 }
 impl<'a> EffectiveConfig<'a> {
+    /// Layer `user` and `project` with **no gateway catalogue** — the
+    /// empty one, which has no accounts and no configured providers.
+    ///
+    /// Every accessor that does not read an account behaves exactly as it
+    /// always did, which is why this keeps its two-argument shape. A caller
+    /// that resolves entitlements wants [`Self::with_gateway`]; a caller
+    /// that asks about profiles, routing, memory or the firewall does not
+    /// need one and should not have to load one.
     pub fn new(user: &'a UserConfig, project: Option<&'a ProjectConfig>) -> Self {
-        Self { user, project }
+        Self {
+            user,
+            project,
+            gateway: GatewayCatalogue::empty(),
+        }
+    }
+
+    /// The same layering over the gateway's catalogue — what every
+    /// production path that resolves an entitlement uses.
+    pub fn with_gateway(
+        user: &'a UserConfig,
+        project: Option<&'a ProjectConfig>,
+        gateway: &'a GatewayCatalogue,
+    ) -> Self {
+        Self {
+            user,
+            project,
+            gateway,
+        }
+    }
+
+    /// The gateway catalogue this layering reads accounts from.
+    pub fn gateway_catalogue(&self) -> &'a GatewayCatalogue {
+        self.gateway
     }
 
     /// Resolve whether `id` is enabled, reporting which layer decided it.
@@ -1007,23 +1046,49 @@ impl<'a> EffectiveConfig<'a> {
     ///
     /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", effective.rs `entitlements`.
     pub fn entitlements(&self) -> Result<Vec<ResolvedEntitlement>, EntitlementLookupError> {
-        let mut names: BTreeSet<&str> = self.user.entitlements().names().collect();
+        let mut names: BTreeSet<&str> = self.gateway.account_names().collect();
+        names.extend(self.user.entitlements().names());
         if let Some(project) = self.project {
             names.extend(project.entitlements().names());
         }
+        // One entry per **gateway account**, plus one per overlay that
+        // stands on its own by naming a harness's sign-in. An overlay is
+        // policy about an account; an account with no overlay is still an
+        // account, resolved under the defaults and attributed to
+        // [`Layer::User`] — it is in the user's own gateway catalogue.
+        let empty_overlay = EntitlementConfig::default();
+        let no_account = AccountEntry::default();
         let mut resolved = Vec::with_capacity(names.len());
         for name in names {
-            let (config, layer) = match self.project.and_then(|p| p.entitlements().get(name)) {
-                Some(config) => (config, Layer::Project),
-                None => (
-                    self.user
-                        .entitlements()
-                        .get(name)
-                        .expect("a name collected from the user table is in the user table"),
-                    Layer::User,
-                ),
+            let overlay = match self.project.and_then(|p| p.entitlements().get(name)) {
+                Some(config) => Some((config, Layer::Project)),
+                None => self
+                    .user
+                    .entitlements()
+                    .get(name)
+                    .map(|config| (config, Layer::User)),
             };
-            resolved.push(config.to_resolved(name, layer)?);
+            let entry = match (self.gateway.account(name), overlay) {
+                (Some(account), Some((config, layer))) => {
+                    config.to_resolved(name, account, layer)?
+                }
+                (Some(account), None) => empty_overlay.to_resolved(name, account, Layer::User)?,
+                // A harness's own sign-in is not gateway state: nothing
+                // about it is an account the gateway serves, so an overlay
+                // that names one stands alone.
+                (None, Some((config, layer))) if config.native_harness().is_some() => {
+                    config.to_resolved(name, &no_account, layer)?
+                }
+                (None, Some(_)) => {
+                    return Err(EntitlementLookupError::UnknownAccount {
+                        name: name.to_owned(),
+                        gateway_path: self.gateway.describe_path(),
+                        known: self.gateway.account_names().map(str::to_owned).collect(),
+                    });
+                }
+                (None, None) => unreachable!("every name came from an account or an overlay"),
+            };
+            resolved.push(entry);
         }
 
         // Map line 1973: one credential is one account. Two entries naming

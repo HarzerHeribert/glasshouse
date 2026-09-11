@@ -323,6 +323,8 @@ const PRODUCTION_SOURCE_FILES: &[&str] = &[
     include_str!("commands/routing_destinations.rs"),
     include_str!("commands/routing_classification.rs"),
     include_str!("commands/shared.rs"),
+    include_str!("commands/gateway_forward.rs"),
+    include_str!("commands/migrate_gateway_state.rs"),
 ];
 
 /// [`production_code`], applied to every file in [`PRODUCTION_SOURCE_FILES`]
@@ -1276,13 +1278,25 @@ fn the_firewall_reducer_notice_names_the_withheld_variable_and_never_a_value() {
         "[providers.reducer-provider]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR}\"]\n"
     );
 
+    // The account a reducer may be named by is the gateway's since the
+    // 2026-09-11 ruling; the provider it is behind is still Glasshouse's.
+    let gateway = glasshouse::config::GatewayCatalogue::from_toml(
+        "[accounts.support]\nprovider = \"reducer-provider\"\n",
+    )
+    .expect("the gateway's catalogue parses");
+    let empty_gateway = glasshouse::config::GatewayCatalogue::default();
+
     let direct: UserConfig = toml::from_str(&format!(
         "version = 1\n\n{providers}\n[context_firewall]\nreducer = \"reducer-provider\"\n"
     ))
     .expect("user config");
-    let notice =
-        crate::commands::context_firewall::reducer_credential_notice(&direct, None, &secrets)
-            .expect("a withheld reducer credential is reported");
+    let notice = crate::commands::context_firewall::reducer_credential_notice(
+        &direct,
+        None,
+        &empty_gateway,
+        &secrets,
+    )
+    .expect("a withheld reducer credential is reported");
     assert!(
         notice.contains(VAR),
         "the notice must name the variable: {notice}"
@@ -1297,16 +1311,16 @@ fn the_firewall_reducer_notice_names_the_withheld_variable_and_never_a_value() {
     );
 
     let via_entitlement: UserConfig = toml::from_str(&format!(
-        "version = 1\n\n{providers}\n[entitlements.support]\nprovider = \
-         \"reducer-provider\"\n\n[context_firewall]\nreducer = \"support\"\n"
+        "version = 1\n\n{providers}\n[context_firewall]\nreducer = \"support\"\n"
     ))
     .expect("user config");
     let notice = crate::commands::context_firewall::reducer_credential_notice(
         &via_entitlement,
         None,
+        &gateway,
         &secrets,
     )
-    .expect("an entitlement's provider is resolved to its credential");
+    .expect("an account's provider is resolved to its credential");
     assert!(notice.contains(VAR), "{notice}");
 
     let local: UserConfig = toml::from_str(&format!(
@@ -1314,15 +1328,25 @@ fn the_firewall_reducer_notice_names_the_withheld_variable_and_never_a_value() {
     ))
     .expect("user config");
     assert!(
-        crate::commands::context_firewall::reducer_credential_notice(&local, None, &secrets)
-            .is_none(),
+        crate::commands::context_firewall::reducer_credential_notice(
+            &local,
+            None,
+            &empty_gateway,
+            &secrets
+        )
+        .is_none(),
         "a local tool has no credential to withhold"
     );
     let none: UserConfig =
         toml::from_str(&format!("version = 1\n\n{providers}")).expect("user config");
     assert!(
-        crate::commands::context_firewall::reducer_credential_notice(&none, None, &secrets)
-            .is_none(),
+        crate::commands::context_firewall::reducer_credential_notice(
+            &none,
+            None,
+            &empty_gateway,
+            &secrets
+        )
+        .is_none(),
         "no reducer, no notice"
     );
 }
@@ -2596,19 +2620,21 @@ fn the_reserve_override_a_user_records_reaches_the_routing_decision() {
     user.save(fixture.runtime.paths()).unwrap();
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths().data_dir())
-        .store(
-            PROVIDER,
-            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "1000"),
-                ("x-ratelimit-limit-tokens", "1000"),
-                ("x-ratelimit-remaining-requests", "100"),
-                ("x-ratelimit-remaining-tokens", "100"),
-                ("x-ratelimit-reset-requests", "7200s"),
-                ("x-ratelimit-reset-tokens", "7200s"),
-            ]),
-            now_unix,
-        );
+    glasshouse::provider::telemetry::GatewayQuotaCache::new(
+        fixture.runtime.paths().gateway_data_dir(),
+    )
+    .store(
+        PROVIDER,
+        &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "1000"),
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-requests", "100"),
+            ("x-ratelimit-remaining-tokens", "100"),
+            ("x-ratelimit-reset-requests", "7200s"),
+            ("x-ratelimit-reset-tokens", "7200s"),
+        ]),
+        now_unix,
+    );
 
     // Before the user says anything, this candidate is denied — which is
     // what makes the two assertions after the grant attributable.
@@ -2806,19 +2832,21 @@ fn disposable_extraction_model_reflects_real_cached_capacity_telemetry() {
     user.save(fixture.runtime.paths()).unwrap();
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths().data_dir())
-        .store(
-            PROVIDER,
-            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "7000"),
-                ("x-ratelimit-limit-tokens", "6000"),
-                ("x-ratelimit-remaining-requests", "6999"),
-                ("x-ratelimit-remaining-tokens", "5991"),
-                ("x-ratelimit-reset-requests", "300s"),
-                ("x-ratelimit-reset-tokens", "300s"),
-            ]),
-            now_unix,
-        );
+    glasshouse::provider::telemetry::GatewayQuotaCache::new(
+        fixture.runtime.paths().gateway_data_dir(),
+    )
+    .store(
+        PROVIDER,
+        &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "7000"),
+            ("x-ratelimit-limit-tokens", "6000"),
+            ("x-ratelimit-remaining-requests", "6999"),
+            ("x-ratelimit-remaining-tokens", "5991"),
+            ("x-ratelimit-reset-requests", "300s"),
+            ("x-ratelimit-reset-tokens", "300s"),
+        ]),
+        now_unix,
+    );
 
     let model = crate::commands::routing_classification::disposable_extraction_model(
         &fixture.runtime,
@@ -2871,15 +2899,17 @@ fn a_free_resource_whose_remaining_requests_are_all_reserved_is_not_chosen() {
     user.save(fixture.runtime.paths()).unwrap();
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths().data_dir())
-        .store(
-            PROVIDER,
-            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "10"),
-                ("x-ratelimit-remaining-requests", "1"),
-            ]),
-            now_unix,
-        );
+    glasshouse::provider::telemetry::GatewayQuotaCache::new(
+        fixture.runtime.paths().gateway_data_dir(),
+    )
+    .store(
+        PROVIDER,
+        &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "10"),
+            ("x-ratelimit-remaining-requests", "1"),
+        ]),
+        now_unix,
+    );
     let label = format!("{PROVIDER}/{VAR}");
     glasshouse::provider::telemetry::DispatchReservationCache::new(
         fixture.runtime.paths().data_dir(),
@@ -3061,19 +3091,21 @@ fn disposable_extraction_model_lets_the_protected_reserve_policy_deny_a_metered_
     user.save(fixture.runtime.paths()).unwrap();
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths().data_dir())
-        .store(
-            PROVIDER,
-            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
-                ("x-ratelimit-limit-requests", "1000"),
-                ("x-ratelimit-limit-tokens", "1000"),
-                ("x-ratelimit-remaining-requests", "100"),
-                ("x-ratelimit-remaining-tokens", "100"),
-                ("x-ratelimit-reset-requests", "7200s"),
-                ("x-ratelimit-reset-tokens", "7200s"),
-            ]),
-            now_unix,
-        );
+    glasshouse::provider::telemetry::GatewayQuotaCache::new(
+        fixture.runtime.paths().gateway_data_dir(),
+    )
+    .store(
+        PROVIDER,
+        &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "1000"),
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-requests", "100"),
+            ("x-ratelimit-remaining-tokens", "100"),
+            ("x-ratelimit-reset-requests", "7200s"),
+            ("x-ratelimit-reset-tokens", "7200s"),
+        ]),
+        now_unix,
+    );
 
     let model = crate::commands::routing_classification::disposable_extraction_model(
         &fixture.runtime,
@@ -3852,7 +3884,7 @@ fn observed_health_of_hands_the_persisted_cooldown_cause_to_the_pool() {
         cooldown_cause: Some(CooldownCause::Declared),
         credential_rejected: false,
     };
-    GatewayHealthCache::new(fixture.runtime.paths().data_dir()).store(
+    GatewayHealthCache::new(fixture.runtime.paths().gateway_data_dir()).store(
         "anthropic",
         &[reading],
         now_unix,
@@ -4551,7 +4583,7 @@ fn pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_
     let effective = EffectiveConfig::new(&user, None);
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    GatewayQuotaCache::new(fixture.runtime.paths().data_dir()).store(
+    GatewayQuotaCache::new(fixture.runtime.paths().gateway_data_dir()).store(
         PROVIDER,
         &RateLimitHeaders::read(vec![
             ("x-ratelimit-limit-requests", "100"),

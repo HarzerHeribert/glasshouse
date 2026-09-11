@@ -201,7 +201,7 @@ impl BinaryFixture {
 #[test]
 fn line_1931_a_fixture_providers_quota_headers_render_in_native_units_not_a_bare_percentage() {
     let fixture = BinaryFixture::new();
-    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let quota_cache_dir = fixture.config.path().join("gateway").join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
         "anyrouter",
@@ -1080,7 +1080,7 @@ fn line_1937_a_gateway_backed_route_records_a_success_and_a_failure_and_route_ci
         glasshouse::bootstrap(&cli, &root).unwrap()
     };
     let ledger = Arc::new(EvidenceLedger::open(&runtime).unwrap());
-    let health_cache = GatewayHealthCache::new(runtime.paths().data_dir());
+    let health_cache = GatewayHealthCache::new(runtime.paths().gateway_data_dir());
 
     // One success, one failure, from a fixture upstream on loopback.
     let address = stub_server(vec![

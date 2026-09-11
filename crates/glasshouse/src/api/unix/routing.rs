@@ -34,15 +34,19 @@ pub(super) fn resource_capacity(runtime: &Runtime) -> Response {
         Ok(project_config) => project_config,
         Err(err) => return Response::err(err),
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
 
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
         .gather_gateway_quota(&glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            runtime.paths().data_dir(),
+            runtime.paths().gateway_data_dir(),
         ))
         .gather_gateway_health(&glasshouse::provider::telemetry::GatewayHealthCache::new(
-            runtime.paths().data_dir(),
+            runtime.paths().gateway_data_dir(),
         ))
         .gather_harness_status(now_unix);
 
@@ -75,7 +79,11 @@ pub(super) fn routing_model_status(runtime: &Runtime) -> Response {
         Ok(project_config) => project_config,
         Err(err) => return Response::err(err),
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
 
     let selection = effective.routing_model();
     let resolution = effective.routing_model_resolution();
@@ -193,7 +201,11 @@ pub(super) fn recommend_route(
         Ok(project_config) => project_config,
         Err(err) => return Response::err(err),
     };
-    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
 
     // `None`/`false`/`false` are the three override arguments this verb does
     // not take — see [`Request::RecommendRoute`]'s own doc comment for why

@@ -982,45 +982,60 @@ fn entitlements_round_trip_and_resolve_project_over_user_with_a_native_default()
     let tmp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
 
+    // The accounts are the gateway's since the 2026-09-11 ruling; the two
+    // `[entitlements.<name>]` tables below are policy about them.
+    let gateway = crate::config::GatewayCatalogue::from_toml(
+        "[accounts.max]\nkind = \"claude\"\n\n\
+         [accounts.team-key]\nkind = \"api-key\"\nprovider = \"openrouter\"\n",
+    )
+    .expect("the gateway's catalogue parses");
+
     let mut user = UserConfig::default();
     assert!(user.entitlements().is_empty());
     let mut max = EntitlementConfig::default();
-    max.set_kind(Some(EntitlementKind::Claude))
-        .set_native_harness(Some(IntegrationId::ClaudeCode))
+    max.set_native_harness(Some(IntegrationId::ClaudeCode))
         .set_deny_tiers([WorkloadTier::Leaf])
         .set_allow_job_kinds([JobKind::MemoryExtraction]);
     user.entitlements_mut().set("max", max);
     let mut team = EntitlementConfig::default();
-    team.set_kind(Some(EntitlementKind::ApiKey))
-        .set_provider(Some("openrouter".to_owned()))
-        .set_allow_harnesses([IntegrationId::Codex])
+    team.set_allow_harnesses([IntegrationId::Codex])
         .set_deny_harnesses([IntegrationId::ClaudeCode]);
     user.entitlements_mut().set("team-key", team);
     user.save(&paths).unwrap();
     let loaded = UserConfig::load(&paths).unwrap();
     assert_eq!(loaded.entitlements(), user.entitlements());
 
-    // The on-disk spellings are the routing types' own.
+    // The on-disk spellings are the routing types' own — and not one of the
+    // five account keys is among them.
     let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
     for expected in [
         "[entitlements.max]",
-        "kind = \"claude\"",
         "native_harness = \"claude-code\"",
         "deny_tiers = [\"leaf\"]",
         "allow_job_kinds = [\"memory extraction\"]",
         "[entitlements.team-key]",
-        "kind = \"api-key\"",
-        "provider = \"openrouter\"",
         "allow_harnesses = [\"codex\"]",
         "deny_harnesses = [\"claude-code\"]",
     ] {
         assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
     }
+    for gateways in [
+        "kind =",
+        "vendor =",
+        "credential =",
+        "provider =",
+        "subscription_broker =",
+    ] {
+        assert!(
+            !text.contains(gateways),
+            "`{gateways}` is the gateway's and must not be written here:\n{text}"
+        );
+    }
 
     // The user layer alone: `max` is Claude Code's sign-in, every other
     // harness gets its unrestricted default, and the API key is found by
     // the provider it backs.
-    let effective = EffectiveConfig::new(&loaded, None);
+    let effective = EffectiveConfig::with_gateway(&loaded, None, &gateway);
     let claude = effective
         .entitlement_for(IntegrationId::ClaudeCode, &BackendResource::Native)
         .unwrap()
@@ -1091,7 +1106,7 @@ fn entitlements_round_trip_and_resolve_project_over_user_with_a_native_default()
          allow_tiers = [\"heavy\", \"frontier\"]\n",
     )
     .unwrap();
-    let effective = EffectiveConfig::new(&loaded, Some(&project));
+    let effective = EffectiveConfig::with_gateway(&loaded, Some(&project), &gateway);
     let claude = effective
         .entitlement_for(IntegrationId::ClaudeCode, &BackendResource::Native)
         .unwrap()
@@ -1107,8 +1122,9 @@ fn entitlements_round_trip_and_resolve_project_over_user_with_a_native_default()
     assert_eq!((codex.name(), codex.layer()), ("max", Layer::Project));
     assert_eq!(
         codex.kind(),
-        None,
-        "the project's entry replaced the kind too"
+        Some(EntitlementKind::Claude),
+        "a project overlay replaces the policy whole and the account not at all: \
+         the plan is the gateway's"
     );
     assert!(codex.rules().serves_tier(WorkloadTier::Heavy));
     assert!(!codex.rules().serves_tier(WorkloadTier::Leaf));
@@ -1144,25 +1160,33 @@ fn entitlements_round_trip_and_resolve_project_over_user_with_a_native_default()
 
 /// The contradictions only the resolved set can show, each refused by
 /// name rather than settled by picking one.
+///
+/// Half of each contradiction is now in the gateway's catalogue — the
+/// provider an account is behind is the gateway's since the 2026-09-11
+/// ruling — and the other half in Glasshouse's overlay, which is precisely
+/// why these can only be seen once the two are resolved together.
 #[test]
 fn contradictory_entitlement_tables_are_refused_by_name() {
     use crate::profile::BackendResource;
 
-    let both: UserConfig = toml::from_str(
-        "version = 1\n\n[entitlements.x]\nnative_harness = \"codex\"\nprovider = \"openrouter\"\n",
-    )
-    .unwrap();
-    let err = EffectiveConfig::new(&both, None)
+    let gateway = |text: &str| {
+        crate::config::GatewayCatalogue::from_toml(text).expect("the gateway catalogue parses")
+    };
+    let user = |text: &str| toml::from_str::<UserConfig>(text).expect("the overlay parses");
+
+    let both_gw = gateway("[accounts.x]\nprovider = \"openrouter\"\n");
+    let both = user("version = 1\n\n[entitlements.x]\nnative_harness = \"codex\"\n");
+    let err = EffectiveConfig::with_gateway(&both, None, &both_gw)
         .entitlements()
         .unwrap_err();
     assert!(matches!(err, EntitlementLookupError::TwoBackings { ref name } if name == "x"));
 
-    let two_claim: UserConfig = toml::from_str(
+    let empty_gw = gateway("");
+    let two_claim = user(
         "version = 1\n\n[entitlements.a]\nnative_harness = \"codex\"\n\n\
          [entitlements.b]\nnative_harness = \"codex\"\n",
-    )
-    .unwrap();
-    let err = EffectiveConfig::new(&two_claim, None)
+    );
+    let err = EffectiveConfig::with_gateway(&two_claim, None, &empty_gw)
         .entitlement_for(IntegrationId::Codex, &BackendResource::Native)
         .unwrap_err();
     assert!(
@@ -1175,17 +1199,16 @@ fn contradictory_entitlement_tables_are_refused_by_name() {
     );
     // Claude Code is untouched by Codex's contradiction.
     assert!(
-        EffectiveConfig::new(&two_claim, None)
+        EffectiveConfig::with_gateway(&two_claim, None, &empty_gw)
             .entitlement_for(IntegrationId::ClaudeCode, &BackendResource::Native)
             .is_ok()
     );
 
-    let two_providers: UserConfig = toml::from_str(
-        "version = 1\n\n[entitlements.a]\nprovider = \"openrouter\"\n\n\
-         [entitlements.b]\nprovider = \"openrouter\"\n",
-    )
-    .unwrap();
-    let err = EffectiveConfig::new(&two_providers, None)
+    let two_providers = gateway(
+        "[accounts.a]\nprovider = \"openrouter\"\n\n[accounts.b]\nprovider = \"openrouter\"\n",
+    );
+    let none = UserConfig::default();
+    let err = EffectiveConfig::with_gateway(&none, None, &two_providers)
         .entitlement_for(
             IntegrationId::Codex,
             &BackendResource::DirectProvider {
@@ -1198,9 +1221,8 @@ fn contradictory_entitlement_tables_are_refused_by_name() {
         "{err}"
     );
 
-    let reserved: UserConfig =
-        toml::from_str("version = 1\n\n[entitlements.codex]\nprovider = \"openrouter\"\n").unwrap();
-    let err = EffectiveConfig::new(&reserved, None)
+    let reserved = gateway("[accounts.codex]\nprovider = \"openrouter\"\n");
+    let err = EffectiveConfig::with_gateway(&none, None, &reserved)
         .entitlements()
         .unwrap_err();
     assert!(
@@ -1208,15 +1230,25 @@ fn contradictory_entitlement_tables_are_refused_by_name() {
         "{err}"
     );
 
-    // An entry that names neither backing is listed and matches nothing.
-    let unstated: UserConfig =
-        toml::from_str("version = 1\n\n[entitlements.someday]\nkind = \"gemini\"\n").unwrap();
-    let all = EffectiveConfig::new(&unstated, None)
+    // An account that names neither backing is listed and matches nothing.
+    let unstated = gateway("[accounts.someday]\nkind = \"gemini\"\n");
+    let all = EffectiveConfig::with_gateway(&none, None, &unstated)
         .entitlements()
         .unwrap();
     let someday = all.iter().find(|s| s.name() == "someday").unwrap();
     assert_eq!(someday.backing(), &EntitlementBacking::Unstated);
     assert_eq!(someday.describe(), "Gemini plan, no backing stated");
+
+    // And an overlay with no account behind it, and no harness sign-in of
+    // its own, is refused by name — the 2026-09-11 ruling's own refusal.
+    let orphan = user("version = 1\n\n[entitlements.nothing]\ndeny_tiers = [\"leaf\"]\n");
+    let err = EffectiveConfig::with_gateway(&orphan, None, &empty_gw)
+        .entitlements()
+        .unwrap_err();
+    assert!(
+        matches!(&err, EntitlementLookupError::UnknownAccount { name, .. } if name == "nothing"),
+        "{err}"
+    );
 }
 
 /// Every [`crate::routing::disposable::JobKind`] is listed in

@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use glasshouse::config::{EffectiveConfig, UserConfig};
+use glasshouse::config::{EffectiveConfig, GatewayCatalogue, UserConfig};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::platform::exec::{self, ResolvedExecutable};
@@ -30,12 +30,16 @@ use glasshouse::session::{SessionId, SessionPresentation, SessionRuntime};
 /// Two accounts of one vendor, each backed by its own provider name and
 /// carrying its own environment-shaped credential — the same shape
 /// `entitlement_pool.rs`'s own fixtures use.
-fn two_accounts(var_a: &str, var_b: &str) -> UserConfig {
-    toml::from_str(&format!(
-        "version = 1\n\n\
-         [entitlements.claude-a]\nvendor = \"claude\"\nprovider = \"alpha-probe\"\n\
+///
+/// In the **gateway's** catalogue, because an account is the gateway's since
+/// the 2026-09-11 ruling. Glasshouse's own configuration states no policy
+/// about either, which is the ordinary case: an account with no overlay
+/// resolves under the defaults.
+fn two_accounts(var_a: &str, var_b: &str) -> GatewayCatalogue {
+    GatewayCatalogue::from_toml(&format!(
+        "[accounts.claude-a]\nvendor = \"claude\"\nprovider = \"alpha-probe\"\n\
          credential = {{ env = \"{var_a}\" }}\n\n\
-         [entitlements.claude-b]\nvendor = \"claude\"\nprovider = \"beta-probe\"\n\
+         [accounts.claude-b]\nvendor = \"claude\"\nprovider = \"beta-probe\"\n\
          credential = {{ env = \"{var_b}\" }}\n"
     ))
     .expect("two provider-backed accounts parse")
@@ -307,8 +311,9 @@ fn a_shell_started_launch_under_one_entitlement_never_carries_the_other_accounts
     const VALUE_A: &str = "fake-shell-scrub-a-0123456789abcdef";
     const VALUE_B: &str = "fake-shell-scrub-b-fedcba9876543210";
 
-    let user = two_accounts(VAR_A, VAR_B);
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts(VAR_A, VAR_B);
+    let user = UserConfig::default();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let entitlement = effective
         .entitlement_for(
             IntegrationId::ClaudeCode,
@@ -362,8 +367,9 @@ fn a_shell_started_launch_with_no_serving_entitlement_carries_neither_accounts_v
     const VALUE_A: &str = "fake-shell-scrub-none-a-0123456789abcdef";
     const VALUE_B: &str = "fake-shell-scrub-none-b-fedcba9876543210";
 
-    let user = two_accounts(VAR_A, VAR_B);
-    let effective = EffectiveConfig::new(&user, None);
+    let gateway = two_accounts(VAR_A, VAR_B);
+    let user = UserConfig::default();
+    let effective = EffectiveConfig::with_gateway(&user, None, &gateway);
     let entitlement = effective
         .entitlement_for(
             IntegrationId::ClaudeCode,

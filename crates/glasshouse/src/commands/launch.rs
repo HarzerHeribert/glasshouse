@@ -451,7 +451,8 @@ pub(crate) fn launch_session(
     let routing_started_at_unix = glasshouse::provider::cache::now_unix_seconds();
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let selection = session::select::select(harness, effective)?;
     // -----------------------------------------------------------------------
     // Phase 37 lines 1592, 1593 and 1595–1600: **where** this work goes is

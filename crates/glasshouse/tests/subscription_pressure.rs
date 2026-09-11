@@ -1114,6 +1114,14 @@ impl Binary {
         self.base.join("data")
     }
 
+    /// Where the gateway's own caches live: `RuntimePaths::resolve` derives
+    /// the gateway's data directory from the `--data-dir` this fixture
+    /// passes, because a relocated Glasshouse never reaches into the
+    /// machine's default gateway store (user ruling 2026-09-11).
+    fn gateway_data_dir(&self) -> PathBuf {
+        self.data_dir().join("gateway")
+    }
+
     fn both_streams(output: &Output) -> String {
         format!(
             "{}{}",
@@ -1135,7 +1143,7 @@ impl Binary {
     /// turns into an absolute reset time.
     fn plant_quota(&self, provider: &str, remaining: i64, limit: i64, reset_seconds: Option<i64>) {
         let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(
-            self.data_dir().join("gateway-quota"),
+            self.gateway_data_dir().join("gateway-quota"),
         );
         let limit = limit.to_string();
         let remaining = remaining.to_string();

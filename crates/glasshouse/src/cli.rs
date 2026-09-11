@@ -165,6 +165,25 @@ pub enum Command {
     },
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
+    /// Move account and broker state from Glasshouse's own store into the
+    /// gateway's — the one-time migration for the 2026-09-11 ruling.
+    ///
+    /// What moves: the `kind`, `vendor`, `credential`, `subscription_broker`
+    /// and `provider` keys of every `[entitlements.<name>]` table, into
+    /// `gateway.toml`'s `[accounts.<name>]`; and the broker, managed-tool,
+    /// model-catalogue, quota and health directories, into the gateway's own
+    /// data directory.
+    ///
+    /// Safe to run twice: the second run finds nothing to move and says so.
+    /// A backup of every configuration file it rewrites is taken first, and
+    /// a single refusal — an account already in `gateway.toml` saying
+    /// something different, a destination directory that is not empty —
+    /// stops the whole run before anything is written.
+    MigrateGatewayState {
+        /// Print the plan and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// File a provider credential in the operating system's own secure
     /// store, remove one, or list where each credential comes from.
     ///

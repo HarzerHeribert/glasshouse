@@ -70,14 +70,19 @@ pub(crate) fn context_firewall_hook(
     let project = config::load_project_config(runtime.project())
         .ok()
         .flatten();
+    // The gateway's accounts, because a reducer may be named by account and
+    // an account is the gateway's. Unreadable degrades to the empty
+    // catalogue, the same fail-open posture as the two layers above.
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
     let aggressive_drops_uncertain = user.as_ref().is_some_and(|user| {
-        EffectiveConfig::new(user, project.as_ref())
+        EffectiveConfig::with_gateway(user, project.as_ref(), &gateway)
             .context_firewall_aggressive_drops_uncertain()
             .value
     });
     let active_reducer = match &user {
         Some(user) => {
-            let reducer = disposable_reducer(runtime, user, project.as_ref(), &event.session_id);
+            let reducer =
+                disposable_reducer(runtime, user, project.as_ref(), &gateway, &event.session_id);
             // Map line 488, said out loud where a person can read it: hooks
             // run with logging off, so a reducer lost to a withheld
             // credential is one stderr line here, names only. Fail-open and
@@ -86,6 +91,7 @@ pub(crate) fn context_firewall_hook(
                 && let Some(notice) = reducer_credential_notice(
                     user,
                     project.as_ref(),
+                    &gateway,
                     &glasshouse::secret::native::PreferNativeSecretStore::detect(),
                 )
             {
@@ -697,33 +703,34 @@ fn record_context_firewall_expansion(runtime: &Runtime, found_tool: Option<&str>
 pub(crate) fn reducer_credential_notice(
     user: &UserConfig,
     project: Option<&ProjectConfig>,
+    gateway: &config::GatewayCatalogue,
     secrets: &dyn glasshouse::secret::SecretStore,
 ) -> Option<String> {
     use crate::commands::routing_classification::{
         withheld_credential_notice, withheld_provider_credentials,
     };
 
-    let effective = EffectiveConfig::new(user, project);
+    let effective = EffectiveConfig::with_gateway(user, project, gateway);
     let reducer_ref = effective.context_firewall_reducer().value?;
     if reducer_ref.starts_with("local:") {
         return None;
     }
+    // A reducer named by account resolves through the account's own
+    // backing, which is the gateway's `provider` key — never Glasshouse's
+    // table, which no longer states one.
     let provider = if effective.provider_names().contains(&reducer_ref) {
         reducer_ref
     } else {
-        project
-            .and_then(|p| {
-                p.entitlements()
-                    .iter()
-                    .find(|(name, _)| *name == reducer_ref)
-            })
-            .or_else(|| {
-                user.entitlements()
-                    .iter()
-                    .find(|(name, _)| *name == reducer_ref)
-            })
-            .and_then(|(_, entitlement)| entitlement.provider())?
-            .to_owned()
+        match effective
+            .entitlements()
+            .ok()?
+            .into_iter()
+            .find(|entry| entry.name() == reducer_ref)?
+            .backing()
+        {
+            glasshouse::config::EntitlementBacking::Provider(provider) => provider.clone(),
+            _ => return None,
+        }
     };
     withheld_credential_notice(&withheld_provider_credentials(
         &effective,
@@ -736,13 +743,14 @@ fn disposable_reducer(
     runtime: &Runtime,
     user: &UserConfig,
     project: Option<&ProjectConfig>,
+    gateway: &config::GatewayCatalogue,
     session_id: &str,
 ) -> Option<Box<dyn glasshouse::firewall::reducer::Reducer>> {
     use glasshouse::provider::registry::Locality;
     use glasshouse::routing::disposable::{DisposableRouting, JobKind};
     use glasshouse::routing::free::{FreePool, FreePreferences};
 
-    let effective = EffectiveConfig::new(user, project);
+    let effective = EffectiveConfig::with_gateway(user, project, gateway);
     let reducer_ref = effective.context_firewall_reducer().value?;
 
     // Phase 58, map lines 2028-2030: `local:<name>` selects an installed
@@ -762,7 +770,9 @@ fn disposable_reducer(
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths().gateway_data_dir(),
+        ),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion — the same

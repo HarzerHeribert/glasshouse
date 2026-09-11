@@ -40,6 +40,10 @@ use glasshouse::routing::evidence::{
 use glasshouse::routing::request::TaskClass;
 use glasshouse::{Cli, Runtime};
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 const CREDENTIAL_VAR: &str = "GLASSHOUSE_PHASE51_JOINS_KEY";
 const CREDENTIAL: &str = "sk-fabricated-test-value-not-a-real-credential";
 const PROVIDER: &str = "phase51-joins-probe";
@@ -102,10 +106,10 @@ impl Fixture {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!(
-                "version = 1\n\n\
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) = split_gateway_state(&format!(
+            "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
                  [providers.{PROVIDER}]\ntemplate = \"anthropic-compatible\"\n\
                  base_url = \"http://127.0.0.1:9/\"\n\
@@ -114,9 +118,9 @@ impl Fixture {
                  [profiles.metered.backend]\nkind = \"direct-provider\"\nprovider = \"{PROVIDER}\"\n\n\
                  [entitlements.acct]\nkind = \"claude\"\nvendor = \"claude\"\n\
                  provider = \"{PROVIDER}\"\ncredential = {{ env = \"{CREDENTIAL_VAR}\" }}\n"
-            ),
-        )
-        .expect("write user config");
+        ));
+        std::fs::write(config_dir.join("config.toml"), config_text).expect("write user config");
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).expect("write user config");
 
         let cli = Cli::try_parse_from([
             "glasshouse",
@@ -136,6 +140,14 @@ impl Fixture {
 
     fn data_dir(&self) -> PathBuf {
         self.base.join("data")
+    }
+
+    /// Where the gateway's own caches live: `RuntimePaths::resolve` derives
+    /// the gateway's data directory from the `--data-dir` this fixture
+    /// passes, because a relocated Glasshouse never reaches into the
+    /// machine's default gateway store (user ruling 2026-09-11).
+    fn gateway_data_dir(&self) -> PathBuf {
+        self.data_dir().join("gateway")
     }
 
     fn glasshouse(&self, args: &[&str]) -> std::process::Output {
@@ -602,7 +614,7 @@ fn test_1854_by_evidence_held_carries_stale_and_absent_with_their_success_counts
     fixture.hook(&absent_session, "StopFailure");
 
     // observed-stale: a reading older than the horizon.
-    let cache = GatewayHealthCache::at(fixture.data_dir().join("gateway-health"));
+    let cache = GatewayHealthCache::at(fixture.gateway_data_dir().join("gateway-health"));
     let long_ago = now_unix() - HEALTH_EVIDENCE_HORIZON_SECONDS - 60;
     cache.store(
         PROVIDER,

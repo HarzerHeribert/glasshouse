@@ -424,7 +424,8 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
 
     let user = UserConfig::load(runtime.paths()).ok()?;
     let project = load_project_config(runtime.project()).ok()?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = crate::config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     // Step 1: consent. No knob, no candidate, no routing decision, no call —
     // see this function's own documentation for why this returns rather

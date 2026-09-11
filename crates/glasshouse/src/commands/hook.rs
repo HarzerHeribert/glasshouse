@@ -43,7 +43,8 @@ fn memory_extraction_enabled(runtime: &Runtime) -> bool {
         return true;
     };
     let project = config::load_project_config(runtime.project()).unwrap_or(None);
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .memory_extraction_enabled()
         .value
 }
@@ -62,7 +63,8 @@ fn automatic_checkpoint_enabled(runtime: &Runtime) -> bool {
         return true;
     };
     let project = config::load_project_config(runtime.project()).unwrap_or(None);
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .automatic_checkpoint_enabled()
         .value
 }

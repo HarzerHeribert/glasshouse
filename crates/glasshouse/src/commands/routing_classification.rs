@@ -740,7 +740,7 @@ fn persist_support_work_health(
     use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
     use glasshouse::routing::free::FreePool;
 
-    let cache = GatewayHealthCache::new(paths.data_dir());
+    let cache = GatewayHealthCache::new(paths.gateway_data_dir());
     let provider = resource.credential().provider().to_owned();
     let label = resource.credential().label();
     let model = resource.model().to_owned();
@@ -831,11 +831,14 @@ pub(crate) fn disposable_extraction_model(
             return Box::new(crate::commands::memory_extraction::NoExtractionModel);
         }
     };
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths().gateway_data_dir(),
+        ),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion. Fail-soft
@@ -1213,7 +1216,8 @@ pub(crate) fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return false;
     };
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .memory_retrieval_diagnostics()
         .value
 }
@@ -1229,7 +1233,8 @@ pub(crate) fn memory_extraction_diagnostics_enabled(runtime: &Runtime) -> bool {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return false;
     };
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .memory_extraction_diagnostics()
         .value
 }
@@ -1671,7 +1676,9 @@ pub(crate) fn automatic_classification_choice(
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths().gateway_data_dir(),
+        ),
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion. Fail-soft
@@ -1835,7 +1842,8 @@ pub(crate) fn classify_with_routing_model(
             return ClassificationAttempt::NotConfigured;
         }
     };
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
 
     let first = match effective.routing_model_resolution().value {
         RoutingModelResolution::Heuristics(_) => return ClassificationAttempt::NotConfigured,

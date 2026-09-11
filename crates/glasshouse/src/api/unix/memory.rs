@@ -258,7 +258,8 @@ fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
     let Ok(project) = config::load_project_config(runtime.project()) else {
         return false;
     };
-    EffectiveConfig::new(&user, project.as_ref())
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
+    EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway)
         .memory_retrieval_diagnostics()
         .value
 }

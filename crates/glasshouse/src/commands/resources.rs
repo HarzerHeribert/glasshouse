@@ -31,16 +31,19 @@ pub(crate) fn resources_report(
 ) -> anyhow::Result<String> {
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
+    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
 
     let mut telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
-    telemetry = telemetry.gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir()),
-    );
-    telemetry = telemetry.gather_gateway_health(
-        &glasshouse::provider::telemetry::GatewayHealthCache::new(runtime.paths().data_dir()),
-    );
+    telemetry =
+        telemetry.gather_gateway_quota(&glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths().gateway_data_dir(),
+        ));
+    telemetry =
+        telemetry.gather_gateway_health(&glasshouse::provider::telemetry::GatewayHealthCache::new(
+            runtime.paths().gateway_data_dir(),
+        ));
     // Capability map lines 1316/1365: recent failures by class, from the
     // project's routing evidence ledger. Fail-soft: a project with no ledger
     // yet renders `unknown` on that line, as the caches do.

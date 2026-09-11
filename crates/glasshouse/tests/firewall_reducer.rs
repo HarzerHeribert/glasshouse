@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use glasshouse::config::{EntitlementConfig, EntitlementCredential, ProviderConfig, UserConfig};
+use glasshouse::config::{EntitlementConfig, ProviderConfig, UserConfig};
 use glasshouse::routing::disposable::JobKind;
 use glasshouse::{Cli, Runtime};
 
@@ -230,12 +230,24 @@ impl Fixture {
     /// line 1947's per-entitlement job-kind rule applies to this job kind
     /// unchanged.
     fn deny_context_reduction_for(&self, entitlement_name: &str, provider: &str) {
+        // The account — its provider and its credential reference — is the
+        // gateway's since the 2026-09-11 ruling; the job-kind rule is
+        // Glasshouse's. Both halves are written here, which is what makes
+        // this the shipped-binary proof it claims to be.
+        let path = self.runtime.paths().gateway_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "[accounts.{entitlement_name}]\nprovider = \"{provider}\"\n\
+                 credential = {{ env = \"{CREDENTIAL_VAR}\" }}\n"
+            ),
+        )
+        .unwrap();
+
         let mut user = self.config();
         let mut entitlement = EntitlementConfig::default();
-        entitlement
-            .set_provider(Some(provider.to_owned()))
-            .set_credential(Some(EntitlementCredential::environment(CREDENTIAL_VAR)))
-            .set_deny_job_kinds([JobKind::ContextReduction]);
+        entitlement.set_deny_job_kinds([JobKind::ContextReduction]);
         user.entitlements_mut().set(entitlement_name, entitlement);
         self.save(user);
     }

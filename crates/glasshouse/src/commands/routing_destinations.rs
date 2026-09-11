@@ -273,7 +273,7 @@ pub(crate) fn routing_destinations(
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let quota_cache =
-        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().data_dir());
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths().gateway_data_dir());
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
         .gather_gateway_quota(&quota_cache);
 
@@ -1289,7 +1289,7 @@ pub(crate) fn observed_provider_health(
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let now = std::time::Instant::now();
     let telemetry = GatheredTelemetry::new()
-        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().data_dir()));
+        .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().gateway_data_dir()));
     let price_table =
         glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
     // Capability map line 1366's *learn* half: read once for every
@@ -1459,7 +1459,7 @@ pub(crate) fn observed_health_of(
     // plus the unix second each provider's file was written, which line
     // 1854's *stale* half is read from. A file with no date fails to
     // deserialize and never reaches this loop.
-    let stored = GatewayHealthCache::new(runtime.paths().data_dir()).load_all_dated();
+    let stored = GatewayHealthCache::new(runtime.paths().gateway_data_dir()).load_all_dated();
     if stored.is_empty() {
         return ObservedHealth { pool, observed_at };
     }
@@ -1707,26 +1707,37 @@ pub(crate) fn session_pairing(
 #[cfg(test)]
 mod subscription_broker_tests {
     use super::*;
-    use glasshouse::config::{SubscriptionBroker, UserConfig};
+    use glasshouse::config::{GatewayCatalogue, SubscriptionBroker, UserConfig};
     use glasshouse::integrations::IntegrationId;
     use glasshouse::profile::BackendResource;
 
-    fn broker_pool(config: &str) -> (UserConfig, Vec<glasshouse::config::ResolvedEntitlement>) {
+    /// The two halves a broker pool now needs: the gateway's accounts and
+    /// Glasshouse's policy overlay.
+    fn broker_pool(
+        gateway_toml: &str,
+        config: &str,
+    ) -> (
+        UserConfig,
+        GatewayCatalogue,
+        Vec<glasshouse::config::ResolvedEntitlement>,
+    ) {
         let user: UserConfig = toml::from_str(config).expect("broker entitlement config parses");
-        let pool = EffectiveConfig::new(&user, None)
+        let gateway =
+            GatewayCatalogue::from_toml(gateway_toml).expect("the gateway catalogue parses");
+        let pool = EffectiveConfig::with_gateway(&user, None, &gateway)
             .entitlements()
             .expect("broker entitlement pool resolves");
-        (user, pool)
+        (user, gateway, pool)
     }
 
     #[test]
     fn gateway_keeps_two_same_vendor_broker_accounts_as_separate_candidates() {
-        let (_user, pool) = broker_pool(
-            "version = 1\n\n\
-             [entitlements.chatgpt-a]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
+        let (_user, _gateway, pool) = broker_pool(
+            "[accounts.chatgpt-a]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
              subscription_broker = \"cliproxyapi\"\n\n\
-             [entitlements.chatgpt-b]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
+             [accounts.chatgpt-b]\nkind = \"chatgpt\"\nvendor = \"openai\"\n\
              subscription_broker = \"cliproxyapi\"\n",
+            "version = 1\n",
         );
 
         let matches = pool_entitlements_for(
@@ -1755,14 +1766,15 @@ mod subscription_broker_tests {
 
     #[test]
     fn broker_native_access_reuses_the_configured_entitlement_and_gateway_rules_still_gate() {
-        let (user, pool) = broker_pool(
+        let (user, gateway_catalogue, pool) = broker_pool(
+            "[accounts.chatgpt-a]\nsubscription_broker = \"cliproxyapi\"\n\n\
+             [accounts.chatgpt-b]\nsubscription_broker = \"cliproxyapi\"\n",
             "version = 1\n\n\
-             [entitlements.chatgpt-a]\nsubscription_broker = \"cliproxyapi\"\n\
-             native_harness = \"codex\"\nallow_harnesses = [\"pane\"]\n\n\
-             [entitlements.chatgpt-b]\nsubscription_broker = \"cliproxyapi\"\n\
-             deny_harnesses = [\"pane\"]\n",
+             [entitlements.chatgpt-a]\nnative_harness = \"codex\"\n\
+             allow_harnesses = [\"pane\"]\n\n\
+             [entitlements.chatgpt-b]\ndeny_harnesses = [\"pane\"]\n",
         );
-        let effective = EffectiveConfig::new(&user, None);
+        let effective = EffectiveConfig::with_gateway(&user, None, &gateway_catalogue);
 
         let native =
             pool_entitlements_for(&pool, IntegrationId::Codex, &BackendResource::Native, None);

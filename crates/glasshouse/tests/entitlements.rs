@@ -33,6 +33,10 @@ use glasshouse::routing::{
 };
 use glasshouse::secret::SecretRef;
 
+// Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
+// gateway's `gateway.toml` — see the included file for what moves and why.
+include!("fixtures/gateway_split.rs");
+
 // ===========================================================================
 // Half one — the rules, and the router through `SessionRouter::choose`.
 // ===========================================================================
@@ -508,15 +512,15 @@ impl Binary {
 
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(
-            config_dir.join("config.toml"),
-            format!(
-                "version = 1\n\n\
+        // The accounts are the gateway's since the 2026-09-11 ruling; this
+        // fixture writes both halves so the binary reads what it used to.
+        let (config_text, gateway_text) = split_gateway_state(&format!(
+            "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\
                  {extra}"
-            ),
-        )
-        .expect("write user config");
+        ));
+        std::fs::write(config_dir.join("config.toml"), config_text).expect("write user config");
+        std::fs::write(config_dir.join("gateway.toml"), gateway_text).expect("write user config");
 
         Self {
             _tmp: tmp,
