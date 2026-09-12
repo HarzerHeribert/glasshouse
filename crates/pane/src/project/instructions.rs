@@ -86,7 +86,9 @@ pub fn root(profile: &Profile) -> String {
         omissions: load.omissions.clone(),
         complete: load.complete,
     };
-    render(profile, &load, Some(&index))
+    let mut rendered = super::workflows::user_instructions();
+    rendered.push_str(&render(profile, &load, Some(&index)));
+    rendered
 }
 
 /// Instructions whose directory scopes contain at least one target path.

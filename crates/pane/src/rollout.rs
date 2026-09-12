@@ -55,6 +55,10 @@ struct TurnLine {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PersistedBlock {
+    Image {
+        media_type: String,
+        data: String,
+    },
     Text {
         text: String,
     },
@@ -73,6 +77,10 @@ enum PersistedBlock {
 impl PersistedBlock {
     fn from_block(block: &Block) -> Self {
         match block {
+            Block::Image { media_type, data } => Self::Image {
+                media_type: media_type.clone(),
+                data: data.clone(),
+            },
             Block::Text(text) => Self::Text { text: text.clone() },
             Block::ToolUse { id, name, input } => Self::ToolUse {
                 id: id.clone(),
@@ -93,6 +101,7 @@ impl PersistedBlock {
 
     fn into_block(self) -> Block {
         match self {
+            Self::Image { media_type, data } => Block::Image { media_type, data },
             Self::Text { text } => Block::Text(text),
             Self::ToolUse { id, name, input } => Block::ToolUse { id, name, input },
             Self::ToolResult {

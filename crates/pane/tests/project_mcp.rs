@@ -266,7 +266,7 @@ fn encoded_names_cannot_collide_and_invalid_configuration_is_redacted() {
             .contains("invalid")
     );
     let remote = r#"{"mcpServers":{"remote":{"type":"http","url":"https://invalid.test"}}}"#;
-    assert!(pane::project::mcp::parse(Some(remote)).unwrap().is_empty());
+    assert!(pane::project::mcp::parse(Some(remote)).unwrap()["remote"].is_remote());
 }
 
 #[test]

@@ -120,8 +120,15 @@ fn pane_launches_over_a_pty_and_is_visible_in_the_session_list() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project_dir = tmp.path().join("proj");
     std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    std::fs::create_dir_all(project_dir.join(".pane")).expect("create Pane config dir");
+    std::fs::write(
+        project_dir.join(".pane/config.toml"),
+        "[model]\nparent = \"fixture-model\"\n",
+    )
+    .expect("write Pane config");
     let state_dir = tmp.path().join("state");
     let config_dir = tmp.path().join("config");
+    let pane_global_dir = tmp.path().join("pane-global");
     std::fs::create_dir_all(&state_dir).expect("create state dir");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
@@ -135,6 +142,7 @@ fn pane_launches_over_a_pty_and_is_visible_in_the_session_list() {
     .expect("write config");
 
     let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+        .env("XDG_CONFIG_HOME", &pane_global_dir)
         .arg("--scope")
         .arg(&project_dir)
         .arg("--data-dir")

@@ -1,6 +1,8 @@
 //! Human-invoked session inspection and configuration. No model dispatch.
 use super::*;
-use crate::config::{AgentsMode, PaneConfig};
+use crate::config::AgentsMode;
+#[cfg(test)]
+use crate::config::PaneConfig;
 use crate::spend::Tier;
 use crate::tui::{Mode, Panel, PanelRow, TierModels};
 
@@ -81,11 +83,9 @@ fn tier_models(session: &Session<'_>) -> TierModels {
 
 /// Assigns a model to one tier, and persists the two that outlive the session.
 ///
-/// All three are written to `.glasshouse/pane.toml`. The parent is there for
-/// the plainest reason -- a session that forgets which model you chose makes
-/// you choose it again every time -- and the other two because `agent.rs`
-/// loads that file itself when a delegated goal starts, so a choice held only
-/// in memory would be one a subagent could not see.
+/// All three are written to `.pane/config.toml`, under the active named
+/// profile when selected. The effective configuration stays live and travels
+/// to delegated agents as a snapshot.
 ///
 /// SAFETY OF THE EDIT: the text is proved to load with [`PaneConfig::parse`]
 /// **before** it replaces the file, so a rejected model name -- a path, a
@@ -112,34 +112,18 @@ pub(super) fn assign_model(
             matches!(value, "auto" | "inherit" | "off"),
         ),
     };
-    let path = session.project.root.join(".glasshouse").join("pane.toml");
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.to_string()),
-    };
-    let mut document: toml::Value = if text.trim().is_empty() {
-        toml::Value::Table(toml::Table::new())
-    } else {
-        toml::from_str(&text).map_err(|e| format!("pane.toml: {e}"))?
-    };
-    let table = document
-        .as_table_mut()
-        .ok_or_else(|| "pane.toml: must be a table".to_string())?
-        .entry(section)
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| format!("pane.toml: `[{section}]` must be a table"))?;
-    if key_removed {
-        table.remove(key);
-    } else {
-        table.insert(key.into(), toml::Value::String(value.into()));
-        // Choosing a helper model in a panel IS the opt-in the fail-closed
-        // default asks for, so an earlier `enabled = false` must not silently
-        // swallow the choice a person just made.
-        if tier == Tier::Helpers {
-            table.insert("enabled".into(), toml::Value::Boolean(true));
-        }
+    let store = crate::settings::Store::new(&session.project.root)?;
+    let snapshot = store.read(crate::settings::Scope::Local)?;
+    let mut edits = vec![(
+        format!("{section}.{key}"),
+        if key_removed {
+            None
+        } else {
+            Some(value.into())
+        },
+    )];
+    if tier == Tier::Helpers {
+        edits.push(("helpers.enabled".into(), Some((!key_removed).to_string())));
     }
     if tier == Tier::Subagents {
         let mode = match value {
@@ -147,14 +131,15 @@ pub(super) fn assign_model(
             "off" => "off",
             _ => "pinned",
         };
-        table.insert("mode".into(), toml::Value::String(mode.into()));
+        edits.push(("agents.mode".into(), Some(mode.into())));
     }
-    let encoded = toml::to_string_pretty(&document).map_err(|e| e.to_string())?;
-    let parsed = PaneConfig::parse(&encoded)?;
-    fs::create_dir_all(path.parent().expect("pane.toml has a parent"))
-        .map_err(|e| e.to_string())?;
-    fs::write(&path, &encoded).map_err(|e| e.to_string())?;
-    *session.config.borrow_mut() = parsed;
+    let loaded = store.save_profile(
+        crate::settings::Scope::Local,
+        &snapshot,
+        &edits,
+        session.selected_profile.as_deref(),
+    )?;
+    *session.config.borrow_mut() = loaded.config;
     Ok(match (tier, value) {
         (Tier::Helpers, "off") => "helpers off; no helper will run".to_string(),
         (Tier::Subagents, "auto" | "inherit") => {
@@ -625,7 +610,7 @@ pub(super) fn command(
                 Panel::text(
                     "Task spend",
                     format!(
-                        "Last task: {used} cumulative tokens\nToken spend is telemetry and has no cap.\nCell limit: {}\nConfigure runtime limits in .glasshouse/pane.toml for the next session.",
+                        "Last task: {used} cumulative tokens\nToken spend is telemetry and has no cap.\nCell limit: {}\nConfigure runtime limits in .pane/config.toml for the next session.",
                         session.config().limits.cells
                     ),
                 ),
@@ -669,13 +654,39 @@ pub(super) fn command(
                 ),
             );
         }
-        "status" | "config" => {
+        "config" => {
+            let args = argument
+                .unwrap_or("")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            match crate::settings_commands::execute(&session.project.root, &args) {
+                Ok(text) => show(
+                    session,
+                    Panel::text(
+                        "Pane configuration",
+                        format!(
+                            "{text}\nRuntime changes require a new session; live sandbox unchanged."
+                        ),
+                    ),
+                ),
+                Err(error) => session_println!("ERROR: {error}"),
+            }
+        }
+        "settings" => show(
+            session,
+            Panel::text(
+                "Settings",
+                "Open /settings in an interactive terminal. CLI: pane config --help",
+            ),
+        ),
+        "status" => {
             show(
                 session,
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .pane/config.toml (loaded at startup)\nPermissions: native global/project config (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),
@@ -710,7 +721,7 @@ pub(super) fn command(
                 Panel::text(
                     "Supervisor",
                     format!(
-                        "State: {}\nModel: {}\nCadence: every {} cells\nLatest: {}\nConfigure [supervisor] in .glasshouse/pane.toml for the next session.",
+                        "State: {}\nModel: {}\nCadence: every {} cells\nLatest: {}\nConfigure [supervisor] in .pane/config.toml for the next session.",
                         if session.config().supervisor.enabled
                             && session.config().supervisor.model.is_some()
                         {
@@ -829,81 +840,12 @@ fn rollback_confirmation(
 }
 
 fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, String> {
-    let root = &session.project.root;
-    let path = root.join(".claude/settings.json");
-    let mut settings: serde_json::Value = match fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("settings.json: {e}"))?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(e.to_string()),
-    };
-    let mut changed = false;
-    if let Some(argument) = argument.filter(|s| !s.is_empty()) {
-        let (action, rule) = argument
-            .split_once(' ')
-            .ok_or("Use /permissions allow|remove <rule>")?;
-        if !matches!(action, "allow" | "remove") || rule.trim().is_empty() {
-            return Err("Use /permissions allow|remove <rule>".into());
-        }
-        let root_map = settings
-            .as_object_mut()
-            .ok_or("settings.json must be an object")?;
-        let permissions = root_map
-            .entry("permissions")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-            .ok_or("permissions must be an object")?;
-        let allow = permissions
-            .entry("allow")
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-            .ok_or("permissions.allow must be an array")?;
-        let rule = serde_json::Value::String(rule.trim().into());
-        if action == "allow" {
-            if !allow.contains(&rule) {
-                allow.push(rule);
-                changed = true;
-            }
-        } else {
-            let old = allow.len();
-            allow.retain(|v| v != &rule);
-            changed = old != allow.len();
-        }
-        if changed {
-            let encoded = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-            let profile = Profile::compile(root, Some(&encoded));
-            if !profile.diagnostics().is_empty() {
-                return Err(format!("Not saved: {}", profile.diagnostics().join("; ")));
-            }
-            fs::create_dir_all(path.parent().expect("settings parent"))
-                .map_err(|e| e.to_string())?;
-            fs::write(&path, encoded + "\n").map_err(|e| e.to_string())?;
-        }
-    }
-    let permissions = settings
-        .get("permissions")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({"allow":[]}));
+    let saved = crate::settings_session::permissions(&session.project.root, argument)?;
     Ok(format!(
-        "Effective current session (immutable):\n{} path rules · {} command patterns · {} MCP patterns · network {}\n{}\n\nPersisted next-session settings:\n{}\n{}\n\n/permissions allow <rule>\n/permissions remove <rule>\nPersisted edits never change the running sandbox.",
+        "Effective current session (immutable): {} path rules · {} command patterns · {} MCP patterns\n{saved}",
         session.profile.rule_count(),
         session.profile.command_pattern_count(),
-        session.profile.mcp_tool_count(),
-        if session.profile.grants_network() {
-            "on"
-        } else {
-            "off"
-        },
-        if session.profile.diagnostics().is_empty() {
-            "No permission diagnostics.".to_string()
-        } else {
-            format!("Diagnostics: {}", session.profile.diagnostics().join("; "))
-        },
-        if changed {
-            "Saved .claude/settings.json"
-        } else {
-            ".claude/settings.json"
-        },
-        serde_json::to_string_pretty(&permissions).map_err(|e| e.to_string())?
+        session.profile.mcp_tool_count()
     ))
 }
 
@@ -952,11 +894,11 @@ mod tests {
     #[test]
     fn permission_edits_preserve_other_settings_and_reject_invalid_grants() {
         let root = std::env::temp_dir().join(format!("pane-permissions-{}", std::process::id()));
-        fs::create_dir_all(root.join(".claude")).unwrap();
-        let path = root.join(".claude/settings.json");
+        fs::create_dir_all(root.join(".pane")).unwrap();
+        let path = root.join(".pane/config.toml");
         fs::write(
             &path,
-            r#"{"other":{"keep":true},"permissions":{"allow":[],"deny":["Bash(rm *)"]}}"#,
+            "# keep this comment\n[ui]\ntheme='amber'\n[permissions]\nallow=[]\ndeny=['Bash(rm *)']\n",
         )
         .unwrap();
         let project = ProjectConfig {
@@ -964,7 +906,14 @@ mod tests {
             ..ProjectConfig::default()
         };
         let config = PaneConfig::default();
-        let profile = Profile::compile(&root, fs::read_to_string(&path).ok().as_deref());
+        let profile = Profile::compile(
+            &root,
+            crate::settings::Store::new(&root)
+                .unwrap()
+                .permissions()
+                .unwrap()
+                .as_deref(),
+        );
         let glasshouse = Glasshouse::Command {
             glasshouse: root.join("absent"),
         };
@@ -975,6 +924,9 @@ mod tests {
         let memory = LocalMemory::new(&root);
         let interrupt = Interrupter::new(id.clone());
         let session = Session {
+            selected_profile: None,
+            pending_images: RefCell::new(Vec::new()),
+            approval_gate: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, &root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
@@ -997,28 +949,37 @@ mod tests {
         };
         permissions(&session, Some("allow Read(**)")).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(parsed["other"]["keep"], true);
+        let parsed: toml::Value = toml::from_str(&saved).unwrap();
+        assert_eq!(parsed["ui"]["theme"].as_str(), Some("amber"));
+        assert!(saved.contains("# keep this comment"));
         assert_eq!(
             parsed["permissions"]["deny"],
-            serde_json::json!(["Bash(rm *)"])
+            toml::Value::Array(vec![toml::Value::String("Bash(rm *)".into())])
         );
         assert!(permissions(&session, Some("allow NotAGrant(foo)")).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), saved);
         permissions(&session, Some("remove Read(**)")).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["permissions"]["allow"], serde_json::json!([]));
+        let parsed: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["permissions"]["allow"], toml::Value::Array(vec![]));
         fs::remove_dir_all(root).unwrap();
     }
 
     /// Builds a session rooted at `root` and runs `body` against it.
     fn with_session(root: &std::path::Path, body: impl FnOnce(&Session<'_>)) {
+        with_selected_session(root, None, body)
+    }
+
+    fn with_selected_session(
+        root: &std::path::Path,
+        selected: Option<&str>,
+        body: impl FnOnce(&Session<'_>),
+    ) {
         let project = ProjectConfig {
             root: root.to_path_buf(),
             ..ProjectConfig::default()
         };
-        let config = RefCell::new(PaneConfig::load(root).expect("the fixture parses"));
+        let config =
+            RefCell::new(PaneConfig::load_profile(root, selected).expect("the fixture parses"));
         let profile = Profile::compile(root, None);
         let glasshouse = Glasshouse::Command {
             glasshouse: root.join("absent"),
@@ -1030,6 +991,9 @@ mod tests {
         let memory = LocalMemory::new(root);
         let interrupt = Interrupter::new(id.clone());
         let session = Session {
+            selected_profile: selected.map(str::to_string),
+            pending_images: RefCell::new(Vec::new()),
+            approval_gate: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
@@ -1059,8 +1023,8 @@ mod tests {
     fn assigning_a_tier_is_live_persisted_and_reversible() {
         let root = std::env::temp_dir().join(format!("pane-tier-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(".glasshouse")).unwrap();
-        let file = root.join(".glasshouse").join("pane.toml");
+        fs::create_dir_all(root.join(".pane")).unwrap();
+        let file = root.join(".pane").join("config.toml");
         fs::write(
             &file,
             "[limits]\ncells = 42\n\n[helpers]\nenabled = false\n",
@@ -1125,6 +1089,45 @@ mod tests {
             assert_eq!(fs::read_to_string(&file).unwrap(), before);
         });
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tier_changes_preserve_selected_profile_and_leave_base_settings_unchanged() {
+        let root = std::env::temp_dir().join(format!("pane-profile-tier-{}", std::process::id()));
+        fs::create_dir_all(root.join(".pane")).unwrap();
+        let file = root.join(".pane/config.toml");
+        let text = "[model]\nparent='base-parent'\n[limits]\ncells=42\n[helpers]\nmodel='base-helper'\nenabled=true\n[agents]\nmodel='base-agent'\n[profiles.review.limits]\ncells=17\n[profiles.review.web]\nenabled=true\n[profiles.review.helpers]\nmodel='review-helper'\n";
+        fs::write(&file, text).unwrap();
+        let base = PaneConfig::parse(text).unwrap();
+        with_selected_session(&root, Some("review"), |session| {
+            assign_model(session, Tier::Helpers, "changed-helper").unwrap();
+            assert_eq!(session.config().limits.cells, 17);
+            assert!(session.config().web.enabled);
+            assert_eq!(
+                session.config().helpers.model.as_deref(),
+                Some("changed-helper")
+            );
+            assign_model(session, Tier::Helpers, "off").unwrap();
+            assert!(!session.config().helpers.enabled);
+            assign_model(session, Tier::Subagents, "off").unwrap();
+            assert_eq!(session.config().agents.mode, crate::config::AgentsMode::Off);
+            assign_model(session, Tier::Subagents, "auto").unwrap();
+            assert_eq!(
+                session.config().agents.mode,
+                crate::config::AgentsMode::Auto
+            );
+            assign_model(session, Tier::Parent, "review-parent").unwrap();
+            assert_eq!(
+                session.config().model.parent.as_deref(),
+                Some("review-parent")
+            );
+            assert_eq!(PaneConfig::load(&root).unwrap(), base);
+            assert_eq!(
+                PaneConfig::load_profile(&root, Some("review")).unwrap(),
+                *session.config()
+            );
+        });
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

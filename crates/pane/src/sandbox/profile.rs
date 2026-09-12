@@ -127,6 +127,8 @@ struct NeverRule {
 #[derive(Debug, Clone)]
 pub struct Profile {
     root: PathBuf,
+    /// Explicit host-selected directories, fixed before session start.
+    additional_roots: Vec<PathBuf>,
     /// Present when the supplied project root had no unambiguous absolute
     /// identity. Every admission method checks this before implicit root or
     /// configured grants.
@@ -229,6 +231,7 @@ impl Profile {
             never: never_rules(&root, home.as_deref()),
             root_spelling: spelling(&root),
             root,
+            additional_roots: Vec::new(),
             home,
             allow: Vec::new(),
             deny: Vec::new(),
@@ -471,6 +474,71 @@ impl Profile {
         &self.root
     }
 
+    pub fn additional_roots(&self) -> &[PathBuf] {
+        &self.additional_roots
+    }
+
+    /// Host-only construction step. Consuming the profile keeps the active
+    /// session immutable; project permission patterns cannot opt into this.
+    /// Arbitrary deny globs are not approximated by OS subtree grants.
+    pub fn with_additional_root(mut self, path: impl AsRef<Path>) -> Result<Self, String> {
+        if cfg!(target_os = "windows") {
+            return Err(
+                "--add-dir is not supported by the Windows AppContainer applier yet".into(),
+            );
+        }
+        if self.invalid_root.is_some() {
+            return Err("cannot add a directory to an invalid project profile".into());
+        }
+        let supplied = if path.as_ref().is_absolute() {
+            path.as_ref().to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        let root = std::fs::canonicalize(&supplied)
+            .map_err(|error| format!("additional directory {}: {error}", supplied.display()))?;
+        if !root.is_dir() {
+            return Err("additional root must be an existing directory".into());
+        }
+        if root == self.root || self.additional_roots.contains(&root) {
+            return Ok(self);
+        }
+        if !self.deny.is_empty() {
+            return Err("--add-dir cannot be combined with filesystem deny patterns until every platform can enforce their exclusions; no additional directory was granted".into());
+        }
+        let candidate = spelling(&root);
+        for never in &self.never {
+            // Only the broad home boundary can be carved out by the host.
+            // Credential stores and state remain forbidden, including when
+            // the requested directory would contain one of those subtrees.
+            let broad_home = self
+                .home
+                .as_ref()
+                .is_some_and(|home| spelling(home) == never.prefix);
+            if broad_home {
+                continue;
+            }
+            if contains_refusing(&never.prefix, &candidate)
+                || contains_refusing(&candidate, &never.prefix)
+            {
+                return Err(format!("additional directory refused: {}", never.rule));
+            }
+        }
+        for name in [".claude", ".pane"] {
+            let protected = spelling(&root.join(name));
+            self.never.push(NeverRule {
+                glob: subtree_glob(&protected),
+                prefix: protected,
+                except: None,
+                except_spelling: None,
+                write_only: true,
+                rule: format!("`{name}/**` in an additional directory is never writable"),
+            });
+        }
+        self.additional_roots.push(root);
+        Ok(self)
+    }
+
     /// Every rule this profile compiled, in the order [`Profile::check`]
     /// consults them: §4's never-grantable set, then `deny`, then `allow`.
     ///
@@ -677,6 +745,14 @@ impl Profile {
                     .except_spelling
                     .as_ref()
                     .is_some_and(|except| contains(except, &candidate))
+                && !(self
+                    .home
+                    .as_ref()
+                    .is_some_and(|home| spelling(home) == never.prefix)
+                    && self
+                        .additional_roots
+                        .iter()
+                        .any(|root| contains(&spelling(root), &candidate)))
         });
         let denied = self
             .deny
@@ -781,6 +857,17 @@ impl Profile {
             {
                 continue;
             }
+            if self
+                .home
+                .as_ref()
+                .is_some_and(|home| spelling(home) == never.prefix)
+                && self
+                    .additional_roots
+                    .iter()
+                    .any(|root| contains(&spelling(root), &candidate))
+            {
+                continue;
+            }
             return denied(never.rule.clone());
         }
         for rule in &self.deny {
@@ -788,7 +875,12 @@ impl Profile {
                 return denied(format!("`{}` in permissions.deny", rule.written));
             }
         }
-        if contains(&self.root_spelling, &candidate) {
+        if contains(&self.root_spelling, &candidate)
+            || self
+                .additional_roots
+                .iter()
+                .any(|root| contains(&spelling(root), &candidate))
+        {
             return grant(resolved);
         }
         let granted = self.allow.iter().any(|rule| {
@@ -830,6 +922,15 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
         write_only: true,
         rule: "`.claude/**` is never writable: a program that could edit it could widen the profile it was derived from (sandbox-grants.md §1.5)".to_string(),
     }];
+    let dot_pane = spelling(&root.join(".pane"));
+    rules.push(NeverRule {
+        glob: subtree_glob(&dot_pane),
+        prefix: dot_pane,
+        except: None,
+        except_spelling: None,
+        write_only: true,
+        rule: "`.pane/**` is host-owned configuration and never writable by agent tools".into(),
+    });
     // `Some(root)`, and it is what makes §4.2 hold on Windows: `/etc/sudoers`
     // has a root and no drive there, so a candidate spelled that way acquires
     // the project's drive from `Path::join` and becomes `C:/etc/sudoers`. A

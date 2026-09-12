@@ -26,6 +26,10 @@ static DRAWING: Mutex<()> = Mutex::new(());
 thread_local! { static OUTPUT: RefCell<Option<mpsc::Sender<Update>>> = const { RefCell::new(None) }; }
 
 pub(super) fn output(message: String) {
+    if super::output::active() {
+        eprintln!("{message}");
+        return;
+    }
     OUTPUT.with(|output| {
         if let Some(sender) = output.borrow().as_ref() {
             let _ = sender.send(Update::Notice(message));
@@ -110,6 +114,7 @@ pub(super) fn read_line() -> io::Result<Option<String>> {
 }
 
 pub(super) enum Update {
+    Approval(crate::approval::Request),
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
     /// Open a modal masked prompt with this title. The terminal thread
     /// answers it on the secret channel and on nothing else.
@@ -146,6 +151,20 @@ pub(super) struct LiveUi {
     thread: Option<JoinHandle<()>>,
 }
 impl LiveUi {
+    /// Forwards suspended exact actions to the terminal owner. Closing the
+    /// terminal drops pending requests and denies their waiting callbacks.
+    pub(super) fn approval_gate(&self) -> crate::approval::Gate {
+        let (gate, receiver) = crate::approval::Gate::channel();
+        let updates = self.updates.clone();
+        thread::spawn(move || {
+            for request in receiver {
+                if updates.send(Update::Approval(request)).is_err() {
+                    break;
+                }
+            }
+        });
+        gate
+    }
     pub(super) fn start(
         state: ScreenState,
         conversation: Conversation,
@@ -552,13 +571,29 @@ fn run(
     let mut previous_rows = 0usize;
     let mut viewport_height = 10usize;
     let mut panel_geometry = tui::PanelGeometry::default();
+    let mut approvals: std::collections::VecDeque<crate::approval::Request> =
+        std::collections::VecDeque::new();
+    let mut approval_scroll = 0u16;
+    let mut settings_editor: Option<crate::settings_session::Editor> = None;
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
             break;
         }
+        let queued = approvals.len();
+        approvals.retain(crate::approval::Request::is_pending);
+        if approvals.len() != queued {
+            approval_scroll = 0;
+            dirty = true;
+        }
         for update in updates.try_iter() {
             dirty = true;
             match update {
+                Update::Approval(request) => {
+                    approvals.push_back(request);
+                    state.panel = None;
+                    state.inspection = None;
+                    approval_scroll = 0;
+                }
                 Update::Snapshot(snapshot) => {
                     let (c, n, s, activity) = *snapshot;
                     let completed = n
@@ -598,6 +633,10 @@ fn run(
                         activity,
                         Activity::Idle | Activity::Complete | Activity::Failed
                     ) {
+                        // Cancellation may finish the waiting callback before
+                        // the user answers. Remove stale confirmations then.
+                        approvals.clear();
+                        approval_scroll = 0;
                         if let Some(start) = task_started.take() {
                             state.pulse.elapsed_ms = start.elapsed().as_millis() as u64;
                         }
@@ -710,7 +749,12 @@ fn run(
                     &super::empty_handles(),
                     &notebook,
                     &state,
-                )
+                );
+                if let Some(request) = approvals.front() {
+                    tui::render_approval(frame, &request.action().confirmation(), approval_scroll);
+                } else if let Some(settings) = settings_editor.as_ref() {
+                    settings.panel.render(frame, state.theme);
+                }
             })?;
             io::stdout().flush()?;
             dirty = false;
@@ -726,6 +770,18 @@ fn run(
                 dirty = true;
             }
             Event::Mouse(mouse) => {
+                if settings_editor.is_some() {
+                    continue;
+                }
+                if !approvals.is_empty() {
+                    approval_scroll = match mouse.kind {
+                        MouseEventKind::ScrollUp => approval_scroll.saturating_sub(3),
+                        MouseEventKind::ScrollDown => approval_scroll.saturating_add(3),
+                        _ => approval_scroll,
+                    };
+                    dirty = true;
+                    continue;
+                }
                 if state
                     .panel
                     .as_mut()
@@ -756,6 +812,12 @@ fn run(
                 }
             }
             Event::Paste(text) => {
+                if settings_editor.is_some() {
+                    continue;
+                }
+                if !approvals.is_empty() {
+                    continue;
+                }
                 // Pasting is how most keys are entered, so the masked prompt
                 // takes a paste before anything else can.
                 if let Some(prompt) = state.secret_prompt.as_mut() {
@@ -771,6 +833,58 @@ fn run(
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 dirty = true;
+                if let Some(request) = approvals.front() {
+                    let complete = request.action().confirmation().complete;
+                    let decision = match key.code {
+                        KeyCode::Char('o' | 'O') if complete && key.modifiers.is_empty() => {
+                            Some(crate::approval::Decision::AllowOnce)
+                        }
+                        KeyCode::Char('s' | 'S') if complete && key.modifiers.is_empty() => {
+                            Some(crate::approval::Decision::AllowForSession)
+                        }
+                        KeyCode::Char('d' | 'D') | KeyCode::Esc => {
+                            Some(crate::approval::Decision::Deny)
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            super::INTERRUPT.store(true, Ordering::SeqCst);
+                            Some(crate::approval::Decision::Deny)
+                        }
+                        KeyCode::Up => {
+                            approval_scroll = approval_scroll.saturating_sub(1);
+                            None
+                        }
+                        KeyCode::Down => {
+                            approval_scroll = approval_scroll.saturating_add(1);
+                            None
+                        }
+                        KeyCode::PageUp => {
+                            approval_scroll = approval_scroll.saturating_sub(10);
+                            None
+                        }
+                        KeyCode::PageDown => {
+                            approval_scroll = approval_scroll.saturating_add(10);
+                            None
+                        }
+                        KeyCode::Home => {
+                            approval_scroll = 0;
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(decision) = decision {
+                        if let Some(request) = approvals.pop_front() {
+                            request.respond(decision);
+                        }
+                        approval_scroll = 0;
+                    }
+                    continue;
+                }
+                if let Some(settings) = settings_editor.as_mut() {
+                    if settings.key(key, &mut state) {
+                        settings_editor = None;
+                    }
+                    continue;
+                }
                 // **Modal, and first.** While a masked prompt is open every
                 // key belongs to it: none reaches the editor, the panel, the
                 // inspector or the input history.
@@ -1130,6 +1244,15 @@ fn run(
                         );
                         continue;
                     }
+                    if !busy && matches!(editor.text.trim(), "/settings" | "/statusline") {
+                        let status_only = editor.text.trim() == "/statusline";
+                        editor.take();
+                        match crate::settings_session::Editor::open(&state, status_only) {
+                            Ok(settings) => settings_editor = Some(settings),
+                            Err(error) => state.notice = Some(error),
+                        }
+                        continue;
+                    }
                     if editor.text.split_whitespace().next() == Some("/theme") {
                         let text = editor.take();
                         match text.split_whitespace().nth(1) {
@@ -1211,15 +1334,11 @@ fn run(
                         return Ok(());
                     }
                     if text.split_whitespace().next() == Some("/statusline") {
-                        state.status_line = match text.split_whitespace().nth(1) {
-                            Some("compact") => tui::StatusLine::Compact,
-                            Some("hide") | Some("hidden") => tui::StatusLine::Hidden,
-                            Some("full") => tui::StatusLine::Full,
-                            _ => {
-                                state.notice = Some("Use /statusline full|compact|hide".into());
-                                continue;
-                            }
-                        };
+                        let word = text.split_whitespace().nth(1).unwrap_or("");
+                        state.notice=Some(match crate::settings_session::save_status(&mut state,word) {
+                            Ok(())=>"Status line saved for this project. Selected profile overrides still apply.".into(),
+                            Err(error)=>error,
+                        });
                         continue;
                     }
                     if text.split_whitespace().next() == Some("/sidebar") {

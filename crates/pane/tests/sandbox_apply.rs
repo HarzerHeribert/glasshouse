@@ -337,6 +337,7 @@ fn the_allow_set_is_exactly_the_declared_terms() {
     expected.push(RESOLVED.to_string());
     expected.push(root.to_string_lossy().into_owned());
     expected.push(root.join(".claude").to_string_lossy().into_owned());
+    expected.push(root.join(".pane").to_string_lossy().into_owned());
     assert_eq!(
         sorted(filters.iter().map(|f| f.value.clone()).collect()),
         sorted(expected),
@@ -672,6 +673,7 @@ fn the_reported_regime_matches_what_was_applied() {
     for full in [
         linux::Regime::BubblewrapAndLandlock { abi: 4 },
         linux::Regime::BubblewrapOnly,
+        linux::Regime::LandlockAndSeccomp { abi: 3 },
     ] {
         assert!(full.removes_network(), "{full}");
     }
@@ -740,19 +742,19 @@ fn the_reported_regime_matches_what_was_applied() {
         assert!(
             matches!(
                 live,
-                linux::Regime::LandlockOnly { .. } | linux::Regime::Unconfined
+                linux::Regime::LandlockAndSeccomp { .. } | linux::Regime::Unconfined
             ),
             "regime() reported a regime this package cannot apply: {live:?}"
         );
-        assert!(
-            !live.removes_network(),
-            "nothing here removes the network: {live}"
+        assert_eq!(
+            live.removes_network(),
+            matches!(live, linux::Regime::LandlockAndSeccomp { .. })
         );
         let abi = linux::landlock_abi();
         assert_eq!(
             live,
-            if abi >= 3 {
-                linux::Regime::LandlockOnly { abi }
+            if abi >= 3 && linux::seccomp_supported_arch() {
+                linux::Regime::LandlockAndSeccomp { abi }
             } else {
                 linux::Regime::Unconfined
             },
@@ -771,7 +773,8 @@ fn the_reported_regime_matches_what_was_applied() {
 #[test]
 fn no_runtime_input_can_widen_a_grant() {
     // (a) The profile decides, not the applier. A document whose `deny`
-    // covers the project root produces no write grant anywhere.
+    // covers the project root produces no writable directory. Linux still
+    // grants the one /dev/null sink needed by ordinary command redirection.
     let fixture = Fixture::new("widen");
     let root_pattern = fixture.root.to_string_lossy().replace('\\', "/");
     let denied = fixture.profile(Some(&format!(
@@ -779,10 +782,9 @@ fn no_runtime_input_can_widen_a_grant() {
     )));
     let text = macos::profile_text(&denied, Path::new(RESOLVED));
     assert!(!text.contains("(allow file-write* (subpath"), "{text}");
-    assert!(
-        linux::landlock_rules(&denied, Path::new(RESOLVED))
-            .read_write
-            .is_empty(),
+    assert_eq!(
+        linux::landlock_rules(&denied, Path::new(RESOLVED)).read_write,
+        vec![PathBuf::from("/dev/null")],
         "{:?}",
         linux::landlock_rules(&denied, Path::new(RESOLVED))
     );
@@ -930,7 +932,24 @@ fn the_landlock_ruleset_is_exactly_the_declared_paths() {
             .collect::<Vec<_>>(),
         "{rules:?}"
     );
-    assert_eq!(rules.read_write, vec![root.clone()], "{rules:?}");
+    assert_eq!(
+        rules.read_write,
+        vec![PathBuf::from("/dev/null"), root.clone()],
+        "{rules:?}"
+    );
+    for path in [
+        "/dev",
+        "/dev/zero",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+        "/dev/sda",
+    ] {
+        assert!(
+            !rules.read_write.contains(&PathBuf::from(path)),
+            "unexpected writable device grant: {rules:?}"
+        );
+    }
 
     // The three that were here and are not. Named individually because the
     // equality above would also pass if all three were added and the
@@ -1061,7 +1080,11 @@ fn the_windows_acl_admits_the_capability_sid_to_the_project_and_nothing_else() {
     let grants = windows::acl_grants(&profile, Path::new(RESOLVED));
 
     assert_eq!(grants.read_write, vec![root.clone()], "{grants:?}");
-    assert_eq!(grants.read_only, vec![root.join(".claude")], "{grants:?}");
+    assert_eq!(
+        grants.read_only,
+        vec![root.join(".claude"), root.join(".pane")],
+        "{grants:?}"
+    );
     // Neither grant carries `FILE_EXECUTE`: the project tree is where
     // model-authored files live and map line 2457 says none of them runs.
     // The rest of `FILE_GENERIC_EXECUTE` stays, because `SYNCHRONIZE` and

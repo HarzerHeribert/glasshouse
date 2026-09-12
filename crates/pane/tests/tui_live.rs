@@ -50,6 +50,15 @@ impl App {
     }
 
     fn start_with(base: &str, bare: bool, helper_model: Option<&str>) -> Self {
+        Self::start_with_flags(base, bare, helper_model, &[])
+    }
+
+    fn start_with_flags(
+        base: &str,
+        bare: bool,
+        helper_model: Option<&str>,
+        flags: &[&str],
+    ) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-live-{}-{}",
@@ -58,9 +67,9 @@ impl App {
         ));
         std::fs::create_dir_all(&root).unwrap();
         if let Some(model) = helper_model {
-            std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+            std::fs::create_dir_all(root.join(".pane")).unwrap();
             std::fs::write(
-                root.join(".glasshouse/pane.toml"),
+                root.join(".pane/config.toml"),
                 format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
             )
             .unwrap();
@@ -75,9 +84,9 @@ impl App {
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_pane"));
         if bare {
-            std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+            std::fs::create_dir_all(root.join(".pane")).unwrap();
             std::fs::write(
-                root.join(".glasshouse/pane.toml"),
+                root.join(".pane/config.toml"),
                 "[model]\nparent = \"fixture-model\"\n",
             )
             .unwrap();
@@ -99,7 +108,12 @@ impl App {
             // a picker test writes its script at that path.
             command.env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"));
         }
+        command.args(flags.iter().copied());
         command.env("ANTHROPIC_BASE_URL", base);
+        // Every live session gets an isolated user-settings root. Besides
+        // keeping these tests away from the developer's real HOME, this
+        // makes Global/Project scope assertions deterministic on every OS.
+        command.env("XDG_CONFIG_HOME", root.join("global-config"));
         command.env_remove("ANTHROPIC_API_KEY");
         command.env_remove("ANTHROPIC_AUTH_TOKEN");
         command.env("TERM", "xterm-256color");
@@ -377,6 +391,118 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
         }
     });
     (base, requests)
+}
+
+/// Single deterministic model response for approval tests. Tool calls still
+/// run through the shipped runtime, sandbox, and terminal thread.
+fn approval_provider(program: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                len = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let text = format!("```pane\n{program}\n```");
+        let (mime, body) = if request["stream"] == true {
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":10}}}),
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}}),
+                serde_json::json!({"type":"message_delta","usage":{"output_tokens":20}}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            (
+                "text/event-stream",
+                events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>(),
+            )
+        } else {
+            ("application/json", serde_json::json!({"role":"assistant","content":[{"type":"text","text":text}],"usage":{"input_tokens":10,"output_tokens":20}}).to_string())
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    base
+}
+
+#[test]
+fn live_approval_once_session_and_deny_gate_actual_writes() {
+    let base = approval_provider(
+        r#"
+        write({path: "once.txt", content: "once"});
+        write({path: "remember.txt", content: "remember"});
+        write({path: "./remember.txt", content: "remember"});
+        try { write({path: "denied.txt", content: "must not appear"}); } catch (e) {}
+        return "APPROVAL FINISHED";
+    "#,
+    );
+    let mut app = App::start_with_flags(&base, false, None, &["--ask-approval"]);
+    app.contains("fixture-model");
+    app.send(b"proceed\r");
+    app.contains("Approve exact tool call");
+    app.contains("once.txt");
+    assert!(!app.root.join("once.txt").exists());
+    // Enter and pasted text must never accept the modal by accident.
+    app.send(b"\r\x1b[200~o\x1b[201~");
+    app.settle(100);
+    assert!(!app.root.join("once.txt").exists());
+    app.send(b"o");
+    app.contains("remember.txt");
+    assert_eq!(
+        std::fs::read_to_string(app.root.join("once.txt")).unwrap(),
+        "once"
+    );
+    assert!(!app.root.join("remember.txt").exists());
+    app.send(b"s");
+    // Canonically equivalent repeated arguments skip a second prompt.
+    app.contains("denied.txt");
+    assert_eq!(
+        std::fs::read_to_string(app.root.join("remember.txt")).unwrap(),
+        "remember"
+    );
+    assert!(!app.root.join("denied.txt").exists());
+    app.send(b"d");
+    app.contains("APPROVAL FINISHED");
+    assert!(!app.root.join("denied.txt").exists());
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn live_approval_ctrl_c_denies_pending_write_and_restores_terminal_on_exit() {
+    let base =
+        approval_provider(r#"write({path: "cancelled.txt", content: "no"}); return "done";"#);
+    let mut app = App::start_with_flags(&base, false, None, &["--ask-approval"]);
+    app.contains("fixture-model");
+    app.send(b"proceed\r");
+    app.contains("Approve exact tool call");
+    app.send(b"\x03");
+    app.wait("cancelled approval closes", |screen| {
+        !screen.contents().contains("Approve exact tool call")
+    });
+    assert!(!app.root.join("cancelled.txt").exists());
+    app.settle(300);
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
 }
 
 /// Accept one request and hold its response until the test releases it. The
@@ -1183,6 +1309,89 @@ fn handlers_can_be_inspected_and_cancelled_during_an_active_task() {
     app.wait("empty handler panel closed", |screen| {
         !screen.contents().contains("Standing handlers")
     });
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    app.resize(160);
+    let project = app.root.join(".pane/config.toml");
+    let global = app.root.join("global-config/pane/config.toml");
+
+    app.send(b"/settings\r");
+    app.contains("Settings");
+    app.contains("Global");
+    app.contains("Project");
+    app.contains(&project.display().to_string());
+
+    // Tab switches scope without saving. The destination shown must switch
+    // with the selected tab, so a Global label cannot conceal a Project
+    // write (or vice versa).
+    app.send(b"\t");
+    app.contains(&global.display().to_string());
+    app.send(b"\x1b");
+    app.wait("settings editor closes", |screen| {
+        !screen.contents().contains(&global.display().to_string())
+    });
+    assert!(!project.exists(), "viewing/cancelling created {project:?}");
+    assert!(!global.exists(), "viewing/cancelling created {global:?}");
+
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn bare_statusline_selector_previews_cancels_and_ctrl_s_saves_project_scope() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    let project = app.root.join(".pane/config.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let original = "# retained on cancel\n[ui]\nstatusline = \"full\"\n";
+    std::fs::write(&project, original).unwrap();
+
+    app.send(b"/statusline\r");
+    app.contains("Status line");
+    app.contains("preview:");
+    app.contains("Project");
+    app.send(b"\x1b[C");
+    app.contains("compact");
+    app.send(b"\x1b");
+    app.wait("status-line selector closes", |screen| {
+        !screen.contents().contains("preview:")
+    });
+    assert_eq!(
+        std::fs::read_to_string(&project).unwrap(),
+        original,
+        "cancelled preview changed the settings file"
+    );
+
+    app.send(b"/statusline\r");
+    app.contains("preview:");
+    app.send(b"\x1b[C");
+    app.contains("compact");
+    app.send(b"\x13");
+    app.contains("Settings saved");
+    let saved = std::fs::read_to_string(&project).expect("Ctrl-S writes project settings");
+    assert!(saved.contains("statusline = \"compact\""), "{saved}");
+
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn statusline_compact_shortcut_persists_without_contacting_inference() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    let project = app.root.join(".pane/config.toml");
+
+    app.send(b"/statusline compact\r");
+    app.contains("Status line saved for this project");
+    let saved = std::fs::read_to_string(&project).expect("shortcut writes project settings");
+    assert!(saved.contains("statusline = \"compact\""), "{saved}");
+
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }

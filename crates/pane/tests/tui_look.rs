@@ -230,7 +230,17 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    assert_eq!(slash_matches("/").len(), 28);
+    assert_eq!(slash_matches("/").len(), 30);
+    assert!(
+        slash_matches("/se")
+            .iter()
+            .any(|(name, _)| name == "/settings")
+    );
+    assert!(
+        slash_matches("/co")
+            .iter()
+            .any(|(name, _)| name == "/config")
+    );
     assert!(
         slash_matches("/ex").iter().any(|(name, _)| name == "/exit"),
         "the command that ends the session must be offered by the menu"

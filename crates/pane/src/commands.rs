@@ -1,6 +1,6 @@
 //! Resolves a slash command name to what it *is*, never to its effect: this
-//! module runs nothing, spawns nothing, and reads no content it is handed
-//! back as anything but a string. It only decides, for a given
+//! module runs nothing and spawns nothing. It validates skill documents for
+//! discovery, but never interprets their contents as code. It decides, for a given
 //! `contract::ProjectConfig` and name, which of a built-in, a project
 //! command, or a skill answers, and whether the built-in's subsystem exists
 //! yet.
@@ -95,8 +95,8 @@ pub struct ResolvedCommand {
 /// silently replaced by a same-named file the project happens to ship. Where
 /// a project command and a skill share a name that no built-in claims, the
 /// command wins: `.claude/commands/<name>.md` is written to be a command,
-/// where a skill of the same name is a directory pane merely offers by
-/// name, so the more specific source takes it. Both rules are one
+/// where a skill of the same name is a reusable directory workflow, so the
+/// more specific source takes it. Both rules are one
 /// precedence order: built-in, then project command, then skill.
 pub fn all(project: &ProjectConfig) -> Vec<ResolvedCommand> {
     let mut out: Vec<ResolvedCommand> = BUILT_INS
@@ -125,7 +125,7 @@ pub fn all(project: &ProjectConfig) -> Vec<ResolvedCommand> {
         out.push(ResolvedCommand {
             name: name.clone(),
             source: CommandSource::ProjectSkill,
-            status: CommandStatus::Informational,
+            status: skill_status(project, name),
         });
     }
 
@@ -149,7 +149,7 @@ pub fn resolve(project: &ProjectConfig, name: &str) -> Option<ResolvedCommand> {
         return Some(ResolvedCommand {
             name: name.to_string(),
             source: CommandSource::ProjectSkill,
-            status: CommandStatus::Informational,
+            status: skill_status(project, name),
         });
     }
     None
@@ -160,5 +160,13 @@ fn resolved_builtin(builtin: BuiltIn) -> ResolvedCommand {
         name: builtin.name().to_string(),
         source: CommandSource::BuiltIn(builtin),
         status: CommandStatus::Available,
+    }
+}
+
+fn skill_status(project: &ProjectConfig, name: &str) -> CommandStatus {
+    if crate::project::workflows::skill_available(project, name) {
+        CommandStatus::Available
+    } else {
+        CommandStatus::Informational
     }
 }

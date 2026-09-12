@@ -33,7 +33,10 @@ pub(crate) fn run(paths: &glasshouse::paths::RuntimePaths, refresh: bool) -> Str
         // the machine consumer.
         let said = match analysis::ensure(paths.data_dir(), TTL) {
             analysis::Refresh::NotConfigured => {
-                format!("{} is not set; using any cached catalogue", analysis::KEY_VARIABLE)
+                format!(
+                    "{} is not set; using any cached catalogue",
+                    analysis::KEY_VARIABLE
+                )
             }
             analysis::Refresh::Fresh => "cache is fresh".to_string(),
             analysis::Refresh::BudgetLow { remaining } => {

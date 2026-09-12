@@ -26,16 +26,10 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
-        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::create_dir_all(root.join(".pane")).unwrap();
         std::fs::write(
-            root.join(".glasshouse/pane.toml"),
-            "[helpers]\nmodel = \"checker-model\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join(".claude/settings.json"),
-            r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#,
+            root.join(".pane/config.toml"),
+            "[helpers]\nmodel = \"checker-model\"\n\n[permissions]\nallow = [\"Read(**)\", \"Write(**)\"]\n",
         )
         .unwrap();
         Self { root }

@@ -1,6 +1,6 @@
 # pane — sandbox grants
 
-Unblocks **61D**. How `.claude/settings.json`'s `permissions` become an OS
+Unblocks **61D**. How permission patterns become an OS
 sandbox on macOS, Linux and Windows; what can never be granted; and what a
 program sees when it asks for something outside the grant.
 
@@ -9,14 +9,51 @@ authority, no filesystem, no sockets. This document is about the other half —
 the **tools** the program calls, which spawn real processes and touch real
 files. `cargo_test` is what needs a sandbox, not `hits.filter(...)`.
 
+## Current implementation addendum (2026-09-12)
+
+The historical platform evidence below remains applicable to its recorded
+regime. Current configuration and invocation examples are in
+[competitive workflows](competitive-workflows.md). This addendum records
+implementation; verification results and retained limitations belong in the
+[competitive checklist](competitive-capability-checklist.md).
+
+Pane now loads native `[permissions]` from global Pane configuration and
+`<project>/.pane/config.toml`. Global denials survive project overrides and
+`--yolo`. `.claude/settings.json` is an explicit, previewable import only,
+never an implicit grant source and never written back. Unsupported security
+directives block applying an import. See [settings experience](settings-experience.md).
+Historical JSON fixtures and measurements below describe the shared pattern
+compiler, not the current session's configuration ownership.
+
+- `--add-dir` is a host-selected, session-start read/write grant for an existing
+  canonical directory. Relative arguments resolve from the project root.
+  macOS renders exact subpaths; Linux extends Landlock roots. Explicit roots
+  preserve credential/state exclusions and do not grant their siblings.
+  Windows and any configured filesystem deny-pattern combination refuse this
+  flag rather than approximate exclusions. Each added root's `.claude` and `.pane` are
+  write-denied by the profile and macOS sandbox; Linux retains the additive
+  Landlock inner-deny limitation documented below.
+- Shell network access remains denied. Linux now installs a seccomp filter
+  for network-socket isolation alongside Landlock; the historical
+  Landlock-only measurements below describe the earlier behavior. Windows
+  network confinement still depends on its documented Firewall conditions.
+- Native web tools and remote Streamable HTTP MCP use the separate `[web]`
+  host broker, with domain checks, public-address DNS validation, bounded
+  responses, and explicit enablement. They do not widen shell network access.
+  Authenticated MCP POSTs do not follow redirects or automatically replay.
+- `--ask-approval` connects the foreground file/shell exact-call gate to the
+  live terminal. It does not approve missing permissions or widen the sandbox.
+  Web, MCP, background jobs, and subagents are outside its scope. Section 8
+  describes its waiting, cancellation, and decision semantics.
+
 ## 1. The invariants
 
 These are numbered because 61D's acceptance quotes them.
 
 1. **No grant is ever widened at the model's request.** There is no tool, no
    argument, no escape sequence and no prompt that adds a path to a profile.
-   The only widening path is a person editing `.claude/settings.json` and
-   starting a new session.
+   Widening requires host configuration or explicit `--add-dir` arguments
+   before starting a new session; model calls cannot change either.
 2. **`deny` beats `allow`, at every specificity.** A path matched by any
    `deny` pattern is refused even when a longer, more specific `allow` names
    it exactly. There is no "most specific wins" rule to reason about.
@@ -28,18 +65,19 @@ These are numbered because 61D's acceptance quotes them.
    (`runtime-contract.md` §5). It never becomes an interactive prompt, never
    reaches the user as a question, and never escalates.
 5. **The profile is computed once, at session start, and is immutable for the
-   life of the session.** This is not a performance decision: `.claude/`
+   life of the session.** This is not a performance decision: `.pane/`
    lives *inside* the project root, which invariant 3 makes writable, so a
    profile recomputed from disk mid-session would let a program widen its own
-   sandbox by editing the file it was derived from. `.claude/**` is therefore
-   also in the deny-write set by default, and `settings.json` is read before
-   the sandbox is entered.
+   sandbox by editing the file it was derived from. `.pane/**` and the legacy
+   `.claude/**` are in the profile's deny-write set. macOS enforces the native
+   exclusion for subprocesses too; active Linux Landlock cannot carve it out
+   of a writable project and explicitly warns about future-session mutation.
 
 ## 2. The pattern language, and what each pattern is
 
-`.claude/settings.json` (this repository's own is the fixture — it carries
-seven `allow` and two `deny` entries, all `Read`/`Write`/`Edit` with absolute
-globs) admits these forms. Each maps to a different **kind** of rule, and
+Native TOML `[permissions]` allow/deny arrays use the same pattern language
+as the historical `.claude/settings.json` compiler fixtures. Each form maps
+to a different **kind** of rule, and
 conflating them is the mistake this table exists to prevent.
 
 | pattern | kind | becomes |
@@ -49,7 +87,7 @@ conflating them is the mistake this table exists to prevent.
 | `Edit(<glob>)` | filesystem | read+write grant on existing files |
 | `Bash(<prefix>*)` | **argv admission** | exact resolved literal executables from admitted command segments on macOS/Linux |
 | `Bash` (bare) | argv admission | every command line admitted; the profile is unchanged |
-| `WebFetch(domain:…)` | network | **not registered**; see §4 |
+| `WebFetch(domain:…)` | network | not a permissions grant; native broker uses separate `[web]` configuration |
 | `mcp__<server>__<tool>` | tool admission | that MCP tool is registered; no OS rule |
 
 **Command admission and file authority remain separate.** After the whole
@@ -457,11 +495,12 @@ exec grant at all.
 
 ## 4. What is never grantable, by any pattern, on any platform
 
-1. **Network.** No `permissions` pattern names a host, a port or a protocol,
+1. **Shell network authority through permissions patterns.** No `permissions` pattern names a host, a port or a protocol,
    so a network grant would have to be invented — and an invented capability
    is the one thing an allow-list must never produce. Tools that need network
-   are **not registered** under the sandbox; `WebFetch` is absent from the
-   registry in 61D rather than present and failing.
+   are not granted network by this profile. The original 61D registry omitted
+   `WebFetch`; the current native web API uses the separately configured host
+   broker described above.
 2. **The OS keyring or credential store.** Keychain, Secret Service, DPAPI —
    and, for writing, the machine's own credential and identity store, by
    name: `/etc/sudoers`, `/etc/sudoers.d`, `/etc/shadow`, `/etc/gshadow`,
@@ -572,11 +611,10 @@ the project boundary, and the sandbox is what must change.
   (`events.rs`'s background-job cases, `helpers.rs`'s post-result cases) to
   Windows now that it has an applier.
 
-## 8. Exact-call suspension seam (development, not interactive approval)
+## 8. Foreground exact-call approval
 
-`Runtime::with_approval_gate` is a host-only callback seam for a future
-interactive approval implementation. The shipped session and TUI do not
-install it. It can only delay or deny a registered call that the existing
+`--ask-approval` installs `Runtime::with_approval_gate` in a live terminal
+session. It can only delay or deny a registered foreground file/shell call that the existing
 immutable profile already admits. Missing grants, explicit denies and
 never-grantable actions remain refusals and never reach its request channel.
 It does not interpret `permissions.ask`, modify settings, add an OS grant,
@@ -589,8 +627,11 @@ the complete canonical tool name, project root and every checked argument;
 they are never patterns. Re-resolving the original arguments after the wait
 rejects a symlink that changed its canonical target. A disconnected host,
 dropped request, user cancellation or V8 termination denies the suspended
-call. A late answer cannot apply to another request. The existing cell wall
-clock includes this waiting time; it has not been paused or weakened.
+call. A late answer cannot apply to another request. Human waiting pauses the
+cell watchdog, preserving the compute budget already consumed rather than
+resetting it after each answer. A confirmation expires after ten minutes;
+heap limits and cancellation remain active. Completed/cancelled requests are
+removed from the terminal promptly, even before the task ends.
 Subagent and background calls never inherit this gate. Remembered-action
 summaries expose the tool and an identity hash, not argument values.
 
@@ -598,13 +639,22 @@ summaries expose the tool and an identity hash, not argument values.
 including a confined Bash append before a suspended write. The append occurs
 once, the write resumes in the same cell, and a repeated write needs a new
 once answer. Other tests cover exact session matching, execution failure,
-denial, disconnect, cancellation, timeout, symlink retargeting and unchanged
-OS confinement. These are callback tests, not TUI/PTY approval acceptance.
+denial, disconnect, cancellation, paused deadlines, remaining compute budget,
+symlink retargeting and unchanged OS confinement. Real terminal tests in
+`tests/tui_live.rs` cover once/session/deny decisions, absent writes before
+approval, pasted-text rejection, and cancellation. Tests are subject to the
+consolidated gate; their presence alone is not completion evidence.
+
+The modal shows escaped canonical arguments and accepts `o` (once), `s`
+(this exact action for the session), or `d`/Escape (deny). Ctrl-C denies and
+interrupts. Actions exceeding the 16 KiB confirmation budget cannot be
+approved from a truncated display; they are deny-only. This is an argument
+review, not a before/after edit-diff acceptance UI.
 
 Full interactive missing-grant approvals remain blocked on the platform
-appliers. `macos::profile_text` currently renders the project root and the
-`.claude` write carve-out, but does not render the full `Profile::rules()`
-allow/deny set; its `Regime::ProjectRootOnly` explicitly describes that
+appliers. `macos::profile_text` renders the project root, explicit additional
+roots, and `.claude` write carve-outs, but does not render the full
+`Profile::rules()` allow/deny set; its regime description identifies that
 limitation. `linux::landlock_rules` and `linux::bwrap_argv` likewise derive
 root-based grants; additive Landlock rules cannot subtract an in-root deny.
 Windows process execution is no longer refused: the AppContainer applier is
@@ -614,13 +664,13 @@ the same limitation applies to it. Passing a widened clone to these implementati
 would not establish an exact additional capability. A Bash or MCP admission
 alone would also not fix a filesystem deny that the OS layer does not render.
 
-Before connecting the TUI, the implementation must classify hard refusals
+Before adding missing-grant escalation, the implementation must classify hard refusals
 separately from missing/ask decisions, prove exact per-call OS grants and
 deny precedence on each supported platform, define explicit MCP server-start
-approval, and add real terminal tests. No cell-replay fallback is permitted.
+approval, and add terminal tests for escalation itself. No cell-replay fallback is permitted.
 
 CONTRACT
-behaviour:  Every tool a pane program can call runs under an OS sandbox whose file grants are computed once from `.claude/settings.json` `permissions`, with the project root the only writable root and no network at all.
+behaviour:  File/shell tools use session-fixed permission checks and platform confinement, with the project root writable by default and explicit host-selected additional roots where supported. Web/remote MCP use a separate configured broker; shell network authority is not widened.
 invariant:  No grant is widened at the model's request, `deny` beats `allow` at every specificity, and a request outside the grant throws `PermissionDenied` inside the program without ever becoming a prompt.
 path:       `crates/pane/src/sandbox/{profile,macos,linux,windows}.rs`: one profile compiler from the settings document, three platform appliers, and one pre-call path check that enforces the filters the OS layer cannot express.
 test:       `crates/pane/tests/sandbox_grants.rs::a_program_cannot_widen_its_own_grant` — a cell that rewrites `.claude/settings.json` to allow `$HOME` and then reads `~/.ssh/id_ed25519` gets `PermissionDenied` on both calls; plus Phase 46's four named tests run against the sandboxed path.

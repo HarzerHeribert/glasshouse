@@ -267,8 +267,8 @@ impl HostGlobals {
     /// by the subagent depth check, but a capability absent from the binding
     /// surface cannot be reached by a helper talked into trying, which is the
     /// standard `little-helpers.md` sets for the toolset.
-    pub const WITHHELD_FROM_A_HELPER: [&'static str; 6] =
-        ["bg", "send", "mcp", "checks", "helper", "agent"];
+    pub const WITHHELD_FROM_A_HELPER: [&'static str; 7] =
+        ["bg", "send", "mcp", "checks", "helper", "agent", "web"];
 
     /// Whether `global` is installed under this narrowing — the one predicate
     /// [`install`] and [`crate::prompt::render_runtime_for`] both read, so
@@ -346,6 +346,17 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
     }
     if let Some(function) = v8::Function::builder(off_callback).build(scope) {
         set_fixed_key(scope, global, "off", function.into());
+    }
+
+    if globals.installs("web") {
+        let web = v8::Object::new(scope);
+        for name in ["fetch", "search"] {
+            let data = js_string(scope, name);
+            if let Some(function) = v8::Function::builder(web_callback).data(data).build(scope) {
+                set_fixed_key(scope, web, name, function.into());
+            }
+        }
+        set_fixed_key(scope, global, "web", web.into());
     }
 
     if globals.installs("mcp") {
@@ -479,6 +490,70 @@ pub(crate) fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s,
 
 // --- registered tools -------------------------------------------------
 
+fn web_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let operation = args.data().to_rust_string_lossy(scope);
+    let name = format!("web.{operation}");
+    if !args.get(0).is_string() {
+        throw_tool_error(
+            scope,
+            "web.fetch requires a URL string; web.search requires a query string",
+        );
+        return;
+    }
+    let input = args.get(0).to_rust_string_lossy(scope);
+    let state = state(scope);
+    if state.token.borrow().is_cancelled() {
+        throw_cancelled(scope, &name);
+        return;
+    }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let broker = state.web.borrow();
+        let broker = broker
+            .as_ref()
+            .ok_or("web access is disabled; configure [web] in pane.toml")?;
+        match operation.as_str() {
+            "fetch" => {
+                serde_json::to_value(broker.fetch_cancellable(&input, &state.token.borrow())?)
+                    .map_err(|e| e.to_string())
+            }
+            "search" => {
+                serde_json::to_value(broker.search_cancellable(&input, &state.token.borrow())?)
+                    .map_err(|e| e.to_string())
+            }
+            _ => Err("unknown web operation".into()),
+        }
+    })();
+    trace(scope).record(CallRecord {
+        tool: name.clone(),
+        args: std::collections::BTreeMap::new(),
+        evidence: None,
+        lifted_from: None,
+        ended: if result.is_ok() {
+            Ended::Ok
+        } else {
+            Ended::Threw {
+                class: "ToolError".into(),
+            }
+        },
+    });
+    if state.token.borrow().is_cancelled() {
+        throw_cancelled(scope, &name);
+        return;
+    }
+    match result {
+        Ok(json) => {
+            let value = json_to_v8(scope, &json);
+            tag_mcp_result(scope, &state, &name, value, &json.to_string());
+            retval.set(value);
+        }
+        Err(reason) => throw_tool_error(scope, &reason),
+    }
+}
+
 fn mcp_list_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -603,7 +678,9 @@ fn tag_mcp_result(
     let preview = marshal::marshal(scope, value);
     let meta = HandleMeta {
         type_label: Some(
-            if name == "mcp.list" {
+            if name.starts_with("web.") {
+                "Web.Result"
+            } else if name == "mcp.list" {
                 "MCP.Tool[]"
             } else {
                 "MCP.Result"
@@ -2294,6 +2371,8 @@ fn agent_run_callback(
     }
     let turns = read_millis(scope, args.get(1), "turns").unwrap_or(crate::agent::DEFAULT_TURNS);
     let asked_model = read_option(scope, args.get(1), "model");
+    let asked_profile = read_option(scope, args.get(1), "profile");
+    let asked_effort = read_option(scope, args.get(1), "effort");
 
     let state = state(scope);
     if state.subagent.get() {
@@ -2309,6 +2388,34 @@ fn agent_run_callback(
         return;
     }
 
+    let template = match asked_profile
+        .as_deref()
+        .map(|name| state.agent_templates.resolve(name))
+        .transpose()
+    {
+        Ok(template) => template,
+        Err(error) => {
+            throw_tool_error(scope, &error);
+            return;
+        }
+    };
+    let effort = match asked_effort.as_deref() {
+        Some(value) => match crate::wire::Effort::parse(value) {
+            Some(effort) => effort,
+            None => {
+                throw_tool_error(
+                    scope,
+                    "agent effort must be default, low, medium, high, xhigh, or max",
+                );
+                return;
+            }
+        },
+        None => template
+            .and_then(|template| template.effort)
+            .unwrap_or_default(),
+    };
+    let task = template.map_or(task.clone(), |template| template.task(&task));
+    let asked_model = asked_model.or_else(|| template.and_then(|template| template.model.clone()));
     let model = match state.agent_model(asked_model) {
         Ok(model) => model,
         Err(rule) => {
@@ -2345,14 +2452,15 @@ fn agent_run_callback(
     let options = crate::agent::AgentOptions {
         turns: turns.clamp(1, crate::agent::MAX_TURNS),
         model,
-        effort: crate::wire::Effort::default(),
+        effort,
     };
-    let handle = crate::bg::agent(
+    let handle = crate::bg::agent_with_config(
         &state.profile,
         &state.glasshouse,
         &state.session,
         &task,
         &options,
+        state.effective_config.borrow().as_ref(),
     );
     trace(scope).record(CallRecord {
         tool: "agent.run".into(),

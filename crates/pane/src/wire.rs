@@ -168,6 +168,9 @@ struct WireMessage {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireBlock {
+    Image {
+        source: ImageSource,
+    },
     Text {
         text: String,
     },
@@ -187,6 +190,14 @@ enum WireBlock {
     /// data to ignore, never something to run.
     #[serde(other)]
     Other,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    kind: String,
+    media_type: String,
+    data: String,
 }
 
 /// Serialises `conversation` into the JSON body of an Anthropic Messages
@@ -338,6 +349,13 @@ fn to_wire_message(message: &Message) -> WireMessage {
 
 fn to_wire_block(block: &Block) -> WireBlock {
     match block {
+        Block::Image { media_type, data } => WireBlock::Image {
+            source: ImageSource {
+                kind: "base64".into(),
+                media_type: media_type.clone(),
+                data: data.clone(),
+            },
+        },
         Block::Text(text) => WireBlock::Text { text: text.clone() },
         Block::ToolUse { id, name, input } => WireBlock::ToolUse {
             id: id.clone(),
@@ -825,6 +843,11 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
             WireBlock::Text { text } => content.push(Block::Text(text)),
             WireBlock::ToolUse { id, name, input } => {
                 content.push(Block::ToolUse { id, name, input })
+            }
+            WireBlock::Image { .. } => {
+                return Err(WireError::Stream(
+                    "assistant response contained a user-only image block".into(),
+                ));
             }
             WireBlock::ToolResult { .. } => {
                 return Err(WireError::Stream(

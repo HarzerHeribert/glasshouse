@@ -55,10 +55,9 @@ const HOOK_EVENTS: &[&str] = &[
 
 /// The Codex version `HOOK_EVENTS` was last read from.
 ///
-/// **This catalogue is observed, not documented**: Codex publishes no
-/// machine-readable list of its hook events, and a `hooks.json` naming an
-/// event Codex does not recognise is accepted in silence. So the sole thing
-/// a test can cheaply hold Codex to is that this version is still installed
+/// **This is a version-specific observation**, corroborated by the current
+/// official hook documentation: <https://learn.chatgpt.com/docs/hooks>.
+/// A test holds this observation to the version actually installed
 /// — see `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
 ///
 /// When it fails, re-read the catalogue, reconcile `HOOK_EVENTS` with it,
@@ -69,7 +68,9 @@ const HOOK_EVENTS: &[&str] = &[
 /// check can be driven from a tool call.
 ///
 /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `CATALOGUE_OBSERVED_VERSION`.
-pub const CATALOGUE_OBSERVED_VERSION: &str = "0.153.4";
+/// Re-read 2026-09-12 from the installed 0.154.0 binary's `HookEventsToml`:
+/// all twelve variants above are unchanged. No hooks were installed or enabled.
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.154.0";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool

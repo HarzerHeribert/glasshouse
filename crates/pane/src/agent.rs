@@ -86,6 +86,7 @@ pub struct Narrowed {
 pub(crate) struct NarrowedRun<'a> {
     narrowed: Option<&'a Narrowed>,
     helper_usage: Option<&'a crate::helpers::HelperUsageTracker>,
+    config: Option<&'a crate::config::PaneConfig>,
 }
 
 impl<'a> NarrowedRun<'a> {
@@ -93,6 +94,7 @@ impl<'a> NarrowedRun<'a> {
         Self {
             narrowed,
             helper_usage: None,
+            config: None,
         }
     }
 
@@ -103,6 +105,7 @@ impl<'a> NarrowedRun<'a> {
         Self {
             narrowed: Some(narrowed),
             helper_usage: Some(usage),
+            config: None,
         }
     }
 }
@@ -119,6 +122,30 @@ pub fn run(
     token: &CancellationToken,
 ) -> AgentResult {
     run_narrowed(profile, glasshouse, session, task, options, token, None)
+}
+
+pub fn run_with_config(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &AgentOptions,
+    token: &CancellationToken,
+    config: Option<&crate::config::PaneConfig>,
+) -> AgentResult {
+    run_narrowed_metered(
+        profile,
+        glasshouse,
+        session,
+        task,
+        options,
+        token,
+        NarrowedRun {
+            narrowed: None,
+            helper_usage: None,
+            config,
+        },
+    )
 }
 
 /// The same loop, optionally narrowed to one helper's toolset and preamble.
@@ -163,6 +190,7 @@ pub(crate) fn run_narrowed_metered(
     let NarrowedRun {
         narrowed,
         helper_usage,
+        config,
     } = narrowed_run;
     let tools = toolset(narrowed);
     let facts = crate::session::session_facts(profile);
@@ -197,15 +225,17 @@ pub(crate) fn run_narrowed_metered(
     if narrowed.is_none() {
         // A subagent completes a goal, so it hits the same walls the task
         // model does and gets the same helpers; a narrowed loop is itself a
-        // helper and gets none, which is what makes it a leaf. It is handed a
-        // profile and nothing else — `bg` calls this on its own thread — so it
-        // reads `[helpers]` from the project itself; a file that will not
-        // parse leaves helpers off, which is the same fail-closed answer as an
-        // unset model.
-        let config = crate::config::PaneConfig::load(profile.root()).unwrap_or_default();
-        runtime = runtime
-            .with_helpers(config.helpers)
-            .with_agents(config.agents);
+        // helper and gets none, which is what makes it a leaf. Session-started
+        // agents inherit the effective configuration snapshot, including named
+        // overlays and brokered web policy. Legacy direct callers without a
+        // snapshot retain project-config loading with fail-closed defaults.
+        let config = config
+            .cloned()
+            .unwrap_or_else(|| crate::config::PaneConfig::load(profile.root()).unwrap_or_default());
+        runtime = match runtime.with_config(config) {
+            Ok(runtime) => runtime,
+            Err(error) => return finish(&error, "failed", 0, 0, Vec::new()),
+        };
     }
     let mut tokens = 0u64;
     let mut trajectory: Vec<String> = Vec::new();

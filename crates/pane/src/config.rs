@@ -1,4 +1,4 @@
-//! `<project root>/.glasshouse/pane.toml`, read once at session start --
+//! Pane runtime settings, layered by the native settings store at startup --
 //! `docs/product/pane/supervisor.md` §1. A missing file means every default
 //! the runtime limits already used before this package existed
 //! (`runtime-contract.md` §7), so an absent file changes no
@@ -153,6 +153,7 @@ pub struct PaneConfig {
     pub helpers: HelpersConfig,
     pub agents: AgentsConfig,
     pub model: ModelConfig,
+    pub web: crate::web::WebConfig,
 }
 
 /// `[model]` -- the parent tier, the one the person talks to.
@@ -251,13 +252,58 @@ impl Range {
 }
 
 impl PaneConfig {
-    /// Loads `<root>/.glasshouse/pane.toml`. A missing file is the default,
+    /// Loads global and `<root>/.pane/config.toml` settings. Missing files use defaults,
     /// never an error -- most projects have none.
     pub fn load(root: &Path) -> Result<Self, String> {
-        match std::fs::read_to_string(root.join(".glasshouse").join("pane.toml")) {
-            Ok(text) => Self::parse(&text),
-            Err(_) => Ok(Self::default()),
+        Self::load_profile(root, None)
+    }
+
+    /// Select a named configuration overlay without modifying project defaults.
+    pub fn load_profile(root: &Path, profile: Option<&str>) -> Result<Self, String> {
+        Ok(crate::settings::Store::new(root)?.load(profile)?.config)
+    }
+
+    pub fn parse_profile(text: &str, selected: Option<&str>) -> Result<Self, String> {
+        let mut value: toml::Value =
+            toml::from_str(text).map_err(|error| format!("pane.toml: {error}"))?;
+        let table = value.as_table_mut().ok_or("pane.toml must be a table")?;
+        let profiles = table.remove("profiles");
+        if let Some(profiles) = &profiles {
+            let profiles = profiles
+                .as_table()
+                .ok_or("pane.toml: [profiles] must be a table")?;
+            for (name, overlay) in profiles {
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    || !overlay.is_table()
+                {
+                    return Err(
+                        "pane.toml: profiles must be named tables (letters, digits, _ or -)".into(),
+                    );
+                }
+            }
         }
+        if let Some(name) = selected {
+            let overlay = profiles
+                .as_ref()
+                .and_then(|profiles| profiles.get(name))
+                .ok_or_else(|| format!("pane.toml: no profile named `{name}`"))?;
+            if let Some(agents) = overlay.get("agents").and_then(toml::Value::as_table)
+                && matches!(
+                    agents.get("mode").and_then(toml::Value::as_str),
+                    Some("off" | "auto")
+                )
+                && !agents.contains_key("model")
+                && let Some(base_agents) =
+                    value.get_mut("agents").and_then(toml::Value::as_table_mut)
+            {
+                base_agents.remove("model");
+            }
+            merge_tables(&mut value, overlay);
+        }
+        Self::parse_base(&toml::to_string(&value).map_err(|error| format!("pane.toml: {error}"))?)
     }
 
     /// Parses without touching the filesystem.
@@ -268,6 +314,10 @@ impl PaneConfig {
     /// this module's only filesystem verb; the write belongs to the command
     /// that made the edit.
     pub fn parse(text: &str) -> Result<Self, String> {
+        Self::parse_profile(text, None)
+    }
+
+    fn parse_base(text: &str) -> Result<Self, String> {
         let value: toml::Value = toml::from_str(text).map_err(|e| format!("pane.toml: {e}"))?;
         let table = value.as_table().ok_or_else(|| {
             "pane.toml: must be a table of [limits], [supervisor], [helpers] and [agents]"
@@ -275,10 +325,12 @@ impl PaneConfig {
         })?;
 
         for key in table.keys() {
-            if !["limits", "supervisor", "helpers", "agents", "model"].contains(&key.as_str()) {
+            if !["limits", "supervisor", "helpers", "agents", "model", "web"]
+                .contains(&key.as_str())
+            {
                 return Err(format!(
                     "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
-                     [agents] and [model] are recognised"
+                     [agents], [model] and [web] are recognised"
                 ));
             }
         }
@@ -307,13 +359,38 @@ impl PaneConfig {
             None => ModelConfig::default(),
         };
 
+        let web = match table.get("web") {
+            Some(value) => value
+                .clone()
+                .try_into::<crate::web::WebConfig>()
+                .map_err(|error| format!("pane.toml: [web]: {error}"))?,
+            None => crate::web::WebConfig::default(),
+        };
+        crate::web::WebBroker::new(web.clone())?;
+
         Ok(Self {
             limits,
             supervisor,
             helpers,
             agents,
             model,
+            web,
         })
+    }
+}
+
+fn merge_tables(base: &mut toml::Value, overlay: &toml::Value) {
+    if let (Some(base), Some(overlay)) = (base.as_table_mut(), overlay.as_table()) {
+        for (key, value) in overlay {
+            match base.get_mut(key) {
+                Some(existing) if existing.is_table() && value.is_table() => {
+                    merge_tables(existing, value)
+                }
+                _ => {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
 }
 

@@ -1,13 +1,22 @@
+mod cli_workflows;
+
 const HELP: &str = "pane — the Glasshouse native harness
 
 Usage:
   pane
+  pane -p <task> [session options]
+  pane exec [task] [session options]
+  pane --resume [id] | --continue | --sessions
+  pane doctor [--root <path>] [--json]
+  pane config [global|local] [key] [value] [--root <path>]
   pane session --root <path> [options]
   pane ruler run [options]
   pane --help
   pane --version
 
-Running `pane` with no arguments starts a session in the current project.";
+Running `pane` with no arguments starts a session in the current project.
+`exec` without a task reads all of stdin as one task. Piped input to ordinary
+sessions remains one turn per line. Session options default --root to .";
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -32,7 +41,28 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("session") {
-        return dispatch_session(&args[1..]);
+        return dispatch_session(&cli_workflows::session_options(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("doctor") {
+        std::process::exit(cli_workflows::doctor(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("config") {
+        match pane::settings_commands::cli(&args[1..]) {
+            Ok(message) => println!("{message}"),
+            Err(message) => {
+                eprintln!("pane config: {message}");
+                std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+    match cli_workflows::prepare(&args) {
+        Ok(Some(args)) => return dispatch_session(&args),
+        Ok(None) => {}
+        Err(message) => {
+            eprintln!("pane: {message}");
+            std::process::exit(2);
+        }
     }
 
     let kind = if args[0].starts_with('-') {

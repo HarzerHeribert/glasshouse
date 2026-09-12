@@ -1,5 +1,38 @@
 # Pane project context
 
+## Current workflow additions (2026-09-12)
+
+The implementation now loads global user instructions from
+`$XDG_CONFIG_HOME/pane/AGENTS.md`, falling back to `~/.config/pane/AGENTS.md`.
+This host-selected read does not grant tools access to the user's home.
+Documents are complete UTF-8 text bounded at 64 KiB; failures are reported.
+Project commands and complete project skills can be invoked as slash commands;
+skill arguments remain literal text and permissions remain unchanged.
+See [competitive workflows](competitive-workflows.md) for configuration and
+invocation examples, including custom agent templates.
+
+Native `web.fetch`/`web.search` and remote Streamable HTTP MCP now use a
+separate host web broker enabled through `[web]`. Domain and public-address
+checks apply to network destinations; shell processes gain no network grant.
+Search requires an explicitly configured compatible endpoint. Remote MCP
+supports JSON and bounded finite SSE POST responses, without redirects or
+automatic replay of effectful requests. Legacy SSE GET, OAuth discovery,
+server-initiated requests, and resumable streams remain unsupported.
+Local stdio MCP retains the subprocess confinement described below.
+
+`--add-dir` grants explicit additional filesystem roots on macOS/Linux, but
+does not extend the nested-instruction discovery boundary outside the main
+project. Windows and configured filesystem deny-pattern combinations refuse
+the flag. `--ask-approval` prompts only for already-admitted foreground
+file/shell calls; web, MCP, background work, and subagents are outside that
+gate. See [sandbox grants](sandbox-grants.md) for exact limitations.
+
+These additions describe current source and written tests. Their consolidated
+verification is tracked in the [competitive checklist](competitive-capability-checklist.md);
+this addendum does not assert that the gate has passed.
+
+## Project instruction and context pipeline
+
 At each user task, including a resumed task, Pane refreshes root `AGENTS.md`
 and `CLAUDE.md` from the session's existing read profile. Each document is
 labelled with its file and directory scope. Deeper scopes apply to their
@@ -55,10 +88,10 @@ byte as `_xx`, including literal underscores, so punctuation cannot collide.
 Permissions still use the original `mcp__server__tool` spelling. A matching
 allow must exist before discovery starts a server; denies win, including
 case-insensitive server denies. Every advertised tool and every invocation is
-checked against the session's existing profile. Built-in web fetch/search and
-network-tool absences also apply to advertised MCP names.
+checked against the session's existing profile. MCP names reserved by the
+registry remain unavailable; the separate host `web` API is not an MCP grant.
 
-Discovery starts lazily, after project guidance delivery, and uses the existing
+Stdio discovery starts lazily, after project guidance delivery, and uses the existing
 OS sandbox with project cwd and network denial. Ambient credential variables
 are removed; explicit project `env` entries are passed only to that server.
 Server stderr and protocol diagnostics are not copied into logs or errors, and
@@ -72,14 +105,15 @@ are killed and reaped on teardown, cancellation, timeout, or broken transport.
 A cancelled/broken server is not restarted automatically, avoiding replay of
 potential effects.
 
-The initial transport supports newline-delimited stdio MCP protocol 2024-11-05,
-initialize/initialized, paginated tools/list, and tools/call. Remote transports
-and server-initiated requests are unsupported. Configuration is capped at
+The original transport supports newline-delimited stdio MCP protocol 2024-11-05,
+initialize/initialized, paginated tools/list, and tools/call. The current remote
+transport is described in the addendum above; server-initiated requests remain
+unsupported. Configuration is capped at
 1 MiB/16 servers; discovery at 128 tools per server, 16 pages, 32 KiB per schema,
 and 2,048 description characters. Frames are capped at 8 MiB and each exchange
 has a 10-second deadline; excess content fails explicitly instead of appearing
-as a complete truncated result. Windows continues to refuse process startup
-until its existing confinement applier is enabled.
+as a complete truncated result. Windows uses the operational AppContainer
+applier with the platform limitations recorded in [sandbox grants](sandbox-grants.md).
 
 The source-context packer returns a complete small file or, for a large file,
 a named definition with nearby definitions, imports, callers, and tests. It

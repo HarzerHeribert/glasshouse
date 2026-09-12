@@ -1,4 +1,8 @@
-//! The Linux applier: bubblewrap for the mount view, Landlock for the
+//! The Linux applier: Landlock for filesystem rights and seccomp for sockets.
+//! `confine` installs both before exec, with inheritance across descendants.
+//! Bubblewrap argv construction remains available but is not the spawn path.
+//!
+//! Historical mount-view design: bubblewrap for the mount view, Landlock for the
 //! per-path grants — map line 2455, specification
 //! `docs/product/pane/sandbox-grants.md` §3.
 //!
@@ -218,6 +222,8 @@ pub fn exec_scope(profile: &Profile, binary: &Path) -> ExecScope {
 /// in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regime {
+    /// Landlock filesystem restrictions and inherited seccomp socket denial.
+    LandlockAndSeccomp { abi: i32 },
     /// Both: the mount view removes the network and everything outside the
     /// project is read-only; Landlock applies per-directory rights inside.
     BubblewrapAndLandlock { abi: i32 },
@@ -235,6 +241,9 @@ impl Regime {
     /// The sentence a session prints at start-up.
     pub fn describe(self) -> String {
         match self {
+            Regime::LandlockAndSeccomp { abi } => format!(
+                "Landlock ABI {abi} filesystem rules with inherited seccomp network denial: socket/socketpair, io_uring and pidfd_getfd are refused. Host mount/PID namespaces remain. Landlock rules are additive and cannot carve `.claude/` or `.pane/` out of a writable project: pane's direct tool checks refuse those writes, but an arbitrary admitted process can modify them, including `.pane/config.toml` settings used by a future session."
+            ),
             Regime::BubblewrapAndLandlock { abi } => format!(
                 "bubblewrap mount view (no network, read-only outside the project) with a Landlock ABI {abi} ruleset. \
                  Landlock has no glob: an extension-filtered pattern is enforced at directory granularity here and exactly by pane's own pre-call check."
@@ -244,7 +253,7 @@ impl Regime {
                 .to_string(),
             Regime::LandlockOnly { abi } => format!(
                 "Landlock ABI {abi} ruleset and no bubblewrap: per-path rights apply, but this process keeps the host's mount view and its network namespace, \
-                 and `.claude/` is not write-protected by the OS layer — Landlock's rules are additive and cannot carve a subdirectory out of a writable project, \
+                 and `.claude/` and `.pane/` are not write-protected by the OS layer — Landlock's rules are additive and cannot carve subdirectories out of a writable project, \
                  so pane's own pre-call check is the only thing refusing that write. \
                  `/proc` and `/sys` are not granted at all, because this process shares the host's PID namespace and a read of `/proc` there is a read of every \
                  same-user process's environment; a tool that needs either is refused rather than handed them."
@@ -255,12 +264,15 @@ impl Regime {
         }
     }
 
-    /// Whether the network is removed by the OS layer. Only the mount view
-    /// does that here — Landlock ABI 3 has no network access type at all.
+    /// Whether the OS layer denies network access. Seccomp denies socket
+    /// operations without removing the host network namespace; callers must
+    /// not deliberately pass existing network descriptors to the child.
     pub fn removes_network(self) -> bool {
         matches!(
             self,
-            Regime::BubblewrapAndLandlock { .. } | Regime::BubblewrapOnly
+            Regime::BubblewrapAndLandlock { .. }
+                | Regime::BubblewrapOnly
+                | Regime::LandlockAndSeccomp { .. }
         )
     }
 }
@@ -283,7 +295,8 @@ pub struct LandlockRules {
     /// **Not executable**: see [`access::READ`].
     pub read_only: Vec<PathBuf>,
     /// Directories a process may additionally write, create in and remove
-    /// from. Empty when the profile grants no write to the project root.
+    /// from, plus the literal `/dev/null` sink. File grants are masked to
+    /// file-only rights when installed; no `/dev` directory is granted.
     /// Not executable either.
     pub read_write: Vec<PathBuf>,
     /// Everything carrying `LANDLOCK_ACCESS_FS_EXECUTE`: the resolved binary
@@ -305,10 +318,10 @@ pub struct LandlockRules {
 /// can only narrow: the widest thing it produces is the root list that used
 /// to be unconditional.
 ///
-/// **§1.5's `.claude` write-deny is not in here, because Landlock cannot
+/// **§1.5's `.claude` and `.pane` write-denies are not in here, because Landlock cannot
 /// express it.** A ruleset's rules are additive: an access beneath a granted
 /// directory is allowed if *any* matching rule allows it, so a read-only rule
-/// on `<root>/.claude` beneath a read-write rule on `<root>` removes nothing.
+/// on either protected directory beneath a read-write rule on `<root>` removes nothing.
 /// That was measured, not assumed —
 /// `landlock_alone_does_not_enforce_the_dot_claude_carve_out_and_the_mount_view_does`
 /// watched the write succeed on a Landlock ABI 8 kernel. On Linux the
@@ -332,7 +345,10 @@ pub fn landlock_rules_with_descendants(
         .chain(DEVICE_READS.iter())
         .map(PathBuf::from)
         .collect();
-    let mut read_write = Vec::new();
+    // Git and ordinary command redirection open this sink read/write. Grant
+    // the one character device, never its containing directory or siblings.
+    let mut read_write = vec![PathBuf::from("/dev/null")];
+    read_write.extend(profile.additional_roots().iter().cloned());
     if grants(profile, Access::Write, &root) {
         read_write.push(root.clone());
     } else if grants(profile, Access::Read, &root) {
@@ -349,6 +365,7 @@ pub fn landlock_rules_with_descendants(
             let mut paths: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
             paths.push(binary.to_path_buf());
             paths.push(profile.root().to_path_buf());
+            paths.extend(profile.additional_roots().iter().cloned());
             paths
         }
     };
@@ -376,8 +393,8 @@ pub fn landlock_rules_with_descendants(
 /// `profile` is consulted for it.
 ///
 /// Bind order is the whole of the policy and is not cosmetic: `/` read-only
-/// first, then the project read-write over it, then `.claude` read-only over
-/// *that*. bwrap applies binds in argument order, so reversing any pair
+/// first, then the project read-write over it, then `.claude` and `.pane`
+/// read-only over *that*. bwrap applies binds in argument order, so reversing any pair
 /// widens the result. That last bind is the **only** OS-level enforcement of
 /// §1.5 on Linux — see [`landlock_rules`] for why the ruleset cannot do it.
 pub fn bwrap_argv(profile: &Profile, program: &OsStr, args: &[OsString]) -> Vec<OsString> {
@@ -398,9 +415,10 @@ pub fn bwrap_argv(profile: &Profile, program: &OsStr, args: &[OsString]) -> Vec<
     argv.push(OsString::from("/dev"));
     if grants(profile, Access::Write, root) {
         bind(&mut argv, "--bind", root);
-        let dot_claude = root.join(".claude");
-        if !grants(profile, Access::Write, &dot_claude) {
-            bind(&mut argv, "--ro-bind", &dot_claude);
+        for protected in [root.join(".claude"), root.join(".pane")] {
+            if !grants(profile, Access::Write, &protected) {
+                bind(&mut argv, "--ro-bind", &protected);
+            }
         }
     }
     argv.push(OsString::from("--"));
@@ -481,7 +499,7 @@ pub fn landlock_abi() -> i32 {
 
 /// What [`confine`] actually applies on this host.
 ///
-/// Landlock, or nothing. Bubblewrap is deliberately absent from the answer
+/// Landlock plus seccomp, or no supported confinement. Bubblewrap is absent
 /// even where `bwrap` is installed: this package never spawns it, so a
 /// regime naming the mount view would claim an enforcement that was not
 /// installed — and [`Regime::removes_network`] would answer `true` for a
@@ -491,8 +509,8 @@ pub fn landlock_abi() -> i32 {
 #[cfg(target_os = "linux")]
 pub fn regime() -> Regime {
     let abi = landlock_abi();
-    if abi >= 3 {
-        Regime::LandlockOnly { abi }
+    if abi >= 3 && seccomp_supported_arch() {
+        Regime::LandlockAndSeccomp { abi }
     } else {
         Regime::Unconfined
     }
@@ -517,7 +535,7 @@ pub fn available_regime() -> Regime {
     }
 }
 
-/// Installs `profile`'s Landlock ruleset on `command`, to take effect in the
+/// Installs `profile`'s Landlock ruleset and socket-denial seccomp filter on `command`, to take effect in the
 /// child between `fork` and `exec`.
 ///
 /// The ruleset is still derived here rather than accepted as an argument,
@@ -553,9 +571,11 @@ pub fn confine_with_descendants(
     use std::os::unix::process::CommandExt;
 
     let abi = landlock_abi();
-    if abi < 3 {
+    if abi < 3 || !seccomp_supported_arch() {
         return Ok(false);
     }
+    let network_filter = socket_deny_filter(std::env::consts::ARCH)
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOTSUP))?;
     let rules = landlock_rules_with_descendants(profile, binary, descendants);
     let mut handles: Vec<(OwnedFd, u64)> = Vec::new();
     for (paths, rights) in [
@@ -593,7 +613,10 @@ pub fn confine_with_descendants(
     // SAFETY: `pre_exec` runs in the forked child before `exec`. It performs
     // syscalls on descriptors opened in the parent and allocates nothing.
     unsafe {
-        command.pre_exec(move || restrict(handled, &handles));
+        command.pre_exec(move || {
+            restrict(handled, &handles)?;
+            install_socket_filter(&network_filter)
+        });
     }
     return Ok(true);
 
@@ -659,4 +682,77 @@ pub fn confine_with_descendants(
         }
         Ok(())
     }
+}
+
+/// Native ABIs with an audited syscall map. Compat ABIs are killed by the
+/// filter's architecture guard; x32 syscall numbers are killed separately.
+pub fn seccomp_supported_arch() -> bool {
+    matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
+}
+
+/// Linux classic BPF instruction layout; portable so policy tests run on macOS.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketFilterInstruction {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
+/// Fail-closed network policy. All new sockets (including Unix sockets) are
+/// denied to prevent local network proxies and SCM_RIGHTS descriptor receipt.
+/// io_uring is denied because its socket operations bypass syscall filtering.
+/// pidfd_getfd cannot import another process's existing network descriptor.
+/// This does not revoke descriptors deliberately inherited from the parent.
+pub fn socket_deny_filter(arch: &str) -> Option<Vec<SocketFilterInstruction>> {
+    let (audit_arch, socket_calls): (u32, &[u32]) = match arch {
+        "x86_64" => (
+            0xc000_003e,
+            &[41, 53, 42, 49, 50, 43, 288, 44, 46, 307, 47, 299],
+        ),
+        "aarch64" => (
+            0xc000_00b7,
+            &[198, 199, 203, 200, 201, 202, 242, 206, 211, 269, 212, 243],
+        ),
+        _ => return None,
+    };
+    let instruction = |code, jt, jf, k| SocketFilterInstruction { code, jt, jf, k };
+    let mut filter = vec![
+        instruction(0x20, 0, 0, 4),           // LD W ABS seccomp_data.arch
+        instruction(0x15, 1, 0, audit_arch),  // JEQ native arch, skip kill
+        instruction(0x06, 0, 0, 0x8000_0000), // RET KILL_PROCESS
+        instruction(0x20, 0, 0, 0),           // LD W ABS seccomp_data.nr
+        instruction(0x35, 0, 1, 0x4000_0000), // JGE x32 bit / invalid syscall
+        instruction(0x06, 0, 0, 0x8000_0000),
+    ];
+    // Syscall IDs 425..427 and 438 are shared by the two supported ABIs.
+    for syscall in socket_calls.iter().copied().chain([425, 426, 427, 438]) {
+        filter.push(instruction(0x15, 0, 1, syscall));
+        filter.push(instruction(0x06, 0, 0, 0x0005_0001)); // RET ERRNO EPERM
+    }
+    filter.push(instruction(0x06, 0, 0, 0x7fff_0000)); // RET ALLOW
+    Some(filter)
+}
+
+#[cfg(target_os = "linux")]
+fn install_socket_filter(filter: &[SocketFilterInstruction]) -> std::io::Result<()> {
+    #[repr(C)]
+    struct Program {
+        len: u16,
+        filter: *const SocketFilterInstruction,
+    }
+    let program = Program {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+    // no_new_privs was installed by restrict(). The pre-exec child is single
+    // threaded; seccomp filters are inherited by clone/fork and survive exec.
+    // SAFETY: Program and instructions have Linux sock_fprog/sock_filter ABI
+    // layout and remain live throughout this synchronous kernel copy.
+    let result = unsafe { libc::prctl(libc::PR_SET_SECCOMP, 2, &program as *const Program, 0, 0) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

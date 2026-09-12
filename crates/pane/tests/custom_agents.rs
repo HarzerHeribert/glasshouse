@@ -1,0 +1,216 @@
+use pane::contract::SessionId;
+use pane::glasshouse::Glasshouse;
+use pane::project::agents::{Catalog, Definition};
+use pane::runtime::isolate::Runtime;
+use pane::runtime::outcome::CellOutcome;
+use pane::sandbox::profile::Profile;
+use std::io::{BufRead, BufReader, Read, Write};
+
+struct Fixture(std::path::PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "pane-custom-agents-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".pane/agents")).unwrap();
+        Self(root)
+    }
+    fn write(&self, name: &str, text: &str) {
+        std::fs::write(self.0.join(format!(".pane/agents/{name}.toml")), text).unwrap();
+    }
+    fn profile(&self) -> Profile {
+        Profile::compile(&self.0, Some(r#"{"permissions":{"allow":["Read(**)"]}}"#))
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn definitions_cannot_grant_permissions_and_validate_routing_defaults() {
+    for text in [
+        "instructions='Review'\npermissions=['Bash(*)']",
+        "instructions='Review'\nmodel='off'",
+        "instructions='Review'\neffort='enormous'",
+        "instructions=''",
+        "model='model'",
+    ] {
+        assert!(Definition::parse(text).is_err(), "accepted {text}");
+    }
+    let definition = Definition::parse(
+        "instructions='Review correctness'\nmodel='provider/model'\neffort='xhigh'",
+    )
+    .unwrap();
+    assert_eq!(definition.effort, Some(pane::wire::Effort::Xhigh));
+    assert!(definition.task("inspect parser").contains("inspect parser"));
+}
+
+#[test]
+fn catalog_is_a_permission_checked_immutable_snapshot() {
+    let fixture = Fixture::new();
+    fixture.write("review", "instructions='original'\neffort='high'");
+    let catalog = Catalog::load(&fixture.profile());
+    fixture.write("review", "instructions='changed'");
+    assert_eq!(catalog.resolve("review").unwrap().instructions, "original");
+    assert!(catalog.resolve("../review").is_err());
+    assert!(catalog.resolve("absent").is_err());
+    let denied = Profile::compile(
+        &fixture.0,
+        Some(r#"{"permissions":{"allow":["Read(**)"],"deny":["Read(.pane/agents/**)"]}}"#),
+    );
+    assert!(
+        Catalog::load(&denied)
+            .resolve("review")
+            .unwrap_err()
+            .contains("denied")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_symlink_definition_is_refused() {
+    let fixture = Fixture::new();
+    let outside = Fixture::new();
+    outside.write("external", "instructions='outside'");
+    std::os::unix::fs::symlink(
+        outside.0.join(".pane/agents/external.toml"),
+        fixture.0.join(".pane/agents/link.toml"),
+    )
+    .unwrap();
+    assert!(
+        Catalog::load(&fixture.profile())
+            .resolve("link")
+            .unwrap_err()
+            .contains("escapes")
+    );
+}
+
+#[test]
+fn invalid_profile_throws_before_a_background_agent_is_created() {
+    let fixture = Fixture::new();
+    let id = SessionId::new("invalid-custom-profile");
+    let mut runtime = Runtime::new(&fixture.profile(), &Glasshouse::None, &id);
+    runtime.set_task_context(0, "test/model");
+    assert!(matches!(
+        runtime.run_cell("agent.run('review', {profile:'unknown'});"),
+        CellOutcome::Threw { .. }
+    ));
+    assert_eq!(pane::bg::live(&id), 0);
+}
+
+#[test]
+fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_override() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join(".glasshouse")).unwrap();
+    std::fs::write(
+        fixture.0.join(".glasshouse/pane.toml"),
+        "[helpers]\nmodel='base-helper'\nenabled=true\n",
+    )
+    .unwrap();
+    fixture.write(
+        "review",
+        "instructions='ORIGINAL_REVIEW_GUIDANCE'\nmodel='template-model'\neffort='high'",
+    );
+    let id = SessionId::new("custom-agent-routing");
+    let mut effective = pane::config::PaneConfig::load(&fixture.0).unwrap();
+    effective.helpers.enabled = false;
+    let mut runtime = Runtime::new(&fixture.profile(), &Glasshouse::None, &id)
+        .with_config(effective)
+        .unwrap();
+    runtime.set_task_context(0, "parent-model");
+    fixture.write(
+        "review",
+        "instructions='MUTATED_GUIDANCE'\nmodel='mutated-model'",
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, requests) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            sender
+                .send(serde_json::from_slice::<serde_json::Value>(&body).unwrap())
+                .unwrap();
+            let response = r#"{"role":"assistant","content":[{"type":"tool_use","id":"check-helpers","name":"execute_cell","input":{"code":"try { helper.find('sample'); return 'unexpected helper execution'; } catch (error) { return String(error); }"}}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+        }
+    });
+    let previous = std::env::var_os("ANTHROPIC_BASE_URL");
+    // SAFETY: only this test in this integration-test process mutates the
+    // provider environment, and restoration follows agent thread teardown.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", endpoint);
+    }
+    let first = runtime.run_cell("agent.run('inspect parser', {profile:'review'});");
+    let second = runtime.run_cell(
+        "agent.run('inspect parser', {profile:'review', model:'explicit-model', effort:'low'});",
+    );
+    let received = [
+        requests.recv_timeout(std::time::Duration::from_secs(20)),
+        requests.recv_timeout(std::time::Duration::from_secs(20)),
+    ];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pane::bg::live(&id) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let events = pane::bg::drain(&id);
+    let answers: Vec<_> = events
+        .iter()
+        .filter_map(|event| pane::bg::payload(&id, event.payload.as_str()))
+        .collect();
+    pane::bg::shutdown(&id);
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("ANTHROPIC_BASE_URL", value),
+            None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+        }
+    }
+    assert!(!matches!(first, CellOutcome::Threw { .. }));
+    assert!(!matches!(second, CellOutcome::Threw { .. }));
+    assert_eq!(answers.len(), 2);
+    assert!(
+        answers
+            .iter()
+            .all(|answer| answer.stdout.contains("helpers are off")),
+        "child helpers ignored effective config: {answers:?}"
+    );
+    for request in received {
+        let request = request.unwrap();
+        let serialized = request.to_string();
+        assert!(serialized.contains("ORIGINAL_REVIEW_GUIDANCE"));
+        assert!(!serialized.contains("MUTATED_GUIDANCE"));
+        assert!(serialized.contains("inspect parser"));
+        match request["model"].as_str().unwrap() {
+            "template-model" => assert_eq!(request["output_config"]["effort"], "high"),
+            "explicit-model" => assert_eq!(request["output_config"]["effort"], "low"),
+            unexpected => panic!("unexpected model {unexpected}"),
+        }
+    }
+    server.join().unwrap();
+}

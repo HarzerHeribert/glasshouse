@@ -4,6 +4,7 @@
 //! see the packet's OBJECTIVE for why that gap, not missing code, is what
 //! this module exists to close.
 
+pub mod output;
 mod ui;
 
 use std::cell::{Cell, Ref, RefCell};
@@ -372,7 +373,9 @@ fn write_turn(
     text: &str,
 ) -> io::Result<()> {
     let _line = interrupt.writing();
-    rollout.record_turn(role, text)
+    rollout.record_turn(role, text)?;
+    output::message(&Message::text(role, text));
+    Ok(())
 }
 
 fn write_message(
@@ -381,7 +384,9 @@ fn write_message(
     message: &Message,
 ) -> io::Result<()> {
     let _line = interrupt.writing();
-    rollout.record_message(message)
+    rollout.record_message(message)?;
+    output::message(message);
+    Ok(())
 }
 
 fn write_cell(
@@ -390,7 +395,9 @@ fn write_cell(
     record: &CellRecord,
 ) -> io::Result<()> {
     let _line = interrupt.writing();
-    rollout.record_cell(record)
+    rollout.record_cell(record)?;
+    output::cell(record);
+    Ok(())
 }
 
 /// `pane session`'s whole flag set. A project root and a way to identify the
@@ -413,6 +420,10 @@ pub struct SessionArgs {
     /// piped inputs one per line until EOF.
     #[arg(long)]
     pub task: Option<String>,
+
+    /// Machine formats require one-shot --task; progress records are versioned JSON.
+    #[arg(long, value_enum, default_value = "text")]
+    pub output_format: output::Format,
 
     /// Initial request model; can also be changed with /model.
     #[arg(long)]
@@ -466,8 +477,8 @@ pub struct SessionArgs {
     #[arg(long)]
     pub gateway: Option<PathBuf>,
 
-    /// Grant the whole project root and every command line, ignoring
-    /// `.claude/settings.json`.
+    /// Grant the whole project root and every command line, retaining native
+    /// permission denials and the never-grantable set.
     ///
     /// **This is the person widening their own grant at session start, which
     /// is the only widening `sandbox-grants.md` §1.1 permits** — it is a flag
@@ -478,6 +489,28 @@ pub struct SessionArgs {
     /// `--yolo` exactly as it is without it.
     #[arg(long)]
     pub yolo: bool,
+
+    /// Ask before admitted foreground file/shell tools. O allows once, S
+    /// remembers this exact call, D denies. Web, MCP, background and agents
+    /// are excluded; this never grants additional permissions.
+    #[arg(long)]
+    pub ask_approval: bool,
+
+    /// Start in planning mode; model code and tools are not executed.
+    #[arg(long)]
+    pub plan: bool,
+
+    /// Select [profiles.NAME] in pane.toml over the base configuration.
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    /// Attach a local PNG, JPEG, GIF, or WebP to the first task (up to four).
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<PathBuf>,
+
+    /// Grant an additional existing directory for this session only.
+    #[arg(long = "add-dir", value_name = "PATH")]
+    pub additional_dirs: Vec<PathBuf>,
 }
 
 /// Parses `args` (everything after `pane session`) and runs it.
@@ -486,10 +519,18 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
         std::iter::once("pane session".to_string()).chain(args.iter().cloned()),
     )
     .map_err(|e| e.to_string())?;
+    let machine_output = output::Output::start(parsed.output_format);
+    if parsed.output_format != output::Format::Text && (parsed.task.is_none() || parsed.sessions) {
+        let result = Err("--output-format json/stream-json requires --task (or pane exec) and cannot be combined with --sessions".into());
+        machine_output.finish(&result)?;
+        return result;
+    }
     if parsed.sessions {
         return resume::print_listing(&parsed.root);
     }
-    run(parsed)
+    let result = run(parsed);
+    machine_output.finish(&result)?;
+    result
 }
 
 /// The system block, and it is [`prompt::render_system`]'s bytes and nothing
@@ -756,6 +797,12 @@ pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
         .filter(|rule| rule.write() && rule.effect() == crate::sandbox::profile::Effect::Allow)
         .map(|rule| rule.written().to_string())
         .collect();
+    writable.extend(
+        profile
+            .additional_roots()
+            .iter()
+            .map(|root| root.display().to_string()),
+    );
     writable.sort();
     writable.dedup();
     prompt::SessionFacts {
@@ -867,6 +914,9 @@ fn helper_lane(
 /// exactly when a task had run long enough to be worth reading; the doubling
 /// is the room a wrapped table line takes.
 fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
+    if output::active() {
+        return;
+    }
     let handles = empty_handles();
     let rows = tui::notebook_height(&transcript.conversation, &handles, &transcript.notebook);
     let height = (rows * 2 + 8).clamp(40, 2_000) as u16;
@@ -901,7 +951,7 @@ fn startup_model(cli: Option<&str>, config: &PaneConfig) -> Result<String, Strin
         .map(str::to_string)
         .or_else(|| config.model.parent.clone())
         .ok_or_else(|| {
-            "pane cannot start: no parent model selected; pass `--model <id>` or set `[model] parent` in .glasshouse/pane.toml".to_string()
+            "pane cannot start: no parent model selected; pass `--model <id>` or set `[model] parent` in .pane/config.toml (or global Pane config)".to_string()
         })?;
     crate::config::validate_parent_model(&model)
         .map_err(|reason| format!("pane cannot start: {reason}"))?;
@@ -912,6 +962,19 @@ fn startup_model(cli: Option<&str>, config: &PaneConfig) -> Result<String, Strin
 /// project, resume or start the rollout, `SessionStart`, then one input (or
 /// stdin's, one per line) at a time until the input source is exhausted.
 fn run(args: SessionArgs) -> Result<(), String> {
+    if args.images.len() > 4 {
+        return Err("at most four image attachments are accepted per task".into());
+    }
+    let images = args
+        .images
+        .iter()
+        .map(|path| crate::images::load(&args.root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if args.ask_approval
+        && (args.task.is_some() || !io::stdin().is_terminal() || !io::stdout().is_terminal())
+    {
+        return Err("--ask-approval requires an interactive terminal session; scripted calls cannot approve themselves".into());
+    }
     // `little-helpers.md`: a malformed roster is a refusal with one sentence,
     // and it is made here because this is the last moment before anything a
     // helper can be called from exists. A guardrail checked after the first
@@ -921,12 +984,37 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // rather than arriving under two lines of startup notes. Said at the end
     // too: a crash or a closed pane never reaches `/exit`.
     let (session_id, rollout_path) = resume::resolve_session(&args)?;
+    output::session(session_id.as_str());
     session_println!("{}", resume::resume_hint(&session_id));
-    let project = project::load(&args.root);
+    let mut project = project::load(&args.root);
+    let settings_store = crate::settings::Store::new(&args.root)?;
+    let loaded_settings = settings_store.load(args.profile.as_deref())?;
+    for notice in &loaded_settings.notices {
+        session_println!("settings: {notice}");
+    }
+    if project.settings.is_some() {
+        session_println!(
+            "settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed."
+        );
+    }
+    project.settings = settings_store.permissions()?;
     // Shared and mutable because `/model helper <id>` changes it mid-session:
     // the next cell's runtime must be built from the choice just made, not
     // from what the file said at startup.
-    let config = RefCell::new(PaneConfig::load(&args.root)?);
+    let config = RefCell::new(loaded_settings.config);
+    let initial_mode = if args.plan
+        || crate::settings_session::value(&loaded_settings.values, "session.mode")
+            .and_then(toml::Value::as_str)
+            == Some("plan")
+    {
+        tui::Mode::Plan
+    } else {
+        tui::Mode::Execute
+    };
+    let initial_effort = crate::settings_session::value(&loaded_settings.values, "session.effort")
+        .and_then(toml::Value::as_str)
+        .and_then(wire::Effort::parse)
+        .unwrap_or_default();
     // An explicit `--model` wins, then the model this project was last left
     // on. There is no compiled-in request-model fallback: starting without a
     // concrete choice would make Pane silently spend against a model the
@@ -937,10 +1025,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     }
 
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
-    // for the session's life. `.claude/` lives inside the writable project
-    // root, so a profile recomputed mid-session would let a program widen
-    // its own sandbox by editing the file it was derived from.
-    let profile = compile_profile_once(&project, args.yolo);
+    // for the session's life. Reloading a persisted configuration must never
+    // let a program widen its own sandbox during the running session.
+    let mut profile = compile_profile_once(&project, args.yolo);
+    for directory in &args.additional_dirs {
+        profile = profile.with_additional_root(directory)?;
+    }
 
     let glasshouse = match &args.glasshouse {
         Some(path) => Glasshouse::Command {
@@ -1029,32 +1119,65 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let interactive =
         if args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
             Some(ui::LiveUi::start(
-                tui::ScreenState {
-                    model: Some(started_on.clone()),
-                    compact: true,
-                    pretty: true,
-                    project: Some(
-                        args.root
-                            .file_name()
-                            .unwrap_or(args.root.as_os_str())
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                    sandbox: Some(format!(
-                        "{}p/{}c{}",
-                        profile.rule_count(),
-                        profile.command_pattern_count(),
-                        if args.yolo { " YOLO" } else { "" }
-                    )),
-                    network: Some(
-                        if profile.grants_network() {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                        .into(),
-                    ),
-                    ..tui::ScreenState::default()
+                {
+                    let mut state = tui::ScreenState {
+                        model: Some(started_on.clone()),
+                        mode: initial_mode,
+                        effort: initial_effort,
+                        settings_root: Some(args.root.clone()),
+                        settings_profile: args.profile.clone(),
+                        compact: true,
+                        pretty: true,
+                        project: Some(
+                            args.root
+                                .file_name()
+                                .unwrap_or(args.root.as_os_str())
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                        sandbox: Some(format!(
+                            "{}p/{}c{}",
+                            profile.rule_count(),
+                            profile.command_pattern_count(),
+                            if args.yolo { " YOLO" } else { "" }
+                        )),
+                        network: Some(
+                            if profile.grants_network() {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                            .into(),
+                        ),
+                        ..tui::ScreenState::default()
+                    };
+                    crate::settings_session::presentation(&mut state, &loaded_settings.values);
+                    state.settings_models = gateway
+                        .run(&["entitlements", "--json"], None)
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|v| {
+                            v.get("accounts")
+                                .and_then(serde_json::Value::as_array)
+                                .cloned()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|a| {
+                            a.get("selectable").and_then(serde_json::Value::as_bool) != Some(false)
+                                && a.get("authenticated").and_then(serde_json::Value::as_bool)
+                                    != Some(false)
+                        })
+                        .flat_map(|a| {
+                            a.get("models")
+                                .and_then(serde_json::Value::as_array)
+                                .cloned()
+                                .unwrap_or_default()
+                        })
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    state.settings_models.sort();
+                    state.settings_models.dedup();
+                    state
                 },
                 transcript.conversation.clone(),
                 transcript.notebook.clone(),
@@ -1063,7 +1186,15 @@ fn run(args: SessionArgs) -> Result<(), String> {
             None
         };
 
+    let approval_gate = if args.ask_approval {
+        interactive.as_ref().map(ui::LiveUi::approval_gate)
+    } else {
+        None
+    };
     let session = Session {
+        selected_profile: args.profile.clone(),
+        pending_images: RefCell::new(images),
+        approval_gate,
         inbox: RefCell::new(crate::events::inbox::Inbox::discover(
             &glasshouse,
             profile.root(),
@@ -1083,8 +1214,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         context_window: args
             .context_window_tokens
             .map(|cap| (started_on.clone(), cap)),
-        mode: Cell::new(tui::Mode::Execute),
-        effort: Cell::new(wire::Effort::Default),
+        mode: Cell::new(initial_mode),
+        effort: Cell::new(initial_effort),
         interface: Cell::new(args.interface.unwrap_or_default()),
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
@@ -1117,6 +1248,9 @@ fn run(args: SessionArgs) -> Result<(), String> {
 /// `Profile` `run` compiled is the only one any input can be answered
 /// against; there is no owned field here that a later call could replace.
 struct Session<'a> {
+    selected_profile: Option<String>,
+    pending_images: RefCell<Vec<Block>>,
+    approval_gate: Option<crate::approval::Gate>,
     inbox: RefCell<crate::events::inbox::Inbox>,
     window: RefCell<Window>,
     messages:
@@ -1261,6 +1395,19 @@ fn process_input(
     }
     if let Some(rest) = input.strip_prefix('/') {
         let (name, argument) = split_command(rest);
+        if !is_session_control(name)
+            && let Some(resolved) = commands::resolve(session.project, name)
+            && resolved.source == CommandSource::ProjectSkill
+            && resolved.status == CommandStatus::Available
+        {
+            let task = crate::project::workflows::skill_task(
+                session.project,
+                session.profile,
+                name,
+                argument.unwrap_or(""),
+            )?;
+            return run_task(&task, session, transcript, rollout);
+        }
         if !is_session_control(name)
             && let Some(resolved) = commands::resolve(session.project, name)
             && resolved.source == CommandSource::ProjectCommand
@@ -1567,6 +1714,16 @@ fn run_task_inner(
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
     transcript.conversation.system = build_system_prompt(session.project, session.profile);
+    if session.config().web.enabled {
+        transcript.conversation.system.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
+        transcript.conversation.system.push_str(
+            if session.config().web.search_endpoint.is_some() {
+                "web.search is configured. Cite the source URLs returned by web tools.\n"
+            } else {
+                "web.search has no configured search endpoint and will refuse.\n"
+            },
+        );
+    }
     // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
     // the static orientation already has. It fires **once per task**, before
     // the model's first turn, so the block is paid for as one cache write
@@ -1602,12 +1759,13 @@ fn run_task_inner(
         LifecycleEvent::UserPromptSubmit,
     );
 
-    transcript
-        .conversation
-        .messages
-        .push(Message::text(Role::User, task));
-    write_turn(session.interrupt, rollout, Role::User, task)
+    let mut user_message = Message::text(Role::User, task);
+    user_message
+        .content
+        .extend(session.pending_images.borrow_mut().drain(..));
+    write_message(session.interrupt, rollout, &user_message)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
+    transcript.conversation.messages.push(user_message);
 
     if session.mode.get() == tui::Mode::Plan {
         let mut request = transcript.conversation.clone();
@@ -1663,8 +1821,10 @@ fn run_task_inner(
     )
     .with_response_byte_cap(session.config().limits.response_bytes)
     .with_instruction_context()
-    .with_helpers(session.config().helpers.clone())
-    .with_agents(session.config().agents.clone());
+    .with_config(session.config().clone())?;
+    if let Some(gate) = &session.approval_gate {
+        runtime = runtime.with_approval_gate(gate.clone());
+    }
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
@@ -2657,7 +2817,13 @@ fn send_task_turn_recovering(
 ) -> Result<(wire::Turn, u64), String> {
     let provider_view = |transcript: &Transcript| {
         if let Some(checkpoint) = &transcript.provider_checkpoint {
-            let mut messages = vec![Message::text(Role::User, checkpoint)];
+            let mut checkpoint_message = Message::text(Role::User, checkpoint);
+            if let Some((index, message)) = transcript.conversation.messages.iter().enumerate().rev().find(|(_, message)| {
+                message.role == Role::User && matches!(message.content.first(), Some(Block::Text(text)) if text == task)
+            }) && index < transcript.provider_start {
+                checkpoint_message.content.extend(message.content.iter().filter(|block| matches!(block, Block::Image { .. })).cloned());
+            }
+            let mut messages = vec![checkpoint_message];
             messages
                 .extend_from_slice(&transcript.conversation.messages[transcript.provider_start..]);
             Conversation {
@@ -2957,9 +3123,19 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
     let profile = if yolo {
         session_println!(
             "sandbox: --yolo — the project root and every command line are granted; \
-             .claude/settings.json is ignored and the never-grantable set still applies"
+             native permission denials and the never-grantable set still apply"
         );
-        Profile::compile(&project.root, Some(&yolo_settings(&project.root)))
+        let mut settings: serde_json::Value =
+            serde_json::from_str(&yolo_settings(&project.root)).expect("generated permissions");
+        if let Some(denies) = project
+            .settings
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .and_then(|v| v.get("permissions").and_then(|p| p.get("deny")).cloned())
+        {
+            settings["permissions"]["deny"] = denies;
+        }
+        Profile::compile(&project.root, Some(&settings.to_string()))
     } else {
         Profile::from_project(project)
     };

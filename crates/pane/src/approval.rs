@@ -6,17 +6,58 @@
 //! The immutable base profile must admit the call before a request is sent.
 //! Neither a decision nor a remembered decision can add a sandbox capability.
 //!
-//! The shipped session does not install this seam. Interactive missing-grant
-//! approvals require exact platform grants and deny rendering first; see
+//! The live terminal can install this seam for explicit exact-call approval.
+//! Interactive missing-grant approvals still require platform grants; see
 //! `docs/product/pane/sandbox-grants.md` §8.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
 use crate::tools::invoke::CheckedArgs;
+
+/// Human confirmation is bounded independently of the cell compute clock.
+pub const MAX_APPROVAL_WAIT: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Default)]
+pub(crate) struct WaitClock(Mutex<WaitState>);
+#[derive(Default)]
+struct WaitState {
+    accumulated: Duration,
+    since: Option<Instant>,
+}
+impl WaitClock {
+    pub(crate) fn elapsed(&self) -> Duration {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accumulated + state.since.map(|since| since.elapsed()).unwrap_or_default()
+    }
+    fn pause(self: &Arc<Self>) -> Waiting {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .since = Some(Instant::now());
+        Waiting(self.clone())
+    }
+}
+struct Waiting(Arc<WaitClock>);
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(since) = state.since.take() {
+            state.accumulated += since.elapsed();
+        }
+    }
+}
 
 /// The answer to one exact action, never a pattern or a profile edit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +107,41 @@ impl Action {
         let hex = format!("{hash:x}");
         format!("{} · exact action {}", self.tool, &hex[..12])
     }
+
+    /// A bounded, terminal-safe description. Approval is disabled when the
+    /// complete action does not fit the display budget.
+    pub fn confirmation(&self) -> Confirmation {
+        Confirmation::new(&self.tool, &self.root, &self.arguments)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Confirmation {
+    pub text: String,
+    pub complete: bool,
+}
+
+impl Confirmation {
+    pub fn new(tool: &str, root: &str, arguments: &CheckedArgs) -> Self {
+        let text = serde_json::to_string_pretty(&serde_json::json!({
+            "tool": tool, "workspace": root, "arguments": arguments,
+        }))
+        .expect("checked arguments contain strings");
+        // JSON escapes ASCII controls; escape Unicode formatting controls as
+        // well so bidirectional text cannot reorder the confirmation surface.
+        let escaped: String = text.chars().flat_map(|c| {
+            if c != '\n' && (c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
+                c.escape_unicode().collect::<Vec<_>>()
+            } else { vec![c] }
+        }).collect();
+        let complete = escaped.len() <= 16 * 1024;
+        let text = if complete {
+            escaped
+        } else {
+            "Action exceeds the 16 KiB confirmation limit. Approval is disabled; deny this call and ask for a smaller action.".into()
+        };
+        Self { text, complete }
+    }
 }
 
 impl std::fmt::Debug for Action {
@@ -79,9 +155,13 @@ impl std::fmt::Debug for Action {
 pub struct Request {
     action: Action,
     reply: mpsc::SyncSender<Decision>,
+    pending: Arc<AtomicBool>,
 }
 
 impl Request {
+    pub fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::SeqCst)
+    }
     pub fn action(&self) -> &Action {
         &self.action
     }
@@ -89,7 +169,14 @@ impl Request {
     /// Returns false when the waiting callback has ended. A queued reply may
     /// still be denied if cancellation is observed before it is consumed.
     pub fn respond(self, decision: Decision) -> bool {
-        self.reply.send(decision).is_ok()
+        self.is_pending() && self.reply.send(decision).is_ok()
+    }
+}
+
+struct Pending(Arc<AtomicBool>);
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -99,6 +186,7 @@ impl Request {
 pub struct Gate {
     requests: mpsc::Sender<Request>,
     remembered: Arc<Mutex<BTreeSet<Action>>>,
+    wait_clock: Option<Arc<WaitClock>>,
 }
 
 impl Gate {
@@ -108,9 +196,19 @@ impl Gate {
             Self {
                 requests,
                 remembered: Arc::new(Mutex::new(BTreeSet::new())),
+                wait_clock: None,
             },
             receiver,
         )
+    }
+
+    pub(crate) fn with_wait_clock(mut self) -> Self {
+        self.wait_clock = Some(Arc::new(WaitClock::default()));
+        self
+    }
+
+    pub(crate) fn wait_clock(&self) -> Option<Arc<WaitClock>> {
+        self.wait_clock.clone()
     }
 
     /// Values that can be displayed without leaking command arguments,
@@ -133,26 +231,31 @@ impl Gate {
             return !stopped();
         }
         drop(remembered);
+        let _waiting = self.wait_clock.as_ref().map(WaitClock::pause);
+        let waiting_started = Instant::now();
+        let pending = Arc::new(AtomicBool::new(true));
+        let _pending = Pending(pending.clone());
         let (reply, response) = mpsc::sync_channel(1);
         if self
             .requests
             .send(Request {
                 action: action.clone(),
                 reply,
+                pending,
             })
             .is_err()
         {
             return false;
         }
         loop {
-            if stopped() {
+            if stopped() || waiting_started.elapsed() >= MAX_APPROVAL_WAIT {
                 return false;
             }
             match response.recv_timeout(Duration::from_millis(20)) {
                 Ok(decision) => {
                     // A response queued before a cancellation is still denied
                     // if the call has stopped before it can consume that answer.
-                    if stopped() {
+                    if stopped() || waiting_started.elapsed() >= MAX_APPROVAL_WAIT {
                         return false;
                     }
                     return match decision {

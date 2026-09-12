@@ -24,6 +24,8 @@ name = "pane"
 path = "src/lib.rs"
 
 [dependencies]
+toml_edit = "0.22"
+base64 = "0.22.1"
 clap = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }

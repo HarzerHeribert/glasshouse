@@ -6,10 +6,12 @@
 //! is skipped rather than followed, and nothing here ever opens a path for
 //! writing.
 
+pub mod agents;
 pub mod instructions;
 pub mod mcp;
 pub mod orientation;
 pub mod source_context;
+pub mod workflows;
 
 use crate::contract::ProjectConfig;
 use std::collections::BTreeMap;

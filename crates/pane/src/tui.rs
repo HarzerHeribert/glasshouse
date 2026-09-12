@@ -28,6 +28,72 @@ const ACCENT: Color = Color::LightGreen;
 const MUTED: Color = Color::Gray;
 const NOT_CONNECTED: &str = "Glasshouse not connected.";
 
+/// Modal confirmation drawn last, above all other surfaces. The terminal
+/// owner retains the request and is the only code that can answer it.
+pub fn render_approval(
+    frame: &mut Frame<'_>,
+    confirmation: &crate::approval::Confirmation,
+    scroll: u16,
+) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    let height = area.height.saturating_sub(2).min(28);
+    let overlay = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, overlay);
+    let block = Block::default()
+        .title(" Approve exact tool call ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let footer_height = inner.height.min(3);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(footer_height),
+    );
+    let footer = Rect::new(inner.x, inner.y + body.height, inner.width, footer_height);
+    let estimated_rows: usize = confirmation
+        .text
+        .lines()
+        .map(|line| {
+            line.chars()
+                .count()
+                .max(1)
+                .div_ceil(usize::from(body.width).max(1))
+        })
+        .sum();
+    let maximum_scroll = estimated_rows
+        .saturating_sub(usize::from(body.height))
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(
+        Paragraph::new(confirmation.text.as_str())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll.min(maximum_scroll), 0)),
+        body,
+    );
+    let choices = if confirmation.complete {
+        "[o] Allow once  [s] Allow this exact call for session  [d/Esc] Deny\n↑/↓ PgUp/PgDn scroll · Expires after 10 min · Sandbox unchanged"
+    } else {
+        "[d/Esc] Deny · This action cannot be approved because its complete details exceed the display limit"
+    };
+    frame.render_widget(
+        Paragraph::new(choices)
+            .style(Style::default().fg(ACCENT))
+            .wrap(Wrap { trim: false }),
+        footer,
+    );
+}
+
 /// Session-owned presentation state. Missing instrumentation stays unknown.
 /// Pass this to `render_screen` on input, resize, runtime events and activity ticks.
 #[derive(Debug, Clone, Default)]
@@ -71,6 +137,9 @@ pub struct ScreenState {
     /// typed into has taken something away rather than given room back.
     pub fullscreen: bool,
     pub theme: Theme,
+    pub settings_root: Option<std::path::PathBuf>,
+    pub settings_profile: Option<String>,
+    pub settings_models: Vec<String>,
     pub mode: Mode,
     pub effort: crate::wire::Effort,
     pub status_line: StatusLine,
@@ -216,7 +285,7 @@ impl Theme {
             Self::Rose => Color::Rgb(38, 22, 34),
         }
     }
-    fn accent(self) -> Color {
+    pub(crate) fn accent(self) -> Color {
         match self {
             Self::Neon => Color::Rgb(223, 255, 0),
             Self::Amber => Color::LightYellow,
@@ -477,6 +546,8 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "inspect current context and token usage",
                 ),
                 ("/status".to_string(), "inspect session status"),
+                ("/settings".to_string(), "Global / Project settings"),
+                ("/config".to_string(), "inspect or edit advanced settings"),
                 ("/statusline".to_string(), "full, compact or hidden status"),
                 (
                     "/fullscreen".to_string(),
@@ -2437,6 +2508,7 @@ fn message_text(message: &Message) -> String {
                 Some(text.as_str())
             }
             ContentBlock::ToolUse { .. } => None,
+            ContentBlock::Image { .. } => Some("\n[image attachment]\n"),
         })
         .collect::<Vec<_>>()
         .join("");

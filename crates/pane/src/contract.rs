@@ -33,6 +33,10 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Text(String),
+    Image {
+        media_type: String,
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -51,6 +55,7 @@ impl Block {
     /// into prose here.
     pub fn text(&self) -> &str {
         match self {
+            Block::Image { .. } => "[image attachment]",
             Block::Text(text) | Block::ToolResult { content: text, .. } => text,
             Block::ToolUse { input, .. } => input
                 .get("code")

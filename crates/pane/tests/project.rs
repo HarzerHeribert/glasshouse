@@ -232,7 +232,7 @@ fn a_project_command_beats_a_same_named_skill() {
 }
 
 #[test]
-fn a_discovered_skill_is_explicitly_informational() {
+fn a_discovered_complete_skill_is_available() {
     let fixture = Fixture::new("informational-skill");
     write(
         &fixture.root,
@@ -242,7 +242,7 @@ fn a_discovered_skill_is_explicitly_informational() {
     let config = project::load(&fixture.root);
     let resolved = commands::resolve(&config, "reviewer").unwrap();
     assert_eq!(resolved.source, CommandSource::ProjectSkill);
-    assert_eq!(resolved.status, CommandStatus::Informational);
+    assert_eq!(resolved.status, CommandStatus::Available);
 }
 
 #[cfg(unix)]

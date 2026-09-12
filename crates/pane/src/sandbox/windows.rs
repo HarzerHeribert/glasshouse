@@ -263,9 +263,9 @@ pub const WITHHELD_RIGHTS: u32 = FILE_EXECUTE | FILE_DELETE_CHILD | WRITE_DAC | 
 
 /// Read, and nothing else. `0x0012_0089`.
 ///
-/// This is the carve-out's whole grant, so every bit in it is a bit a program
-/// holds on `.claude`: it opens the settings document and reads it, and there
-/// is no bit here through which it could change one.
+/// This is each carve-out's whole grant, so every bit in it is a bit a program
+/// holds on `.claude` and `.pane`: it opens a settings document and reads it,
+/// and there is no bit here through which it could change one.
 ///
 /// **The absent [`DELETE`] is load-bearing and is half of escape 3's fix**,
 /// because a rename needs it on the object when the parent withholds
@@ -325,8 +325,8 @@ pub struct AclGrants {
 /// exec grant — so it can widen nothing here even in principle. Every system
 /// directory an AppContainer needs is already readable by
 /// `ALL APPLICATION PACKAGES`, so there is nothing to add for them and
-/// nothing here that could be widened into them. `.claude/` is carved back to
-/// read-only inside a writable root (§1.5), and both decisions are
+/// nothing here that could be widened into them. `.claude/` and `.pane/` are
+/// carved back to read-only inside a writable root (§1.5), and both decisions are
 /// [`Profile::check`]'s rather than this function's.
 pub fn acl_grants(profile: &Profile, binary: &Path) -> AclGrants {
     let root = profile.root().to_path_buf();
@@ -334,9 +334,10 @@ pub fn acl_grants(profile: &Profile, binary: &Path) -> AclGrants {
     let mut read_write = Vec::new();
     if grants(profile, Access::Write, &root) {
         read_write.push(root.clone());
-        let dot_claude = root.join(".claude");
-        if !grants(profile, Access::Write, &dot_claude) {
-            read_only.push(dot_claude);
+        for protected in [root.join(".claude"), root.join(".pane")] {
+            if !grants(profile, Access::Write, &protected) {
+                read_only.push(protected);
+            }
         }
     } else if grants(profile, Access::Read, &root) {
         read_only.push(root);
@@ -1175,7 +1176,7 @@ mod platform {
     /// ever removes an ACE belonging to another principal: the developer,
     /// `SYSTEM` and `Administrators` keep exactly what they had.
     ///
-    /// **The `.claude` carve-out is an absence of grant, not a DENY, and that
+    /// **The `.claude` and `.pane` carve-outs are absences of grant, not DENYs, and that
     /// is a measurement rather than a preference.** Measured on the Windows
     /// ARM64 VM, 2026-09-09: with `.claude` carrying, in ACL order, an
     /// explicit DENY of the write bits for the container SID, then an
@@ -1235,18 +1236,18 @@ mod platform {
         }
         for (path, _, nested) in &targets {
             // **A carve-out has to exist to be carved out**, and on a
-            // fresh project `.claude/` does not. Skipping a missing one
+            // fresh project either protected directory may not. Skipping a missing one
             // -- which is what the Linux applier does with a system root
             // a distribution lacks -- would be a fail-open here and not a
             // harmless absence: the project root is writable, so a
-            // program could create `.claude` itself and write the
+            // program could create the protected directory itself and write the
             // settings document its *next* session is compiled from,
             // which is invariant 5 defeated by a `mkdir`. So the
             // directory is created, and a failure to create it is a
             // refusal rather than a spawn without the carve-out.
             //
-            // `sandbox-grants.md` §3 records the empty `.claude/` left in
-            // a project that had none as a consequence of having run.
+            // `sandbox-grants.md` §3 records protected directories left in a
+            // project that had none as a consequence of having run.
             if *nested && !path.exists() {
                 std::fs::create_dir_all(path)?;
             }

@@ -212,7 +212,10 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             );
         }
         Some(Command::Analysis { refresh }) => {
-            println!("{}", crate::commands::analysis::run(runtime.paths(), *refresh));
+            println!(
+                "{}",
+                crate::commands::analysis::run(runtime.paths(), *refresh)
+            );
         }
         Some(Command::Classify { text }) => {
             let request = text.join(" ");

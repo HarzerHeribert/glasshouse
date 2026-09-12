@@ -214,8 +214,10 @@ fn cancellation_denies_the_pending_call_and_rejects_a_late_session_answer() {
     let (finished, completion) = mpsc::channel();
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(request.is_pending());
         cancelled.cancel();
         completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!request.is_pending());
         assert!(!request.respond(Decision::AllowForSession));
     });
     let mut runtime = fixture
@@ -235,14 +237,13 @@ fn cancellation_denies_the_pending_call_and_rejects_a_late_session_answer() {
 }
 
 #[test]
-fn the_wall_clock_ends_a_blocked_host_callback_without_an_effect() {
+fn human_approval_wait_pauses_the_cell_clock_and_then_resumes_the_write() {
     let fixture = Fixture::new();
     let (gate, requests) = Gate::channel();
-    let (finished, completion) = mpsc::channel();
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
-        completion.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(!request.respond(Decision::AllowOnce));
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(request.respond(Decision::AllowOnce));
     });
     let mut runtime = Runtime::with_limits(
         &Profile::compile(&fixture.0, None),
@@ -253,14 +254,54 @@ fn the_wall_clock_ends_a_blocked_host_callback_without_an_effect() {
     )
     .with_approval_gate(gate);
     let started = Instant::now();
-    let outcome = runtime.run_cell(r#"write({path: "target", content: "no"});"#);
-    finished.send(()).unwrap();
+    let outcome =
+        runtime.run_cell(r#"write({path: "target", content: "yes"}); return "approved";"#);
     responder.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert!(matches!(outcome, CellOutcome::Threw { .. }), "{outcome:?}");
-    assert!(format!("{outcome:?}").contains("RuntimeTimeout"));
+    assert!(started.elapsed() >= Duration::from_millis(350));
+    returned(&outcome, "approved");
     assert!(!runtime.poisoned());
-    assert!(!fixture.0.join("target").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("target")).unwrap(),
+        "yes"
+    );
+}
+
+#[test]
+fn approval_resumes_remaining_compute_budget_instead_of_resetting_it() {
+    let fixture = Fixture::new();
+    let (gate, requests) = Gate::channel();
+    let responder = std::thread::spawn(move || {
+        let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(request.respond(Decision::AllowOnce));
+    });
+    let mut runtime = Runtime::with_limits(
+        &Profile::compile(&fixture.0, None),
+        &Glasshouse::None,
+        &SessionId::new("approval-budget"),
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_millis(400),
+    )
+    .with_approval_gate(gate);
+    let outcome = runtime.run_cell(
+        r#"
+        const before = Date.now(); while (Date.now() - before < 250) {}
+        write({path: "target", content: "approved"});
+        const after = Date.now(); while (Date.now() - after < 250) {}
+        return "incorrectly reset the budget";
+    "#,
+    );
+    responder.join().unwrap();
+    assert!(
+        format!("{outcome:?}").contains("RuntimeTimeout"),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("target")).unwrap(),
+        "approved"
+    );
+    assert!(!runtime.poisoned());
 }
 
 #[test]

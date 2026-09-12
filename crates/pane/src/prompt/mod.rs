@@ -65,19 +65,19 @@ pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -
     let task_index = request.messages.iter().rposition(|message| {
         message.role == crate::contract::Role::User
             && message.historical.is_none()
-            && message.content.len() == 1
-            && matches!(&message.content[0], Block::Text(text) if text == task)
+            && matches!(message.content.first(), Some(Block::Text(text)) if text == task)
+            && message
+                .content
+                .iter()
+                .skip(1)
+                .all(|block| matches!(block, Block::Image { .. }))
     });
     project_runtime_history(&mut request, task_index.unwrap_or(0));
     request.system.push_str(&format!(
         "\n\nYou are Pane, a coding assistant. Configured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
         serde_json::to_string(model).expect("model name serializes")
     ));
-    if let Some(message) = request.messages.iter_mut().rev().find(|message| {
-        message.role == crate::contract::Role::User
-            && message.content.len() == 1
-            && matches!(&message.content[0], Block::Text(text) if text == task)
-    }) {
+    if let Some(message) = task_index.and_then(|index| request.messages.get_mut(index)) {
         message.content.push(Block::Text(
             "[Pane task boundary: this is the current user request. Its runtime started empty; variables, handles and jobs from earlier completed requests are not live. Bindings created while answering THIS request persist between its cells. A cell error does not reset completed bindings.]".into()
         ));
@@ -107,7 +107,7 @@ pub fn project_runtime_history(conversation: &mut Conversation, active_from: usi
                     Block::Text(text) | Block::ToolResult { content: text, .. } => {
                         *text = history.clone()
                     }
-                    Block::ToolUse { .. } => {}
+                    Block::ToolUse { .. } | Block::Image { .. } => {}
                 }
             }
         }
@@ -567,7 +567,7 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
         message.content.iter().any(|block| match block {
             Block::Text(text) => is_rendered_result(text),
             Block::ToolResult { content, .. } => is_rendered_result(content),
-            Block::ToolUse { .. } => false,
+            Block::ToolUse { .. } | Block::Image { .. } => false,
         })
     });
     let Some(last_rendered) = last_rendered else {
@@ -582,7 +582,7 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
         for block in message.content.iter_mut() {
             let text = match block {
                 Block::Text(text) | Block::ToolResult { content: text, .. } => text,
-                Block::ToolUse { .. } => continue,
+                Block::ToolUse { .. } | Block::Image { .. } => continue,
             };
             if !is_rendered_result(text) {
                 continue;

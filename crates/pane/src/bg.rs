@@ -279,6 +279,17 @@ pub fn agent(
     task: &str,
     options: &crate::agent::AgentOptions,
 ) -> String {
+    agent_with_config(profile, glasshouse, session, task, options, None)
+}
+
+pub fn agent_with_config(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &crate::agent::AgentOptions,
+    config: Option<&crate::config::PaneConfig>,
+) -> String {
     start(
         profile,
         glasshouse,
@@ -286,6 +297,7 @@ pub fn agent(
         Work::Agent {
             task: task.to_string(),
             options: options.clone(),
+            config: config.cloned().map(Box::new),
         },
         None,
         None,
@@ -404,6 +416,7 @@ enum Work {
     Agent {
         task: String,
         options: crate::agent::AgentOptions,
+        config: Option<Box<crate::config::PaneConfig>>,
     },
 }
 
@@ -449,14 +462,19 @@ impl JobThread {
                 let result = self.call();
                 self.emit("exit", result);
             }
-            Work::Agent { task, options } => {
-                let answered = crate::agent::run(
+            Work::Agent {
+                task,
+                options,
+                config,
+            } => {
+                let answered = crate::agent::run_with_config(
                     &self.profile,
                     &self.glasshouse,
                     &self.session,
                     task,
                     options,
                     &self.token,
+                    config.as_deref(),
                 );
                 // The answer is the job's output, so a subagent's result is
                 // read exactly as a command's is — `stdout`, `stderr`,

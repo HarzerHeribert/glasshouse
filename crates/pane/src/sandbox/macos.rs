@@ -236,12 +236,29 @@ pub enum Regime {
     /// [`Profile::check`] and none of which reaches the OS layer. `exec` is
     /// which paths `process-exec*` names.
     ProjectRootOnly { path_rules: usize, exec: ExecScope },
+    ExplicitRoots {
+        path_rules: usize,
+        exec: ExecScope,
+        additional: usize,
+    },
 }
 
 impl Regime {
     /// The sentence a session prints at start-up. It names the coarseness,
     /// because §3 requires pane to state it rather than imply exactness.
     pub fn describe(self) -> String {
+        if let Regime::ExplicitRoots {
+            path_rules,
+            exec,
+            additional,
+        } = self
+        {
+            return Regime::ProjectRootOnly { path_rules, exec }.describe().replacen(
+                "the project root the only readable and writable root",
+                &format!("the project root and {additional} explicit additional readable and writable root(s), each with a .claude write deny"),
+                1,
+            );
+        }
         match self {
             Regime::ProjectRootOnly { path_rules, exec } => format!(
                 "seatbelt: deny by default, the project root the only readable and writable root, no network, no Mach service. \
@@ -259,6 +276,7 @@ impl Regime {
                          root — the commands this profile admits can reach their own binaries. Argv admission is unchanged.",
                 }
             ),
+            Regime::ExplicitRoots { .. } => unreachable!("handled above"),
         }
     }
 }
@@ -271,6 +289,13 @@ impl fmt::Display for Regime {
 
 /// The regime [`profile_text`] achieves for `profile` and `binary`.
 pub fn regime(profile: &Profile, binary: &Path) -> Regime {
+    if !profile.additional_roots().is_empty() {
+        return Regime::ExplicitRoots {
+            path_rules: profile.rule_count(),
+            exec: exec_scope(profile, binary),
+            additional: profile.additional_roots().len(),
+        };
+    }
     Regime::ProjectRootOnly {
         path_rules: profile.rule_count(),
         exec: exec_scope(profile, binary),
@@ -342,6 +367,9 @@ pub fn profile_text_with_descendants(
                 out.push_str(&format!(" (subpath {})", quote(path)));
             }
             out.push_str(&format!(" (subpath {})", quote(&root)));
+            for extra in profile.additional_roots() {
+                out.push_str(&format!(" (subpath {})", quote(&display(extra))));
+            }
         }
     }
     for descendant in descendants {
@@ -421,11 +449,32 @@ pub fn profile_text_with_descendants(
         out.push_str(&format!("(allow file-write* (subpath {}))\n", quote(&root)));
     }
 
+    // Explicit host roots are canonical subtrees, admitted only when no
+    // configured deny glob would need an approximate OS translation.
+    for extra in profile.additional_roots() {
+        let path = quote(&display(extra));
+        out.push_str(&format!(
+            "(allow file-read* file-write* (subpath {path}))\n"
+        ));
+        out.push_str(&format!(
+            "(deny file-write* (subpath {}))\n",
+            quote(&display(&extra.join(".claude")))
+        ));
+        out.push_str(&format!(
+            "(deny file-write* (subpath {}))\n",
+            quote(&display(&extra.join(".pane")))
+        ));
+    }
+
     // §1.5: `.claude/` lives inside the writable root, so a program that
     // could write it could widen the profile it was derived from. Emitted
     // when — and only when — the profile agrees it is unwritable, so the two
     // layers cannot disagree about it.
     let dot_claude = profile.root().join(".claude");
+    out.push_str(&format!(
+        "(deny file-write* (subpath {}))\n",
+        quote(&display(&profile.root().join(".pane")))
+    ));
     if profile
         .check("write", Access::Write, &dot_claude.join(WRITE_PROBE))
         .is_err()

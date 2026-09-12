@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,7 @@ pub struct Mcp {
     discovered: bool,
     clients: BTreeMap<String, Client>,
     tools: BTreeMap<String, Descriptor>,
+    web: Option<Arc<crate::web::WebBroker>>,
 }
 
 fn failure(reason: &str) -> ToolError {
@@ -56,6 +58,15 @@ fn denied() -> ToolError {
 }
 
 impl Mcp {
+    pub fn configure_web(&mut self, config: crate::web::WebConfig) -> Result<(), String> {
+        self.with_web_broker(crate::web::WebBroker::new(config)?);
+        Ok(())
+    }
+
+    /// Host-only transport injection; remote credentials never come from JS.
+    pub fn with_web_broker(&mut self, broker: crate::web::WebBroker) {
+        self.web = Some(Arc::new(broker));
+    }
     /// The trusted discovered spelling used by the hook observer.
     pub(crate) fn registered_name(&self, name: &str) -> Option<&str> {
         self.tools
@@ -95,9 +106,24 @@ impl Mcp {
                 if !profile.admits_mcp_server(&name) {
                     continue;
                 }
-                let mut client = Client::start(profile, &server, token)?;
-                let initialized = client.rpc("initialize", json!({"protocolVersion":"2024-11-05", "capabilities":{}, "clientInfo":{"name":"pane", "version":env!("CARGO_PKG_VERSION")}}), token)?;
-                if initialized.get("protocolVersion").and_then(Value::as_str) != Some("2024-11-05")
+                let mut client = if server.is_remote() {
+                    Client::start_remote(
+                        &server,
+                        self.web.clone().ok_or_else(|| {
+                            failure("remote MCP requires configured host web policy")
+                        })?,
+                        token,
+                    )?
+                } else {
+                    Client::start(profile, &server, token)?
+                };
+                let protocol = if server.is_remote() {
+                    "2025-03-26"
+                } else {
+                    "2024-11-05"
+                };
+                let initialized = client.rpc("initialize", json!({"protocolVersion":protocol, "capabilities":{}, "clientInfo":{"name":"pane", "version":env!("CARGO_PKG_VERSION")}}), token)?;
+                if initialized.get("protocolVersion").and_then(Value::as_str) != Some(protocol)
                     || !initialized
                         .get("capabilities")
                         .is_some_and(Value::is_object)
@@ -240,16 +266,61 @@ impl Mcp {
 struct Request {
     value: Value,
     reply: bool,
+    token: CancellationToken,
 }
 struct Client {
     child: Option<invoke::ConfinedChild>,
-    tx: Sender<Request>,
+    tx: Option<Sender<Request>>,
     rx: Receiver<Result<Value, &'static str>>,
     next_id: u64,
     grant: ExecGrant,
     confinement: Confinement,
+    remote_active: bool,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Client {
+    fn start_remote(
+        server: &Server,
+        broker: Arc<crate::web::WebBroker>,
+        token: &CancellationToken,
+    ) -> Result<Self, ToolError> {
+        if token.is_cancelled() {
+            return Err(ToolError::Cancelled { tool: "mcp".into() });
+        }
+        let url = server
+            .url
+            .clone()
+            .ok_or_else(|| failure("remote MCP URL is missing"))?;
+        broker
+            .validate_url(&url)
+            .map_err(|_| failure("remote MCP URL violates host web policy"))?;
+        let headers = server.remote_headers().map_err(failure)?;
+        let (tx, requests) = mpsc::channel::<Request>();
+        let (responses, rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let mut session_id = None;
+            while let Ok(request) = requests.recv() {
+                let result = remote_exchange(&broker, &url, &headers, &mut session_id, request);
+                let failed = result.is_err();
+                if responses.send(result).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            child: None,
+            tx: Some(tx),
+            rx,
+            next_id: 0,
+            grant: ExecGrant {
+                binary: PathBuf::new(),
+                fell_back_to_roots: false,
+            },
+            confinement: Confinement::BrokeredNetwork,
+            remote_active: true,
+            worker: Some(worker),
+        })
+    }
     fn start(
         profile: &Profile,
         server: &Server,
@@ -333,11 +404,13 @@ impl Client {
         });
         Ok(Self {
             child: Some(child),
-            tx,
+            tx: Some(tx),
             rx,
             next_id: 0,
             grant,
             confinement,
+            remote_active: false,
+            worker: None,
         })
     }
     fn rpc(
@@ -347,7 +420,7 @@ impl Client {
         token: &CancellationToken,
     ) -> Result<Value, ToolError> {
         self.next_id += 1;
-        self.send(Request { value: json!({"jsonrpc":"2.0", "id":self.next_id, "method":method, "params":params}), reply: true }, token)
+        self.send(Request { value: json!({"jsonrpc":"2.0", "id":self.next_id, "method":method, "params":params}), reply: true, token: token.clone() }, token)
     }
     fn notify(
         &mut self,
@@ -359,13 +432,14 @@ impl Client {
             Request {
                 value: json!({"jsonrpc":"2.0", "method":method, "params":params}),
                 reply: false,
+                token: token.clone(),
             },
             token,
         )
         .map(|_| ())
     }
     fn send(&mut self, request: Request, token: &CancellationToken) -> Result<Value, ToolError> {
-        if self.child.is_none() {
+        if self.child.is_none() && !self.remote_active {
             return Err(failure("MCP server is unavailable"));
         }
         if request.value.to_string().len() > FRAME_BYTES {
@@ -375,7 +449,7 @@ impl Client {
             self.stop();
             return Err(ToolError::Cancelled { tool: "mcp".into() });
         }
-        if self.tx.send(request).is_err() {
+        if self.tx.as_ref().is_none_or(|tx| tx.send(request).is_err()) {
             self.stop();
             return Err(failure("MCP server disconnected"));
         }
@@ -404,14 +478,122 @@ impl Client {
         }
     }
     fn stop(&mut self) {
+        self.remote_active = false;
+        self.tx.take();
         if let Some(mut child) = self.child.take() {
             invoke::kill_and_reap(&mut child);
         }
     }
 }
+
+fn remote_exchange(
+    broker: &crate::web::WebBroker,
+    url: &str,
+    configured_headers: &BTreeMap<String, String>,
+    session_id: &mut Option<String>,
+    request: Request,
+) -> Result<Value, &'static str> {
+    if request.token.is_cancelled() {
+        return Err("remote MCP cancelled before dispatch");
+    }
+    let mut headers = configured_headers.clone();
+    if let Some(id) = session_id.as_ref() {
+        headers.insert("mcp-session-id".into(), id.clone());
+    }
+    headers.insert("mcp-protocol-version".into(), "2025-03-26".into());
+    let body = serde_json::to_vec(&request.value).map_err(|_| "invalid MCP request")?;
+    let response = broker.post_json_cancellable(url, &headers, &body, &request.token).map_err(
+        |_| "remote MCP request failed or was denied; no redirect or automatic retry was performed",
+    )?;
+    let initialize = request.value.get("method").and_then(Value::as_str) == Some("initialize");
+    if initialize && let Some(id) = response.session_id {
+        if id.is_empty() || id.len() > 4096 || !id.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+            return Err("invalid MCP session ID");
+        }
+        *session_id = Some(id);
+    }
+    if !request.reply {
+        return if response.status == 202 && response.body.is_empty() {
+            Ok(Value::Null)
+        } else {
+            Err("remote MCP notification must return empty HTTP 202")
+        };
+    }
+    let media = response.content_type.split(';').next().unwrap_or("").trim();
+    let messages = match media {
+        "application/json" => {
+            vec![serde_json::from_slice(&response.body).map_err(|_| "malformed remote MCP JSON")?]
+        }
+        "text/event-stream" => parse_sse(&response.body)?,
+        _ => return Err("remote MCP response must be JSON or finite SSE"),
+    };
+    let mut answer = None;
+    for value in messages {
+        let batch = if let Value::Array(values) = value {
+            values
+        } else {
+            vec![value]
+        };
+        for value in batch {
+            if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+                return Err("invalid MCP JSON-RPC version");
+            }
+            if value.get("method").is_some() {
+                if value.get("id").is_some() {
+                    return Err("MCP server requests are unsupported");
+                }
+                continue;
+            }
+            if value.get("id") != request.value.get("id") {
+                return Err("MCP reply id mismatch");
+            }
+            if value.get("error").is_some() {
+                return Err("MCP server returned a protocol error");
+            }
+            if answer.is_some() {
+                return Err("duplicate MCP reply");
+            }
+            answer = Some(
+                value
+                    .get("result")
+                    .cloned()
+                    .ok_or("MCP result is missing")?,
+            );
+        }
+    }
+    answer.ok_or("remote MCP stream ended without a matching response")
+}
+
+/// Finite POST response SSE only: no legacy endpoint negotiation, GET stream,
+/// reconnection, event replay or server-initiated request handling.
+fn parse_sse(body: &[u8]) -> Result<Vec<Value>, &'static str> {
+    let text = std::str::from_utf8(body).map_err(|_| "MCP SSE is not UTF-8")?;
+    let mut messages = Vec::new();
+    let mut data = String::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !data.is_empty() {
+                if messages.len() == 64 {
+                    return Err("MCP SSE exceeds 64 events");
+                }
+                messages.push(serde_json::from_str(&data).map_err(|_| "malformed MCP SSE event")?);
+                data.clear();
+            }
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            data.push('\n');
+        } else if line == "data" {
+            data.push('\n');
+        }
+    }
+    Ok(messages)
+}
 impl Drop for Client {
     fn drop(&mut self) {
         self.stop();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 

@@ -729,9 +729,9 @@ fn handles_command_reports_the_recorded_preview() {
 #[test]
 fn the_binary_with_no_arguments_starts_a_session_in_its_current_directory() {
     let root = scratch_dir("bare-entrypoint-root");
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".glasshouse/pane.toml"),
+        root.join(".pane/config.toml"),
         format!("[model]\nparent = {:?}\n", pane::wire::MODEL),
     )
     .unwrap();
@@ -1092,10 +1092,10 @@ fn a_project_skill_resolves_by_name() {
 #[test]
 fn supervisor_and_permissions_report_effective_session_state() {
     let root = scratch_dir("control-state");
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Bash(cargo *)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Bash(cargo *)\"]\n",
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
@@ -2189,9 +2189,9 @@ fn looping_cell_reply() -> String {
 }
 
 fn write_supervisor_pane_toml(root: &Path, every: u32, extra: &str) {
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".glasshouse").join("pane.toml"),
+        root.join(".pane/config.toml"),
         format!("[supervisor]\nevery = {every}\nmodel = \"claude-sonnet-5\"\n{extra}"),
     )
     .unwrap();
@@ -2508,9 +2508,9 @@ fn the_look_carries_the_purpose_header() {
 #[test]
 fn the_look_names_the_supervisors_model_and_the_turns_name_the_tasks() {
     let root = scratch_dir("supervisor-model-root");
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".glasshouse").join("pane.toml"),
+        root.join(".pane/config.toml"),
         "[supervisor]\nevery = 1\nmodel = \"cheap-model-for-the-test\"\n",
     )
     .unwrap();
@@ -2572,12 +2572,8 @@ fn the_look_names_the_supervisors_model_and_the_turns_name_the_tasks() {
 #[test]
 fn a_loaded_cell_limit_ends_the_task() {
     let root = scratch_dir("loaded-cell-limit-root");
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
-    fs::write(
-        root.join(".glasshouse").join("pane.toml"),
-        "[limits]\ncells = 2\n",
-    )
-    .unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
+    fs::write(root.join(".pane/config.toml"), "[limits]\ncells = 2\n").unwrap();
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
 
@@ -2961,13 +2957,13 @@ mod interrupts {
     /// prefixes, no path rule of any kind (`sandbox-grants.md` §2 -- argv
     /// admission grants no file access).
     fn grant_the_spin(root: &Path) {
-        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::create_dir_all(root.join(".pane")).unwrap();
         fs::write(
-            root.join(".claude").join("settings.json"),
+            root.join(".pane/config.toml"),
             // `trap` is here for the stubborn-job test below, which needs a
             // job that ignores every catchable signal; it grants no file
             // access either (`sandbox-grants.md` §2).
-            r#"{"permissions":{"allow":["Bash(while*)","Bash(do*)","Bash(echo*)","Bash(trap*)"]}}"#,
+            "[permissions]\nallow = [\"Bash(while*)\", \"Bash(do*)\", \"Bash(echo*)\", \"Bash(trap*)\"]\n",
         )
         .unwrap();
     }
@@ -3907,7 +3903,7 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
 #[test]
 fn a_project_starts_on_the_model_it_was_last_left_on() {
     let root = scratch_dir("model-remembered-root");
-    std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
     let rollout = root.join("rollout.jsonl");
 
     let (base_url, _bodies) = start_fake_provider(vec![ending_reply()]);
@@ -3925,7 +3921,7 @@ fn a_project_starts_on_the_model_it_was_last_left_on() {
         stdout.contains("model changed to claude-opus-4-8"),
         "{stdout}"
     );
-    let saved = std::fs::read_to_string(root.join(".glasshouse").join("pane.toml")).unwrap();
+    let saved = std::fs::read_to_string(root.join(".pane/config.toml")).unwrap();
     assert!(
         saved.contains("claude-opus-4-8"),
         "the choice was not written: {saved}"
@@ -4307,10 +4303,10 @@ fn an_identity_answer_after_a_completed_task_does_not_trigger_more_execution() {
 #[cfg(unix)]
 fn shell_changes_survive_a_cell_error_but_never_enter_model_context() {
     let root = scratch_dir("local-diff");
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Read(**)","Write(**)","Bash(echo*)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Read(**)\", \"Write(**)\", \"Bash(echo*)\"]\n",
     )
     .unwrap();
     fs::write(root.join("example.txt"), "LOCAL_DIFF_OLD_SENTINEL\n").unwrap();
@@ -4474,10 +4470,10 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
 #[test]
 fn prose_without_a_native_call_is_final_and_never_executes_its_example() {
     let root = scratch_dir("completion-regression");
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Read(**)\", \"Write(**)\"]\n",
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
@@ -4638,6 +4634,12 @@ fn task_orientation_and_instructions_refresh_without_widening_live_permissions()
                 r#"{"permissions":{"allow":["Bash"]}}"#,
             )
             .unwrap();
+            fs::create_dir_all(changed_root.join(".pane")).unwrap();
+            fs::write(
+                changed_root.join(".pane/config.toml"),
+                "[permissions]\nallow = [\"Bash\"]\n",
+            )
+            .unwrap();
         }
         ending_reply()
     });
@@ -4733,10 +4735,10 @@ fn environment_snapshot_does_not_change_between_inferences_in_one_task() {
 fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
     let root = scratch_dir("nested-provider-boundary");
     fs::create_dir_all(root.join("nested")).unwrap();
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Read(**)","Write(**)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Read(**)\", \"Write(**)\"]\n",
     )
     .unwrap();
     fs::write(root.join("AGENTS.md"), "ROOT_GUIDANCE").unwrap();
@@ -4812,10 +4814,10 @@ fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
 #[test]
 fn standing_handler_drains_a_future_batch_without_an_extra_model_request() {
     let root = scratch_dir("standing-handler-drain");
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Bash(echo*)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Bash(echo*)\"]\n",
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
@@ -4874,10 +4876,10 @@ fn standing_handler_drains_a_future_batch_without_an_extra_model_request() {
 #[test]
 fn disabled_handler_notice_reaches_the_first_preview_once_before_next_inference() {
     let root = scratch_dir("standing-handler-notice");
-    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".claude/settings.json"),
-        r#"{"permissions":{"allow":["Bash(echo*)"]}}"#,
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Bash(echo*)\"]\n",
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
@@ -4940,9 +4942,9 @@ fn disabled_handler_notice_reaches_the_first_preview_once_before_next_inference(
 /// `[helpers] model` is the whole configuration a preflight needs: unset is
 /// off, exactly as `[supervisor] model` unset is.
 fn write_helpers_pane_toml(root: &Path, model: &str) {
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".glasshouse").join("pane.toml"),
+        root.join(".pane/config.toml"),
         format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
     )
     .unwrap();
@@ -5010,9 +5012,9 @@ fn preflight_does_not_fire_with_helpers_unconfigured() {
 #[test]
 fn a_configured_helper_model_does_not_enable_preflight_by_itself() {
     let root = scratch_dir("preflight-default-off-root");
-    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
-        root.join(".glasshouse/pane.toml"),
+        root.join(".pane/config.toml"),
         "[helpers]\nmodel = \"helper-tier\"\n",
     )
     .unwrap();

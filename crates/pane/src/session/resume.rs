@@ -245,7 +245,11 @@ mod tests {
         assert_eq!(path, rollout_path_for(&root, fresh.as_str()));
         let mut bare = args_for(&root);
         bare.resume = Some(String::new());
-        assert!(resolve_session(&bare).unwrap_err().contains("nothing to resume"));
+        assert!(
+            resolve_session(&bare)
+                .unwrap_err()
+                .contains("nothing to resume")
+        );
 
         fs::write(rollout_path_for(&root, "older"), "{}\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -273,7 +277,10 @@ mod tests {
         let mut wrong = args_for(&root);
         wrong.resume = Some("typo".into());
         let refusal = resolve_session(&wrong).unwrap_err();
-        assert!(refusal.contains("typo") && refusal.contains("older"), "{refusal}");
+        assert!(
+            refusal.contains("typo") && refusal.contains("older"),
+            "{refusal}"
+        );
 
         assert!(session_listing(&root).contains("newer"));
         let _ = fs::remove_dir_all(&root);

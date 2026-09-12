@@ -272,9 +272,11 @@ pub fn is_credential_variable(name: &str) -> bool {
 /// rule — the OS layer is directory-granular and never saw them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confinement {
+    /// Host HTTP broker with domain/DNS policy; no process was spawned.
+    BrokeredNetwork,
     /// macOS seatbelt, entered between `fork` and `exec`.
     Seatbelt,
-    /// Linux Landlock, installed on the forked child before `exec`.
+    /// Linux Landlock plus socket-denial seccomp, installed before `exec`.
     Landlock,
     /// A Windows AppContainer, entered at `CreateProcessW` itself. There is
     /// no earlier moment to enter it: the container is an argument to the
@@ -288,8 +290,9 @@ pub enum Confinement {
 impl Confinement {
     pub fn as_str(self) -> &'static str {
         match self {
+            Confinement::BrokeredNetwork => "host web broker (domain/DNS policy)",
             Confinement::Seatbelt => "seatbelt",
-            Confinement::Landlock => "landlock",
+            Confinement::Landlock => "landlock+seccomp",
             Confinement::AppContainer => "appcontainer",
             Confinement::InProcess => "in-process (no child; the path was checked)",
         }
@@ -1589,6 +1592,14 @@ fn spawn_confined(
         command.env_remove(name);
     }
 
+    // Git must not discover host configuration outside the admitted project.
+    // Besides containing credential helpers, an unreadable ~/.gitconfig makes
+    // even `git status` fail under Seatbelt. Keep repository config and explicit
+    // `git -c` options, but give all shell descendants a safe host-config default.
+    let null_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    command.env("GIT_CONFIG_GLOBAL", null_config);
+    command.env("GIT_CONFIG_SYSTEM", null_config);
+
     // The child leads a process group of its own, so a cancellation can name
     // everything the call started and not only the handle it holds. See
     // [`kill_and_reap`] for why that is the difference between stopping a
@@ -1944,14 +1955,14 @@ fn confined_spawn_with_descendants(
         // installs nothing. That is a refusal here rather than a warning.
         Ok(false) => {
             return Err(refused(
-                "this kernel's Landlock ABI is below 3, so no ruleset could be installed and \
+                "this host lacks Landlock ABI 3 or a supported seccomp architecture, so confinement could not be installed and \
                  pane does not spawn a tool unconfined (sandbox-grants.md §3)"
                     .to_string(),
             ));
         }
         Err(error) => {
             return Err(refused(format!(
-                "the Landlock ruleset could not be installed, so nothing was spawned: {error}"
+                "Landlock/seccomp confinement could not be installed, so nothing was spawned: {error}"
             )));
         }
     }

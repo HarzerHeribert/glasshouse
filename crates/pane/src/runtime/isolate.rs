@@ -490,13 +490,22 @@ impl Drop for Runtime {
 }
 
 impl Runtime {
+    /// Effective session configuration, retained for delegated child runtimes.
+    pub fn with_config(self, config: crate::config::PaneConfig) -> Result<Self, String> {
+        let runtime = self
+            .with_helpers(config.helpers.clone())
+            .with_agents(config.agents.clone())
+            .with_web(config.web.clone())?;
+        *runtime.state.effective_config.borrow_mut() = Some(config);
+        Ok(runtime)
+    }
     /// Installs a host-only confirmation seam for already admitted registered
     /// calls. A decision cannot override the compiled sandbox profile. The
     /// shipped session does not enable it; no cell can reach this builder.
     /// Waiting remains subject to the cell's wall-clock and cancellation limits.
     #[must_use]
     pub fn with_approval_gate(self, gate: crate::approval::Gate) -> Self {
-        *self.state.approval_gate.borrow_mut() = Some(gate);
+        *self.state.approval_gate.borrow_mut() = Some(gate.with_wait_clock());
         self
     }
 
@@ -512,11 +521,32 @@ impl Runtime {
     #[must_use]
     /// The default model a delegated goal runs on when the cell names none.
     pub fn with_agents(self, agents: crate::config::AgentsConfig) -> Self {
+        if let Some(config) = self.state.effective_config.borrow_mut().as_mut() {
+            config.agents = agents.clone();
+        }
         self.state.set_agents(agents);
         self
     }
 
+    /// Installs host-owned brokered web access without granting shell network access.
+    pub fn with_web(self, config: crate::web::WebConfig) -> Result<Self, String> {
+        if let Some(effective) = self.state.effective_config.borrow_mut().as_mut() {
+            effective.web = config.clone();
+        }
+        self.state.mcp.borrow_mut().configure_web(config.clone())?;
+        Ok(self.with_web_broker(crate::web::WebBroker::new(config)?))
+    }
+
+    /// A host embedding may provide its own broker transport; JavaScript cannot.
+    pub fn with_web_broker(self, broker: crate::web::WebBroker) -> Self {
+        *self.state.web.borrow_mut() = Some(broker);
+        self
+    }
+
     pub fn with_helpers(self, helpers: crate::config::HelpersConfig) -> Self {
+        if let Some(config) = self.state.effective_config.borrow_mut().as_mut() {
+            config.helpers = helpers.clone();
+        }
         self.state.set_helpers(helpers);
         self
     }
@@ -1237,7 +1267,7 @@ impl Runtime {
             );
         }
 
-        let watchdog = Watchdog::arm_cancellable(
+        let watchdog = Watchdog::arm_pausing(
             self.heap.guard.isolate.get().cloned(),
             self.wall_clock_limit,
             self.state
@@ -1245,6 +1275,11 @@ impl Runtime {
                 .running
                 .get()
                 .then(|| self.state.token.borrow().clone()),
+            self.state
+                .approval_gate
+                .borrow()
+                .as_ref()
+                .and_then(crate::approval::Gate::wait_clock),
         );
         *self.state.watchdog_fired.borrow_mut() = Some(Arc::clone(&watchdog.fired));
         let ending =
@@ -2399,16 +2434,38 @@ impl Watchdog {
         limit: Duration,
         token: Option<CancellationToken>,
     ) -> Self {
+        Self::arm_pausing(isolate, limit, token, None)
+    }
+
+    fn arm_pausing(
+        isolate: Option<v8::IsolateHandle>,
+        limit: Duration,
+        token: Option<CancellationToken>,
+        wait_clock: Option<Arc<crate::approval::WaitClock>>,
+    ) -> Self {
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let fired = Arc::new(AtomicBool::new(false));
         let gave_up = Arc::new(AtomicBool::new(false));
         let armed = Instant::now();
+        let paused_at_start = wait_clock
+            .as_ref()
+            .map(|clock| clock.elapsed())
+            .unwrap_or_default();
         let hard = limit.saturating_mul(HARD_DEADLINE_MULTIPLE);
         let thread = isolate.map(|isolate| {
             let done = Arc::clone(&done);
             let fired = Arc::clone(&fired);
             let gave_up = Arc::clone(&gave_up);
             std::thread::spawn(move || {
+                let elapsed = || {
+                    let paused = wait_clock
+                        .as_ref()
+                        .map(|clock| clock.elapsed())
+                        .unwrap_or_default();
+                    armed
+                        .elapsed()
+                        .saturating_sub(paused.saturating_sub(paused_at_start))
+                };
                 let (lock, finished) = &*done;
                 let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
@@ -2416,14 +2473,14 @@ impl Watchdog {
                         return;
                     }
                     if token.as_ref().is_some_and(CancellationToken::is_cancelled)
-                        || armed.elapsed() >= limit
+                        || elapsed() >= limit
                     {
                         break;
                     }
-                    let wait = if token.is_some() {
-                        Duration::from_millis(20).min(limit.saturating_sub(armed.elapsed()))
+                    let wait = if token.is_some() || wait_clock.is_some() {
+                        Duration::from_millis(20).min(limit.saturating_sub(elapsed()))
                     } else {
-                        limit.saturating_sub(armed.elapsed())
+                        limit.saturating_sub(elapsed())
                     };
                     let (next, _) = finished
                         .wait_timeout_while(guard, wait, |done| !*done)
@@ -2433,7 +2490,7 @@ impl Watchdog {
                 // Ordered before the terminate so the flag is visible to
                 // `disarm`, which cannot run until this thread releases the
                 // lock it is still holding.
-                fired.store(armed.elapsed() >= limit, Ordering::SeqCst);
+                fired.store(elapsed() >= limit, Ordering::SeqCst);
                 isolate.terminate_execution();
                 loop {
                     let (next, _) = finished
@@ -2445,7 +2502,7 @@ impl Watchdog {
                     // exactly the one this flag is about. Checking it after
                     // the `return` below would answer "false" for every cell
                     // that eventually stopped, which is all of them.
-                    if armed.elapsed() >= hard {
+                    if elapsed() >= hard {
                         gave_up.store(true, Ordering::SeqCst);
                     }
                     if *guard {

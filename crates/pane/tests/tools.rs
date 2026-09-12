@@ -612,9 +612,10 @@ fn the_profile_is_built_once_per_session() {
 
     let fixture = Fixture::new("one-profile");
     fixture.write(&fixture.root.join("inside.txt"), "session-content\n");
+    std::fs::create_dir_all(fixture.root.join(".pane")).unwrap();
     std::fs::write(
-        fixture.root.join(".claude").join("settings.json"),
-        settings(),
+        fixture.root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Bash(echo*)\", \"Bash(cat*)\"]\n",
     )
     .unwrap();
     let log = fixture.root.join("hook.log");
