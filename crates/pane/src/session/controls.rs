@@ -549,7 +549,7 @@ pub(super) fn command(
                         && matches!(effort, wire::Effort::Xhigh | wire::Effort::Max)
                     {
                         session_println!(
-                            "This route supports auto|low|medium|high; xhigh/max need a compatible Claude model."
+                            "This route supports default|low|medium|high; xhigh/max need a compatible Claude model."
                         );
                         return true;
                     }
@@ -559,10 +559,10 @@ pub(super) fn command(
                     }
                     session_println!("Effort: {} · applied to the next request", effort.name());
                 } else {
-                    session_println!("Use /effort auto|low|medium|high|xhigh|max");
+                    session_println!("Use /effort default|low|medium|high|xhigh|max");
                 }
             } else {
-                let rows = ["auto", "low", "medium", "high", "xhigh", "max"]
+                let rows = ["default", "low", "medium", "high", "xhigh", "max"]
                     .iter()
                     .map(|value| PanelRow {
                         text: value.to_string(),
@@ -675,7 +675,7 @@ pub(super) fn command(
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nLimits: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .glasshouse/pane.toml (loaded at startup)\nPermissions: .claude/settings.json (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),
@@ -690,7 +690,10 @@ pub(super) fn command(
                             .supervisor
                             .model
                             .as_deref()
-                            .unwrap_or("off")
+                            .unwrap_or("off"),
+                        session.config().helpers.effort.find.name(),
+                        session.config().helpers.effort.reduce.name(),
+                        session.config().helpers.effort.check.name(),
                     ),
                 ),
             );
@@ -980,7 +983,7 @@ mod tests {
             context_window: None,
             interface: Cell::new(crate::abi::Interface::default()),
             mode: Cell::new(tui::Mode::Execute),
-            effort: Cell::new(wire::Effort::Auto),
+            effort: Cell::new(wire::Effort::Default),
             project: &project,
             config: &RefCell::new(config),
             interrupt: &interrupt,
@@ -1035,7 +1038,7 @@ mod tests {
             context_window: None,
             interface: Cell::new(crate::abi::Interface::default()),
             mode: Cell::new(tui::Mode::Execute),
-            effort: Cell::new(wire::Effort::Auto),
+            effort: Cell::new(wire::Effort::Default),
             project: &project,
             config: &config,
             interrupt: &interrupt,

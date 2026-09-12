@@ -380,14 +380,21 @@ impl RuntimeState {
         *self.agents.borrow_mut() = agents;
     }
 
-    pub(crate) fn helper_model(&self) -> Result<String, String> {
+    pub(crate) fn helper_route(
+        &self,
+        helper: &str,
+    ) -> Result<(String, crate::wire::Effort), String> {
         let helpers = self.helpers.borrow();
         if !helpers.enabled {
             return Err("helpers are off: `[helpers] enabled` is false in pane.toml".to_string());
         }
-        helpers.model.clone().ok_or_else(|| {
+        let model = helpers.model.clone().ok_or_else(|| {
             "helpers are not configured: set `[helpers] model` in .glasshouse/pane.toml".to_string()
-        })
+        })?;
+        let effort = helpers.effort.for_helper(helper).ok_or_else(|| {
+            format!("helper `{helper}` has no reasoning effort policy in pane.toml")
+        })?;
+        Ok((model, effort))
     }
 
     /// Takes one of this cell's helper-call slots, or says the ceiling is

@@ -1580,7 +1580,7 @@ mod tests {
         editor.insert("/");
         editor.key(key(KeyCode::Down));
         editor.key(key(KeyCode::Tab));
-        assert_eq!(editor.text, "/entitlements ");
+        assert_eq!(editor.text, "/models ");
         assert_eq!(editor.cursor, editor.text.len());
     }
     #[test]

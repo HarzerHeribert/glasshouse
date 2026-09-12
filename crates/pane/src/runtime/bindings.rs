@@ -1549,7 +1549,7 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     }) else {
         return Reduction::NotAttempted;
     };
-    let Ok(model) = state.helper_model() else {
+    let Ok((model, effort)) = state.helper_route(spec.name) else {
         return Reduction::NotAttempted;
     };
 
@@ -1578,7 +1578,10 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     let token = state.token.borrow().clone();
     let call = crate::helpers::run(
         spec,
-        &model,
+        crate::helpers::HelperRoute {
+            model: &model,
+            effort,
+        },
         &text,
         &state.profile,
         &state.glasshouse,
@@ -2403,8 +2406,8 @@ fn helper_callback(
     }
 
     let state = state(scope);
-    let model = match state.helper_model() {
-        Ok(model) => model,
+    let (model, effort) = match state.helper_route(spec.name) {
+        Ok(route) => route,
         Err(reason) => {
             throw_tool_error(scope, &reason);
             return;
@@ -2435,7 +2438,10 @@ fn helper_callback(
     let token = state.token.borrow().clone();
     let call = crate::helpers::run(
         spec,
-        &model,
+        crate::helpers::HelperRoute {
+            model: &model,
+            effort,
+        },
         &input,
         &state.profile,
         &state.glasshouse,

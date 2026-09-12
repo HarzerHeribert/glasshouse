@@ -41,11 +41,11 @@ const MODEL_HEADER: &str = "x-glasshouse-model";
 /// literal, so both stay in one place.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// User-selected response effort. Auto leaves the existing wire body untouched.
+/// User-selected response effort. Default leaves the existing wire body untouched.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Effort {
     #[default]
-    Auto,
+    Default,
     Low,
     Medium,
     High,
@@ -55,7 +55,8 @@ pub enum Effort {
 impl Effort {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "auto" => Some(Self::Auto),
+            // Compatibility: `auto` was the original public spelling.
+            "default" | "auto" => Some(Self::Default),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
@@ -66,7 +67,7 @@ impl Effort {
     }
     pub fn name(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
+            Self::Default => "default",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -198,7 +199,7 @@ pub fn request_body(conversation: &Conversation) -> Vec<u8> {
 
 /// The same request body used for sending and estimating an explicitly selected model.
 pub fn request_body_on_model(conversation: &Conversation, model: &str) -> Vec<u8> {
-    request_body_configured(conversation, model, Effort::Auto)
+    request_body_configured(conversation, model, Effort::Default)
 }
 
 /// Which tool definitions a request carries — `tool-abi.md` §3.
@@ -294,11 +295,12 @@ pub fn request_body_for_surface(
         build_request_body(model, MAX_TOKENS, conversation, surface),
         model,
         effort,
+        MAX_TOKENS,
     )
 }
 
-fn configure_effort(body: Vec<u8>, model: &str, effort: Effort) -> Vec<u8> {
-    if effort == Effort::Auto {
+fn configure_effort(body: Vec<u8>, model: &str, effort: Effort, response_tokens: u32) -> Vec<u8> {
+    if effort == Effort::Default {
         return body;
     }
     let mut value: serde_json::Value = serde_json::from_slice(&body).expect("serialized request");
@@ -316,13 +318,13 @@ fn configure_effort(body: Vec<u8>, model: &str, effort: Effort) -> Vec<u8> {
             Effort::Medium => 16384,
             Effort::High => 32769,
             Effort::Xhigh => 49152,
-            // `Auto` returned above; this arm is `Max` and the compiler
+            // `Default` returned above; this arm is `Max` and the compiler
             // cannot see that, so it is spelled rather than a wildcard that
             // would silently absorb a sixth level.
-            Effort::Max | Effort::Auto => 65536,
+            Effort::Max | Effort::Default => 65536,
         };
         value["thinking"] = serde_json::json!({"type":"enabled", "budget_tokens":budget});
-        value["max_tokens"] = serde_json::json!(budget + MAX_TOKENS);
+        value["max_tokens"] = serde_json::json!(budget + response_tokens);
     }
     serde_json::to_vec(&value).expect("serialized request")
 }
@@ -601,7 +603,7 @@ pub fn send_turn(conversation: &Conversation) -> Result<Turn, WireError> {
 
 /// A task request with its active model, preserving provider usage accounting.
 pub fn send_turn_on_model(conversation: &Conversation, model: &str) -> Result<Turn, WireError> {
-    send_turn_configured(conversation, model, Effort::Auto)
+    send_turn_configured(conversation, model, Effort::Default)
 }
 pub fn send_turn_configured(
     conversation: &Conversation,
@@ -730,8 +732,31 @@ pub fn send_turn_with_usage(
     max_tokens: u32,
     extra_header: Option<(&str, &str)>,
 ) -> Result<Turn, WireError> {
+    send_turn_with_usage_configured(
+        conversation,
+        model,
+        Effort::Default,
+        max_tokens,
+        extra_header,
+    )
+}
+
+/// [`send_turn_with_usage`] with a hard reasoning effort selected by a
+/// helper's role. The supervisor continues through the default wrapper.
+pub fn send_turn_with_usage_configured(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    max_tokens: u32,
+    extra_header: Option<(&str, &str)>,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = build_request_body(model, max_tokens, conversation, Surface::TextOnly);
+    let body = configure_effort(
+        build_request_body(model, max_tokens, conversation, Surface::TextOnly),
+        model,
+        effort,
+        max_tokens,
+    );
 
     let mut request = ureq::post(&url)
         .config()
@@ -1148,7 +1173,7 @@ pub fn send_turn_streaming(
     model: &str,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
-    send_turn_streaming_configured(conversation, model, Effort::Auto, on_delta)
+    send_turn_streaming_configured(conversation, model, Effort::Default, on_delta)
 }
 pub fn send_turn_streaming_configured(
     conversation: &Conversation,
@@ -1179,6 +1204,7 @@ pub fn send_turn_streaming_on(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
         effort,
+        MAX_TOKENS,
     );
 
     let mut request = ureq::post(&url)
@@ -1672,14 +1698,22 @@ mod tests {
 #[cfg(test)]
 mod effort_tests {
     use super::*;
+
     #[test]
-    fn effort_preserves_auto_bytes_and_selects_the_supported_wire_form() {
+    fn default_is_the_display_name_and_auto_remains_an_alias() {
+        assert_eq!(Effort::parse("default"), Some(Effort::Default));
+        assert_eq!(Effort::parse("auto"), Some(Effort::Default));
+        assert_eq!(Effort::Default.name(), "default");
+    }
+
+    #[test]
+    fn effort_preserves_default_bytes_and_selects_the_supported_wire_form() {
         let conversation = Conversation {
             system: "system".into(),
             messages: vec![],
         };
         assert_eq!(
-            request_body_configured(&conversation, MODEL, Effort::Auto),
+            request_body_configured(&conversation, MODEL, Effort::Default),
             request_body(&conversation)
         );
         let claude: serde_json::Value = serde_json::from_slice(&request_body_configured(

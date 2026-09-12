@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pane::config::{AgentsMode, CompletionStyle, PaneConfig};
+use pane::wire::Effort;
 
 fn unique() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -60,6 +61,30 @@ fn helper_preflight_is_an_explicit_boolean_opt_in() {
     let error = PaneConfig::load(&root).unwrap_err();
     assert!(error.contains("preflight"), "{error}");
     assert_eq!(error.lines().count(), 1);
+}
+
+#[test]
+fn helper_effort_has_role_defaults_and_accepts_partial_hard_overrides() {
+    let defaults = PaneConfig::default().helpers.effort;
+    assert_eq!(defaults.find, Effort::Low);
+    assert_eq!(defaults.reduce, Effort::Medium);
+    assert_eq!(defaults.check, Effort::High);
+
+    let configured = PaneConfig::parse("[helpers.effort]\nfind = \"medium\"\ncheck = \"xhigh\"\n")
+        .unwrap()
+        .helpers
+        .effort;
+    assert_eq!(configured.find, Effort::Medium);
+    assert_eq!(configured.reduce, Effort::Medium);
+    assert_eq!(configured.check, Effort::Xhigh);
+    assert_eq!(configured.for_helper("find"), Some(Effort::Medium));
+    assert_eq!(configured.for_helper("unknown"), None);
+
+    for value in ["default", "auto"] {
+        let error =
+            PaneConfig::parse(&format!("[helpers.effort]\nreduce = \"{value}\"\n")).unwrap_err();
+        assert!(error.contains("hard value"), "{error}");
+    }
 }
 
 #[test]

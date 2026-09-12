@@ -34,6 +34,22 @@ submitted request, live lane, elapsed time and resolved result are visible;
 the record is presentation state for this request, not a synthetic `/cell` row.
 The next request clears it.
 
+**Effort follows the helper role.** The built-in hard defaults are `find =
+"low"`, `reduce = "medium"`, and `check = "high"`: locating spans is
+mechanical, reducing output requires discriminating failures from noise, and a
+checker makes the consequential evidentiary judgement. Projects may override
+any subset without changing the others:
+
+```toml
+[helpers.effort]
+find = "low"
+reduce = "medium"
+check = "high"
+```
+
+Only hard values (`low`, `medium`, `high`, `xhigh`, `max`) are accepted here;
+`default`/legacy `auto` are parent-session reset controls, not helper policy.
+
 **Cancellation.** Helpers share their caller's cancellation token. Ctrl-C stops
 waiting promptly and consumes that interrupt, rather than cancelling an
 unrelated later tool. The already-issued synchronous provider request may still

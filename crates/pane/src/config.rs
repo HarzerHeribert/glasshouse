@@ -55,6 +55,9 @@ impl Default for SupervisorConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpersConfig {
     pub model: Option<String>,
+    /// Per-helper reasoning levels. These are hard defaults, individually
+    /// overridable under `[helpers.effort]`.
+    pub effort: HelperEfforts,
     /// Run the pushed Scout before the task model's first turn. Off by
     /// default: configured helpers remain callable without paying for a
     /// redundant repository scan on every request.
@@ -65,6 +68,41 @@ pub struct HelpersConfig {
     /// The most helper calls one cell may make, so a loop cannot issue three
     /// hundred requests inside a single program.
     pub calls_per_cell: u32,
+}
+
+/// `[helpers.effort]` -- effort follows the work a helper does rather than
+/// the model tier it happens to run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperEfforts {
+    pub find: crate::wire::Effort,
+    pub reduce: crate::wire::Effort,
+    pub check: crate::wire::Effort,
+}
+
+impl HelperEfforts {
+    pub fn for_helper(self, name: &str) -> Option<crate::wire::Effort> {
+        match name {
+            "find" => Some(self.find),
+            "reduce" => Some(self.reduce),
+            "check" => Some(self.check),
+            // No silent provider-default fallback: a new helper must choose a
+            // hard policy and become a config key before it can run.
+            _ => None,
+        }
+    }
+}
+
+impl Default for HelperEfforts {
+    fn default() -> Self {
+        Self {
+            // Lookup is mechanically verifiable; filtering needs more
+            // discrimination; accepting or rejecting a claim is the most
+            // consequential helper decision.
+            find: crate::wire::Effort::Low,
+            reduce: crate::wire::Effort::Medium,
+            check: crate::wire::Effort::High,
+        }
+    }
 }
 
 /// `[helpers] completion` -- what the gate says when a task is ACCEPTED.
@@ -98,6 +136,7 @@ impl Default for HelpersConfig {
     fn default() -> Self {
         Self {
             model: None,
+            effort: HelperEfforts::default(),
             preflight: false,
             completion: CompletionStyle::Silent,
             enabled: true,
@@ -459,6 +498,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
     for key in table.keys() {
         if ![
             "model",
+            "effort",
             "enabled",
             "preflight",
             "calls_per_cell",
@@ -479,6 +519,10 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             validate_concrete_model("[helpers] model", text)?;
             Some(text.to_string())
         }
+    };
+    let effort = match table.get("effort") {
+        None => defaults.effort,
+        Some(value) => parse_helper_efforts(value)?,
     };
     let enabled = match table.get("enabled") {
         None => defaults.enabled,
@@ -508,10 +552,47 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
 
     Ok(HelpersConfig {
         model,
+        effort,
         preflight,
         completion,
         enabled,
         calls_per_cell,
+    })
+}
+
+fn parse_helper_efforts(value: &toml::Value) -> Result<HelperEfforts, String> {
+    let table = table_of(value, "helpers.effort")?;
+    for key in table.keys() {
+        if !["find", "reduce", "check"].contains(&key.as_str()) {
+            return Err(format!(
+                "pane.toml: unknown key `{key}` in [helpers.effort]; only `find`, `reduce` and `check` are recognised"
+            ));
+        }
+    }
+    let defaults = HelperEfforts::default();
+    let read = |name: &str, default| match table.get(name) {
+        None => Ok(default),
+        Some(value) => {
+            let word = value
+                .as_str()
+                .ok_or_else(|| format!("pane.toml: `[helpers.effort] {name}` must be a string"))?;
+            let effort = crate::wire::Effort::parse(word).ok_or_else(|| {
+                format!(
+                    "pane.toml: `[helpers.effort] {name}` must be low, medium, high, xhigh or max, not `{word}`"
+                )
+            })?;
+            if effort == crate::wire::Effort::Default {
+                return Err(format!(
+                    "pane.toml: `[helpers.effort] {name}` must be a hard value: low, medium, high, xhigh or max"
+                ));
+            }
+            Ok(effort)
+        }
+    };
+    Ok(HelperEfforts {
+        find: read("find", defaults.find)?,
+        reduce: read("reduce", defaults.reduce)?,
+        check: read("check", defaults.check)?,
     })
 }
 

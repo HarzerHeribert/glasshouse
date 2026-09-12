@@ -64,6 +64,7 @@ impl Drop for Fixture {
 struct Provider {
     url: String,
     requests: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 fn provider(text: &str) -> Provider {
@@ -78,6 +79,8 @@ fn provider_with_usage(text: &str, usage: serde_json::Value) -> Provider {
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let seen = requests.clone();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured = bodies.clone();
     let reply = text.to_string();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -100,6 +103,10 @@ fn provider_with_usage(text: &str, usage: serde_json::Value) -> Provider {
             if reader.read_exact(&mut body).is_err() {
                 return;
             }
+            captured
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&body).unwrap());
             seen.fetch_add(1, Ordering::SeqCst);
             let payload = serde_json::json!({
                 "role": "assistant",
@@ -118,6 +125,7 @@ fn provider_with_usage(text: &str, usage: serde_json::Value) -> Provider {
     Provider {
         url: format!("http://{address}"),
         requests,
+        bodies,
     }
 }
 
@@ -135,6 +143,8 @@ fn scripted_provider_with_delays(payloads: Vec<(serde_json::Value, Duration)>) -
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let seen = requests.clone();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured = bodies.clone();
     std::thread::spawn(move || {
         for (payload, delay) in payloads {
             let Ok((mut stream, _)) = listener.accept() else {
@@ -158,6 +168,10 @@ fn scripted_provider_with_delays(payloads: Vec<(serde_json::Value, Duration)>) -
             if reader.read_exact(&mut body).is_err() {
                 return;
             }
+            captured
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&body).unwrap());
             seen.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(delay);
             let payload = payload.to_string();
@@ -172,6 +186,7 @@ fn scripted_provider_with_delays(payloads: Vec<(serde_json::Value, Duration)>) -
     Provider {
         url: format!("http://{address}"),
         requests,
+        bodies,
     }
 }
 
@@ -367,17 +382,28 @@ fn a_one_shot_helper_records_every_reported_token_class() {
         }),
     );
     unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+    let mut helpers = configured("test-helper-model", 8);
+    helpers.effort.reduce = pane::wire::Effort::High;
     let mut runtime = Runtime::new(
         &fixture.profile(),
         &Glasshouse::None,
         &SessionId::new("helpers-usage-complete"),
     )
-    .with_helpers(configured("test-helper-model", 8));
+    .with_helpers(helpers);
 
     let outcome = runtime.run_cell("return await helper.reduce(\"a log line\");\n");
     unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
 
     assert_eq!(returned_text(&outcome), "one failure");
+    let bodies = provider.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["output_config"]["effort"], "high");
+    assert_eq!(bodies[0]["thinking"]["budget_tokens"], 32_769);
+    assert_eq!(
+        bodies[0]["max_tokens"],
+        32_769 + REDUCER.max_tokens,
+        "reasoning budget must leave the reducer's own response allowance intact"
+    );
     let records = runtime.helper_records();
     let usage = &records[0].usage;
     assert_eq!(usage.model, "test-helper-model");
@@ -457,7 +483,10 @@ fn a_multiturn_helper_sums_each_response_once_with_cache_coverage() {
 
     let call = pane::helpers::run(
         &TWO_TURN,
-        "test-helper-model",
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Medium,
+        },
         "inspect this",
         &fixture.profile(),
         &Glasshouse::None,
@@ -535,7 +564,10 @@ fn cancellation_keeps_completed_usage_and_marks_the_inflight_request_unknown() {
     let started = Instant::now();
     let call = pane::helpers::run(
         &TWO_TURN,
-        "test-helper-model",
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Medium,
+        },
         "inspect this",
         &fixture.profile(),
         &Glasshouse::None,
@@ -572,7 +604,10 @@ fn preflight_carries_its_helper_usage_into_the_returned_record() {
 
     let record = pane::helpers::preflight(
         "Find the repository entry point",
-        "test-helper-model",
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Low,
+        },
         &fixture.profile(),
         &Glasshouse::None,
         &SessionId::new("helpers-usage-preflight"),

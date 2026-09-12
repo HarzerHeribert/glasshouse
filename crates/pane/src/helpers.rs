@@ -483,6 +483,13 @@ pub struct HelperCall {
     pub usage: HelperUsage,
 }
 
+/// The two provider controls selected for one helper invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperRoute<'a> {
+    pub model: &'a str,
+    pub effort: wire::Effort,
+}
+
 /// Run any helper in the roster: the one entry point a caller uses.
 ///
 /// Dispatches on the spec rather than on its name, so a new `HelperSpec`
@@ -491,7 +498,7 @@ pub struct HelperCall {
 /// goes to [`run_with_tools`].
 pub fn run(
     spec: &HelperSpec,
-    model: &str,
+    route: HelperRoute<'_>,
     input: &str,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
@@ -534,7 +541,7 @@ pub fn run(
     });
     let mut call = run_unprepared(
         spec,
-        model,
+        route,
         request.as_deref().unwrap_or(input),
         profile,
         glasshouse,
@@ -562,7 +569,7 @@ pub fn run(
 
 fn run_unprepared(
     spec: &HelperSpec,
-    model: &str,
+    route: HelperRoute<'_>,
     input: &str,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
@@ -577,20 +584,21 @@ fn run_unprepared(
             looked: Vec::new(),
             usage: HelperUsage {
                 coverage_known: true,
-                model: model.to_string(),
+                model: route.model.to_string(),
                 ..HelperUsage::default()
             },
         };
     }
     if one_shot(spec) {
         let spec = *spec;
-        let model = model.to_string();
+        let model = route.model.to_string();
+        let effort = route.effort;
         let input = input.to_string();
         let usage = HelperUsageTracker::new(&model);
         usage.begin_request();
         let worker_usage = usage.clone();
         match wait_for_helper(token, move || {
-            run_once_metered(&spec, &model, &input, &worker_usage)
+            run_once_metered(&spec, &model, effort, &input, &worker_usage)
         }) {
             HelperWait::Returned(call) => call,
             HelperWait::Cancelled => HelperCall {
@@ -610,7 +618,7 @@ fn run_unprepared(
             },
         }
     } else {
-        run_with_tools(spec, model, input, profile, glasshouse, session, token)
+        run_with_tools(spec, route, input, profile, glasshouse, session, token)
     }
 }
 
@@ -666,15 +674,16 @@ fn one_shot(spec: &HelperSpec) -> bool {
 /// A helper holding tools or asking for more than one turn needs the agent
 /// loop and is not this function's job; [`validate`] permits such a spec and
 /// callers dispatch on `max_turns`.
-pub fn run_once(spec: &HelperSpec, model: &str, input: &str) -> HelperOutcome {
-    let usage = HelperUsageTracker::new(model);
+pub fn run_once(spec: &HelperSpec, route: HelperRoute<'_>, input: &str) -> HelperOutcome {
+    let usage = HelperUsageTracker::new(route.model);
     usage.begin_request();
-    run_once_metered(spec, model, input, &usage).outcome
+    run_once_metered(spec, route.model, route.effort, input, &usage).outcome
 }
 
 fn run_once_metered(
     spec: &HelperSpec,
     model: &str,
+    effort: wire::Effort,
     input: &str,
     usage: &HelperUsageTracker,
 ) -> HelperCall {
@@ -685,9 +694,10 @@ fn run_once_metered(
         system: spec.preamble.to_string(),
         messages: vec![Message::text(Role::User, input)],
     };
-    let outcome = match wire::send_turn_with_usage(
+    let outcome = match wire::send_turn_with_usage_configured(
         &conversation,
         model,
+        effort,
         spec.max_tokens,
         Some(PURPOSE_HEADER),
     ) {
@@ -731,7 +741,7 @@ fn run_once_metered(
 /// having said nothing must not read as a healthy short answer.
 pub fn run_with_tools(
     spec: &HelperSpec,
-    model: &str,
+    route: HelperRoute<'_>,
     input: &str,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
@@ -741,14 +751,14 @@ pub fn run_with_tools(
     let started = Instant::now();
     let options = crate::agent::AgentOptions {
         turns: u64::from(spec.max_turns.min(HELPER_MAX_TURNS)),
-        model: model.to_string(),
-        effort: crate::wire::Effort::default(),
+        model: route.model.to_string(),
+        effort: route.effort,
     };
     let narrowed = crate::agent::Narrowed {
         tools: spec.tools,
         instructions: spec.preamble,
     };
-    let usage = HelperUsageTracker::new(model);
+    let usage = HelperUsageTracker::new(route.model);
     let worker_usage = usage.clone();
     // **On an owned thread, always.** `run_narrowed` builds a Runtime, which is
     // a second V8 isolate, and this function is reached from a host callback
@@ -843,7 +853,7 @@ pub fn run_with_tools(
 /// does today.
 pub fn preflight(
     task: &str,
-    model: &str,
+    route: HelperRoute<'_>,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
     session: &crate::contract::SessionId,
@@ -860,7 +870,7 @@ pub fn preflight(
         ..HelperRecord::default()
     };
     progress(&record);
-    let call = run(spec, model, task, profile, glasshouse, session, token);
+    let call = run(spec, route, task, profile, glasshouse, session, token);
     record.outcome = call.outcome;
     record.turns = call.turns;
     record.looked = call.looked;
@@ -872,7 +882,7 @@ pub fn preflight(
 /// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted.
 pub fn check_completion(
     evidence: &str,
-    model: &str,
+    route: HelperRoute<'_>,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
     session: &crate::contract::SessionId,
@@ -882,7 +892,7 @@ pub fn check_completion(
         .find(|spec| spec.call_sites.contains(&CallSite::CompletionGate))?;
     let call = run(
         spec,
-        model,
+        route,
         evidence,
         profile,
         glasshouse,

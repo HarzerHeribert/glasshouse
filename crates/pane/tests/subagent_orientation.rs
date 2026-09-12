@@ -120,7 +120,7 @@ fn child_receives_root_orientation_and_nested_policy_before_nested_write() {
         &AgentOptions {
             turns: 4,
             model: "test-model".into(),
-            effort: pane::wire::Effort::Auto,
+            effort: pane::wire::Effort::Default,
         },
     );
     let deadline = Instant::now() + Duration::from_secs(20);

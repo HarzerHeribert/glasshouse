@@ -562,11 +562,12 @@ fn preflight_block(
         return None;
     }
     let model = helpers.model.as_deref()?;
+    let effort = helpers.effort.for_helper("find")?;
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
     let record = crate::helpers::preflight(
         task,
-        model,
+        crate::helpers::HelperRoute { model, effort },
         session.profile,
         session.glasshouse,
         session.id,
@@ -1083,7 +1084,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
             .context_window_tokens
             .map(|cap| (started_on.clone(), cap)),
         mode: Cell::new(tui::Mode::Execute),
-        effort: Cell::new(wire::Effort::Auto),
+        effort: Cell::new(wire::Effort::Default),
         interface: Cell::new(args.interface.unwrap_or_default()),
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
@@ -2831,7 +2832,7 @@ fn answer_command(
             }
             *session.model.borrow_mut() = model.into();
             // The effort a person chose survives a model change now. It used
-            // to be silently reset to `auto` on a non-Claude model, because
+            // to be silently reset to `default` on a non-Claude model, because
             // `xhigh` and `max` had no wire form there; they do, so taking
             // the choice away would be taking away a level that works.
             if let Some(ui) = session.ui {
