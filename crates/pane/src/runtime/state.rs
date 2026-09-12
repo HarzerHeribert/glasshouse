@@ -358,9 +358,22 @@ impl RuntimeState {
     /// unset is off, exactly as `[supervisor] model` unset is, because a
     /// helper spends money on the user's behalf and the fail-closed direction
     /// is *not configured, not run*.
-    /// The configured default model for a delegated goal, if there is one.
-    pub(crate) fn agent_model(&self) -> Option<String> {
-        self.agents.borrow().model.clone()
+    /// Resolves a delegated goal's model, or refuses the spawn when agents
+    /// are off. An explicit cell model overrides a pinned default, but never
+    /// overrides `off`.
+    pub(crate) fn agent_model(&self, asked: Option<String>) -> Result<String, String> {
+        let agents = self.agents.borrow();
+        match agents.mode {
+            crate::config::AgentsMode::Off => {
+                Err("subagents are off: `[agents] mode` is `off` in pane.toml".to_string())
+            }
+            crate::config::AgentsMode::Auto => {
+                Ok(asked.unwrap_or_else(|| self.model.borrow().clone()))
+            }
+            crate::config::AgentsMode::Pinned => asked
+                .or_else(|| agents.model.clone())
+                .ok_or_else(|| "subagents are misconfigured: pinned mode requires a model".into()),
+        }
     }
 
     pub(crate) fn set_agents(&self, agents: crate::config::AgentsConfig) {
@@ -707,6 +720,40 @@ mod tests {
             },
             &SessionId::new("progress"),
         )
+    }
+
+    #[test]
+    fn agent_modes_resolve_auto_off_and_pinned_without_spawning() {
+        let state = state();
+        *state.model.borrow_mut() = "parent-model".into();
+
+        state.set_agents(crate::config::AgentsConfig::default());
+        assert_eq!(state.agent_model(None).unwrap(), "parent-model");
+        assert_eq!(
+            state.agent_model(Some("cell-model".into())).unwrap(),
+            "cell-model"
+        );
+
+        state.set_agents(crate::config::AgentsConfig {
+            mode: crate::config::AgentsMode::Pinned,
+            model: Some("pinned-model".into()),
+        });
+        assert_eq!(state.agent_model(None).unwrap(), "pinned-model");
+        assert_eq!(
+            state.agent_model(Some("cell-model".into())).unwrap(),
+            "cell-model",
+            "an explicit cell model overrides a pinned default"
+        );
+
+        state.set_agents(crate::config::AgentsConfig {
+            mode: crate::config::AgentsMode::Off,
+            model: None,
+        });
+        assert!(state.agent_model(None).is_err());
+        assert!(
+            state.agent_model(Some("cell-model".into())).is_err(),
+            "off refuses even an explicit model"
+        );
     }
 
     fn asked(name: &str) -> HelperRecord {

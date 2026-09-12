@@ -895,6 +895,18 @@ fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
     }
 }
 
+fn startup_model(cli: Option<&str>, config: &PaneConfig) -> Result<String, String> {
+    let model = cli
+        .map(str::to_string)
+        .or_else(|| config.model.parent.clone())
+        .ok_or_else(|| {
+            "pane cannot start: no parent model selected; pass `--model <id>` or set `[model] parent` in .glasshouse/pane.toml".to_string()
+        })?;
+    crate::config::validate_parent_model(&model)
+        .map_err(|reason| format!("pane cannot start: {reason}"))?;
+    Ok(model)
+}
+
 /// Runs `session`, in the order the packet's OBJECTIVE fixes: load the
 /// project, resume or start the rollout, `SessionStart`, then one input (or
 /// stdin's, one per line) at a time until the input source is exhausted.
@@ -914,14 +926,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // the next cell's runtime must be built from the choice just made, not
     // from what the file said at startup.
     let config = RefCell::new(PaneConfig::load(&args.root)?);
-    // An explicit `--model` wins; then the model this project was last left
-    // on; then the built-in default. Without the middle term every session
-    // starts over, which is what `[model] parent` exists to stop.
-    let started_on = args
-        .model
-        .clone()
-        .or_else(|| config.borrow().model.parent.clone())
-        .unwrap_or_else(|| wire::MODEL.to_string());
+    // An explicit `--model` wins, then the model this project was last left
+    // on. There is no compiled-in request-model fallback: starting without a
+    // concrete choice would make Pane silently spend against a model the
+    // person did not select.
+    let started_on = startup_model(args.model.as_deref(), &config.borrow())?;
     if config.borrow().supervisor.model.is_none() {
         session_println!("supervisor: off (no model)");
     }
@@ -1278,6 +1287,7 @@ fn is_session_control(name: &str) -> bool {
         "" | "help"
             | "tool"
             | "model"
+            | "models"
             | "effort"
             | "mode"
             | "handlers"
@@ -2789,7 +2799,7 @@ fn answer_command(
             // the second is the tiers it can now also name.
             const USAGE: &str = "/model expects one model name\n\
                 /model parent|helper|subagent <id> assigns one tier\n\
-                /model helper off · /model subagent inherit";
+                /model helper off · /model subagent auto|off (inherit is an alias for auto)";
             let (tier, model) = match argument.split_once(char::is_whitespace) {
                 Some((word, rest)) => match crate::spend::Tier::parse(word) {
                     Some(tier) => (tier, rest.trim()),
@@ -2811,10 +2821,14 @@ fn answer_command(
                 }
                 return;
             }
-            // The parent is remembered too -- but a project that cannot be
-            // written must not cost the person the model change itself, so
-            // the failure is reported beside a change that still happened.
+            // Validate and persist before changing the live request model.
+            // A rejected control word or malformed id therefore leaves both
+            // the file and the running session unchanged.
             let remembered = controls::assign_model(session, tier, model);
+            if let Err(reason) = remembered {
+                session_println!("model unchanged: {reason}");
+                return;
+            }
             *session.model.borrow_mut() = model.into();
             // The effort a person chose survives a model change now. It used
             // to be silently reset to `auto` on a non-Claude model, because
@@ -2823,12 +2837,7 @@ fn answer_command(
             if let Some(ui) = session.ui {
                 ui.model(model);
             }
-            match remembered {
-                Ok(_) => session_println!("model changed to {model}"),
-                Err(reason) => {
-                    session_println!("model changed to {model} — not remembered: {reason}");
-                }
-            }
+            session_println!("model changed to {model}");
         } else {
             controls::models(session);
         }
@@ -3072,6 +3081,28 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn startup_model_requires_a_concrete_cli_or_persisted_choice() {
+        let empty = PaneConfig::default();
+        let error = startup_model(None, &empty).unwrap_err();
+        assert!(error.contains("--model <id>"), "{error}");
+
+        for mode in ["auto", "off", "inherit"] {
+            assert!(
+                startup_model(Some(mode), &empty).is_err(),
+                "accepted {mode}"
+            );
+        }
+
+        let persisted = PaneConfig::parse("[model]\nparent = \"persisted-model\"\n").unwrap();
+        assert_eq!(startup_model(None, &persisted).unwrap(), "persisted-model");
+        assert_eq!(
+            startup_model(Some("cli-model"), &persisted).unwrap(),
+            "cli-model",
+            "the CLI must take precedence"
+        );
+    }
 
     /// A fixture tree and a profile that admits reading it.
     fn abi_fixture(name: &str) -> (std::path::PathBuf, Profile) {

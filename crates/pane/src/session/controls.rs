@@ -1,6 +1,6 @@
 //! Human-invoked session inspection and configuration. No model dispatch.
 use super::*;
-use crate::config::PaneConfig;
+use crate::config::{AgentsMode, PaneConfig};
 use crate::spend::Tier;
 use crate::tui::{Mode, Panel, PanelRow, TierModels};
 
@@ -71,7 +71,11 @@ fn tier_models(session: &Session<'_>) -> TierModels {
             .enabled
             .then(|| config.helpers.model.clone())
             .flatten(),
-        subagent: config.agents.model.clone(),
+        subagent: match config.agents.mode {
+            AgentsMode::Auto => None,
+            AgentsMode::Off => Some("off".to_string()),
+            AgentsMode::Pinned => config.agents.model.clone(),
+        },
     }
 }
 
@@ -94,8 +98,19 @@ pub(super) fn assign_model(
 ) -> Result<String, String> {
     let (section, key, key_removed) = match tier {
         Tier::Parent => ("model", "parent", false),
-        Tier::Helpers => ("helpers", "model", value == "off"),
-        Tier::Subagents => ("agents", "model", value == "inherit"),
+        Tier::Helpers => {
+            if matches!(value, "auto" | "inherit") {
+                return Err(format!(
+                    "helper model must be `off` or a concrete model id, not `{value}`"
+                ));
+            }
+            ("helpers", "model", value == "off")
+        }
+        Tier::Subagents => (
+            "agents",
+            "model",
+            matches!(value, "auto" | "inherit" | "off"),
+        ),
     };
     let path = session.project.root.join(".glasshouse").join("pane.toml");
     let text = match fs::read_to_string(&path) {
@@ -126,15 +141,26 @@ pub(super) fn assign_model(
             table.insert("enabled".into(), toml::Value::Boolean(true));
         }
     }
+    if tier == Tier::Subagents {
+        let mode = match value {
+            "auto" | "inherit" => "auto",
+            "off" => "off",
+            _ => "pinned",
+        };
+        table.insert("mode".into(), toml::Value::String(mode.into()));
+    }
     let encoded = toml::to_string_pretty(&document).map_err(|e| e.to_string())?;
     let parsed = PaneConfig::parse(&encoded)?;
     fs::create_dir_all(path.parent().expect("pane.toml has a parent"))
         .map_err(|e| e.to_string())?;
     fs::write(&path, &encoded).map_err(|e| e.to_string())?;
     *session.config.borrow_mut() = parsed;
-    Ok(match (tier, key_removed) {
-        (Tier::Helpers, true) => "helpers off; no helper will run".to_string(),
-        (Tier::Subagents, true) => "subagents inherit the parent's model".to_string(),
+    Ok(match (tier, value) {
+        (Tier::Helpers, "off") => "helpers off; no helper will run".to_string(),
+        (Tier::Subagents, "auto" | "inherit") => {
+            "subagents use auto mode and inherit the parent's model by default".to_string()
+        }
+        (Tier::Subagents, "off") => "subagents off; no subagent will run".to_string(),
         (tier, _) => format!("{} model set to {value}", tier.singular()),
     })
 }
@@ -706,7 +732,7 @@ pub(super) fn command(
             Ok(text) => show(session, Panel::text("Permissions", text)),
             Err(error) => session_println!("ERROR: {error}"),
         },
-        "entitlements" => {
+        "models" | "entitlements" => {
             models(session);
         }
         "login" => login(session, argument),
@@ -1057,10 +1083,15 @@ mod tests {
             assert_eq!(saved.limits.cells, 42);
 
             assign_model(session, Tier::Subagents, "claude-sonnet-5").unwrap();
-            assert_eq!(
-                PaneConfig::load(&root).unwrap().agents.model.as_deref(),
-                Some("claude-sonnet-5")
-            );
+            let saved = PaneConfig::load(&root).unwrap();
+            assert_eq!(saved.agents.mode, AgentsMode::Pinned);
+            assert_eq!(saved.agents.model.as_deref(), Some("claude-sonnet-5"));
+
+            assign_model(session, Tier::Subagents, "off").unwrap();
+            let saved = PaneConfig::load(&root).unwrap();
+            assert_eq!(saved.agents.mode, AgentsMode::Off);
+            assert_eq!(saved.agents.model, None);
+            assert_eq!(tier_models(session).subagent.as_deref(), Some("off"));
 
             // Reversible, which is what makes the panel safe to press.
             assign_model(session, Tier::Helpers, "off").unwrap();
@@ -1068,6 +1099,10 @@ mod tests {
             assert_eq!(PaneConfig::load(&root).unwrap().helpers.model, None);
             assign_model(session, Tier::Subagents, "inherit").unwrap();
             assert_eq!(tier_models(session).subagent, None);
+            assert_eq!(
+                PaneConfig::load(&root).unwrap().agents.mode,
+                AgentsMode::Auto
+            );
 
             // A value the config refuses fails with the config's own sentence
             // and leaves the file byte-identical: one validator, not two.
@@ -1082,6 +1117,9 @@ mod tests {
                 PaneConfig::load(&root).unwrap().model.parent.as_deref(),
                 Some("claude-opus-4-8")
             );
+            let before = fs::read_to_string(&file).unwrap();
+            assert!(assign_model(session, Tier::Parent, "auto").is_err());
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
         });
         fs::remove_dir_all(&root).unwrap();
     }

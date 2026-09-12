@@ -237,6 +237,8 @@ fn scripted_session_defers_a_same_cell_candidate_until_after_checker_observation
         .arg(&rollout)
         .arg("--session")
         .arg("checker-session-path")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("Implement the change and check it before completing.")
         .arg("--glasshouse")

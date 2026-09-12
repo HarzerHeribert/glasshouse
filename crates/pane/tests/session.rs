@@ -36,6 +36,19 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Most session fixtures are not about model selection, so they name the
+/// historical fixture model explicitly. A test that already persisted a
+/// parent omits the CLI flag, preserving the production precedence rule.
+fn supply_test_model(command: &mut Command, root: &Path) {
+    let persisted = pane::config::PaneConfig::load(root)
+        .ok()
+        .and_then(|config| config.model.parent)
+        .is_some();
+    if !persisted {
+        command.arg("--model").arg(pane::wire::MODEL);
+    }
+}
+
 /// Unix only: the fakes are shell scripts. The Windows pane cell runs every
 /// other test in this file; a `.cmd` twin is the successor if one is wanted.
 #[cfg(unix)]
@@ -447,6 +460,7 @@ fn run_session_with_gateway(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY");
+    supply_test_model(&mut command, root);
     if let Some(glasshouse) = glasshouse {
         command.arg("--glasshouse").arg(glasshouse);
     }
@@ -715,6 +729,12 @@ fn handles_command_reports_the_recorded_preview() {
 #[test]
 fn the_binary_with_no_arguments_starts_a_session_in_its_current_directory() {
     let root = scratch_dir("bare-entrypoint-root");
+    fs::create_dir_all(root.join(".glasshouse")).unwrap();
+    fs::write(
+        root.join(".glasshouse/pane.toml"),
+        format!("[model]\nparent = {:?}\n", pane::wire::MODEL),
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .current_dir(&root)
         .env("ANTHROPIC_BASE_URL", refused_base_url())
@@ -2967,6 +2987,8 @@ mod interrupts {
             .arg(rollout)
             .arg("--session")
             .arg("sess-interrupt")
+            .arg("--model")
+            .arg(pane::wire::MODEL)
             .arg("--task")
             .arg(task)
             .env("ANTHROPIC_BASE_URL", base_url)
@@ -3616,6 +3638,7 @@ fn run_session_stdin(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    supply_test_model(&mut command, root);
     if yolo {
         command.arg("--yolo");
     }
@@ -3868,7 +3891,7 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
     );
     // And the two tiers a person would otherwise never learn they had.
     assert!(
-        stdout.contains("helper off") && stdout.contains("subagent inherits parent"),
+        stdout.contains("helper off") && stdout.contains("subagent auto"),
         "`/model` named only the parent tier: {stdout}"
     );
     assert!(
@@ -5299,6 +5322,7 @@ fn run_session_stdin_with_gateway(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    supply_test_model(&mut command, root);
     if let Some(base_url) = base_url {
         command.env("ANTHROPIC_BASE_URL", base_url);
     }
@@ -5346,6 +5370,7 @@ fn run_session_stdin_hosted(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    supply_test_model(&mut command, root);
     if let Some(glasshouse) = glasshouse {
         command.arg("--glasshouse").arg(glasshouse);
     }
@@ -5389,6 +5414,8 @@ fn a_session_runs_standalone_against_a_gateway_it_started() {
         .arg(&rollout)
         .arg("--session")
         .arg("sess-standalone")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("hi")
         .arg("--gateway")
@@ -5482,6 +5509,8 @@ credential = {{ env = "PANE_E2E_PROVIDER_KEY" }}
         .arg(&rollout)
         .arg("--session")
         .arg("sess-real-gateway")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("hi")
         .arg("--gateway")
@@ -5920,6 +5949,8 @@ fn the_usage_rows_of_a_hosted_session_still_reach_glasshouse_scoped_to_the_proje
         .arg(&rollout)
         .arg("--session")
         .arg("sess-hosted-usage")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("hi")
         .arg("--glasshouse")
@@ -5978,6 +6009,8 @@ fn a_hosted_session_with_no_gateway_anywhere_says_it_is_not_reachable() {
         .arg(&rollout)
         .arg("--session")
         .arg("sess-hosted-no-gateway")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
@@ -6040,6 +6073,8 @@ fn a_hosted_session_prefers_the_gateway_beside_the_binary_to_the_one_on_path() {
             .arg(root.join(format!("{session}.jsonl")))
             .arg("--session")
             .arg(session)
+            .arg("--model")
+            .arg(pane::wire::MODEL)
             .env("ANTHROPIC_BASE_URL", &base_url)
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("ANTHROPIC_API_KEY")
@@ -6158,6 +6193,8 @@ fn a_gateway_that_refuses_to_serve_is_quoted_in_panes_refusal() {
         .arg(&rollout)
         .arg("--session")
         .arg("sess-gateway-refusal")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("hi")
         .arg("--gateway")
@@ -6204,6 +6241,8 @@ fn a_gateway_that_cannot_be_started_refuses_the_session_by_name() {
         .arg(&rollout)
         .arg("--session")
         .arg("sess-gateway-missing")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--task")
         .arg("hi")
         .arg("--gateway")
@@ -6271,6 +6310,8 @@ credential_env = ["PANE_E2E_ENTERED_KEY"]
         .arg(&rollout)
         .arg("--session")
         .arg("sess-key-entry")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--gateway")
         .arg(&gateway)
         .env_remove("ANTHROPIC_BASE_URL")
@@ -6364,6 +6405,8 @@ fn a_connected_subscription_silences_the_missing_credential_notice() {
             .arg(root.join(format!("rollout-{authenticated}.jsonl")))
             .arg("--session")
             .arg(format!("sess-notice-{authenticated}"))
+            .arg("--model")
+            .arg(pane::wire::MODEL)
             .arg("--gateway")
             .arg(&gateway)
             .env_remove("ANTHROPIC_BASE_URL")
@@ -6408,6 +6451,8 @@ fn ending_a_session_lets_its_gateway_shut_down_before_it_is_killed() {
         .arg(root.join("rollout.jsonl"))
         .arg("--session")
         .arg("sess-polite-shutdown")
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--gateway")
         .arg(&gateway)
         .env_remove("ANTHROPIC_BASE_URL")

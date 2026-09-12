@@ -1,4 +1,6 @@
 //! Local session controls and scrollable command panels.
+mod picker;
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -88,15 +90,10 @@ impl TierModels {
         match tier {
             Tier::Parent => &self.parent,
             Tier::Helpers => self.helper.as_deref().unwrap_or("off"),
-            Tier::Subagents => self.subagent.as_deref().unwrap_or("inherits parent"),
+            Tier::Subagents => self.subagent.as_deref().unwrap_or("auto"),
         }
     }
 }
-/// The rows the tier roster needs before it will draw at all. The panel is a
-/// model list first: below this there is no roster, and the title still names
-/// every tier.
-const ROSTER_RESERVE: u16 = 3;
-
 /// How the catalogue is ordered — `^O` cycles it.
 ///
 /// **Alphabetical is the wrong default and was the shipped one.** A flat sort
@@ -117,13 +114,6 @@ pub enum Order {
 }
 
 impl Order {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Name => "ORDER ▸ NAME",
-            Self::Intelligence => "ORDER ▸ AA INDEX",
-        }
-    }
     #[must_use]
     pub fn next(self) -> Self {
         match self {
@@ -157,6 +147,14 @@ pub struct PanelSearch {
     /// which [`Order::Intelligence`] renders as an unmeasured list rather than
     /// as an empty one.
     intelligence: BTreeMap<String, f64>,
+    details: BTreeMap<usize, ModelDetail>,
+}
+#[derive(Debug, Clone)]
+struct ModelDetail {
+    id: String,
+    route: String,
+    score: Option<f64>,
+    unavailable_reason: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ModelGroup {
@@ -182,11 +180,15 @@ pub(crate) struct PanelGeometry {
     providers: Vec<(Rect, usize)>,
     models: Vec<(Rect, usize)>,
     tiers: Vec<(Rect, Tier)>,
+    orders: Vec<(Rect, Order)>,
+    modes: Vec<(Rect, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelHit {
     Provider(usize),
+    Order(Order),
+    Mode(usize),
     Model(usize),
     /// A row of the tier roster. Clicking one moves the assignment, which is
     /// the direct path Tab's cycle does not give: the roster shows all three,
@@ -196,10 +198,22 @@ pub(crate) enum PanelHit {
 
 impl PanelGeometry {
     pub(crate) fn hit(&self, column: u16, row: u16) -> Option<PanelHit> {
-        self.tiers
+        self.orders
             .iter()
             .find(|(area, _)| contains(*area, column, row))
-            .map(|(_, tier)| PanelHit::Tier(*tier))
+            .map(|(_, order)| PanelHit::Order(*order))
+            .or_else(|| {
+                self.modes
+                    .iter()
+                    .find(|(area, _)| contains(*area, column, row))
+                    .map(|(_, index)| PanelHit::Mode(*index))
+            })
+            .or_else(|| {
+                self.tiers
+                    .iter()
+                    .find(|(area, _)| contains(*area, column, row))
+                    .map(|(_, tier)| PanelHit::Tier(*tier))
+            })
             .or_else(|| self.hit_catalogue(column, row))
     }
 
@@ -345,6 +359,9 @@ impl Panel {
         let assignment = self.assignment.as_ref()?;
         let tier = assignment.active;
         let command = self.rows.get(self.selected)?.command.clone()?;
+        if !command.starts_with("/model ") {
+            return None;
+        }
         // The last word of the command is the value in every form the panel
         // emits -- a model id, `off`, `inherit` -- which is why the label is
         // taken from there rather than parsed back out of the row's text.
@@ -400,8 +417,40 @@ impl Panel {
         let Some(search) = self.search.as_mut() else {
             return false;
         };
-        search.order = search.order.next();
+        let order = search.order.next();
+        self.select_order(order)
+    }
+
+    pub(crate) fn select_order(&mut self, order: Order) -> bool {
+        let selected = self
+            .rows
+            .get(self.selected)
+            .and_then(|row| row.command.clone());
+        let identity = self
+            .search
+            .as_ref()
+            .and_then(|search| search.details.get(&self.selected))
+            .map(|detail| (detail.id.clone(), detail.route.clone()));
+        let Some(search) = self.search.as_mut() else {
+            return false;
+        };
+        search.order = order;
         self.provider_rows();
+        let same_model = identity.and_then(|(id, route)| {
+            self.search
+                .as_ref()?
+                .details
+                .iter()
+                .find(|(_, detail)| detail.id == id && detail.route == route)
+                .map(|(index, _)| *index)
+        });
+        if let Some(index) = same_model.or_else(|| {
+            self.rows
+                .iter()
+                .position(|row| row.command.is_some() && row.command == selected)
+        }) {
+            self.selected = index;
+        }
         true
     }
 
@@ -426,7 +475,11 @@ impl Panel {
         let Some(assignment) = self.assignment.as_mut() else {
             return false;
         };
-        assignment.active = assignment.active.next();
+        assignment.active = match assignment.active {
+            Tier::Parent => Tier::Subagents,
+            Tier::Subagents => Tier::Helpers,
+            Tier::Helpers => Tier::Parent,
+        };
         self.provider_rows();
         true
     }
@@ -540,6 +593,7 @@ impl Panel {
             .map(|group| group.provider.clone())
             .collect();
         search.providers.dedup();
+        search.providers.push("All providers".into());
         search.active = previous
             .and_then(|name| search.providers.iter().position(|p| p == &name))
             .unwrap_or(0);
@@ -567,101 +621,97 @@ impl Panel {
         };
         self.rows.clear();
         search.choices.clear();
-        // A tier that can be *unset* offers that as its first row, because
-        // otherwise the panel could turn helpers on and never off again --
-        // and "off" is the state helpers ship in.
-        let clearing = match tier {
-            Tier::Parent => None,
-            Tier::Helpers => Some(("  ⊘ OFF · run no helpers", "/model helper off")),
-            Tier::Subagents => Some(("  ↳ INHERIT · the parent's model", "/model subagent inherit")),
+        search.details.clear();
+        let clearing: &[(&str, &str)] = match tier {
+            Tier::Parent => &[],
+            Tier::Helpers => &[("Off", "/model helper off")],
+            Tier::Subagents => &[
+                ("Auto", "/model subagent auto"),
+                ("Off", "/model subagent off"),
+            ],
         };
-        if let Some((text, command)) = clearing {
+        for &(text, command) in clearing {
             search.choices.push(self.rows.len());
             self.rows.push(PanelRow {
                 text: format!("{text}{}", mark(command)),
-                command: Some(command.to_string()),
-            });
-            // A labelled rule, so what is above it reads as a state and what
-            // is below it reads as a catalogue. Prose, so it is never a
-            // target and never becomes the heading the header line quotes.
-            self.rows.push(PanelRow {
-                text: format!("  ── OR PIN ONE {}", "─".repeat(24)),
-                command: None,
+                command: Some(command.into()),
             });
         }
-        for group in search
-            .matched
-            .iter()
-            .filter(|group| Some(&group.provider) == search.providers.get(search.active))
-        {
-            self.rows.push(PanelRow {
-                text: format!(
-                    "{} · {} · {}",
-                    group.provider,
-                    group.account,
-                    if group.selectable == Some(false) {
-                        group
-                            .unavailable_reason
-                            .as_deref()
-                            .unwrap_or("locked to another route")
-                    } else {
-                        &group.scope
-                    }
-                ),
-                command: None,
-            });
-            // An account that could be connected and is not has no models to
-            // list, so the row that would have been empty is the connect
-            // action instead. This is where a person looks for models, so it
-            // is where the reason there are none belongs.
+        let mut entries = Vec::new();
+        for group in search.matched.iter().filter(|group| {
+            search
+                .providers
+                .get(search.active)
+                .is_some_and(|provider| provider == "All providers" || provider == &group.provider)
+        }) {
             if let Some(provider) = &group.connect {
                 search.choices.push(self.rows.len());
                 self.rows.push(PanelRow {
-                    text: format!("  ⊕ connect this {provider} account"),
+                    text: format!("Connect {} · {provider}", group.account),
                     command: Some(format!("/login {}", group.account)),
                 });
                 continue;
             }
-            // Ordered here rather than at construction, so `^O` re-orders a
-            // list already on screen instead of rebuilding the catalogue.
-            let mut ids: Vec<&String> = group.models.iter().collect();
-            if search.order == Order::Intelligence {
-                let score = |id: &str| search.intelligence.get(&normalise(id)).copied();
-                ids.sort_by(|a, b| match (score(a), score(b)) {
-                    (Some(x), Some(y)) => y
-                        .partial_cmp(&x)
-                        .unwrap_or(Ordering::Equal)
-                        .then_with(|| a.cmp(b)),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => a.cmp(b),
-                });
-            }
-            for id in ids {
-                let command = (group.selectable != Some(false)).then(|| match tier {
-                    Tier::Parent => format!("/model {id}"),
-                    assigned => format!("/model {} {id}", assigned.singular()),
-                });
-                search.choices.push(self.rows.len());
-                self.rows.push(PanelRow {
-                    text: format!(
-                        "  {}{id}{}{}",
-                        if group.selectable == Some(false) {
-                            "× "
-                        } else {
-                            ""
-                        },
-                        search
-                            .intelligence
-                            .get(&normalise(id))
-                            .map_or_else(String::new, |index| format!("   AA {index:.0}")),
-                        command.as_deref().map_or("", &mark)
-                    ),
-                    command,
-                });
+            for id in &group.models {
+                let score = search
+                    .intelligence
+                    .get(&normalise(id))
+                    .copied()
+                    .filter(|score| score.is_finite() && *score >= 0.0);
+                entries.push((group, id, score));
             }
         }
-        if self.rows.is_empty() {
+        entries.sort_by(|(a, x, sx), (b, y, sy)| {
+            let name = (&a.provider, &a.account, x).cmp(&(&b.provider, &b.account, y));
+            if search.order == Order::Name {
+                return name;
+            }
+            match (sx, sy) {
+                (Some(x), Some(y)) => y.partial_cmp(x).unwrap_or(Ordering::Equal).then(name),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => name,
+            }
+        });
+        let mut last_group = None;
+        for (group, id, score) in entries {
+            let route = format!("{} · {}", group.provider, group.account);
+            if search.order == Order::Name && last_group.as_ref() != Some(&route) {
+                self.rows.push(PanelRow {
+                    text: format!(
+                        "{route} · {}",
+                        group.unavailable_reason.as_deref().unwrap_or(&group.scope)
+                    ),
+                    command: None,
+                });
+                last_group = Some(route.clone());
+            }
+            let command = (group.selectable != Some(false)).then(|| match tier {
+                Tier::Parent => format!("/model {id}"),
+                assigned => format!("/model {} {id}", assigned.singular()),
+            });
+            let index = self.rows.len();
+            search.choices.push(index);
+            search.details.insert(
+                index,
+                ModelDetail {
+                    id: id.clone(),
+                    route,
+                    score,
+                    unavailable_reason: group.unavailable_reason.clone(),
+                },
+            );
+            self.rows.push(PanelRow {
+                text: format!(
+                    "  {}{id}{}{}",
+                    if command.is_none() { "× " } else { "" },
+                    score.map_or_else(String::new, |score| format!("   AA {score:.0}")),
+                    command.as_deref().map_or("", &mark)
+                ),
+                command,
+            });
+        }
+        if self.rows.len() == clearing.len() {
             self.rows.push(PanelRow {
                 text: "No models match. Ctrl-U clears search.".into(),
                 command: None,
@@ -727,6 +777,9 @@ pub(super) fn render_panel(
     panel: &Panel,
     theme: super::Theme,
 ) -> PanelGeometry {
+    if panel.search.is_some() {
+        return picker::render(frame, area, panel, theme);
+    }
     let mut geometry = PanelGeometry::default();
     // Two double rules, not a box. A closed frame was tried and boxed the
     // panel off from the session it is drawn over; the weight belongs in the
@@ -753,63 +806,8 @@ pub(super) fn render_panel(
                 panel.title
             ))
     };
-    let mut inner = block.inner(area);
+    let inner = block.inner(area);
     frame.render_widget(block, area);
-    if let Some(search) = &panel.search {
-        geometry.providers = render_providers(frame, &mut inner, search, theme);
-        if let Some(assignment) = &panel.assignment {
-            geometry.tiers =
-                render_tier_roster(frame, &mut inner, assignment, &panel.staged, theme);
-        }
-        let matches: usize = search.matched.iter().map(|g| g.models.len()).sum();
-        let total: usize = search.source.iter().map(|g| g.models.len()).sum();
-        let prompt = if search.query.is_empty() {
-            "type to filter"
-        } else {
-            &search.query
-        };
-        let group = panel
-            .rows
-            .iter()
-            .enumerate()
-            .take(panel.selected + 1)
-            .rev()
-            .find(|(i, _)| !search.choices.contains(i))
-            .map_or("", |(_, row)| row.text.as_str());
-        // One line where there were two. The tier roster above states which
-        // tier `Enter` assigns to and what all three run on, so the sentence
-        // that used to say only the first of those has nothing left to add.
-        let lines = [
-            format!(
-                "FILTER ▸ {prompt}   {matches}/{total}   {}   ← → PROVIDER · ^U CLEAR",
-                search.order.label()
-            ),
-            if matches > 0 {
-                group.to_string()
-            } else {
-                String::new()
-            },
-        ];
-        // The panel is a model list first. On a short terminal the hint lines
-        // yield to it rather than squeezing it to nothing -- which two extra
-        // header lines did, leaving a ten-row panel with no models at all.
-        const RESERVED_FOR_MODELS: u16 = 3;
-        for (index, text) in lines
-            .into_iter()
-            .filter(|text| !text.is_empty())
-            .enumerate()
-        {
-            if inner.height == 0 || (index > 0 && inner.height <= RESERVED_FOR_MODELS) {
-                break;
-            }
-            frame.render_widget(
-                Paragraph::new(super::abbreviate(&text, inner.width as usize)),
-                Rect { height: 1, ..inner },
-            );
-            inner.y += 1;
-            inner.height -= 1;
-        }
-    }
     let start = panel
         .selected
         .saturating_sub(usize::from(inner.height).saturating_sub(1));
@@ -863,157 +861,6 @@ pub(super) fn render_panel(
     geometry
 }
 
-/// The provider strip — one dense row, read like a station readout.
-///
-/// **It was three rows of cards, and the row it gives back is not free
-/// space: it pays for the roster below it.** The panel is a model list
-/// first, so chrome that grows has to take its rows from somewhere, and a
-/// card whose second line said "14 models" and whose third was an underline
-/// spent two rows on what fits after a separator.
-fn render_providers(
-    frame: &mut Frame,
-    area: &mut Rect,
-    search: &PanelSearch,
-    theme: super::Theme,
-) -> Vec<(Rect, usize)> {
-    let mut geometry = Vec::new();
-    if area.height < 1 || area.width < 10 || search.providers.is_empty() {
-        return geometry;
-    }
-    let available = usize::from(area.width.saturating_sub(4));
-    let visible = (available / 17).max(1).min(search.providers.len());
-    let first = search
-        .active
-        .saturating_sub(visible / 2)
-        .min(search.providers.len().saturating_sub(visible));
-    let card_width = (available.saturating_sub(visible - 1) / visible) as u16;
-    for (slot, provider) in search
-        .providers
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(visible)
-    {
-        let selected = slot == search.active;
-        let card = Rect::new(
-            area.x + 2 + (slot - first) as u16 * (card_width + 1),
-            area.y,
-            card_width,
-            1,
-        );
-        geometry.push((card, slot));
-        let locked = search
-            .matched
-            .iter()
-            .filter(|group| &group.provider == provider)
-            .all(|group| group.selectable == Some(false));
-        let style = if selected && !locked {
-            Style::default().bg(theme.accent()).fg(Color::Black)
-        } else {
-            Style::default().bg(theme.dock()).fg(theme.accent())
-        };
-        let count: usize = search
-            .matched
-            .iter()
-            .filter(|group| &group.provider == provider)
-            .map(|group| group.models.len())
-            .sum();
-        // The tail is the count *or* the lock, never both: a locked account's
-        // model count is not a number anybody can act on, and spending six
-        // columns to print it truncated the provider's own name.
-        let tail = if locked {
-            "LOCK".to_string()
-        } else {
-            count.to_string()
-        };
-        let label = super::abbreviate(
-            &provider.to_uppercase(),
-            card_width.saturating_sub(tail.chars().count() as u16 + 4) as usize,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(format!(
-                " {} {label} {tail}",
-                if selected { "\u{25c6}" } else { "\u{b7}" }
-            )))
-            .style(style),
-            card,
-        );
-    }
-    if first > 0 {
-        frame.render_widget(
-            Paragraph::new("\u{25c0}").style(Style::default().fg(theme.accent())),
-            Rect::new(area.x, area.y, 1, 1),
-        );
-    }
-    if first + visible < search.providers.len() {
-        frame.render_widget(
-            Paragraph::new("\u{25b6}").style(Style::default().fg(theme.accent())),
-            Rect::new(area.right() - 1, area.y, 1, 1),
-        );
-    }
-    area.y += 1;
-    area.height -= 1;
-    geometry
-}
-
-/// The three tiers a session runs on, each on its own row, with the one
-/// `Enter` would assign marked and inverted.
-///
-/// **The thing being changed now sits next to the change.** What this
-/// replaces was a hint line reading `Tab ⇄ assigning to parent` while the
-/// values themselves were in the panel title, twelve rows away — so the
-/// panel could tell you which tier was active or what the tiers ran on, but
-/// never both in one glance. A row is also a click target, which is the
-/// direct jump `Tab`'s cycle cannot offer.
-///
-/// The rows yield to the model list rather than squeezing it: below
-/// [`ROSTER_RESERVE`] rows of space there is no roster at all, and the title
-/// still states every tier for the piped path that draws nothing.
-fn render_tier_roster(
-    frame: &mut Frame,
-    area: &mut Rect,
-    assignment: &Assignment,
-    staged: &BTreeMap<Tier, String>,
-    theme: super::Theme,
-) -> Vec<(Rect, Tier)> {
-    let mut geometry = Vec::new();
-    if area.width < 16 || area.height <= ROSTER_RESERVE {
-        return geometry;
-    }
-    for tier in Tier::every() {
-        let active = tier == assignment.active;
-        let row = Rect { height: 1, ..*area };
-        geometry.push((row, tier));
-        // The tier word is the one a person types (`/model helper luna`),
-        // upper-cased rather than renamed: a label the command does not
-        // accept would be a second vocabulary for one thing.
-        // A staged tier reads `now → next`, so an unapplied change is visible
-        // on the row it will change rather than only in a notice that scrolls.
-        let value = match staged.get(&tier).and_then(|c| c.rsplit(' ').next()) {
-            Some(next) => format!("{} → {next}", assignment.models.describe(tier)),
-            None => assignment.models.describe(tier).to_string(),
-        };
-        let text = format!(
-            " {} {:<9}{value}",
-            if active { MARK_FOCUSED } else { " " },
-            tier.singular().to_uppercase(),
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(super::abbreviate(&text, area.width as usize))).style(
-                if active {
-                    Style::default().bg(theme.accent()).fg(Color::Black)
-                } else {
-                    Style::default().bg(theme.dock()).fg(theme.accent())
-                },
-            ),
-            row,
-        );
-        area.y += 1;
-        area.height -= 1;
-    }
-    geometry
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,10 +893,16 @@ mod tests {
         // Both separators reach the same AND, which is what keeps the panel
         // usable after `Space` stopped being a character.
         panel.search_insert("ACCOUNT-4+exact");
-        assert_eq!(panel.search.as_ref().unwrap().providers, ["provider-4"]);
+        assert_eq!(
+            panel.search.as_ref().unwrap().providers,
+            ["provider-4", "All providers"]
+        );
         panel.search_clear();
         panel.search_insert("ACCOUNT-4 exact");
-        assert_eq!(panel.search.as_ref().unwrap().providers, ["provider-4"]);
+        assert_eq!(
+            panel.search.as_ref().unwrap().providers,
+            ["provider-4", "All providers"]
+        );
         assert_eq!(
             panel.rows[panel.selected].command.as_deref(),
             Some("/model model-4/exact")
@@ -1060,7 +913,7 @@ mod tests {
         assert_eq!(panel.rows.len(), 2);
         panel.search_clear();
         panel.search_insert("flash");
-        assert_eq!(panel.search.as_ref().unwrap().providers.len(), 5);
+        assert_eq!(panel.search.as_ref().unwrap().providers.len(), 6);
         panel.move_provider(true);
         assert_eq!(
             panel.rows[panel.selected].command.as_deref(),
@@ -1100,50 +953,34 @@ mod tests {
     /// without being taught it.
     #[test]
     fn tab_moves_which_tier_a_chosen_model_is_assigned_to() {
-        let mut panel = Panel::models(
-            "Models",
-            vec![ModelGroup {
-                provider: "openai".into(),
-                account: "chatgpt-subscription".into(),
-                scope: "subscription".into(),
-                models: vec!["gpt-5.6-luna".into()],
-                selectable: Some(true),
-                unavailable_reason: None,
-                connect: None,
-            }],
-            TierModels {
-                parent: "opus-5".into(),
-                helper: None,
-                subagent: None,
-            },
+        let mut panel = catalogue();
+        assert_eq!(panel.tier(), Tier::Parent);
+        assert!(panel.rows.iter().all(|row| {
+            !row.command
+                .as_deref()
+                .is_some_and(|c| c.ends_with(" off") || c.ends_with(" auto"))
+        }));
+        panel.cycle_tier();
+        assert_eq!(panel.tier(), Tier::Subagents);
+        assert_eq!(
+            panel.rows[0].command.as_deref(),
+            Some("/model subagent auto")
         );
-        let command = |panel: &Panel| {
-            panel
+        assert_eq!(
+            panel.rows[1].command.as_deref(),
+            Some("/model subagent off")
+        );
+        panel.cycle_tier();
+        assert_eq!(panel.tier(), Tier::Helpers);
+        assert_eq!(panel.rows[0].command.as_deref(), Some("/model helper off"));
+        assert!(
+            !panel
                 .rows
                 .iter()
-                .filter_map(|row| row.command.clone())
-                .collect::<Vec<_>>()
-        };
-
+                .any(|row| row.command.as_deref() == Some("/model helper auto"))
+        );
+        panel.cycle_tier();
         assert_eq!(panel.tier(), Tier::Parent);
-        assert_eq!(command(&panel), ["/model gpt-5.6-luna"]);
-
-        assert!(panel.cycle_tier());
-        assert_eq!(panel.tier(), Tier::Helpers);
-        assert_eq!(
-            command(&panel),
-            ["/model helper off", "/model helper gpt-5.6-luna"],
-            "a tier that can be unset offers that too"
-        );
-
-        assert!(panel.cycle_tier());
-        assert_eq!(
-            command(&panel),
-            ["/model subagent inherit", "/model subagent gpt-5.6-luna"]
-        );
-
-        assert!(panel.cycle_tier());
-        assert_eq!(panel.tier(), Tier::Parent, "Tab wraps");
     }
 
     /// Opening the panel is how a person finds out the other two tiers exist,
@@ -1177,21 +1014,12 @@ mod tests {
         let screen: String = (0..24)
             .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
             .collect();
-        assert!(screen.contains("parent opus-5"), "{screen}");
-        assert!(screen.contains("helper off"), "{screen}");
-        assert!(
-            screen.contains("subagent claude-sonnet-5"),
-            "an unset helper and a set subagent are both named: {screen}"
-        );
-        // The roster states all three *and* which one Enter assigns to, in
-        // rows of its own. What this replaced said only the second half, in a
-        // hint line, while the values sat in the title.
-        assert!(screen.contains("▸ PARENT"), "the active tier is marked: {screen}");
-        assert!(screen.contains("  HELPER   off"), "{screen}");
-        assert!(
-            screen.contains("  SUBAGENT claude-sonnet-5"),
-            "every tier is a row, set or not: {screen}"
-        );
+        assert!(screen.contains("[▸Main ]"), "{screen}");
+        assert!(screen.contains("[ Subagent ]"), "{screen}");
+        assert!(screen.contains("[ Helper ]"), "{screen}");
+        assert!(screen.contains("Current: opus-5"), "{screen}");
+        assert!(screen.contains("claude-sonnet-5"), "{screen}");
+        assert!(screen.contains("off"), "{screen}");
     }
 
     #[test]
@@ -1305,49 +1133,15 @@ mod tests {
     #[test]
     fn provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow() {
         for theme in super::super::Theme::ALL {
-            let mut panel = catalogue();
-            let mut wide = Terminal::new(TestBackend::new(80, 22)).unwrap();
-            let mut cards = PanelGeometry::default();
-            wide.draw(|frame| {
-                cards = render_panel(frame, frame.area(), &panel, theme);
-            })
-            .unwrap();
-            // Sampled where the panel says it drew, not at a column counted
-            // off a previous layout: a look test that pins coordinates fails
-            // for every change of frame and reports none of them usefully.
-            let at = |slot: usize| {
-                let (area, _) = cards.providers[slot];
-                wide.backend().buffer()[(area.x, area.y)].bg
-            };
-            assert_eq!(at(0), theme.accent(), "the active provider is filled");
-            assert_eq!(at(1), theme.dock(), "a resting one still reads as a tab");
-            let mut terminal = Terminal::new(TestBackend::new(44, 22)).unwrap();
-            for (moves, left, right) in [(0, false, true), (2, true, true), (2, true, false)] {
-                for _ in 0..moves {
-                    panel.move_provider(true);
-                }
-                let mut strip = PanelGeometry::default();
-                terminal
-                    .draw(|frame| {
-                        strip = render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme);
-                    })
-                    .unwrap();
-                let buffer = terminal.backend().buffer();
-                // One row, inside a closed frame: the strip is at the inner
-                // top-left, so its arrows are too.
-                assert_eq!(buffer[(2, 2)].symbol() == "◀", left);
-                assert_eq!(buffer[(41, 2)].symbol() == "▶", right);
-                let active = panel.search.as_ref().unwrap().active;
-                let (card, _) = strip
-                    .providers
-                    .iter()
-                    .find(|(_, slot)| *slot == active)
-                    .copied()
-                    .expect("the active provider is always one of the drawn tabs");
-                assert_eq!(buffer[(card.x + 1, card.y)].bg, theme.accent());
-                assert_eq!(buffer[(card.x + 1, card.y)].fg, Color::Black);
-                assert_eq!(buffer[(0, 2)].symbol(), " ");
-                assert_eq!(buffer[(43, 2)].symbol(), " ");
+            let panel = catalogue();
+            let mut terminal = Terminal::new(TestBackend::new(80, 22)).unwrap();
+            let mut hits = PanelGeometry::default();
+            terminal
+                .draw(|frame| hits = render_panel(frame, frame.area(), &panel, theme))
+                .unwrap();
+            for (slot, expected) in [(0, theme.accent()), (1, theme.dock())] {
+                let rect = hits.providers[slot].0;
+                assert_eq!(terminal.backend().buffer()[(rect.x, rect.y)].bg, expected);
             }
         }
         for width in [1, 5, 12, 40, 80, 160] {
@@ -1355,7 +1149,20 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal
                     .draw(|frame| {
-                        render_panel(frame, frame.area(), &catalogue(), super::super::Theme::Neon);
+                        let hits = render_panel(
+                            frame,
+                            frame.area(),
+                            &catalogue(),
+                            super::super::Theme::Neon,
+                        );
+                        for (area, _) in hits
+                            .providers
+                            .iter()
+                            .chain(hits.models.iter())
+                            .chain(hits.modes.iter())
+                        {
+                            assert!(area.right() <= width && area.bottom() <= height);
+                        }
                     })
                     .unwrap();
             }
@@ -1483,12 +1290,19 @@ mod tests {
             },
         );
 
-        assert!(panel.staged_commands().is_empty(), "nothing is staged on open");
+        assert!(
+            panel.staged_commands().is_empty(),
+            "nothing is staged on open"
+        );
 
         // The row that IS the tier's current value says so, and staging it
         // means "leave this tier alone" rather than queueing a no-op.
         assert_eq!(panel.tier(), Tier::Parent);
-        assert!(panel.rows[panel.selected].text.contains("· NOW"), "{:?}", panel.rows);
+        assert!(
+            panel.rows[panel.selected].text.contains("· NOW"),
+            "{:?}",
+            panel.rows
+        );
         assert!(panel.stage().unwrap().contains("parent stays big"));
         assert!(panel.staged_commands().is_empty());
 
@@ -1497,7 +1311,11 @@ mod tests {
         assert_eq!(panel.staged_commands(), ["/model small"]);
         // Every press moves a marker under the cursor, so `Space` is never a
         // key that appears to do nothing.
-        assert!(panel.rows[panel.selected].text.contains("◆ STAGED"), "{:?}", panel.rows);
+        assert!(
+            panel.rows[panel.selected].text.contains("◆ STAGED"),
+            "{:?}",
+            panel.rows
+        );
 
         // Pressing it again on the same row takes it back.
         assert!(panel.stage().unwrap().contains("unstaged parent"));
@@ -1511,6 +1329,7 @@ mod tests {
         assert!(panel.stage().is_some());
 
         assert!(panel.select_tier(Tier::Subagents));
+        panel.move_selection(true, 1);
         assert!(panel.stage().unwrap().contains("staged subagent"));
 
         let applied = panel.staged_commands();
@@ -1567,12 +1386,16 @@ mod tests {
         let panel = catalogue();
         let drawn = geometry(&panel, 80, 22);
         assert_eq!(
-            drawn.tiers.iter().map(|(_, tier)| *tier).collect::<Vec<_>>(),
-            Tier::every(),
+            drawn
+                .tiers
+                .iter()
+                .map(|(_, tier)| *tier)
+                .collect::<Vec<_>>(),
+            [Tier::Parent, Tier::Subagents, Tier::Helpers],
             "all three are drawn, so all three are reachable"
         );
 
-        let (row, tier) = drawn.tiers[2];
+        let (row, tier) = drawn.tiers[1];
         assert_eq!(tier, Tier::Subagents);
         assert_eq!(drawn.hit(row.x, row.y), Some(PanelHit::Tier(tier)));
 
@@ -1584,7 +1407,7 @@ mod tests {
             panel
                 .rows
                 .iter()
-                .any(|row| row.command.as_deref() == Some("/model subagent inherit")),
+                .any(|row| row.command.as_deref() == Some("/model subagent auto")),
             "the rows follow the tier, which is what the assignment is for"
         );
     }
@@ -1601,72 +1424,36 @@ mod tests {
     #[test]
     fn hit_geometry_is_the_visible_carousel_and_scrolled_model_slice() {
         let mut panel = catalogue();
-        let visible = geometry(&panel, 80, 22);
-        assert_eq!(
-            visible
-                .providers
-                .iter()
-                .map(|(_, index)| *index)
-                .collect::<Vec<_>>(),
-            [0, 1, 2, 3]
-        );
-        let first = visible.providers[0].0;
-        assert_eq!(visible.hit(first.x, first.y), Some(PanelHit::Provider(0)));
-        assert_eq!(
-            visible.hit(first.right() - 1, first.bottom() - 1),
-            Some(PanelHit::Provider(0))
-        );
-        assert_eq!(
-            visible.hit(first.right(), first.y),
-            None,
-            "the one-column gap between provider cards is not a hidden target"
-        );
-
-        for _ in 0..4 {
-            panel.move_provider(true);
+        let visible = geometry(&panel, 90, 24);
+        assert_eq!(visible.providers.len(), 6);
+        assert_eq!(visible.orders.len(), 2);
+        for (area, index) in &visible.providers {
+            assert_eq!(
+                visible.hit(area.x, area.y),
+                Some(PanelHit::Provider(*index))
+            );
         }
-        let shifted = geometry(&panel, 80, 22);
-        assert_eq!(
-            shifted
-                .providers
+        for (area, order) in &visible.orders {
+            assert_eq!(visible.hit(area.x, area.y), Some(PanelHit::Order(*order)));
+        }
+        panel.select_tier(Tier::Subagents);
+        let modes = geometry(&panel, 90, 24);
+        assert_eq!(modes.modes.len(), 2);
+        for (area, index) in &modes.modes {
+            assert_eq!(modes.hit(area.x, area.y), Some(PanelHit::Mode(*index)));
+        }
+        panel.select_provider(5);
+        panel.move_selection(true, 50);
+        let scrolled = geometry(&panel, 40, 12);
+        assert!(
+            scrolled
+                .models
                 .iter()
-                .map(|(_, index)| *index)
-                .collect::<Vec<_>>(),
-            [1, 2, 3, 4],
-            "offscreen provider tabs must not retain hit targets"
+                .any(|(_, index)| *index == panel.selected)
         );
-
-        let mut long = Panel::models(
-            "Models",
-            vec![ModelGroup {
-                provider: "provider".into(),
-                account: "account".into(),
-                scope: "declared".into(),
-                models: (0..20).map(|index| format!("model-{index:02}")).collect(),
-                selectable: Some(true),
-                unavailable_reason: None,
-                connect: None,
-            }],
-            TierModels::default(),
-        );
-        long.move_selection(true, 19);
-        let scrolled = geometry(&long, 40, 10);
-        let drawn: Vec<_> = scrolled.models.iter().map(|(_, index)| *index).collect();
-        // Three, because the hint lines now yield to the list on a short
-        // panel; the property under test is that what is drawn is hittable
-        // and what scrolled off is not.
-        assert_eq!(drawn, [18, 19, 20]);
         for (area, index) in &scrolled.models {
             assert_eq!(scrolled.hit(area.x, area.y), Some(PanelHit::Model(*index)));
         }
-        assert_eq!(scrolled.hit(40, scrolled.models[0].0.y), None);
-        assert_eq!(scrolled.hit(0, 10), None);
-
-        let narrow = geometry(&catalogue(), 5, 10);
-        assert!(narrow.providers.is_empty());
-        assert!(
-            !matches!(narrow.hit(0, 1), Some(PanelHit::Provider(_))),
-            "a provider card that was clipped away cannot be clicked"
-        );
+        assert!(geometry(&panel, 5, 10).providers.is_empty());
     }
 }

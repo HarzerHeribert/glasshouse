@@ -120,7 +120,8 @@ pub struct PaneConfig {
 ///
 /// It is here for the same reason `[helpers] model` and `[agents] model` are:
 /// a session is three models, and the one you chose last should not be the
-/// only one that forgets. Unset falls back to [`crate::wire::MODEL`].
+/// only one that forgets. There is deliberately no compiled-in fallback:
+/// startup requires either this value or `--model`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelConfig {
     pub parent: Option<String>,
@@ -132,8 +133,33 @@ pub struct ModelConfig {
 /// driven by a frontier model pays frontier rates for every investigation it
 /// hands off, unless the model remembers to name a cheaper one each time.
 /// A model the cell names still wins: this is a default, not a ceiling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentsMode {
+    /// Use a model named by the cell, otherwise inherit the parent.
+    #[default]
+    Auto,
+    /// Refuse every subagent spawn, including one that names a model.
+    Off,
+    /// Use `model` unless the cell explicitly names another model.
+    Pinned,
+}
+
+impl AgentsMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "off" => Ok(Self::Off),
+            "pinned" => Ok(Self::Pinned),
+            other => Err(format!(
+                "pane.toml: `[agents] mode` must be \"auto\", \"off\" or \"pinned\", not `{other}`"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentsConfig {
+    pub mode: AgentsMode,
     pub model: Option<String>,
 }
 
@@ -252,27 +278,55 @@ impl PaneConfig {
     }
 }
 
-/// `[agents] model` -- one optional key, refusing anything else so a typo is
-/// a startup error rather than a silently ignored preference.
+/// `[agents]` -- an explicit mode plus a model for `pinned`.
+///
+/// A legacy table containing only `model` is interpreted as `pinned`, so an
+/// existing project keeps the behaviour it selected before modes existed.
 fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
     let table = table_of(value, "agents")?;
     for key in table.keys() {
-        if key != "model" {
+        if !["mode", "model"].contains(&key.as_str()) {
             return Err(format!(
-                "pane.toml: unknown key `{key}` in [agents]; only `model` is recognised"
+                "pane.toml: unknown key `{key}` in [agents]; only `mode` and `model` are recognised"
             ));
         }
     }
     let model = match table.get("model") {
         None => None,
-        Some(value) => Some(
+        Some(value) => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `[agents] model` must be a string".to_string())?;
+            validate_concrete_model("[agents] model", text)?;
+            Some(text.to_string())
+        }
+    };
+    let mode = match table.get("mode") {
+        None if model.is_some() => AgentsMode::Pinned,
+        None => AgentsMode::Auto,
+        Some(value) => AgentsMode::parse(
             value
                 .as_str()
-                .ok_or_else(|| "pane.toml: `model` must be a string".to_string())?
-                .to_string(),
-        ),
+                .ok_or_else(|| "pane.toml: `[agents] mode` must be a string".to_string())?,
+        )?,
     };
-    Ok(AgentsConfig { model })
+    match (mode, model.as_ref()) {
+        (AgentsMode::Pinned, None) => {
+            return Err("pane.toml: `[agents] mode = \"pinned\"` requires `model`".to_string());
+        }
+        (AgentsMode::Auto | AgentsMode::Off, Some(_)) => {
+            return Err(format!(
+                "pane.toml: `[agents] mode = \"{}\"` cannot also set `model`",
+                match mode {
+                    AgentsMode::Auto => "auto",
+                    AgentsMode::Off => "off",
+                    AgentsMode::Pinned => unreachable!(),
+                }
+            ));
+        }
+        _ => {}
+    }
+    Ok(AgentsConfig { mode, model })
 }
 
 /// `[model] parent` -- one optional key, refused the same way the other two
@@ -288,12 +342,13 @@ fn parse_model(value: &toml::Value) -> Result<ModelConfig, String> {
     }
     let parent = match table.get("parent") {
         None => None,
-        Some(value) => Some(
-            value
+        Some(value) => {
+            let text = value
                 .as_str()
-                .ok_or_else(|| "pane.toml: `parent` must be a string".to_string())?
-                .to_string(),
-        ),
+                .ok_or_else(|| "pane.toml: `parent` must be a string".to_string())?;
+            validate_parent_model(text)?;
+            Some(text.to_string())
+        }
     };
     Ok(ModelConfig { parent })
 }
@@ -421,7 +476,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             let text = value
                 .as_str()
                 .ok_or_else(|| "pane.toml: `model` must be a string".to_string())?;
-            check_names_no_tool_path_or_grant("model", text)?;
+            validate_concrete_model("[helpers] model", text)?;
             Some(text.to_string())
         }
     };
@@ -465,11 +520,45 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
 /// separator, a glob character, or a registered tool's own name refuses the
 /// value with one sentence naming the key.
 fn check_names_no_tool_path_or_grant(key: &str, value: &str) -> Result<(), String> {
-    let looks_like_a_path_or_glob =
-        value.contains('/') || value.contains('\\') || value.contains('*') || value.contains('?');
+    // Gateway catalogues legitimately use provider-qualified ids such as
+    // `vendor/model-302`. A slash alone therefore cannot mean "path". Path
+    // roots and traversal segments can, and no concrete model id needs a
+    // backslash, glob, or permission-expression parenthesis.
+    let slash_segments: Vec<_> = value.split('/').collect();
+    let bytes = value.as_bytes();
+    let windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let looks_like_a_path_or_glob = value.starts_with('/')
+        || value.starts_with("~/")
+        || windows_drive
+        || value.contains('\\')
+        || value.contains('*')
+        || value.contains('?')
+        || value.contains('(')
+        || value.contains(')')
+        || slash_segments
+            .iter()
+            .any(|segment| segment.is_empty() || matches!(*segment, "." | ".."));
     let names_a_tool = registry::names().contains(&value);
     if looks_like_a_path_or_glob || names_a_tool {
         return Err(format!("pane.toml: `{key}` names no tool, path or grant"));
     }
     Ok(())
+}
+
+/// Validates a model used by the parent. Mode words are controls, never
+/// concrete request model identifiers.
+pub fn validate_parent_model(value: &str) -> Result<(), String> {
+    validate_concrete_model("[model] parent", value)
+}
+
+fn validate_concrete_model(key: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("pane.toml: `{key}` must be one concrete model id"));
+    }
+    if matches!(value, "auto" | "off" | "inherit") {
+        return Err(format!(
+            "pane.toml: `{key}` must be a concrete model id, not `{value}`"
+        ));
+    }
+    check_names_no_tool_path_or_grant(key, value)
 }

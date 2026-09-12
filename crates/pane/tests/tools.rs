@@ -625,6 +625,8 @@ fn the_profile_is_built_once_per_session() {
         .arg("session")
         .arg("--root")
         .arg(&fixture.root)
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--glasshouse")
         .arg(&script)
         // Attach, so no `inference-gateway` is started: nothing here is a
@@ -684,6 +686,8 @@ fn a_refusal_reaches_the_binary_as_a_value_and_the_session_continues() {
         .arg("session")
         .arg("--root")
         .arg(&fixture.root)
+        .arg("--model")
+        .arg(pane::wire::MODEL)
         .arg("--glasshouse")
         .arg(&script)
         // Attach, so no `inference-gateway` is started: nothing here is a

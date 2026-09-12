@@ -43,6 +43,8 @@ impl Fixture {
         command
             .args(["session", "--root"])
             .arg(&self.root)
+            .arg("--model")
+            .arg(pane::wire::MODEL)
             .args([
                 "--task",
                 "Verify cutoff",

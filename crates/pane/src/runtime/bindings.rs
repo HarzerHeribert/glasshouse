@@ -2306,6 +2306,21 @@ fn agent_run_callback(
         return;
     }
 
+    let model = match state.agent_model(asked_model) {
+        Ok(model) => model,
+        Err(rule) => {
+            throw_denied(
+                scope,
+                &PermissionDenied {
+                    tool: "agent".to_string(),
+                    path: String::new(),
+                    rule,
+                },
+            );
+            return;
+        }
+    };
+
     // Nonzero remains supported for direct runtime callers. Normal Pane
     // sessions pass zero, so cumulative task spend cannot reach this guard.
     let remaining = state.budget_remaining.get();
@@ -2326,13 +2341,7 @@ fn agent_run_callback(
 
     let options = crate::agent::AgentOptions {
         turns: turns.clamp(1, crate::agent::MAX_TURNS),
-        // The cell's own choice first, then `[agents] model`, then the
-        // parent's. Without the middle step a session on a frontier model
-        // pays frontier rates for every goal it delegates, which is the
-        // opposite of why delegation exists.
-        model: asked_model
-            .or_else(|| state.agent_model())
-            .unwrap_or_else(|| state.model.borrow().clone()),
+        model,
         effort: crate::wire::Effort::default(),
     };
     let handle = crate::bg::agent(

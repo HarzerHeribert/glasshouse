@@ -14,11 +14,29 @@ impl Scratch {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(path.join(".glasshouse")).unwrap();
+        std::fs::write(
+            path.join(".glasshouse/pane.toml"),
+            format!("[model]\nparent = {:?}\n", pane::wire::MODEL),
+        )
+        .unwrap();
         Self(path)
     }
 
     fn path(&self) -> &Path {
         &self.0
+    }
+
+    fn has_session_rollout(&self) -> bool {
+        std::fs::read_dir(self.path().join(".pane/sessions")).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+                    && entry.path().is_file()
+            })
+        })
     }
 }
 
@@ -74,6 +92,17 @@ fn unknown_commands_and_options_fail_instead_of_echoing_stdin() {
 }
 
 #[test]
+fn bare_pane_without_a_model_refuses_instead_of_choosing_one() {
+    let root = Scratch::new("unconfigured");
+    std::fs::remove_file(root.path().join(".glasshouse/pane.toml")).unwrap();
+    let output = pane().current_dir(root.path()).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no parent model selected"), "{stderr}");
+    assert!(!root.has_session_rollout());
+}
+
+#[test]
 fn bare_pane_runs_the_ordinary_session_in_its_current_directory() {
     let root = Scratch::new("bare");
     let output = pane().current_dir(root.path()).output().unwrap();
@@ -83,7 +112,7 @@ fn bare_pane_runs_the_ordinary_session_in_its_current_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        root.path().join(".pane/rollout.jsonl").is_file(),
+        root.has_session_rollout(),
         "bare pane did not use the session's default rollout path"
     );
 }
@@ -97,7 +126,7 @@ fn explicit_session_version_and_ruler_dispatch_remain_available() {
         .output()
         .unwrap();
     assert!(session.status.success());
-    assert!(root.path().join(".pane/rollout.jsonl").is_file());
+    assert!(root.has_session_rollout());
 
     let version = pane().arg("--version").output().unwrap();
     assert!(version.status.success());

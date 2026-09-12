@@ -75,6 +75,12 @@ impl App {
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_pane"));
         if bare {
+            std::fs::create_dir_all(root.join(".glasshouse")).unwrap();
+            std::fs::write(
+                root.join(".glasshouse/pane.toml"),
+                "[model]\nparent = \"fixture-model\"\n",
+            )
+            .unwrap();
             command.cwd(&root);
             // A developer install must not receive this fixture's lifecycle
             // events. The absent command is the normal fail-soft seam.
@@ -695,10 +701,11 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     let executable = app.root.join("no-gateway");
     std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '{\"version\":1,\"accounts\":[{\"account\":\"z-account\",\"provider\":\"fixture\",\"models\":[\"z-model\"],\"scope\":\"provider-declared\"},{\"account\":\"a-account\",\"provider\":\"fixture\",\"models\":[\"b-model\",\"a-model\"],\"scope\":\"provider-declared\"}]}'\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    app.send(b"/model\r");
-    // The title now names every tier, not just that this is a model list.
-    app.contains("helper off");
+    app.send(b"/models\r");
+    // The agent tabs make every tier directly accessible.
+    app.contains("[ Helper ]");
     app.contains("a-model");
+    app.contains("z-model");
     let content = app.screen.screen().contents();
     assert!(content.find("a-account").unwrap() < content.find("z-account").unwrap());
     assert!(content.find("a-model").unwrap() < content.find("b-model").unwrap());
@@ -757,7 +764,7 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     // tab is driven directly, both directions, by
     // `provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow`;
     // what this live test still owes is that moving along it works.
-    app.contains("OPENROUTER");
+    app.contains("openrouter");
     app.send(b"\x1b[C");
     app.contains("gemini/exact");
     assert!(!app.screen.screen().contents().contains("claude/exact"));

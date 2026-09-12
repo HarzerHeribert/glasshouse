@@ -14,8 +14,9 @@ use crate::contract::ProjectConfig;
 /// in no list, so the `/` menu never offered it and it read as a command pane
 /// did not have. Being absent from a menu is how a command that works comes
 /// to look broken.
-pub const BUILT_INS: [BuiltIn; 8] = [
+pub const BUILT_INS: [BuiltIn; 9] = [
     BuiltIn::Model,
+    BuiltIn::Models,
     BuiltIn::Entitlements,
     BuiltIn::Handles,
     BuiltIn::Supervisor,
@@ -28,6 +29,7 @@ pub const BUILT_INS: [BuiltIn; 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltIn {
     Model,
+    Models,
     Login,
     Entitlements,
     Handles,
@@ -46,6 +48,7 @@ impl BuiltIn {
     pub fn name(self) -> &'static str {
         match self {
             BuiltIn::Model => "model",
+            BuiltIn::Models => "models",
             BuiltIn::Login => "login",
             BuiltIn::Entitlements => "entitlements",
             BuiltIn::Handles => "handles",

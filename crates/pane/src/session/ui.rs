@@ -501,6 +501,12 @@ fn select_panel_at(
         // The roster's whole point over Tab: the tier you want is already on
         // screen, so reaching it is one click rather than up to two cycles.
         Some(tui::PanelHit::Tier(tier)) => panel.select_tier(tier),
+        Some(tui::PanelHit::Order(order)) => panel.select_order(order),
+        Some(tui::PanelHit::Mode(index)) => {
+            panel.select_model_row(index);
+            panel.stage();
+            true
+        }
         None => false,
     }
 }
@@ -1522,6 +1528,31 @@ mod tests {
             }
         ));
         assert_eq!(state.panel.as_ref().unwrap().selected, 2);
+        let click = |state: &mut ScreenState, hit| {
+            let geometry = render_panel_geometry(state);
+            let (column, row) = point_for(&geometry, hit);
+            assert!(select_panel_at(
+                state.panel.as_mut().unwrap(),
+                &geometry,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ));
+        };
+        click(
+            &mut state,
+            tui::PanelHit::Tier(crate::spend::Tier::Subagents),
+        );
+        click(&mut state, tui::PanelHit::Mode(1));
+        assert_eq!(
+            state.panel.as_ref().unwrap().staged_commands(),
+            ["/model subagent off"]
+        );
+        click(&mut state, tui::PanelHit::Mode(1));
+        assert!(state.panel.as_ref().unwrap().staged_commands().is_empty());
     }
 
     #[test]

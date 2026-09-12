@@ -434,6 +434,7 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                 format!("/{}", command.name()),
                 match command {
                     BuiltIn::Model => "set the parent, helper or subagent model",
+                    BuiltIn::Models => "browse models by agent, provider or intelligence",
                     BuiltIn::Entitlements => "inspect available entitlements",
                     BuiltIn::Login => "connect a subscription account",
                     BuiltIn::Handles => "inspect runtime handles",

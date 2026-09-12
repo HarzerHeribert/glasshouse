@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pane::config::{CompletionStyle, PaneConfig};
+use pane::config::{AgentsMode, CompletionStyle, PaneConfig};
 
 fn unique() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -112,6 +112,12 @@ fn pane_toml_names_no_tool_path_or_grant() {
     write_pane_toml(&root, "[supervisor]\nmodel = \"../etc/passwd\"\n");
     let err = PaneConfig::load(&root).unwrap_err();
     assert!(err.contains("names no tool, path or grant"), "{err}");
+
+    let namespaced = PaneConfig::parse(
+        "[model]\nparent = \"vendor/model-302\"\n\n[helpers]\nmodel = \"vendor/helper-1\"\n",
+    )
+    .expect("provider-qualified catalogue ids are model ids, not paths");
+    assert_eq!(namespaced.model.parent.as_deref(), Some("vendor/model-302"));
 }
 
 /// `[helpers] completion` -- the only thing that decides whether an accepted
@@ -212,4 +218,53 @@ fn an_unknown_agents_key_is_refused_by_name() {
     .unwrap();
     let error = pane::config::PaneConfig::load(&root).unwrap_err();
     assert!(error.contains("modle"), "{error}");
+}
+
+#[test]
+fn agent_modes_parse_and_legacy_model_means_pinned() {
+    let automatic = PaneConfig::parse("[agents]\nmode = \"auto\"\n").unwrap();
+    assert_eq!(automatic.agents.mode, AgentsMode::Auto);
+    assert_eq!(automatic.agents.model, None);
+
+    let off = PaneConfig::parse("[agents]\nmode = \"off\"\n").unwrap();
+    assert_eq!(off.agents.mode, AgentsMode::Off);
+    assert_eq!(off.agents.model, None);
+
+    let pinned =
+        PaneConfig::parse("[agents]\nmode = \"pinned\"\nmodel = \"claude-sonnet-5\"\n").unwrap();
+    assert_eq!(pinned.agents.mode, AgentsMode::Pinned);
+    assert_eq!(pinned.agents.model.as_deref(), Some("claude-sonnet-5"));
+
+    let legacy = PaneConfig::parse("[agents]\nmodel = \"legacy-model\"\n").unwrap();
+    assert_eq!(legacy.agents.mode, AgentsMode::Pinned);
+    assert_eq!(legacy.agents.model.as_deref(), Some("legacy-model"));
+}
+
+#[test]
+fn contradictory_or_incomplete_agent_modes_are_refused() {
+    for text in [
+        "[agents]\nmode = \"pinned\"\n",
+        "[agents]\nmode = \"auto\"\nmodel = \"some-model\"\n",
+        "[agents]\nmode = \"off\"\nmodel = \"some-model\"\n",
+        "[agents]\nmode = \"inherit\"\n",
+    ] {
+        assert!(PaneConfig::parse(text).is_err(), "accepted: {text}");
+    }
+}
+
+#[test]
+fn parent_and_helper_model_fields_require_concrete_ids() {
+    for mode in ["auto", "off", "inherit"] {
+        let parent = format!("[model]\nparent = \"{mode}\"\n");
+        assert!(
+            PaneConfig::parse(&parent).is_err(),
+            "parent accepted {mode}"
+        );
+
+        let helper = format!("[helpers]\nmodel = \"{mode}\"\n");
+        assert!(
+            PaneConfig::parse(&helper).is_err(),
+            "helper accepted {mode}"
+        );
+    }
 }
