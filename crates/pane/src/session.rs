@@ -57,6 +57,7 @@ macro_rules! session_println {
 }
 
 fn record_request(notebook: &mut Notebook, measurement: RequestMeasurement) {
+    output::parent_response(&measurement);
     if let Some(used) = measurement.context_tokens() {
         let cap = notebook.context.and_then(|context| context.cap);
         notebook.context = Some(ContextTokens {
@@ -632,6 +633,7 @@ fn preflight_block(
     if record.outcome.cancelled {
         session.interrupt.consumed();
     }
+    output::preflight(&record);
     // Keep the resolved Scout beside this request for every later task-frame.
     // The next task clears it before deciding whether another preflight runs.
     transcript.notebook.preflight = Some(record.clone());
@@ -1984,6 +1986,7 @@ fn run_task_inner(
         // RuntimeState clears this ledger at each cell boundary, so each
         // record belongs to this step and enters cumulative spend once here.
         budget.add_helpers(&step.view.helpers);
+        output::cell_helpers(&step.view.helpers);
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
         let notices = runtime.take_handler_notices().join("\n");
@@ -2872,6 +2875,7 @@ fn timed_send_task_turn(
     task: &str,
 ) -> Result<(wire::Turn, u64), wire::WireError> {
     let start = Instant::now();
+    output::parent_request_started(&session.model.borrow());
     let turn = send_task_turn(conversation, session, task)?;
     let elapsed = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     Ok((turn, elapsed))
@@ -3629,6 +3633,7 @@ mod tests {
                 coverage_known: true,
                 model: "gpt-5.6-luna".into(),
                 requests: 6,
+                responses: 6,
                 reported_requests: 6,
                 input_tokens: 20_329,
                 output_tokens: 2_492,

@@ -312,6 +312,9 @@ pub struct HelperUsage {
     pub coverage_known: bool,
     pub model: String,
     pub requests: u32,
+    /// Successful provider responses received, including responses that
+    /// omitted usage. Transport and HTTP failures remain `requests - responses`.
+    pub responses: u32,
     pub reported_requests: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -341,6 +344,7 @@ impl HelperUsage {
     }
 
     fn record_response(&mut self, usage: Option<crate::wire::Usage>) {
+        self.responses = self.responses.saturating_add(1);
         let Some(usage) = usage else {
             return;
         };

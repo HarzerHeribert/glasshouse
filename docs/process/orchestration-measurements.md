@@ -5751,3 +5751,21 @@ checker observations reconcile, as do UI and ledger. The parent corrects helper
 overstatement before its verdict. This answers the batch's open question with
 observed evidence: cheap helper output needs a parent interpretation boundary;
 low token count and a passing local test alone are not completion assurance.
+
+### Wave 153 — 2026-09-12: benchmark telemetry and official TB2 adapter
+
+| package | tier | result |
+|---|---|---|
+| Pane machine telemetry | GPT-5.6 Sol worker; primary semantic audit and integration | Final machine output now splits parent/helper usage by model and four token classes, counts attempted/successful/reported provider exchanges, records every preflight invocation, cells, tool calls, failures and wall time. Six focused regressions and the complete native Pane suite pass. Missing provider usage remains explicit coverage debt. |
+| Exact-task comparator audit | GPT-5.6 Luna read-only worker; primary arithmetic correction | Four public GPT-5.3-Codex and Claude Opus 4.6 task-level baselines traced to individual official Harbor artifacts. The audit records that actual Codex CLI/Claude Code rows publish only full-suite aggregates, which cannot replace paired task results. |
+| Harbor campaign adapter | GPT-5.6 Terra worker; primary integration and live bridge smoke | Official package revision 1, four tasks × three attempts, native timeouts, no retries, concurrency two. Real Harbor config resolution and Docker-to-host authenticated relay pass; a startup schema mismatch (`listening` versus assumed `url`) was caught and fixed before any model request. |
+
+**Open-question contribution:** cheap parallel implementation found useful
+pieces, but primary integration still caught two result-contract errors: the
+Harbor verifier reward is nested, and the gateway's actual ready field was not
+the adapter's assumed spelling. That is another concrete observation that
+delegation improves breadth while moving, not eliminating, the serial boundary
+review. Worker token/cost telemetry is unavailable and is not estimated. The
+12 paid subscription attempts will supply the first complete parent/helper
+model split from the newly instrumented product; no capability box closes from
+adapter preparation alone.

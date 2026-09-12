@@ -35,12 +35,22 @@ or `pane --root PATH --resume`.
 Ordinary piped sessions retain
 their existing one-turn-per-line behavior. `json` returns one document;
 `stream-json` returns ordered JSONL events, each with `schema_version: 1`, `type`,
-and `sequence`. A final `result` reports `success`, `answer`, and `error`. Machine
+and `sequence`. A final `result` reports `success`, `answer`, `error`, and a
+typed `telemetry` object. That object records command wall time; executed and
+failed cells; main-cell tool calls and failures; provider request, response,
+unanswered, and usage-report coverage; and cumulative input, output,
+cache-read, and cache-creation tokens split between the parent and helpers and
+again by model. Every preflight helper invocation is retained in
+`telemetry.preflight_helpers`; stream output also emits it as a `helper` event
+with `call_site: "preflight"`. Missing provider usage remains visible through
+the coverage counters instead of becoming a measured zero. Machine
 output requires a single task. Diagnostics go to stderr, and failures exit
 nonzero. Normal task/startup/provider failures produce a result; argument-parser
 errors and forced process termination can occur before that result is emitted.
-The event stream includes typed messages and completed cells; it is
-not a token-by-token provider stream.
+The event stream includes typed messages, completed cells, and completed helper
+invocations; it is not a token-by-token provider stream. Tool counts describe
+the parent cell trajectory. A helper's internal observations remain in that
+helper record rather than being relabelled as parent tool calls.
 Failure to write or flush machine output also produces a nonzero exit.
 
 `--plan` starts in the existing planning mode, where model code and tools do not
@@ -192,8 +202,10 @@ Install Pane and its configured provider/gateway dependencies in the CI image.
 Supply provider authentication through the job's secret environment, choose an
 explicit model, and run `pane exec TASK --output-format json`. Capture stdout as
 the result artifact and stderr as diagnostics. Check both the process exit code
-and the result's `success` field. A successful agent exit is not a substitute
-for independently running the repository's tests.
+and the result's `success` field. Preserve the final `telemetry` object rather
+than reconstructing usage from prose or a session total: its per-model parent
+and helper rows are the evidence for mixed-model runs. A successful agent exit
+is not a substitute for independently running the repository's tests.
 
 Use the same clean worktree, task, model, permission settings, and external
 fixtures for every comparative benchmark. Record missing capabilities as
