@@ -5781,3 +5781,19 @@ outer container/VM as the security boundary, and the artifact builder runs a
 real no-provider shell tool before a campaign. This is the measurement-process
 answer: every campaign needs a scored-task canary and a harness tool canary;
 aggregate execution begins only after both pass.
+
+**Accepted campaign result:** 12 fresh trials, zero retries/exceptions, 9/12
+passes. Per task: custom heap crash 3/3, large text editing 3/3, SQLite/gcov
+2/3, C/Python polyglot 1/3. Known tokens total 1,371,727: Sol parent
+1,067,208 across 99 requests; Luna helper 304,519 across 48 requests. All 147
+provider requests succeeded and reported usage; cache-creation usage remained
+unreported, so coverage is incomplete rather than zero. The 12 recorded
+preflights accompany 91 cells (13 failed) and 134 tool calls (11 failed).
+Campaign wall was 1,675.9 seconds at concurrency two. The failure distribution
+answers a product question more strongly than the small score delta: cleanup
+and verifier-aware final-state validation are systematic gaps (two retained
+`cmain` artifacts; one gcov build-directory mismatch). Public exact-task
+baselines: Terminus 2 + GPT-5.3-Codex 14/20 and Terminus 2 + Opus 4.6 3/4;
+different harnesses/effort/environments and unequal trial counts prohibit a
+superiority claim. Full report and sealed raw-artifact hashes live in the
+separate `pane-benchmarks` checkout. No capability box closes from this pilot.

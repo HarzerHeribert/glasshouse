@@ -149,7 +149,10 @@ failure; the latter passed unchanged in the final full run. Local logs are
 `/tmp/pane-competitive-final-tests.log` and `/tmp/pane-competitive-clippy.log`.
 
 Platform-specific and integration limitations remain 🟡 even when local tests
-pass. This is not a full parity claim or a completed competitive benchmark.
+pass. The 2026-09-12 official TB2 pilot completed 12 trials at 9/12, but its
+three-trial task samples and unmatched public comparator harnesses do not make
+that a full parity or ranking claim. The sealed report is
+`/Users/eneas/projects/pane-benchmarks/TERMINAL-BENCH-RESULTS.md`.
 Usage and configuration examples are in
 [competitive-workflows.md](competitive-workflows.md). Release installation uses
 `scripts/install-local.sh` after commit, retaining prior installed versions.
