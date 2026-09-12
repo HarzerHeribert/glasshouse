@@ -206,6 +206,15 @@ def main() -> int:
             notes_text = launch_notes.read_text()
             if "Monitor(" not in notes_text:
                 failures.append("launch-notes.md does not name Monitor(...), the tool that arms the watch")
+            if "blast-radius.sh --targeted <every changed .rs file>" not in notes_text:
+                failures.append(
+                    "launch-notes.md does not tell the worker to use the targeted gate; "
+                    "a bare blast-radius run is the expensive trailing sweep"
+                )
+            if "Never run the bare/full sweep" not in notes_text:
+                failures.append(
+                    "launch-notes.md does not reserve the full blast-radius sweep for the orchestrator"
+                )
 
             # The armed path must be absolute AND must actually exist — a relative
             # `.agent-runtime/...` resolved in 1 of 64 worktrees, and every worker

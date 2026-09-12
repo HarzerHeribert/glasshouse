@@ -24,15 +24,15 @@
 # code. Same treatment here.
 #
 # USAGE
-#   scripts/blast-radius.sh                 # changed vs HEAD (default)
-#   scripts/blast-radius.sh --staged        # staged changes
-#   scripts/blast-radius.sh --since <ref>   # changed since a ref
+#   scripts/blast-radius.sh --full          # full trace, changed vs HEAD
+#   scripts/blast-radius.sh --full --staged # full trace of staged changes
+#   scripts/blast-radius.sh --full --since <ref> # full trace since a ref
 #   scripts/blast-radius.sh --dry-run       # print the plan, run nothing
 #   scripts/blast-radius.sh --list          # print traced targets + lanes, run nothing
-#   scripts/blast-radius.sh --serial        # today's single-lane behavior, byte-for-byte
-#   scripts/blast-radius.sh --targeted      # distance-zero targets only -- see TARGETED MODE below
+#   scripts/blast-radius.sh --serial        # full trace in one lane (attribution only)
+#   scripts/blast-radius.sh --targeted f.rs # worker gate; pass owned files explicitly
 #   scripts/blast-radius.sh --jobs N        # override the parallel-lane worker count
-#   scripts/blast-radius.sh f1.rs f2.rs     # explicit files
+#   scripts/blast-radius.sh --full f1.rs f2.rs # full trace of explicit files
 #
 # TARGETED MODE
 # --------------
@@ -41,9 +41,10 @@
 # changed test file's own target, a changed source file's own same-named/
 # most-specific integration target when one exists, and `--lib` filtered to
 # the changed source files' own module paths -- plus `cargo doc --no-deps`.
-# It does NOT run the symbol fan-out trace the default mode does (a changed
-# constant's four other referencing files, say), so it prints how many
-# FULL-trace targets it skipped and never lets that number pass silently.
+# It does NOT compute or run the symbol fan-out trace the default mode does (a
+# changed constant's four other referencing files, say). It says explicitly
+# that the full trace was not computed; computing it merely to print a skipped
+# count made the supposedly fast gate spend minutes scanning before testing.
 # Composes with nothing else that changes lane membership; see the refusal
 # above for --serial.
 #
@@ -134,7 +135,7 @@ fi
 cd "$REPO" || exit 1
 
 ORIG_ARGS="$*"
-DRY=0; LIST=0; SERIAL=0; TARGETED=0; STATUS=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
+DRY=0; LIST=0; SERIAL=0; TARGETED=0; FULL=0; STATUS=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)   DRY=1 ;;
@@ -142,6 +143,7 @@ while [ $# -gt 0 ]; do
     --status)    STATUS=1 ;;
     --serial)    SERIAL=1 ;;
     --targeted)  TARGETED=1 ;;
+    --full)      FULL=1 ;;
     --jobs)      JOBS="${2:-}"; shift ;;
     --staged)    MODE="staged" ;;
     --since)     MODE="since"; SINCE="${2:-}"; shift ;;
@@ -151,12 +153,22 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# --full is intentionally a semantic no-op inside the executable: the full
+# trace remains the compatibility default for scripts that invoke this one.
+# Its value is at the harness boundary, where the PreToolUse guard can tell an
+# accidental bare worker-loop run from a deliberate trailing sweep. Internal
+# callers also spell it so logs and future readers can see which tier they owe.
+
 # --targeted and --serial answer different questions (which targets to run,
 # vs. which lane to run them in) and composing them silently would make
 # --targeted's honest "I skipped N full-trace targets" line ambiguous about
 # whether the skip was scope or ordering. Refuse loudly instead of guessing.
 if [ "$TARGETED" -eq 1 ] && [ "$SERIAL" -eq 1 ]; then
   echo "blast-radius: --targeted and --serial are mutually exclusive -- --targeted already runs its small target set as a single lane" >&2
+  exit 1
+fi
+if [ "$TARGETED" -eq 1 ] && [ "$FULL" -eq 1 ]; then
+  echo "blast-radius: --targeted and --full are mutually exclusive -- choose the blocking worker gate or the trailing sweep" >&2
   exit 1
 fi
 
@@ -255,15 +267,27 @@ printf '  %s\n' "${FILES[@]}"
 # Deliberately generous about kinds (const/static/fn/struct/enum/trait/type) and
 # deliberately silent about visibility — a `pub(crate)` constant is exactly what
 # bit us, and filtering to `pub` would have missed it.
-SYMS_FILE="$(mktemp)"; trap 'rm -f "$SYMS_FILE" "${HITS_FILE:-}"' EXIT
-for f in "${FILES[@]}"; do
-  [ -f "$f" ] || continue
-  grep -hoE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(const|static|fn|struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$f" 2>/dev/null \
-    | awk '{print $NF}'
-done | sort -u | grep -vE '^(new|main|default|fmt|from|drop|clone|next|len|get|set|run|open|read|write)$' > "$SYMS_FILE"
+SYMS_FILE="$(mktemp)"; HITS_FILE="$(mktemp)"
+trap 'rm -f "$SYMS_FILE" "$HITS_FILE"' EXIT
+FULL_TRACE_COMPUTED=0
 
-echo
-printf '\033[1m=== %d defined symbol(s) to trace ===\033[0m\n' "$(wc -l < "$SYMS_FILE" | tr -d ' ')"
+if [ "$TARGETED" -eq 1 ]; then
+  : > "$SYMS_FILE"
+  : > "$HITS_FILE"
+  echo
+  printf '\033[1m=== targeted planning ===\033[0m\n'
+  echo "  full symbol fan-out not computed (the trailing --full sweep owns it)"
+else
+  FULL_TRACE_COMPUTED=1
+  for f in "${FILES[@]}"; do
+    [ -f "$f" ] || continue
+    grep -hoE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(const|static|fn|struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$f" 2>/dev/null \
+      | awk '{print $NF}'
+  done | sort -u | grep -vE '^(new|main|default|fmt|from|drop|clone|next|len|get|set|run|open|read|write)$' > "$SYMS_FILE"
+
+  echo
+  printf '\033[1m=== %d defined symbol(s) to trace ===\033[0m\n' "$(wc -l < "$SYMS_FILE" | tr -d ' ')"
+fi
 
 # ---- 2. files that REFERENCE those symbols ---------------------------------
 # A symbol referenced by dozens of files is not a blast radius, it is a common
@@ -275,23 +299,24 @@ printf '\033[1m=== %d defined symbol(s) to trace ===\033[0m\n' "$(wc -l < "$SYMS
 # drop the ones that name a concept. REPORTED_EVENTS (the constant that actually
 # bit us) reaches four files and survives; `new` reaches hundreds and does not.
 MAX_FANOUT=${BLAST_MAX_FANOUT:-12}
-HITS_FILE="$(mktemp)"
-printf '%s\n' "${FILES[@]}" > "$HITS_FILE"
-kept=0; dropped=0
-while read -r sym; do
-  [ -n "$sym" ] || continue
-  mapfile -t refs < <(grep -rlE "\b${sym}\b" crates/*/src crates/*/tests 2>/dev/null)
-  n=${#refs[@]}
-  if [ "$n" -gt 0 ] && [ "$n" -le "$MAX_FANOUT" ]; then
-    printf '%s\n' "${refs[@]}" >> "$HITS_FILE"
-    kept=$((kept+1))
-  else
-    dropped=$((dropped+1))
-  fi
-done < "$SYMS_FILE"
-sort -u "$HITS_FILE" -o "$HITS_FILE"
-printf '  %d symbol(s) kept, %d dropped as too generic (fan-out > %d)\n' \
-  "$kept" "$dropped" "$MAX_FANOUT"
+if [ "$FULL_TRACE_COMPUTED" -eq 1 ]; then
+  printf '%s\n' "${FILES[@]}" > "$HITS_FILE"
+  kept=0; dropped=0
+  while read -r sym; do
+    [ -n "$sym" ] || continue
+    mapfile -t refs < <(grep -rlE "\b${sym}\b" crates/*/src crates/*/tests 2>/dev/null)
+    n=${#refs[@]}
+    if [ "$n" -gt 0 ] && [ "$n" -le "$MAX_FANOUT" ]; then
+      printf '%s\n' "${refs[@]}" >> "$HITS_FILE"
+      kept=$((kept+1))
+    else
+      dropped=$((dropped+1))
+    fi
+  done < "$SYMS_FILE"
+  sort -u "$HITS_FILE" -o "$HITS_FILE"
+  printf '  %d symbol(s) kept, %d dropped as too generic (fan-out > %d)\n' \
+    "$kept" "$dropped" "$MAX_FANOUT"
+fi
 
 # ---- 3. map files -> cargo test targets ------------------------------------
 # crates/<pkg>/tests/<name>.rs  -> --test <name>
@@ -385,7 +410,7 @@ most_specific_integration_target() {  # <src-file> on stdout if one exists
   return 1
 }
 
-declare -a TARGETED_TESTS=() TARGETED_FILTERS=() TARGETED_BINS=()
+declare -a TARGETED_TESTS=() TARGETED_FILTERS=() TARGETED_BINS=() TARGETED_LIB_PACKAGES=()
 for f in "${FILES[@]}"; do
   # Same rule as above: only crates/<pkg>/tests/<name>.rs is an integration crate.
   # "pkg:label" throughout, same reason as the full-trace arrays above.
@@ -409,6 +434,7 @@ for f in "${FILES[@]}"; do
         TARGETED_BINS+=("$_tbinpkg:$_tbinpkg"); continue
       fi
       pkg="$(echo "$f" | cut -d/ -f2)"
+      TARGETED_LIB_PACKAGES+=("$pkg")
       tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$pkg:$tgt")
       m="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
       [ "$m" = "lib" ] || TARGETED_FILTERS+=("$pkg:$m")
@@ -422,6 +448,7 @@ done
 mapfile -t TARGETED_TESTS   < <(printf '%s\n' "${TARGETED_TESTS[@]-}"   | sort -u | sed '/^$/d')
 mapfile -t TARGETED_FILTERS < <(printf '%s\n' "${TARGETED_FILTERS[@]-}" | sort -u | sed '/^$/d')
 mapfile -t TARGETED_BINS    < <(printf '%s\n' "${TARGETED_BINS[@]-}"    | sort -u | sed '/^$/d')
+mapfile -t TARGETED_LIB_PACKAGES < <(printf '%s\n' "${TARGETED_LIB_PACKAGES[@]-}" | sort -u | sed '/^$/d')
 TARGETED_LIB=0
 [ ${#TARGETED_FILTERS[@]} -gt 0 ] && TARGETED_LIB=1
 
@@ -508,14 +535,16 @@ is_rerun_eligible() {   # is_rerun_eligible <family-or-target-name>
   return 1
 }
 
-while read -r libsrc; do
-  [ -n "$libsrc" ] || continue
-  m="$(echo "$libsrc" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
-  [ "$m" = "lib" ] && continue
-  already=0
-  for k in "${LIB_SERIAL_FAMILIES[@]}"; do [ "$m" = "$k" ] && already=1 && break; done
-  [ "$already" -eq 1 ] || LIB_SERIAL_FAMILIES+=("$m")
-done < <(grep -rlE 'Command::new|std::process::Command|tokio::process::Command|PtyProcess::spawn|CARGO_BIN_EXE|Child::' crates/*/src 2>/dev/null | sort -u)
+if [ "$TARGETED" -eq 0 ]; then
+  while read -r libsrc; do
+    [ -n "$libsrc" ] || continue
+    m="$(echo "$libsrc" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
+    [ "$m" = "lib" ] && continue
+    already=0
+    for k in "${LIB_SERIAL_FAMILIES[@]}"; do [ "$m" = "$k" ] && already=1 && break; done
+    [ "$already" -eq 1 ] || LIB_SERIAL_FAMILIES+=("$m")
+  done < <(grep -rlE 'Command::new|std::process::Command|tokio::process::Command|PtyProcess::spawn|CARGO_BIN_EXE|Child::' crates/*/src 2>/dev/null | sort -u)
+fi
 
 SERIAL_LIB_FILTERS=("${LIB_SERIAL_FAMILIES[@]}")
 SKIP_LIB_FILTERS=("${LIB_SERIAL_FAMILIES[@]}")
@@ -572,7 +601,11 @@ printf '\033[1m=== plan ===\033[0m\n'
 [ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS_DISPLAY[*]-none})  [split serial/parallel by family]"
 [ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS_DISPLAY[*]}"
 [ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS_DISPLAY[*]}  [serial]"
-echo "  --targeted would skip ${SKIPPED_FULL_TARGET_COUNT} of this full-trace's target(s)"
+if [ "$FULL_TRACE_COMPUTED" -eq 1 ]; then
+  echo "  --targeted would skip ${SKIPPED_FULL_TARGET_COUNT} of this full-trace's target(s)"
+else
+  echo "  full-trace target count not computed in targeted mode"
+fi
 
 if [ "$LIST" -eq 1 ]; then
   echo
@@ -618,7 +651,11 @@ if [ "$LIST" -eq 1 ]; then
     [ -n "$t" ] || continue
     printf '  --test %s\n' "${t#*:}"
   done
-  printf '  would skip %d full-trace target(s)\n' "$SKIPPED_FULL_TARGET_COUNT"
+  if [ "$FULL_TRACE_COMPUTED" -eq 1 ]; then
+    printf '  would skip %d full-trace target(s)\n' "$SKIPPED_FULL_TARGET_COUNT"
+  else
+    printf '  full-trace target count not computed in targeted mode\n'
+  fi
 
   echo
   echo "blast-radius: --list, nothing executed"
@@ -749,7 +786,7 @@ if [ "$TARGETED" -eq 1 ]; then
   echo
   # ---- compile the LIBRARY'S OWN test module first, because nothing below does.
   #
-  # 2026-09-02: `9f513d9` reached main with `cargo check --tests` broken -- a
+  # 2026-09-02: `9f513d9` reached main with the library test harness broken -- a
   # four-argument straggler inside `routing/session.rs`'s `#[cfg(test)]` block
   # after `FreePool::adopt_observed` grew a fifth argument. The targeted gate
   # was green: every target it runs is an integration-test binary, and those
@@ -759,16 +796,18 @@ if [ "$TARGETED" -eq 1 ]; then
   # (a worker's own gate, a fix-forward), and a green here must mean the same
   # thing everywhere. Seconds against a warm target directory; blocking, not
   # advisory -- a warning changed nothing on the day it was needed.
-  printf '\033[1m=== cargo check --tests (the lib'"'"'s own test module; no integration target compiles it) ===\033[0m\n'
-  if ! cargo check -p glasshouse --tests --quiet; then
-    echo
-    echo "blast-radius: the library's own test module does not compile."
-    echo "  This is usually a signature change with a straggler in a #[cfg(test)]"
-    echo "  block -- no integration-test binary compiles that code, so only this"
-    echo "  check sees it. A green target list below would not have meant anything."
-    exit 1
-  fi
-  echo "  cargo check --tests: clean"
+  printf '\033[1m=== library unit-test harness compile (changed packages only) ===\033[0m\n'
+  for pkg in "${TARGETED_LIB_PACKAGES[@]-}"; do
+    [ -n "$pkg" ] || continue
+    if ! cargo test -p "$pkg" --all-features --lib --no-run --quiet; then
+      echo
+      echo "blast-radius: $pkg's library test module does not compile."
+      echo "  This is usually a signature change with a straggler in a #[cfg(test)]"
+      echo "  block -- integration-test binaries compile the library without that code."
+      exit 1
+    fi
+    echo "  $pkg library unit-test harness: clean"
+  done
   echo
   printf '\033[1m=== --targeted: distance-zero targets only ===\033[0m\n'
   if [ "$TARGETED_LIB" -eq 1 ]; then
@@ -785,8 +824,7 @@ if [ "$TARGETED" -eq 1 ]; then
     run_target "${t%%:*}" "cargo test --test ${t#*:}" --test "${t#*:}" || rc=1
   done
   echo
-  printf '\033[33mblast-radius: --targeted skipped %d FULL-trace target(s) -- this is a blocking gate, not the full sweep; run the default sweep before the real gate\033[0m\n' \
-    "$SKIPPED_FULL_TARGET_COUNT"
+  printf '\033[33mblast-radius: --targeted did not compute or run the FULL symbol-fan-out trace -- this is the blocking worker gate; the orchestrator runs --full once per wave\033[0m\n'
 elif [ "$SERIAL" -eq 1 ]; then
   echo
   printf '\033[1m=== --serial: single lane, original order ===\033[0m\n'

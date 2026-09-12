@@ -348,6 +348,22 @@ pub enum Command {
         /// The request text to classify.
         text: Vec<String>,
     },
+    /// Print the published model measurements this machine has cached.
+    ///
+    /// One JSON document on stdout: every model Artificial Analysis lists,
+    /// with its intelligence, coding and agentic indices, its prices and its
+    /// measured speed. A machine surface — `pane`'s model picker orders its
+    /// catalogue by it — so a missing key, an empty cache and a failed
+    /// refresh all print an empty catalogue and exit 0 rather than failing.
+    ///
+    /// `--refresh` fetches first, when `ARTIFICIAL_ANALYSIS_API_KEY` is set,
+    /// the cache is over a day old, and the free-tier budget allows it; it
+    /// says on stderr which of those decided.
+    Analysis {
+        /// Fetch before printing, subject to the key, the age and the budget.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Show where Glasshouse would send this work, and why.
     ///
     /// Ranks every destination — the sessions this project already has and a

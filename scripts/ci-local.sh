@@ -238,7 +238,7 @@ if [ "$DO_MAC" -eq 1 ]; then
   # break what I touched" rather than "does this tree pass CI" -- and the
   # summary says so rather than letting a fast pass read as the real one.
   if [ "$SCOPED" -eq 1 ]; then
-    step "test (macos) / blast radius" scripts/blast-radius.sh
+    step "test (macos) / targeted blast radius" scripts/blast-radius.sh --targeted
   else
     step "test (macos) / build" "${ENV_SCRUB[@]}" cargo build --locked --workspace --exclude pane --all-targets
     step "test (macos) / test"  env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY sh -c 'cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'

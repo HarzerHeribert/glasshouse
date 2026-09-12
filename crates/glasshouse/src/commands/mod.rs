@@ -1,6 +1,7 @@
 //! Command implementations, one module per family. `main.rs` keeps only
 //! argument parsing and dispatch.
 
+pub(crate) mod analysis;
 pub(crate) mod assumptions;
 pub(crate) mod checkpoint;
 pub(crate) mod context_firewall;

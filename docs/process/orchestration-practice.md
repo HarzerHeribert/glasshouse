@@ -4313,6 +4313,12 @@ declared co-edit is not editable until it is claimed). The pattern is §22's:
 every one of these was already written down, and every one was broken
 anyway.
 
+The same distinction is enforced at execution now: a harness PreToolUse guard
+rejects a direct bare `blast-radius.sh`. Workers run the named test while
+editing and `blast-radius.sh --targeted <changed .rs files>` before reporting;
+the orchestrator spells a deliberate trailing sweep `blast-radius.sh --full`.
+Calls nested inside `integrate.sh` and `ci-local.sh` select their own tier.
+
 ## §90 — a "recorded limit" that says the tests bypass the real path is the defect, not a footnote
 
 **What happened.** Batch 79 ticked 1357 and 1358 (configurable score

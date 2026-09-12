@@ -48,7 +48,13 @@ pub(super) fn models(session: &Session<'_>) {
         .gateway
         .run(&["entitlements", "--json", "--refresh"], None)
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
-    show(session, model_panel(catalogue, tier_models(session)));
+    // Read once, when the panel opens, from whatever `glasshouse analysis
+    // --refresh` last cached. No network request on a keystroke.
+    show(
+        session,
+        model_panel(catalogue, tier_models(session))
+            .with_intelligence(crate::glasshouse::intelligence(session.glasshouse)),
+    );
 }
 
 /// What each tier of this session runs on right now.

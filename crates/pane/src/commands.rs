@@ -7,9 +7,14 @@
 
 use crate::contract::ProjectConfig;
 
-/// The seven names map line 2450 requires pane to offer regardless of the
-/// project, in the order they are listed there.
-pub const BUILT_INS: [BuiltIn; 7] = [
+/// The names pane offers regardless of the project.
+///
+/// The first seven are map line 2450's, in the order it lists them. `exit` is
+/// pane's own eighth: the key handler has always acted on `/exit`, but it was
+/// in no list, so the `/` menu never offered it and it read as a command pane
+/// did not have. Being absent from a menu is how a command that works comes
+/// to look broken.
+pub const BUILT_INS: [BuiltIn; 8] = [
     BuiltIn::Model,
     BuiltIn::Entitlements,
     BuiltIn::Handles,
@@ -17,6 +22,7 @@ pub const BUILT_INS: [BuiltIn; 7] = [
     BuiltIn::Rollback,
     BuiltIn::Budget,
     BuiltIn::Memory,
+    BuiltIn::Exit,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +35,9 @@ pub enum BuiltIn {
     Rollback,
     Budget,
     Memory,
+    /// End the session. It has always worked; it was not in this list, so the
+    /// `/` menu did not offer it and it read as a command pane did not have.
+    Exit,
 }
 
 impl BuiltIn {
@@ -44,6 +53,7 @@ impl BuiltIn {
             BuiltIn::Rollback => "rollback",
             BuiltIn::Budget => "budget",
             BuiltIn::Memory => "memory",
+            BuiltIn::Exit => "exit",
         }
     }
 }

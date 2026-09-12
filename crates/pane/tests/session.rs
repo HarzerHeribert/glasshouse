@@ -733,8 +733,14 @@ fn the_binary_with_no_arguments_starts_a_session_in_its_current_directory() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let rollout = root.join(".pane/rollout.jsonl");
-    assert!(rollout.is_file(), "bare pane did not use cwd as --root .");
+    // Per-session rollouts: the id is generated, so the file is found rather
+    // than named. That a bare `pane` uses cwd as its root is still the point.
+    let rollout = fs::read_dir(root.join(".pane/sessions"))
+        .expect("bare pane did not use cwd as --root .")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .next()
+        .expect("bare pane wrote no rollout");
     let lines = rollout_lines(&rollout);
     assert!(
         lines.iter().all(|line| line["kind"] != "turn"),
@@ -5134,8 +5140,11 @@ fn a_failed_preflight_still_runs_the_task() {
 /// A fake `inference-gateway`.
 ///
 /// `serve` prints the one ready line the contract fixes -- pointing at
-/// `listening`, this file's own fake provider -- and then stays alive until it
-/// is killed, as a real gateway serves until its stdin closes. **Every**
+/// `listening`, this file's own fake provider -- and then stays alive until
+/// its stdin closes, as a real gateway does. Do not replace the read loop with
+/// `sleep`: that makes every unrelated caller pay the production three-second
+/// emergency kill grace. The dedicated shutdown tests provide stubborn
+/// children when that fallback is the behavior under test. **Every**
 /// invocation, `serve` included, appends its own argv to `record`, so a test
 /// can prove both what was asked of the gateway and what was not.
 #[cfg(unix)]
@@ -5151,7 +5160,7 @@ echo "$@" >> "@RECORD@"
 case "$1" in
   serve)
     echo '{"listening":"@LISTENING@","token":"@TOKEN@"}'
-    exec sleep 120
+    while read -r _line; do :; done
     ;;
   entitlements)
     echo '{"version":1,"accounts":[{"account":"work@example.com","provider":"anthropic","models":["claude-opus-5"],"scope":"user","selectable":true,"authenticated":'"${FAKE_GATEWAY_AUTHENTICATED:-false}"',"connect_with":"anthropic"}]}'

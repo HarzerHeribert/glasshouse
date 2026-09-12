@@ -293,3 +293,36 @@ pub fn emit_tool_result(glasshouse: &Glasshouse, session: &SessionId, payload: &
         Some(payload.as_bytes()),
     );
 }
+
+/// The intelligence index of every model Glasshouse has a measurement for,
+/// keyed by the name `analysis::normalise` produces.
+///
+/// **Cached only, never a refresh.** This runs while a person is opening the
+/// model picker, so it may not make a network request; `glasshouse analysis
+/// --refresh` is the deliberate call, and this reads whatever that last left
+/// behind.
+///
+/// Empty on every failure path — Glasshouse absent, the subcommand missing on
+/// an older binary, no API key ever configured, a cache that will not parse.
+/// The picker's ordering degrades to the alphabet, which is what it did
+/// before this existed.
+pub fn intelligence(glasshouse: &Glasshouse) -> std::collections::BTreeMap<String, f64> {
+    let Some(bytes) = glasshouse.run(&["analysis"], None) else {
+        return Default::default();
+    };
+    let Ok(catalogue) = serde_json::from_slice::<Value>(&bytes) else {
+        return Default::default();
+    };
+    catalogue
+        .get("models")
+        .and_then(Value::as_object)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|(name, facts)| {
+                    Some((name.clone(), facts.get("intelligence")?.as_f64()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}

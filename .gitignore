@@ -13,3 +13,4 @@ __pycache__/
 
 # Finder metadata (2026-09-05: four of these made integrate.sh call the tree dirty)
 .DS_Store
+/.glasshouse/

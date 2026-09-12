@@ -441,6 +441,7 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     BuiltIn::Rollback => "roll back to a checkpoint",
                     BuiltIn::Budget => "inspect cumulative task spend",
                     BuiltIn::Memory => "read or save project memory",
+                    BuiltIn::Exit => "end the session, printing its resume id",
                 },
             )
         })

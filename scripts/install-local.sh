@@ -20,6 +20,16 @@
 # installing your own build on your own laptop.
 set -euo pipefail
 
+# THE BINARIES THIS PROJECT SHIPS, in one place.
+#
+# `inference-gateway` was missing from every one of the four copies of this
+# list that used to be spelled out below, while `$BINDIR/inference-gateway`
+# was a symlink into `current/bin/` all the same. So every install flipped
+# `current` to a version directory that did not contain it and left that link
+# dangling -- and `pane`, which reaches the gateway as a sibling executable,
+# lost its whole model catalogue. Measured 2026-09-11, on this machine.
+BINARIES=(glasshouse inference-gateway pane)
+
 PREFIX="${GLASSHOUSE_PREFIX:-$HOME/.local}"
 ROOT="$PREFIX/lib/glasshouse"
 VERSIONS="$ROOT/versions"
@@ -84,11 +94,11 @@ list)
   done
   exit 0 ;;
 uninstall)
-  for l in glasshouse pane glasshouse-dev; do
+  for l in "${BINARIES[@]}" glasshouse-dev; do
     [ -L "$BINDIR/$l" ] && rm -f "$BINDIR/$l"
   done
   rm -rf "$ROOT"
-  echo "removed $ROOT and the glasshouse, pane and glasshouse-dev links in $BINDIR"
+  echo "removed $ROOT and the ${BINARIES[*]} and glasshouse-dev links in $BINDIR"
   exit 0 ;;
 rollback)
   live="$(live_version)"
@@ -121,22 +131,22 @@ DEST="$VERSIONS/$VERSION"
 echo "building $VERSION ($PROFILE) ..."
 BUILD_FLAGS=(--profile "$PROFILE")
 [ "$PROFILE" = debug ] && BUILD_FLAGS=()
-( cd "$REPO" && cargo build "${BUILD_FLAGS[@]}" -p glasshouse -p pane )
+( cd "$REPO" && cargo build "${BUILD_FLAGS[@]}" -p glasshouse -p inference-gateway -p pane )
 
 BUILT="$REPO/target/$PROFILE"
-for b in glasshouse pane; do
+for b in "${BINARIES[@]}"; do
   [ -x "$BUILT/$b" ] || die "build produced no $BUILT/$b"
 done
 
 # Smoke the artifacts BEFORE anything becomes current: an install that cannot
 # print its own version is not one to point `current` at.
-for b in glasshouse pane; do
+for b in "${BINARIES[@]}"; do
   "$BUILT/$b" --version >/dev/null 2>&1 || die "$b does not run; refusing to install"
 done
 
 rm -rf "$DEST"
 mkdir -p "$DEST/bin"
-for b in glasshouse pane; do
+for b in "${BINARIES[@]}"; do
   cp "$BUILT/$b" "$DEST/bin/$b"
 done
 
@@ -160,7 +170,7 @@ PY
 previous="$(live_version)"
 mkdir -p "$BINDIR"
 point_current_at "$DEST"
-for b in glasshouse pane; do
+for b in "${BINARIES[@]}"; do
   ln -sfn "$CURRENT/bin/$b" "$BINDIR/$b"
 done
 

@@ -33,7 +33,7 @@ def _blast_source() -> str:
 
 def test_integrate_checks_the_libs_own_test_module() -> None:
     src = _source()
-    assert "cargo check -p glasshouse --tests" in src, (
+    assert "cargo test -p glasshouse --all-features --lib --no-run" in src, (
         "integrate.sh no longer compiles the library's own test module. "
         "No other gate does: integration-test binaries compile the lib "
         "without cfg(test), so a #[cfg(test)] straggler is invisible to them. "
@@ -46,7 +46,7 @@ def test_the_check_runs_before_the_targeted_gate() -> None:
     compile is a result about nothing, and reporting it first invites the
     integrator to believe it."""
     src = _source()
-    check = src.find("cargo check -p glasshouse --tests")
+    check = src.find("cargo test -p glasshouse --all-features --lib --no-run")
     gate = src.find("blast-radius.sh --targeted")
     assert check != -1 and gate != -1, "one of the two gate steps is missing"
     assert check < gate, (
@@ -60,7 +60,7 @@ def test_the_check_is_blocking_not_advisory() -> None:
     """A warning here would have changed nothing on 2026-09-02 -- the
     integrator read a green summary and pushed."""
     src = _source()
-    window = src[src.find("cargo check -p glasshouse --tests") :][:800]
+    window = src[src.find("cargo test -p glasshouse --all-features --lib --no-run") :][:800]
     assert re.search(r"\bexit 1\b", window), (
         "the lib-test compile check must abort integrate.sh, not warn. "
         "The failure it guards was pushed to main by an integrator who read "
@@ -74,7 +74,7 @@ def test_blast_radius_targeted_checks_the_libs_own_test_module() -> None:
     own gate, a fix-forward worker. A green there must mean the same thing
     it means in integrate.sh, so the check lives in both."""
     src = _blast_source()
-    assert "cargo check -p glasshouse --tests" in src, (
+    assert 'cargo test -p "$pkg" --all-features --lib --no-run' in src, (
         "blast-radius.sh --targeted no longer compiles the library's own "
         "test module; every target it runs is an integration-test binary "
         "and none of them compiles the lib with cfg(test). See 9f513d9."
@@ -83,7 +83,7 @@ def test_blast_radius_targeted_checks_the_libs_own_test_module() -> None:
 
 def test_blast_radius_check_runs_before_the_targeted_targets_and_blocks() -> None:
     src = _blast_source()
-    check = src.find("cargo check -p glasshouse --tests")
+    check = src.find('cargo test -p "$pkg" --all-features --lib --no-run')
     targets = src.find("--targeted: distance-zero targets only")
     assert check != -1 and targets != -1, "one of the two targeted-gate steps is missing"
     assert check < targets, (

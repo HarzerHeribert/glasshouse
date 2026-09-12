@@ -498,6 +498,9 @@ fn select_panel_at(
     match geometry.hit(mouse.column, mouse.row) {
         Some(tui::PanelHit::Provider(index)) => panel.select_provider(index),
         Some(tui::PanelHit::Model(index)) => panel.select_model_row(index),
+        // The roster's whole point over Tab: the tier you want is already on
+        // screen, so reaching it is one click rather than up to two cycles.
+        Some(tui::PanelHit::Tier(tier)) => panel.select_tier(tier),
         None => false,
     }
 }
@@ -879,6 +882,29 @@ fn run(
                                 panel.search_clear();
                                 continue;
                             }
+                            // Ctrl-O, not a letter: this panel's plain keys
+                            // are its search box. Not Ctrl-S either, which a
+                            // terminal takes for flow control.
+                            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                panel.cycle_order();
+                                continue;
+                            }
+                            // Space stages rather than filters. The cost is
+                            // stated because it is real: the filter's terms
+                            // are whitespace-separated and AND-ed, so it is
+                            // now reachable one term at a time. Staging is
+                            // what a person does here repeatedly; a two-term
+                            // filter is not.
+                            KeyCode::Char(' ')
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
+                                if let Some(said) = panel.stage() {
+                                    state.notice = Some(said);
+                                }
+                                continue;
+                            }
                             KeyCode::Char(c)
                                 if !key
                                     .modifiers
@@ -896,7 +922,14 @@ fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
+                            // The staged map dies with the panel, which is
+                            // the whole of "Esc throws the changes away".
+                            let discarded = panel.staged_commands().len();
                             state.panel = None;
+                            if discarded > 0 {
+                                state.notice =
+                                    Some(format!("discarded {discarded} staged change(s)"));
+                            }
                         }
                         KeyCode::Up => panel.move_selection(false, 1),
                         KeyCode::Down => panel.move_selection(true, 1),
@@ -909,7 +942,20 @@ fn run(
                         KeyCode::PageUp => panel.move_selection(false, 10),
                         KeyCode::PageDown => panel.move_selection(true, 10),
                         KeyCode::Enter => {
-                            if let Some(command) = panel
+                            // Everything staged, in tier order. `Enter` on a
+                            // panel with nothing staged still applies the
+                            // highlighted row, which is what every non-model
+                            // panel -- themes, handlers, login -- relies on.
+                            let staged = panel.staged_commands();
+                            if !staged.is_empty() {
+                                if !busy {
+                                    state.panel = None;
+                                    busy = true;
+                                    for command in staged {
+                                        let _ = answers.inputs.send(Input::Submit(command));
+                                    }
+                                }
+                            } else if let Some(command) = panel
                                 .rows
                                 .get(panel.selected)
                                 .and_then(|r| r.command.clone())

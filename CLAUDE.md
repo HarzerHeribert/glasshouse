@@ -308,8 +308,14 @@ workers, after the orchestrator had read the diff and ticked it** — every one 
 them the "no production caller" shape `cluster-b.py` finds mechanically. Run the
 script instead, and spend the reading on decisions (§86).
 
-**Before the gate, run `scripts/blast-radius.sh`.** It maps the files you changed
-to the cargo test targets that could break, and runs them. Practice §79 exists
+**In the edit loop, run the specific affected cargo test. Before a worker
+reports, run `scripts/blast-radius.sh --targeted <every changed .rs file>`.** It
+maps the files you changed to their distance-zero cargo targets and runs them.
+Do not omit the filenames: auto-detection includes every other dirty worker
+file in the checkout, and the PreToolUse guard rejects that ambiguous form.
+The orchestrator runs `scripts/blast-radius.sh --full` once per integration
+wave; the PreToolUse guard rejects an accidental bare direct invocation.
+Practice §79 exists
 because a worker ran §69's grep, the grep correctly named the affected file, and
 the worker then *read* that file and judged it unaffected — costing a full gate
 cycle for something one eight-second test run catches. Once a grep names a file,
@@ -319,8 +325,7 @@ run its tests; do not read them and decide.
 of our SDLC has become waiting … do this the smarter way"*). The blocking gate
 before an integration commit is the TARGETED one: the changed files' own
 targets plus the worker's quoted tests, re-run on the merged tree
-(`blast-radius.sh --targeted` once GH-GATE-ECONOMICS lands; until then, run
-the equivalent target list by hand). Commit and push on targeted green. The
+(`blast-radius.sh --targeted`). Commit and push on targeted green. The
 FULL two-lane sweep runs in the background per WAVE — once per two-to-four
 integrations, not once each — **and since 2026-09-05 the push itself starts
 the twelve-cell GitHub sweep, so the local wave sweep is `--macos` and the

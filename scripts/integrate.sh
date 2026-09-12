@@ -170,8 +170,8 @@ echo "  cargo fmt --all: done"
 # change whose stragglers live in a `#[cfg(test)]` block -- and it is
 # seconds against a warm target directory.
 echo
-echo "=== cargo check --tests (the lib's own test module; no other gate compiles it) ==="
-if ! cargo check -p glasshouse --tests --quiet; then
+echo "=== library unit-test harness compile (no integration target compiles it) ==="
+if ! cargo test -p glasshouse --all-features --lib --no-run --quiet; then
   echo
   echo "integrate: the library's own test module does not compile."
   echo "  This is usually a signature change with a straggler in a #[cfg(test)]"
@@ -180,11 +180,11 @@ if ! cargo check -p glasshouse --tests --quiet; then
   echo "  would not have meant anything."
   exit 1
 fi
-echo "  cargo check --tests: clean"
+echo "  glasshouse library unit-test harness: clean"
 
 echo
 if [ "${FULL_GATE:-0}" = "1" ]; then
-  scripts/blast-radius.sh
+  scripts/blast-radius.sh --full
   rc=$?
 else
   CHANGED_RS=$(git diff --name-only HEAD -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs')

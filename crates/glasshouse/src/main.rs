@@ -211,6 +211,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 )?
             );
         }
+        Some(Command::Analysis { refresh }) => {
+            println!("{}", crate::commands::analysis::run(runtime.paths(), *refresh));
+        }
         Some(Command::Classify { text }) => {
             let request = text.join(" ");
             // A model failure degrades to the heuristic and says so, rather

@@ -79,6 +79,7 @@ fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
     });
 }
 mod controls;
+mod resume;
 
 /// The longest a turn waits for an open event window to close before it is
 /// composed without one — `events-contract.md` §2's own 2,000 ms deadline
@@ -429,16 +430,22 @@ pub struct SessionArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub context_window_tokens: Option<u64>,
 
-    /// Where turns are appended and, on a later run, resumed from. Defaults
-    /// to `<root>/.pane/rollout.jsonl` so two runs against the same project
-    /// root resume each other without any extra flag.
+    /// Resume a session by the id `/exit` prints, or the newest in this
+    /// folder when given no value. A bare `pane` always starts a new one.
+    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
+    /// List this folder's resumable sessions, newest first, and exit.
+    #[arg(long)]
+    pub sessions: bool,
+
+    /// Where turns are appended, overriding the resolved session's own file.
     #[arg(long)]
     pub rollout: Option<PathBuf>,
 
     /// This session's id: the value every `glasshouse hook --session`
-    /// invocation carries. Defaults to a value derived from the process, since
-    /// nothing in map lines 2444-2451 requires it to be stable across runs
-    /// absent an explicit choice.
+    /// invocation carries, and the name `--resume` takes. Defaults to a
+    /// generated one -- [`resume`] is why it is no longer the process id.
     #[arg(long)]
     pub session: Option<String>,
 
@@ -479,15 +486,10 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
         std::iter::once("pane session".to_string()).chain(args.iter().cloned()),
     )
     .map_err(|e| e.to_string())?;
+    if parsed.sessions {
+        return resume::print_listing(&parsed.root);
+    }
     run(parsed)
-}
-
-fn default_session_id() -> String {
-    format!("pane-{}", std::process::id())
-}
-
-fn default_rollout_path(root: &std::path::Path) -> PathBuf {
-    root.join(".pane").join("rollout.jsonl")
 }
 
 /// The system block, and it is [`prompt::render_system`]'s bytes and nothing
@@ -902,6 +904,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // helper can be called from exists. A guardrail checked after the first
     // cell runs is not a guardrail.
     crate::helpers::validate().map_err(|reason| format!("pane cannot start: {reason}"))?;
+    // First, so a `--resume <id>` refusal is about which session to open
+    // rather than arriving under two lines of startup notes. Said at the end
+    // too: a crash or a closed pane never reaches `/exit`.
+    let (session_id, rollout_path) = resume::resolve_session(&args)?;
+    session_println!("{}", resume::resume_hint(&session_id));
     let project = project::load(&args.root);
     // Shared and mutable because `/model helper <id>` changes it mid-session:
     // the next cell's runtime must be built from the choice just made, not
@@ -925,16 +932,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // its own sandbox by editing the file it was derived from.
     let profile = compile_profile_once(&project, args.yolo);
 
-    let rollout_path = args
-        .rollout
-        .clone()
-        .unwrap_or_else(|| default_rollout_path(&args.root));
-    if let Some(parent) = rollout_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-    }
-
-    let session_id = SessionId::new(args.session.clone().unwrap_or_else(default_session_id));
     let glasshouse = match &args.glasshouse {
         Some(path) => Glasshouse::Command {
             glasshouse: path.clone(),
@@ -1089,6 +1086,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // own shutdown, and a job of that task must not outlive the session
     // either.
     bg::shutdown(&session_id);
+    session_println!("{}", resume::resume_hint(&session_id));
 
     glasshouse::emit_lifecycle(
         &glasshouse,
@@ -3072,6 +3070,7 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// A fixture tree and a profile that admits reading it.

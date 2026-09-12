@@ -230,7 +230,15 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    assert_eq!(slash_matches("/").len(), 26);
+    // 27 since `/exit` joined BUILT_INS. It always worked; being in no list
+    // is what made a working command look like one pane did not have.
+    assert_eq!(slash_matches("/").len(), 27);
+    assert!(
+        slash_matches("/ex")
+            .iter()
+            .any(|(name, _)| name == "/exit"),
+        "the command that ends the session must be offered by the menu"
+    );
     assert_eq!(
         slash_matches("/mo"),
         vec![

@@ -559,7 +559,14 @@ fn bare_pane_opens_the_live_composer_in_its_current_project() {
     app.contains("bare entrypoint draft");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
-    assert!(app.root.join(".pane/rollout.jsonl").is_file());
+    // One file per session now, named by the id `/exit` prints, so the
+    // assertion is that a rollout was written -- not where a single
+    // project-wide one used to live.
+    let sessions: Vec<_> = std::fs::read_dir(app.root.join(".pane/sessions"))
+        .expect(".pane/sessions")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(sessions.len(), 1, "one session, one rollout");
     assert!(!app.screen.screen().alternate_screen());
 }
 
@@ -739,15 +746,26 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.contains("gemini/exact");
     app.send(b"\x1b[D");
     app.contains("claude/exact");
-    app.contains("locked");
+    // The strip says LOCK where an open provider shows its count; the row
+    // below still gives the reason in full.
+    app.contains("LOCK");
     app.contains("Pinned to another entitlement");
     app.send(b"\r");
     assert!(requests.try_recv().is_err());
-    app.contains("▶");
+    // The four providers all fit the one-row strip, so there is nothing
+    // offscreen and no `▶` to find. That the carousel *signals* an offscreen
+    // tab is driven directly, both directions, by
+    // `provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow`;
+    // what this live test still owes is that moving along it works.
+    app.contains("OPENROUTER");
     app.send(b"\x1b[C");
     app.contains("gemini/exact");
     assert!(!app.screen.screen().contents().contains("claude/exact"));
-    app.send(b"OPENROUTER work 303");
+    // `+` rather than a space: `Space` stages a choice for the active tier
+    // now, so it no longer reaches the filter. Three terms still AND, and
+    // they have to -- this fixture's `work` and `personal` accounts both
+    // carry `vendor/model-303`, so one term cannot pick between them.
+    app.send(b"OPENROUTER+work+303");
     app.contains("1/308");
     app.contains("openrouter · work");
     app.contains("vendor/model-303");

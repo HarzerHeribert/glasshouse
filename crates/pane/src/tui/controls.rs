@@ -1,11 +1,14 @@
 //! Local session controls and scrollable command panels.
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+
 use crate::spend::Tier;
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -44,6 +47,15 @@ pub struct Panel {
     /// Present only on the model panel: which tier a chosen model is being
     /// assigned to, and what all three run on now.
     pub assignment: Option<Assignment>,
+    /// Choices made but not yet applied, one per tier — `Space` puts one
+    /// here, `Enter` applies every one of them, `Esc` throws them all away.
+    ///
+    /// **A session is three models and the panel used to only let you change
+    /// one.** `Enter` applied the highlighted row and closed, so setting a
+    /// parent and a helper meant opening the panel twice and thinking about
+    /// the order. Staging is also what makes `Esc` mean something: before it,
+    /// there was nothing to discard.
+    pub staged: BTreeMap<Tier, String>,
 }
 
 /// What picking a model in this panel will do, and to which tier.
@@ -80,6 +92,57 @@ impl TierModels {
         }
     }
 }
+/// The rows the tier roster needs before it will draw at all. The panel is a
+/// model list first: below this there is no roster, and the title still names
+/// every tier.
+const ROSTER_RESERVE: u16 = 3;
+
+/// How the catalogue is ordered — `^O` cycles it.
+///
+/// **Alphabetical is the wrong default and was the shipped one.** A flat sort
+/// puts `claude-3-5-haiku-20241022` above `claude-opus-5`, so the strongest
+/// model in a provider's list sits below its weakest and the order carries no
+/// information a person wanted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Order {
+    /// By identifier. The order a person can predict without any catalogue.
+    #[default]
+    Name,
+    /// By Artificial Analysis' intelligence index, strongest first.
+    ///
+    /// A model the catalogue does not measure sorts **last and prints no
+    /// score**, never as a zero: an unmeasured model and a weak one are
+    /// different facts and a zero would state the second.
+    Intelligence,
+}
+
+impl Order {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "ORDER ▸ NAME",
+            Self::Intelligence => "ORDER ▸ AA INDEX",
+        }
+    }
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Intelligence,
+            Self::Intelligence => Self::Name,
+        }
+    }
+}
+
+/// The lookup name for a model id.
+///
+/// Deliberately the same one line as `glasshouse::routing::analysis::normalise`,
+/// which is the source of truth and which this crate cannot call: `pane` links
+/// against no part of Glasshouse and reaches it only as a binary. Duplicating
+/// one `replace` is the cheaper of the two costs.
+fn normalise(model: &str) -> String {
+    model.trim().to_ascii_lowercase().replace(['.', '_'], "-")
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PanelSearch {
     query: String,
@@ -88,6 +151,12 @@ pub struct PanelSearch {
     providers: Vec<String>,
     active: usize,
     choices: Vec<usize>,
+    order: Order,
+    /// Normalised model name to its published intelligence index. Empty when
+    /// no catalogue was available, which is the state the panel ships in and
+    /// which [`Order::Intelligence`] renders as an unmeasured list rather than
+    /// as an empty one.
+    intelligence: BTreeMap<String, f64>,
 }
 #[derive(Debug, Clone)]
 pub struct ModelGroup {
@@ -112,16 +181,29 @@ pub struct PanelRow {
 pub(crate) struct PanelGeometry {
     providers: Vec<(Rect, usize)>,
     models: Vec<(Rect, usize)>,
+    tiers: Vec<(Rect, Tier)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelHit {
     Provider(usize),
     Model(usize),
+    /// A row of the tier roster. Clicking one moves the assignment, which is
+    /// the direct path Tab's cycle does not give: the roster shows all three,
+    /// so the one you want is already on screen.
+    Tier(Tier),
 }
 
 impl PanelGeometry {
     pub(crate) fn hit(&self, column: u16, row: u16) -> Option<PanelHit> {
+        self.tiers
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+            .map(|(_, tier)| PanelHit::Tier(*tier))
+            .or_else(|| self.hit_catalogue(column, row))
+    }
+
+    fn hit_catalogue(&self, column: u16, row: u16) -> Option<PanelHit> {
         self.providers
             .iter()
             .find(|(area, _)| contains(*area, column, row))
@@ -159,6 +241,7 @@ impl Panel {
             selected: 0,
             search: None,
             assignment: None,
+            staged: BTreeMap::new(),
         }
     }
 
@@ -174,6 +257,7 @@ impl Panel {
             selected: 0,
             search: None,
             assignment: None,
+            staged: BTreeMap::new(),
         }
     }
 
@@ -226,6 +310,89 @@ impl Panel {
             panel.provider_rows();
         }
         panel
+    }
+
+    /// Attaches the published measurements the catalogue is ordered by.
+    ///
+    /// A builder rather than a fourth argument to [`Self::models`]: the panel
+    /// is useful without a catalogue, every existing caller predates it, and
+    /// the fetch that produces one is allowed to fail.
+    #[must_use]
+    pub fn with_intelligence(mut self, intelligence: BTreeMap<String, f64>) -> Self {
+        if let Some(search) = self.search.as_mut() {
+            // **A catalogue that exists is the order the panel opens in.**
+            // Leaving the alphabet as the default made the measurements a
+            // thing you had to know to press `^O` for, which is the same as
+            // not having them. With no catalogue there is nothing to order
+            // by and the alphabet is the only honest answer.
+            search.order = if intelligence.is_empty() {
+                Order::Name
+            } else {
+                Order::Intelligence
+            };
+            search.intelligence = intelligence;
+        }
+        self.provider_rows();
+        self
+    }
+
+    /// Stages the highlighted row for the active tier, applying nothing.
+    ///
+    /// Staging the tier's *current* model is not an edit and is dropped, so
+    /// `Enter` after an accidental `Space` submits nothing rather than
+    /// re-assigning what is already there.
+    pub fn stage(&mut self) -> Option<String> {
+        let assignment = self.assignment.as_ref()?;
+        let tier = assignment.active;
+        let command = self.rows.get(self.selected)?.command.clone()?;
+        // The last word of the command is the value in every form the panel
+        // emits -- a model id, `off`, `inherit` -- which is why the label is
+        // taken from there rather than parsed back out of the row's text.
+        let chosen = command.rsplit(' ').next().unwrap_or_default().to_string();
+        if assignment.models.describe(tier) == chosen {
+            self.staged.remove(&tier);
+            return Some(format!("{} already runs {chosen}", tier.singular()));
+        }
+        self.staged.insert(tier, command);
+        Some(format!(
+            "staged {} → {chosen} · ⏎ applies {}",
+            tier.singular(),
+            match self.staged.len() {
+                1 => "it".to_string(),
+                n => format!("all {n}"),
+            }
+        ))
+    }
+
+    /// Every staged assignment, in tier order. Empty when nothing is staged,
+    /// which is what makes `Enter` fall back to the highlighted row.
+    #[must_use]
+    pub fn staged_commands(&self) -> Vec<String> {
+        self.staged.values().cloned().collect()
+    }
+
+    /// Cycles the catalogue order. `^O` rather than a letter, because this
+    /// panel's plain keys are its search box.
+    pub fn cycle_order(&mut self) -> bool {
+        let Some(search) = self.search.as_mut() else {
+            return false;
+        };
+        search.order = search.order.next();
+        self.provider_rows();
+        true
+    }
+
+    /// Assigns to `tier` directly — what clicking a roster row does.
+    pub(crate) fn select_tier(&mut self, tier: Tier) -> bool {
+        let Some(assignment) = self.assignment.as_mut() else {
+            return false;
+        };
+        if assignment.active == tier {
+            return true;
+        }
+        assignment.active = tier;
+        self.provider_rows();
+        true
     }
 
     /// Moves the assignment to the next tier, wrapping.
@@ -315,7 +482,15 @@ impl Panel {
         };
         let previous = search.providers.get(search.active).cloned();
         let query = search.query.to_lowercase();
-        let terms: Vec<_> = query.split_whitespace().collect();
+        // Terms split on `+` as well as whitespace, because `Space` now
+        // stages a choice and no longer reaches this box. Multi-term
+        // filtering is not a nicety here: two accounts on one provider can
+        // offer the same model id, and the account name is the only thing
+        // that tells them apart -- `openrouter+work+303`.
+        let terms: Vec<_> = query
+            .split(|c: char| c.is_whitespace() || c == '+')
+            .filter(|term| !term.is_empty())
+            .collect();
         search.matched = search
             .source
             .iter()
@@ -360,14 +535,21 @@ impl Panel {
         // and "off" is the state helpers ship in.
         let clearing = match tier {
             Tier::Parent => None,
-            Tier::Helpers => Some(("  ⊘ off — run no helpers", "/model helper off")),
-            Tier::Subagents => Some(("  ↳ inherit the parent's model", "/model subagent inherit")),
+            Tier::Helpers => Some(("  ⊘ OFF · run no helpers", "/model helper off")),
+            Tier::Subagents => Some(("  ↳ INHERIT · the parent's model", "/model subagent inherit")),
         };
         if let Some((text, command)) = clearing {
             search.choices.push(self.rows.len());
             self.rows.push(PanelRow {
                 text: text.to_string(),
                 command: Some(command.to_string()),
+            });
+            // A labelled rule, so what is above it reads as a state and what
+            // is below it reads as a catalogue. Prose, so it is never a
+            // target and never becomes the heading the header line quotes.
+            self.rows.push(PanelRow {
+                text: format!("  ── OR PIN ONE {}", "─".repeat(24)),
+                command: None,
             });
         }
         for group in search
@@ -403,16 +585,35 @@ impl Panel {
                 });
                 continue;
             }
-            for id in &group.models {
+            // Ordered here rather than at construction, so `^O` re-orders a
+            // list already on screen instead of rebuilding the catalogue.
+            let mut ids: Vec<&String> = group.models.iter().collect();
+            if search.order == Order::Intelligence {
+                let score = |id: &str| search.intelligence.get(&normalise(id)).copied();
+                ids.sort_by(|a, b| match (score(a), score(b)) {
+                    (Some(x), Some(y)) => y
+                        .partial_cmp(&x)
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| a.cmp(b)),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => a.cmp(b),
+                });
+            }
+            for id in ids {
                 search.choices.push(self.rows.len());
                 self.rows.push(PanelRow {
                     text: format!(
-                        "  {}{id}",
+                        "  {}{id}{}",
                         if group.selectable == Some(false) {
                             "× "
                         } else {
                             ""
-                        }
+                        },
+                        search
+                            .intelligence
+                            .get(&normalise(id))
+                            .map_or_else(String::new, |index| format!("   AA {index:.0}"))
                     ),
                     command: (group.selectable != Some(false)).then(|| match tier {
                         Tier::Parent => format!("/model {id}"),
@@ -488,21 +689,28 @@ pub(super) fn render_panel(
     theme: super::Theme,
 ) -> PanelGeometry {
     let mut geometry = PanelGeometry::default();
+    // Two double rules, not a box. A closed frame was tried and boxed the
+    // panel off from the session it is drawn over; the weight belongs in the
+    // rules themselves.
     let block = if panel.search.is_some() {
         let hint = if area.width >= 100 {
-            " ↑↓/click select · Enter apply · text selection: terminal modifier (usually Shift) · Esc close "
+            " ↑↓/CLICK MOVE · ⎵ STAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS · TEXT SELECTION: SHIFT "
         } else {
-            " ↑↓/click · Enter apply · Esc "
+            " ↑↓ MOVE · ⎵ STAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS "
         };
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(theme.accent()))
             .title(format!(" {} ", panel.title))
             .title_bottom(hint)
     } else {
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(theme.accent()))
             .title(format!(
-                " {} · ↑↓ scroll · Enter select · Esc close ",
+                " {} · ↑↓ SCROLL · ⏎ SELECT · ESC CLOSE ",
                 panel.title
             ))
     };
@@ -510,6 +718,10 @@ pub(super) fn render_panel(
     frame.render_widget(block, area);
     if let Some(search) = &panel.search {
         geometry.providers = render_providers(frame, &mut inner, search, theme);
+        if let Some(assignment) = &panel.assignment {
+            geometry.tiers =
+                render_tier_roster(frame, &mut inner, assignment, &panel.staged, theme);
+        }
         let matches: usize = search.matched.iter().map(|g| g.models.len()).sum();
         let total: usize = search.source.iter().map(|g| g.models.len()).sum();
         let prompt = if search.query.is_empty() {
@@ -525,26 +737,14 @@ pub(super) fn render_panel(
             .rev()
             .find(|(i, _)| !search.choices.contains(i))
             .map_or("", |(_, row)| row.text.as_str());
-        // The two assignment lines are why this panel is worth opening even
-        // when nobody means to change anything: they are the only place the
-        // three tiers of a session are stated together.
-        // One line, and it is why this panel is worth opening even when
-        // nobody means to change anything: the only place a session's three
-        // tiers are stated together. `▸` marks the one Enter would assign.
-        // The title already names all three; this says which one Enter would
-        // change, and it is the half that moves when Tab is pressed.
-        let assignment = panel
-            .assignment
-            .as_ref()
-            .map_or_else(String::new, |assignment| {
-                format!("Tab ⇄ assigning to {} · ", assignment.active.singular())
-            });
-        // Folded into the existing hint rather than added as a line of its
-        // own: an extra header row costs a model row, and on an 80x24
-        // terminal that pushed the last account off the panel.
+        // One line where there were two. The tier roster above states which
+        // tier `Enter` assigns to and what all three run on, so the sentence
+        // that used to say only the first of those has nothing left to add.
         let lines = [
-            format!("Search: {prompt}  · {matches}/{total}"),
-            format!("{assignment}← → provider · Ctrl-U clear"),
+            format!(
+                "FILTER ▸ {prompt}   {matches}/{total}   {}   ← → PROVIDER · ^U CLEAR",
+                search.order.label()
+            ),
             if matches > 0 {
                 group.to_string()
             } else {
@@ -624,6 +824,13 @@ pub(super) fn render_panel(
     geometry
 }
 
+/// The provider strip — one dense row, read like a station readout.
+///
+/// **It was three rows of cards, and the row it gives back is not free
+/// space: it pays for the roster below it.** The panel is a model list
+/// first, so chrome that grows has to take its rows from somewhere, and a
+/// card whose second line said "14 models" and whose third was an underline
+/// spent two rows on what fits after a separator.
 fn render_providers(
     frame: &mut Frame,
     area: &mut Rect,
@@ -631,11 +838,11 @@ fn render_providers(
     theme: super::Theme,
 ) -> Vec<(Rect, usize)> {
     let mut geometry = Vec::new();
-    if area.height < 3 || area.width < 6 || search.providers.is_empty() {
+    if area.height < 1 || area.width < 10 || search.providers.is_empty() {
         return geometry;
     }
     let available = usize::from(area.width.saturating_sub(4));
-    let visible = (available / 22).max(1).min(search.providers.len());
+    let visible = (available / 17).max(1).min(search.providers.len());
     let first = search
         .active
         .saturating_sub(visible / 2)
@@ -653,7 +860,7 @@ fn render_providers(
             area.x + 2 + (slot - first) as u16 * (card_width + 1),
             area.y,
             card_width,
-            3,
+            1,
         );
         geometry.push((card, slot));
         let locked = search
@@ -672,34 +879,99 @@ fn render_providers(
             .filter(|group| &group.provider == provider)
             .map(|group| group.models.len())
             .sum();
-        let label = super::abbreviate(provider, card_width.saturating_sub(4) as usize);
+        // The tail is the count *or* the lock, never both: a locked account's
+        // model count is not a number anybody can act on, and spending six
+        // columns to print it truncated the provider's own name.
+        let tail = if locked {
+            "LOCK".to_string()
+        } else {
+            count.to_string()
+        };
+        let label = super::abbreviate(
+            &provider.to_uppercase(),
+            card_width.saturating_sub(tail.chars().count() as u16 + 4) as usize,
+        );
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(format!(" {} {label}", if selected { "◆" } else { "·" })),
-                Line::from(format!(
-                    " {count} models{}",
-                    if locked { " · locked" } else { "" }
-                )),
-                Line::from(if selected { " ━━━━━" } else { "" }),
-            ])
+            Paragraph::new(Line::from(format!(
+                " {} {label} {tail}",
+                if selected { "\u{25c6}" } else { "\u{b7}" }
+            )))
             .style(style),
             card,
         );
     }
     if first > 0 {
         frame.render_widget(
-            Paragraph::new("◀").style(Style::default().fg(theme.accent())),
-            Rect::new(area.x, area.y + 1, 1, 1),
+            Paragraph::new("\u{25c0}").style(Style::default().fg(theme.accent())),
+            Rect::new(area.x, area.y, 1, 1),
         );
     }
     if first + visible < search.providers.len() {
         frame.render_widget(
-            Paragraph::new("▶").style(Style::default().fg(theme.accent())),
-            Rect::new(area.right() - 1, area.y + 1, 1, 1),
+            Paragraph::new("\u{25b6}").style(Style::default().fg(theme.accent())),
+            Rect::new(area.right() - 1, area.y, 1, 1),
         );
     }
-    area.y += 3;
-    area.height -= 3;
+    area.y += 1;
+    area.height -= 1;
+    geometry
+}
+
+/// The three tiers a session runs on, each on its own row, with the one
+/// `Enter` would assign marked and inverted.
+///
+/// **The thing being changed now sits next to the change.** What this
+/// replaces was a hint line reading `Tab ⇄ assigning to parent` while the
+/// values themselves were in the panel title, twelve rows away — so the
+/// panel could tell you which tier was active or what the tiers ran on, but
+/// never both in one glance. A row is also a click target, which is the
+/// direct jump `Tab`'s cycle cannot offer.
+///
+/// The rows yield to the model list rather than squeezing it: below
+/// [`ROSTER_RESERVE`] rows of space there is no roster at all, and the title
+/// still states every tier for the piped path that draws nothing.
+fn render_tier_roster(
+    frame: &mut Frame,
+    area: &mut Rect,
+    assignment: &Assignment,
+    staged: &BTreeMap<Tier, String>,
+    theme: super::Theme,
+) -> Vec<(Rect, Tier)> {
+    let mut geometry = Vec::new();
+    if area.width < 16 || area.height <= ROSTER_RESERVE {
+        return geometry;
+    }
+    for tier in Tier::every() {
+        let active = tier == assignment.active;
+        let row = Rect { height: 1, ..*area };
+        geometry.push((row, tier));
+        // The tier word is the one a person types (`/model helper luna`),
+        // upper-cased rather than renamed: a label the command does not
+        // accept would be a second vocabulary for one thing.
+        // A staged tier reads `now → next`, so an unapplied change is visible
+        // on the row it will change rather than only in a notice that scrolls.
+        let value = match staged.get(&tier).and_then(|c| c.rsplit(' ').next()) {
+            Some(next) => format!("{} → {next}", assignment.models.describe(tier)),
+            None => assignment.models.describe(tier).to_string(),
+        };
+        let text = format!(
+            " {} {:<9}{value}",
+            if active { MARK_FOCUSED } else { " " },
+            tier.singular().to_uppercase(),
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(super::abbreviate(&text, area.width as usize))).style(
+                if active {
+                    Style::default().bg(theme.accent()).fg(Color::Black)
+                } else {
+                    Style::default().bg(theme.dock()).fg(theme.accent())
+                },
+            ),
+            row,
+        );
+        area.y += 1;
+        area.height -= 1;
+    }
     geometry
 }
 
@@ -732,6 +1004,11 @@ mod tests {
         assert!(panel.rows[0].text.contains("provider-0"));
         panel.move_provider(true);
         assert!(panel.rows[0].text.contains("provider-1"));
+        // Both separators reach the same AND, which is what keeps the panel
+        // usable after `Space` stopped being a character.
+        panel.search_insert("ACCOUNT-4+exact");
+        assert_eq!(panel.search.as_ref().unwrap().providers, ["provider-4"]);
+        panel.search_clear();
         panel.search_insert("ACCOUNT-4 exact");
         assert_eq!(panel.search.as_ref().unwrap().providers, ["provider-4"]);
         assert_eq!(
@@ -867,7 +1144,15 @@ mod tests {
             screen.contains("subagent claude-sonnet-5"),
             "an unset helper and a set subagent are both named: {screen}"
         );
-        assert!(screen.contains("Tab ⇄ assigning to parent"), "{screen}");
+        // The roster states all three *and* which one Enter assigns to, in
+        // rows of its own. What this replaced said only the second half, in a
+        // hint line, while the values sat in the title.
+        assert!(screen.contains("▸ PARENT"), "the active tier is marked: {screen}");
+        assert!(screen.contains("  HELPER   off"), "{screen}");
+        assert!(
+            screen.contains("  SUBAGENT claude-sonnet-5"),
+            "every tier is a row, set or not: {screen}"
+        );
     }
 
     #[test]
@@ -952,7 +1237,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{needle}` was not drawn:\n{}", lines.join("\n")));
             let x = lines[y]
                 .chars()
-                .position(|c| c != ' ')
+                .position(|c| c != ' ' && c != '║')
                 .expect("a drawn row has a first character");
             buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())].bg
         };
@@ -983,29 +1268,47 @@ mod tests {
         for theme in super::super::Theme::ALL {
             let mut panel = catalogue();
             let mut wide = Terminal::new(TestBackend::new(80, 22)).unwrap();
+            let mut cards = PanelGeometry::default();
             wide.draw(|frame| {
-                render_panel(frame, frame.area(), &panel, theme);
+                cards = render_panel(frame, frame.area(), &panel, theme);
             })
             .unwrap();
-            assert_eq!(wide.backend().buffer()[(2, 1)].bg, theme.accent());
-            assert_eq!(wide.backend().buffer()[(27, 1)].bg, theme.dock());
+            // Sampled where the panel says it drew, not at a column counted
+            // off a previous layout: a look test that pins coordinates fails
+            // for every change of frame and reports none of them usefully.
+            let at = |slot: usize| {
+                let (area, _) = cards.providers[slot];
+                wide.backend().buffer()[(area.x, area.y)].bg
+            };
+            assert_eq!(at(0), theme.accent(), "the active provider is filled");
+            assert_eq!(at(1), theme.dock(), "a resting one still reads as a tab");
             let mut terminal = Terminal::new(TestBackend::new(44, 22)).unwrap();
             for (moves, left, right) in [(0, false, true), (2, true, true), (2, true, false)] {
                 for _ in 0..moves {
                     panel.move_provider(true);
                 }
+                let mut strip = PanelGeometry::default();
                 terminal
                     .draw(|frame| {
-                        render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme);
+                        strip = render_panel(frame, Rect::new(2, 1, 40, 20), &panel, theme);
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
-                assert_eq!(buffer[(2, 3)].symbol() == "◀", left);
-                assert_eq!(buffer[(41, 3)].symbol() == "▶", right);
-                assert_eq!(buffer[(4, 2)].bg, theme.accent());
-                assert_eq!(buffer[(4, 2)].fg, Color::Black);
-                assert_eq!(buffer[(0, 3)].symbol(), " ");
-                assert_eq!(buffer[(43, 3)].symbol(), " ");
+                // One row, inside a closed frame: the strip is at the inner
+                // top-left, so its arrows are too.
+                assert_eq!(buffer[(2, 2)].symbol() == "◀", left);
+                assert_eq!(buffer[(41, 2)].symbol() == "▶", right);
+                let active = panel.search.as_ref().unwrap().active;
+                let (card, _) = strip
+                    .providers
+                    .iter()
+                    .find(|(_, slot)| *slot == active)
+                    .copied()
+                    .expect("the active provider is always one of the drawn tabs");
+                assert_eq!(buffer[(card.x + 1, card.y)].bg, theme.accent());
+                assert_eq!(buffer[(card.x + 1, card.y)].fg, Color::Black);
+                assert_eq!(buffer[(0, 2)].symbol(), " ");
+                assert_eq!(buffer[(43, 2)].symbol(), " ");
             }
         }
         for width in [1, 5, 12, 40, 80, 160] {
@@ -1031,6 +1334,214 @@ mod tests {
         geometry
     }
 
+    /// `^O` is the answer to a 469-entry list whose alphabetical order put
+    /// `claude-3-5-haiku-20241022` above `claude-opus-5`.
+    #[test]
+    fn the_catalogue_orders_by_published_index_and_sinks_the_unmeasured() {
+        let mut panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "anthropic".into(),
+                account: "one".into(),
+                scope: "declared".into(),
+                models: vec![
+                    "claude-3-5-haiku-20241022".into(),
+                    "claude-opus-5".into(),
+                    "unlisted-model".into(),
+                ],
+                selectable: Some(true),
+                unavailable_reason: None,
+                connect: None,
+            }],
+            TierModels::default(),
+        )
+        .with_intelligence(BTreeMap::from([
+            ("claude-opus-5".to_string(), 71.0),
+            ("claude-3-5-haiku-20241022".to_string(), 34.0),
+        ]));
+
+        let ids = |panel: &Panel| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| row.command.as_deref())
+                .map(|command| command.trim_start_matches("/model ").to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids(&panel),
+            [
+                "claude-opus-5",
+                "claude-3-5-haiku-20241022",
+                "unlisted-model"
+            ],
+            "a catalogue that exists is the order it opens in: strongest first, \
+             and a model with no measurement sinks rather than sorting as a zero"
+        );
+        // The score reaches the row, so the order is inspectable rather than
+        // something a person has to take on trust.
+        assert!(
+            panel.rows.iter().any(|row| row.text.contains("AA 71")),
+            "{:?}",
+            panel.rows
+        );
+
+        assert!(panel.cycle_order());
+        assert_eq!(
+            ids(&panel),
+            [
+                "claude-3-5-haiku-20241022",
+                "claude-opus-5",
+                "unlisted-model"
+            ],
+            "^O still goes back to the alphabet"
+        );
+        assert!(panel.cycle_order());
+        assert!(
+            !panel
+                .rows
+                .iter()
+                .any(|row| row.text.contains("unlisted-model") && row.text.contains("AA")),
+            "an unmeasured model prints no score at all: {:?}",
+            panel.rows
+        );
+
+        assert_eq!(ids(&panel)[0], "claude-opus-5", "^O cycles round");
+    }
+
+    /// With no catalogue there is nothing to order by, so the alphabet is the
+    /// only honest answer and `^O` must not pretend otherwise.
+    #[test]
+    fn a_panel_with_no_catalogue_opens_on_the_alphabet() {
+        let panel = catalogue().with_intelligence(BTreeMap::new());
+        assert_eq!(panel.search.as_ref().unwrap().order, Order::Name);
+        assert!(
+            !panel.rows.iter().any(|row| row.text.contains("AA ")),
+            "no measurement, no score column"
+        );
+    }
+
+    /// Three tiers in one visit: stage each, apply once, or throw the lot
+    /// away. Before this, `Enter` applied one row and closed.
+    #[test]
+    fn space_stages_every_tier_and_enter_has_one_list_to_apply() {
+        let mut panel = Panel::models(
+            "Models",
+            vec![ModelGroup {
+                provider: "anthropic".into(),
+                account: "one".into(),
+                scope: "declared".into(),
+                models: vec!["big".into(), "small".into()],
+                selectable: Some(true),
+                unavailable_reason: None,
+                connect: None,
+            }],
+            TierModels {
+                parent: "big".into(),
+                helper: None,
+                subagent: None,
+            },
+        );
+
+        assert!(panel.staged_commands().is_empty(), "nothing is staged on open");
+
+        // Parent: staging what it already runs is not an edit.
+        assert_eq!(panel.tier(), Tier::Parent);
+        assert!(panel.stage().unwrap().contains("already runs"));
+        assert!(panel.staged_commands().is_empty());
+
+        panel.move_selection(true, 1);
+        assert!(panel.stage().unwrap().contains("small"));
+        assert_eq!(panel.staged_commands(), ["/model small"]);
+
+        // A second tier in the same visit, which is the point.
+        assert!(panel.select_tier(Tier::Helpers));
+        panel.move_selection(true, 1);
+        assert!(panel.stage().is_some());
+
+        assert!(panel.select_tier(Tier::Subagents));
+        assert!(panel.stage().unwrap().contains("staged subagent"));
+
+        let applied = panel.staged_commands();
+        assert_eq!(applied.len(), 3, "{applied:?}");
+        assert!(applied.iter().any(|c| c.starts_with("/model helper ")));
+        assert!(applied.iter().any(|c| c.starts_with("/model subagent ")));
+
+        // Re-staging one tier replaces that tier's choice rather than adding.
+        assert!(panel.select_tier(Tier::Helpers));
+        panel.move_selection(true, 1);
+        panel.stage();
+        assert_eq!(panel.staged_commands().len(), 3, "one choice per tier");
+
+        // And staging a helper's `off` row -- which is what it already runs --
+        // takes that tier back out rather than queueing a no-op.
+        panel.move_selection(false, 9);
+        assert!(panel.stage().unwrap().contains("already runs"));
+        assert_eq!(panel.staged_commands().len(), 2);
+    }
+
+    /// A staged change is visible on the row it will change, not only in a
+    /// notice that the next keystroke replaces.
+    #[test]
+    fn the_roster_shows_a_staged_tier_as_now_then_next() {
+        let mut panel = catalogue();
+        panel.select_tier(Tier::Helpers);
+        // Past the `off` row, which is what this tier already runs.
+        panel.move_selection(true, 1);
+        panel.stage();
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_panel(frame, frame.area(), &panel, super::super::Theme::Neon);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("off → "), "{screen}");
+    }
+
+    /// The roster is a click target, which is the whole of what it offers
+    /// over `Tab`: every tier is on screen, so reaching one is never a cycle.
+    #[test]
+    fn clicking_a_roster_row_assigns_to_that_tier() {
+        let panel = catalogue();
+        let drawn = geometry(&panel, 80, 22);
+        assert_eq!(
+            drawn.tiers.iter().map(|(_, tier)| *tier).collect::<Vec<_>>(),
+            Tier::every(),
+            "all three are drawn, so all three are reachable"
+        );
+
+        let (row, tier) = drawn.tiers[2];
+        assert_eq!(tier, Tier::Subagents);
+        assert_eq!(drawn.hit(row.x, row.y), Some(PanelHit::Tier(tier)));
+
+        let mut panel = panel;
+        assert_eq!(panel.tier(), Tier::Parent);
+        assert!(panel.select_tier(tier));
+        assert_eq!(panel.tier(), Tier::Subagents);
+        assert!(
+            panel
+                .rows
+                .iter()
+                .any(|row| row.command.as_deref() == Some("/model subagent inherit")),
+            "the rows follow the tier, which is what the assignment is for"
+        );
+    }
+
+    /// A panel with no rows to spare draws no roster rather than a roster and
+    /// no models.
+    #[test]
+    fn the_roster_yields_to_the_model_list_on_a_short_panel() {
+        let panel = catalogue();
+        assert!(geometry(&panel, 80, 4).tiers.is_empty());
+        assert!(!geometry(&panel, 80, 22).tiers.is_empty());
+    }
+
     #[test]
     fn hit_geometry_is_the_visible_carousel_and_scrolled_model_slice() {
         let mut panel = catalogue();
@@ -1041,7 +1552,7 @@ mod tests {
                 .iter()
                 .map(|(_, index)| *index)
                 .collect::<Vec<_>>(),
-            [0, 1, 2]
+            [0, 1, 2, 3]
         );
         let first = visible.providers[0].0;
         assert_eq!(visible.hit(first.x, first.y), Some(PanelHit::Provider(0)));
@@ -1065,7 +1576,7 @@ mod tests {
                 .iter()
                 .map(|(_, index)| *index)
                 .collect::<Vec<_>>(),
-            [2, 3, 4],
+            [1, 2, 3, 4],
             "offscreen provider tabs must not retain hit targets"
         );
 
