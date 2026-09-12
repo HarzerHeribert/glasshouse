@@ -349,19 +349,42 @@ impl Panel {
         // emits -- a model id, `off`, `inherit` -- which is why the label is
         // taken from there rather than parsed back out of the row's text.
         let chosen = command.rsplit(' ').next().unwrap_or_default().to_string();
-        if assignment.models.describe(tier) == chosen {
+        let current = assignment.models.describe(tier).to_string();
+
+        // **Space toggles, and every press changes something visible.** The
+        // first version staged only, and silently did nothing at all when the
+        // row already held the tier's current value -- so pressing Space on
+        // `OFF` with helpers already off looked like a dead key. There are
+        // three outcomes and each has a marker on the row it acts on:
+        let said = if self.staged.get(&tier) == Some(&command) {
+            // Pressing the staged row again takes it back.
             self.staged.remove(&tier);
-            return Some(format!("{} already runs {chosen}", tier.singular()));
-        }
-        self.staged.insert(tier, command);
-        Some(format!(
-            "staged {} → {chosen} · ⏎ applies {}",
-            tier.singular(),
-            match self.staged.len() {
-                1 => "it".to_string(),
-                n => format!("all {n}"),
-            }
-        ))
+            format!("unstaged {} · stays {current}", tier.singular())
+        } else if current == chosen {
+            // The row that *is* the current value means "leave this tier
+            // alone", which is how a staged change is reverted without
+            // remembering what it used to be.
+            self.staged.remove(&tier);
+            format!("{} stays {current}", tier.singular())
+        } else {
+            self.staged.insert(tier, command);
+            format!(
+                "staged {} {current} → {chosen} · ⏎ applies {}",
+                tier.singular(),
+                match self.staged.len() {
+                    1 => "it".to_string(),
+                    n => format!("all {n}"),
+                }
+            )
+        };
+        // The rows are rebuilt so the markers move, and `provider_rows`
+        // resets the cursor to the first choice -- which would throw you back
+        // to the top of 469 models on every press. The selection is the one
+        // thing staging must not disturb.
+        let was = self.selected;
+        self.provider_rows();
+        self.selected = was;
+        Some(said)
     }
 
     /// Every staged assignment, in tier order. Empty when nothing is staged,
@@ -525,6 +548,20 @@ impl Panel {
 
     fn provider_rows(&mut self) {
         let tier = self.tier();
+        // Read before the search borrow: a row says whether it is what the
+        // tier runs now and whether it is what `Enter` would apply, so that
+        // `Space` has an effect under the cursor and not only in a notice
+        // drawn below the panel, where it was easy to miss entirely.
+        let current = self
+            .assignment
+            .as_ref()
+            .map(|assignment| assignment.models.describe(tier).to_string());
+        let staged_here = self.staged.get(&tier).cloned();
+        let mark = |command: &str| match (&staged_here, &current) {
+            (Some(staged), _) if staged == command => "  ◆ STAGED",
+            (_, Some(now)) if Some(now.as_str()) == command.rsplit(' ').next() => "  · NOW",
+            _ => "",
+        };
         let Some(search) = &mut self.search else {
             return;
         };
@@ -541,7 +578,7 @@ impl Panel {
         if let Some((text, command)) = clearing {
             search.choices.push(self.rows.len());
             self.rows.push(PanelRow {
-                text: text.to_string(),
+                text: format!("{text}{}", mark(command)),
                 command: Some(command.to_string()),
             });
             // A labelled rule, so what is above it reads as a state and what
@@ -601,10 +638,14 @@ impl Panel {
                 });
             }
             for id in ids {
+                let command = (group.selectable != Some(false)).then(|| match tier {
+                    Tier::Parent => format!("/model {id}"),
+                    assigned => format!("/model {} {id}", assigned.singular()),
+                });
                 search.choices.push(self.rows.len());
                 self.rows.push(PanelRow {
                     text: format!(
-                        "  {}{id}{}",
+                        "  {}{id}{}{}",
                         if group.selectable == Some(false) {
                             "× "
                         } else {
@@ -613,12 +654,10 @@ impl Panel {
                         search
                             .intelligence
                             .get(&normalise(id))
-                            .map_or_else(String::new, |index| format!("   AA {index:.0}"))
+                            .map_or_else(String::new, |index| format!("   AA {index:.0}")),
+                        command.as_deref().map_or("", &mark)
                     ),
-                    command: (group.selectable != Some(false)).then(|| match tier {
-                        Tier::Parent => format!("/model {id}"),
-                        assigned => format!("/model {} {id}", assigned.singular()),
-                    }),
+                    command,
                 });
             }
         }
@@ -694,9 +733,9 @@ pub(super) fn render_panel(
     // rules themselves.
     let block = if panel.search.is_some() {
         let hint = if area.width >= 100 {
-            " ↑↓/CLICK MOVE · ⎵ STAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS · TEXT SELECTION: SHIFT "
+            " ↑↓/CLICK MOVE · ⎵ STAGE/UNSTAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS · SELECT TEXT: SHIFT "
         } else {
-            " ↑↓ MOVE · ⎵ STAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS "
+            " ↑↓ MOVE · ⎵ STAGE/UNSTAGE · ⏎ APPLY · TAB TIER · ^O ORDER · ESC DISCARDS "
         };
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -1446,14 +1485,25 @@ mod tests {
 
         assert!(panel.staged_commands().is_empty(), "nothing is staged on open");
 
-        // Parent: staging what it already runs is not an edit.
+        // The row that IS the tier's current value says so, and staging it
+        // means "leave this tier alone" rather than queueing a no-op.
         assert_eq!(panel.tier(), Tier::Parent);
-        assert!(panel.stage().unwrap().contains("already runs"));
+        assert!(panel.rows[panel.selected].text.contains("· NOW"), "{:?}", panel.rows);
+        assert!(panel.stage().unwrap().contains("parent stays big"));
         assert!(panel.staged_commands().is_empty());
 
         panel.move_selection(true, 1);
-        assert!(panel.stage().unwrap().contains("small"));
+        assert!(panel.stage().unwrap().contains("big → small"));
         assert_eq!(panel.staged_commands(), ["/model small"]);
+        // Every press moves a marker under the cursor, so `Space` is never a
+        // key that appears to do nothing.
+        assert!(panel.rows[panel.selected].text.contains("◆ STAGED"), "{:?}", panel.rows);
+
+        // Pressing it again on the same row takes it back.
+        assert!(panel.stage().unwrap().contains("unstaged parent"));
+        assert!(panel.staged_commands().is_empty());
+        assert!(!panel.rows[panel.selected].text.contains("STAGED"));
+        assert!(panel.stage().is_some());
 
         // A second tier in the same visit, which is the point.
         assert!(panel.select_tier(Tier::Helpers));
@@ -1468,16 +1518,22 @@ mod tests {
         assert!(applied.iter().any(|c| c.starts_with("/model helper ")));
         assert!(applied.iter().any(|c| c.starts_with("/model subagent ")));
 
-        // Re-staging one tier replaces that tier's choice rather than adding.
+        // A different row for a tier that already has one replaces that
+        // tier's choice rather than adding a second.
         assert!(panel.select_tier(Tier::Helpers));
-        panel.move_selection(true, 1);
+        panel.move_selection(true, 2);
         panel.stage();
         assert_eq!(panel.staged_commands().len(), 3, "one choice per tier");
+        assert!(
+            panel.staged_commands().iter().any(|c| c.ends_with("small")),
+            "{:?}",
+            panel.staged_commands()
+        );
 
-        // And staging a helper's `off` row -- which is what it already runs --
-        // takes that tier back out rather than queueing a no-op.
+        // And the helper's `off` row -- what it already runs -- reverts that
+        // tier rather than queueing a no-op.
         panel.move_selection(false, 9);
-        assert!(panel.stage().unwrap().contains("already runs"));
+        assert!(panel.stage().unwrap().contains("helper stays off"));
         assert_eq!(panel.staged_commands().len(), 2);
     }
 
