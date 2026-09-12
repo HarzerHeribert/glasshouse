@@ -24,6 +24,7 @@ pane --plan
 pane --ask-approval
 pane -p "Explain this screenshot" --image screenshot.png
 pane --add-dir ../shared-library
+pane exec "Run the benchmark task" --yolo --dangerously-bypass-os-sandbox
 ```
 
 `exec` without a task reads all stdin as one task. For positional tasks, place the task
@@ -77,6 +78,14 @@ credential exclusions and does not grant access to siblings. macOS/Linux
 support is implemented; Windows and combinations with configured filesystem
 deny patterns refuse explicitly. Linux's existing inner-directory write-deny
 limitations still apply. This flag does not modify the saved permission file.
+
+For a disposable Linux benchmark/CI container that already provides the OS
+boundary, `--dangerously-bypass-os-sandbox` may be paired with `--yolo`. The
+flag cannot be saved in configuration, never activates as a fallback, and is
+rejected without `--yolo`. Pane keeps command/path admission and credential
+stripping but does not install Landlock/seccomp for child tools; startup and
+tool results say that the surrounding container or VM is now the only process
+boundary. Do not use this mode for an ordinary host session.
 
 ## Git inside the sandbox
 

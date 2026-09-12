@@ -4,10 +4,10 @@
 //! `docs/product/pane/sandbox-grants.md`.
 //!
 //! The invariant the whole module exists for: **a profile is built once and
-//! can never be widened afterwards.** That is enforced by the type rather
-//! than by a comment — [`Profile`] has no public field, no setter, no method
-//! taking a mutable receiver and no shared-mutable interior, so there is no
-//! expression a later module could write that adds a grant. It also holds no
+//! can never be widened after session startup.** That is enforced by the type
+//! rather than by a comment — [`Profile`] has no public field or shared-
+//! mutable interior. Its consuming startup builders require ownership before
+//! the profile is shared with a runtime. It also holds no
 //! handle to the document it was compiled from, which is why re-reading
 //! `.claude/settings.json` mid-session — the widening path §1.5 names, since
 //! `.claude/` lives inside the writable project root — is not something a
@@ -121,12 +121,16 @@ struct NeverRule {
 
 /// The compiled profile.
 ///
-/// Every field is private and every method takes a shared receiver, which is
-/// the mechanism behind §1.1: there is no way to widen this after
-/// [`Profile::compile`] returns.
+/// Every field is private. Consuming builders apply explicit host choices
+/// before session startup; after the profile is shared, there is no way to
+/// widen it.
 #[derive(Debug, Clone)]
 pub struct Profile {
     root: PathBuf,
+    /// Explicit session-start acknowledgement that Pane's native child
+    /// confinement is bypassed. Admission checks and credential stripping
+    /// still run; only the OS sandbox layer is skipped.
+    bypass_os_sandbox: bool,
     /// Explicit host-selected directories, fixed before session start.
     additional_roots: Vec<PathBuf>,
     /// Present when the supplied project root had no unambiguous absolute
@@ -228,6 +232,7 @@ impl Profile {
         let home = home_dir().map(|home| resolve(&home, None, None));
         let mut profile = Self {
             invalid_root: None,
+            bypass_os_sandbox: false,
             never: never_rules(&root, home.as_deref()),
             root_spelling: spelling(&root),
             root,
@@ -469,6 +474,20 @@ fn register(profile: &mut Profile, pattern: &str, denying: bool) {
 }
 
 impl Profile {
+    /// Records the host-selected native-sandbox bypass before the immutable
+    /// session profile is shared with any runtime.
+    #[must_use]
+    pub(crate) fn with_os_sandbox_bypass(mut self) -> Self {
+        self.bypass_os_sandbox = true;
+        self
+    }
+
+    /// Whether this session explicitly acknowledged running children without
+    /// Pane's own OS confinement layer.
+    pub(crate) fn os_sandbox_bypassed(&self) -> bool {
+        self.bypass_os_sandbox
+    }
+
     /// The project root, resolved.
     pub fn root(&self) -> &Path {
         &self.root

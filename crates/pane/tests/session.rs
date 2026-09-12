@@ -3786,6 +3786,23 @@ fn yolo_grants_every_command_line_and_the_system_block_says_so() {
     );
 }
 
+#[test]
+fn os_sandbox_bypass_requires_an_explicit_yolo_grant() {
+    let root = scratch_dir("sandbox-bypass-needs-yolo");
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .arg("--dangerously-bypass-os-sandbox")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires --yolo"), "stderr: {stderr}");
+}
+
 /// Without `--yolo` and without a settings document the sandbox grants
 /// nothing, and the system block must say that rather than leave the model to
 /// discover it one `PermissionDenied` at a time.

@@ -491,6 +491,12 @@ pub struct SessionArgs {
     #[arg(long)]
     pub yolo: bool,
 
+    /// Skip Pane's native OS child-process confinement after an explicit
+    /// acknowledgement. Intended for disposable benchmark/CI containers
+    /// whose outer runtime is the security boundary; requires --yolo.
+    #[arg(long)]
+    pub dangerously_bypass_os_sandbox: bool,
+
     /// Ask before admitted foreground file/shell tools. O allows once, S
     /// remembers this exact call, D denies. Web, MCP, background and agents
     /// are excluded; this never grants additional permissions.
@@ -550,6 +556,11 @@ fn build_system_prompt(_project: &ProjectConfig, profile: &Profile) -> String {
         &registry::ALL.iter().collect::<Vec<_>>(),
         &session_facts(profile),
     );
+    if profile.os_sandbox_bypassed() {
+        system.push_str(
+            "\n\nDANGER: Pane's OS process sandbox is disabled by an explicit CLI bypass. The surrounding container or VM is the only process boundary.",
+        );
+    }
     system.push_str("\n\n");
     system.push_str(&crate::project::orientation::collect(profile));
     system
@@ -977,6 +988,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     {
         return Err("--ask-approval requires an interactive terminal session; scripted calls cannot approve themselves".into());
     }
+    if args.dangerously_bypass_os_sandbox && !args.yolo {
+        return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit".into());
+    }
+    if args.dangerously_bypass_os_sandbox && !cfg!(target_os = "linux") {
+        return Err("--dangerously-bypass-os-sandbox is supported only on Linux for externally isolated benchmark/CI containers".into());
+    }
     // `little-helpers.md`: a malformed roster is a refusal with one sentence,
     // and it is made here because this is the last moment before anything a
     // helper can be called from exists. A guardrail checked after the first
@@ -1032,6 +1049,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let mut profile = compile_profile_once(&project, args.yolo);
     for directory in &args.additional_dirs {
         profile = profile.with_additional_root(directory)?;
+    }
+    if args.dangerously_bypass_os_sandbox {
+        profile = profile.with_os_sandbox_bypass();
+        session_println!(
+            "sandbox: DANGER — Pane OS child-process confinement is bypassed by explicit CLI flag; the outer container or VM is the security boundary"
+        );
     }
 
     let glasshouse = match &args.glasshouse {

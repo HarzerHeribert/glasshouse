@@ -11,6 +11,16 @@ files. `cargo_test` is what needs a sandbox, not `hits.filter(...)`.
 
 ## Current implementation addendum (2026-09-12)
 
+`--dangerously-bypass-os-sandbox` is an explicit Linux-only escape hatch for
+disposable benchmark and CI containers whose outer runtime is the intended
+security boundary. It is rejected unless `--yolo` is also present, cannot be
+enabled by project/user configuration or environment variables, and is never
+selected as a fallback when Landlock/seccomp setup fails. Pane still performs
+its admission checks, strips credential variables from children, and preserves
+cancellation/process-group cleanup, but it truthfully reports every child as
+dangerously unconfined and warns that the outer container or VM is the only OS
+boundary. Ordinary sessions remain fail-closed.
+
 The historical platform evidence below remains applicable to its recorded
 regime. Current configuration and invocation examples are in
 [competitive workflows](competitive-workflows.md). This addendum records

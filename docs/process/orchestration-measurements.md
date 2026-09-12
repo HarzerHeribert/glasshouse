@@ -5769,3 +5769,15 @@ review. Worker token/cost telemetry is unavailable and is not estimated. The
 12 paid subscription attempts will supply the first complete parent/helper
 model split from the newly instrumented product; no capability box closes from
 adapter preparation alone.
+
+**Execution canary correction:** the oracle was 4/4, but the first paid task
+failed before its intended shell command because the local Docker runtime did
+not expose Pane's required Landlock/seccomp regime. The primary inspected the
+first completed failure, stopped the remaining batch, and excluded the partial
+launch as infrastructure-invalid. A Sol design audit independently recommended
+the same narrow shape: an explicit Linux-only dangerous flag, requiring
+`--yolo`, with no config/env activation and no fallback. Pane now names the
+outer container/VM as the security boundary, and the artifact builder runs a
+real no-provider shell tool before a campaign. This is the measurement-process
+answer: every campaign needs a scored-task canary and a harness tool canary;
+aggregate execution begins only after both pass.

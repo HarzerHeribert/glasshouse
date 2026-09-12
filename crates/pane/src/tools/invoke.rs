@@ -260,10 +260,10 @@ pub fn is_credential_variable(name: &str) -> bool {
         .any(|segment| CREDENTIAL_WORDS.contains(&segment))
 }
 
-/// Which mechanism confined the child. There is no `Unconfined` variant, and
-/// that is the module's first invariant expressed as a type: a platform with
-/// nothing to install returns [`PermissionDenied`] instead of a value of this
-/// type.
+/// Which mechanism confined the child, or the explicit session-start bypass
+/// selected for a disposable outer container. A platform with nothing to
+/// install still returns [`PermissionDenied`] unless that dangerous flag was
+/// supplied by the host before the session started.
 /// The in-process state is **not** a hole in the invariant above: a tool
 /// declared [`Argv::InProcess`] never becomes a child, so there is no process
 /// to confine. Its one argument that touches the filesystem went through
@@ -282,6 +282,9 @@ pub enum Confinement {
     /// no earlier moment to enter it: the container is an argument to the
     /// call that creates the process.
     AppContainer,
+    /// Pane installed no OS sandbox because the person explicitly selected
+    /// `--dangerously-bypass-os-sandbox` together with `--yolo`.
+    DangerouslyUnconfined,
     /// No child was created. The call ran inside pane, and its path was
     /// checked by `Profile::check` before it did.
     InProcess,
@@ -294,6 +297,9 @@ impl Confinement {
             Confinement::Seatbelt => "seatbelt",
             Confinement::Landlock => "landlock+seccomp",
             Confinement::AppContainer => "appcontainer",
+            Confinement::DangerouslyUnconfined => {
+                "none (explicit OS-sandbox bypass; outer isolation required)"
+            }
             Confinement::InProcess => "in-process (no child; the path was checked)",
         }
     }
@@ -1625,7 +1631,7 @@ fn spawn_confined(
         return Err(cancelled());
     }
 
-    let (mut child, confinement) = confined_spawn_with_descendants(
+    let (mut child, confinement) = spawn_with_confinement_policy(
         profile,
         &grant.binary,
         &descendant_binaries,
@@ -1900,7 +1906,29 @@ pub(crate) fn confined_spawn(
     command: Command,
     pipes: Pipes,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
-    confined_spawn_with_descendants(profile, binary, &[], tool, command, pipes)
+    spawn_with_confinement_policy(profile, binary, &[], tool, command, pipes)
+}
+
+/// Applies the explicit host-selected bypass or delegates to the platform
+/// applier. The bypass lives at the point that owns the `Command`, so a
+/// confinement error can never turn into an implicit unconfined retry.
+fn spawn_with_confinement_policy(
+    profile: &Profile,
+    binary: &Path,
+    descendants: &[PathBuf],
+    tool: &str,
+    mut command: Command,
+    pipes: Pipes,
+) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
+    if profile.os_sandbox_bypassed() {
+        apply_pipes(&mut command, pipes);
+        let child = command.spawn().map_err(SpawnRefusal::Failed)?;
+        return Ok((
+            ConfinedChild { inner: child },
+            Confinement::DangerouslyUnconfined,
+        ));
+    }
+    confined_spawn_with_descendants(profile, binary, descendants, tool, command, pipes)
 }
 
 #[cfg(target_os = "macos")]
@@ -2073,6 +2101,37 @@ fn truncate(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_os_sandbox_bypass_is_never_an_implicit_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "pane-explicit-sandbox-bypass-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = serde_json::json!({"permissions":{"allow":["Bash"]}}).to_string();
+        let profile = Profile::compile(&root, Some(&settings)).with_os_sandbox_bypass();
+        let ctx = ToolContext {
+            profile: &profile,
+            glasshouse: &Glasshouse::None,
+            session: &SessionId::new("explicit-sandbox-bypass"),
+        };
+        let result = run(
+            &ctx,
+            "bash",
+            &Args::new().with("command", "printf bypass-ok"),
+        )
+        .unwrap();
+        assert_eq!(result.stdout, "bypass-ok");
+        assert_eq!(result.confinement, Confinement::DangerouslyUnconfined);
+        assert!(
+            result
+                .confinement
+                .as_str()
+                .contains("outer isolation required")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn host_stop_predicate_cancels_glob_during_traversal() {
