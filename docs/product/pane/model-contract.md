@@ -79,6 +79,55 @@ the byte-for-byte text below remains the compatibility contract.
     that state; failed or skipped calls did not succeed. PermissionDenied is
     final: code cannot widen the session's sandbox grant.
 
+### 2.1 Interface variants
+
+`prompt::preamble_for(interface)` renders the block above for the interface the
+request declares (`tool-abi.md` §3). `Cells` is the block verbatim. `Hybrid` and
+`Tools` are the same constant with exactly the segments below replaced and
+nothing else changed, so every shared sentence has one copy;
+`prompt_bytes.rs::the_interface_variants_are_the_contracts_verbatim` pins each
+indented block here to the rendered variant. No variant says or implies that
+`execute_cell` is the only native tool or that runtime tools are callable only
+inside a cell, because in hybrid mode neither is true.
+
+**Hybrid.** The opening tool sentences (*To act with tools … callable only
+inside its code.*) become:
+
+    To act, call a familiar tool directly for one independent operation, or make
+    exactly one `execute_cell` call for dependent, branching, looped or batched
+    work. Inside a cell the same tools are typed async functions with the same
+    arguments and results.
+
+and the completion sentence (*A prose response with no `execute_cell` call …*)
+becomes:
+
+    A prose response with no tool call ends the task as the answer.
+
+**Tools.** The opening tool sentences become:
+
+    To act, call the familiar tools directly; each call's result is runtime
+    evidence.
+
+The rest of the opening paragraph (*While you construct the call … runtime
+evidence.*) becomes:
+
+    Stop at the next decision that needs unseen evidence. After each call, wait
+    for its correlated result. Never invent output or infer success: only that
+    result is runtime evidence.
+
+The second paragraph (*A cell is validated … `exit_code` says so.*) describes
+cell mechanics a request without `execute_cell` cannot use, and becomes:
+
+    Pane binds an edit to the latest observed source version. A command result
+    succeeded only when its `exit_code` says so.
+
+The completion sentence becomes the hybrid one:
+
+    A prose response with no tool call ends the task as the answer.
+
+The persistent-bindings and completion paragraphs stay in every variant: a
+top-level returned string or a prose reply still ends the task.
+
 ## 3. Tool declarations are TypeScript, one line of prose each
 
 Each tool renders as a `declare function` signature, one `//` doc line, and
@@ -129,7 +178,12 @@ retain normal `read` semantics.
 
 `edit({path, expected_sha256?, old, replacement})` replaces one nonempty, exact,
 uniquely matching string. It writes only when the current file still has the
-version returned by `context` in a prior completed cell. Pane supplies the hash
+version returned by `context` in a prior completed cell, or the version a
+previous `edit`/`write` of the same path produced — Pane registers its own
+mutations as visible, so only an external change is stale.
+`edit({path, olds, replacements})` applies several hunks as one atomic
+mutation: each `olds[i]` must match exactly once in the original text and the
+matches must not overlap, or nothing is written and the error names the hunk. Pane supplies the hash
 when exactly one complete version of that path is visible; the caller supplies
 `expected_sha256` to disambiguate multiple versions. Stale, missing, ambiguous
 and no-op requests throw without writing or retrying. `write` remains the

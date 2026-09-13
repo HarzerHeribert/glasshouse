@@ -1325,3 +1325,60 @@ claim/evidence verification
 A conventional harness gives the model a tool.
 
 Pane should give it the same familiar handle to a much stronger machine.
+
+---
+
+## 31. Landed 2026-09-13 — the roadmap's kernel, prompt and telemetry changes
+
+`smarter-cheaper-roadmap.md` (*Implementation status*) is the row-by-row
+record; this section states what changed in the contracts above.
+
+**§3, the interface-aware prompt.** The system preamble and the
+`execute_cell` description are rendered per interface
+(`prompt::preamble_for`, `prompt::declarations::execute_cell_description`;
+`model-contract.md` §2.1). In `hybrid` and `tools` mode no sentence says or
+implies that `execute_cell` is the only native tool. Cells mode keeps the
+byte-for-byte block. The `## This session` block gains an `## Environment`
+manifest (`manifest::Manifest`): readable and writable roots, reserved
+paths, deny patterns, the command policy, never-admitted names, present and
+absent executables, container mode and unavailable capabilities.
+
+**§13.4, mutation composition.** A successful `edit` or `write` registers
+the version it produced as the visible version of that path, so the next
+edit of the same file — in the same cell or a later one — binds to it; only
+an external change is stale. `edit({path, olds, replacements})` (dialects:
+`old_strings`/`new_strings`) compiles N hunks into one checked atomic
+mutation; a hunk that fails leaves the file byte-identical and names its
+index and reason.
+
+**§18, per-call outcomes in a fused frame.** A frame of two or more direct
+calls isolates each one: a denial or throw in one stops no sibling, the
+trajectory records every call in order, each `tool_result` carries its own
+recorded message, and the binding of a failed call is freed rather than
+listed. A lone call still throws. An authored cell keeps JavaScript
+semantics and its result gains an `## Effects` section naming the effectful
+calls that completed before a throw.
+
+**§19, the delta table.** The turn's `## Handles` is
+`handles::render_table_delta`: entries changed this cell or pinned by `keep`
+in full, every other live handle as one `name  Type  (unchanged since cell
+N)` line. `handles()` and the rollout keep the exact inventory; nothing is
+evicted. `ObservationStats` rides every turn.
+
+**§20, the ledger.** `CallRecord` gains optional `exit_code`, `repeat_of`
+(a pure observation identical to an earlier one, by SHA-256) and `error`.
+
+**§27, telemetry.** `--output-format json|stream-json` carries `interface`
+(provider-selected calls by name), `frames.by_origin`, `single_intent_cells`,
+`failures.by_kind|by_origin` (`syntax`, `denial`, `mutation_conflict`,
+`process_signal`, `timeout`, `infrastructure`, `command`, `runtime`),
+`lifting`, `observation`, `reductions`, `recovery.by_cause`
+(`implementation`, `exploration`, `verification`, `repair`), `completion`,
+`progress` and `capsule`. `pane ruler run --pane-interface hybrid,cells,tools`
+runs matched arms and reports interface regret from those documents.
+
+**Completion.** A terminal return is held once when the deterministic
+final-state contract (`completion::check`) or the fresh independent checker
+(`[helpers] completion_check`) finds something; the same findings a second
+time finish with `completion.verified = false`. A task cut off by the cell
+limit, a poisoned runtime or a provider failure salvages its capsule.

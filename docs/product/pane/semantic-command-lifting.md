@@ -674,3 +674,13 @@ Do not ask the user to choose ordinary parser structures or internal representat
 Most importantly:
 
 > **If Pane can prove the meaning, upgrade the implementation under the familiar call. If it cannot prove the meaning, execute what the model actually asked for.**
+
+## Telemetry as shipped — 2026-09-13
+
+The machine result's `lifting` object counts `shell_shaped` calls (every
+`bash` call and every lifted call), `recognized` (a `CallRecord` with
+`lifted_from`), `fallback`, and `by_family` from `lift::classify` over the
+checked command. Repeated pure observations — the same tool, the same checked
+arguments and the same SHA-256 — carry `repeat_of` on the record and count
+under `observation.repeated_observations`; the call still runs, because the
+hash is what decides.

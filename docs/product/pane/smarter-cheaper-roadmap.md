@@ -1,6 +1,9 @@
 # Pane smarter-and-cheaper execution roadmap
 
-Status: product direction and measured gap register, 2026-09-13.
+Status: product direction and measured gap register, 2026-09-13; the register's
+rows were implemented the same day — see *Implementation status* at the end,
+which is the truthful state of each row, and `docs/product/evidence/phase-65.md`
+for the evidence per map line (map Phase 65, lines 2580–2594).
 
 This record turns the Terminal-Bench pilot, the Tool ABI design, and the useful
 parts of GVS5H's ledger-based orchestration into one product plan. It does not
@@ -232,3 +235,64 @@ experiment, not a present product claim.
 This order preserves the core Tool ABI thesis: the parent may choose familiar
 direct tools or composed cells, but Pane must make either choice smarter than
 the raw provider interaction and must prove the saving in expensive attention.
+
+## Implementation status — 2026-09-13
+
+Each row of the register above, with what now exists, the tests that pin it,
+and what is still genuinely open. **No model-backed campaign has run on this
+code**; every "measured" figure in the register above is still the pilot's, and
+every row marked *Complete* here is complete as an implementation with
+deterministic evidence, not as a measured product claim. The next campaign is
+specified under *The next model-backed ablation*.
+
+| Row | State | What exists now | Evidence | Still open |
+|---|---|---|---|---|
+| Interface-origin telemetry | Complete | `telemetry.interface` (provider-selected `execute_cell` vs direct calls by name), `frames.by_origin`, `operations_per_frame_mean`, `operations_per_parent_request_mean`, `single_intent_cells`, `failures.by_kind`/`by_origin`, `lifting`, `observation`, `reductions`, `recovery.by_cause`, `completion`, `progress`, `capsule` in `--output-format json`/`stream-json` | `tests/telemetry_taxonomy.rs` (23), `tests/session_output.rs::{provider_selected_interface_is_counted_and_every_v1_field_stays, direct_tool_and_authored_frames_are_counted_by_origin, a_request_after_a_thrown_cell_is_charged_to_repair}` | The single-intent detector is a documented heuristic (false negatives only) |
+| Hybrid interface choice | Built, unproven | The prompt no longer biases the choice: `prompt::preamble_for(interface)` and `execute_cell_description(interface)` describe hybrid and tools modes truthfully (`model-contract.md` §2.1); the ruler runs matched `pane:hybrid/cells/tools` arms and computes interface regret | `tests/prompt_interface.rs` (7), `tests/interface_regret.rs` (5), `tests/ruler_run.rs` | The matched trials themselves |
+| Familiar Tool ABI correctness | Complete | Multi-call direct frames isolate each call; `Edit`/`apply_patch` gain `old_strings`/`new_strings`; lowered `Bash` keeps `reduced`/`reduction_error` | `tests/direct_frame_outcomes.rs` (5), `tests/abi.rs`, `abi::tests::a_bounded_process_result_keeps_its_derived_view_beside_the_exact_bytes` | Real-work exercise of the façades is the campaign's |
+| TypeScript Cell contract | Complete | `FreeNames` never reads a type position; `cell::ERASABLE_CONSTRUCTS` (24) all compile, keep every column and run; `NOT_ERASABLE_CONSTRUCTS` (6) are refused by name with an alternative before execution | `tests/typescript_contract.rs` (4, incl. `as_const_in_an_object_literal_compiles_and_runs`), `runtime::cell::tests` | — |
+| Capability/environment manifest | Complete | `manifest::Manifest::collect` from the compiled profile plus a 24-executable `PATH` probe, rendered as `## Environment` in the system block (readable/writable roots, reserved paths, deny patterns, command policy, never-admitted names, absent executables, container mode, unavailable capabilities) | `tests/container_profile.rs`, `manifest::tests`, `tests/session.rs::the_system_block_is_render_systems_own_bytes` | — |
+| Benchmark container profile | Complete | Under `--yolo --dangerously-bypass-os-sandbox` (Linux only, CLI only): reads span the container except credential stores and deny patterns; debuggers are admitted; sandbox launchers stay refused; writes unchanged; ordinary sessions byte-identical | `tests/container_profile.rs` (12) | The adapter still grants `/usr/local/bin` by name for one task |
+| Tool outcome semantics | Complete | Direct frames: a denial or throw in one call stops no sibling and its binding is freed; each `tool_result` carries its own recorded message. Authored cells: JavaScript semantics unchanged, plus an `## Effects` section naming the effectful calls that completed before a throw | `tests/direct_frame_outcomes.rs`, `session::tests::partial_effects_name_only_completed_effectful_calls_of_a_thrown_cell` | — |
+| Transactional mutation composition | Complete | A successful `edit`/`write` registers its resulting version as visible; `edit({olds, replacements})` applies N hunks atomically or not at all; only an external change is stale | `tests/mutation_composition.rs` (9), `tests/exact_edit.rs` | — |
+| Observation delta | Complete | `handles::render_table_delta`: entries changed this cell (or pinned by `keep`) in full, the rest one line each; `handles()` and the rollout keep the inventory; `ObservationStats` per turn | `tests/observation_delta.rs` (8), `tests/handles.rs` | — |
+| Handle lifecycle | Complete | `keep` pins; redeclaration unpins; unchanged handles render as `(unchanged since cell N)`; nothing is evicted | same | Explicit `unpin` host function not exposed |
+| Semantic read/search lifting | Complete (dedup), proven deterministically | Repeated pure observations carry `repeat_of` and a header suffix; lifting counted by family | `tests/observation_dedup.rs` (7), `tests/lifting.rs` | Context/round-trip effect is the campaign's |
+| Adaptive result reduction | Complete | Threshold `[helpers] reduce_above_tokens` (default 2,048), attempted only when the expected parent saving is positive; `ReductionStats` in telemetry; exact output always complete | `tests/observation_dedup.rs` (reduction section) | Measured saving |
+| Structured task capsule | Complete | `runtime::capsule::Capsule` maintained from the trajectory; `## Task` block in live feedback when it changes; on every `CellView` and in the result telemetry | `tests/task_capsule.rs` (4); `tests/evidence_gate.rs::the_task_capsule_reaches_the_feedback_and_the_result` | — |
+| Evidence-gated completion | Complete | A terminal return is held once when findings exist; the same findings a second time finish with `completion.verified = false`; `completion.deferred` counts the holds | `session::TaskState::gate`; `tests/final_state_contract.rs`; `tests/evidence_gate.rs` (5 binary-level canaries through the built `pane` against a loopback provider: stray binary, misplaced coverage, declared-but-unrun check, planted repeat, capsule) | Live measurement |
+| Final-state contract checker | Complete | `completion::check`: unexpected compiled artifact beside a deliverable, coverage tree outside the source tree, stale verification, no verification only where the project declares checks or a `[contract]` (the unconditional form held two ordinary fixtures for no evidence — integration ruling), plus `[contract]` in `checks.toml` | `tests/final_state_contract.rs` (6, the three pilot fixtures) | — |
+| Fresh independent checker | Complete | `[helpers] completion_check = true` runs CHECKER once on the original request, the task diff, the capsule's facts and the findings only | `completion::fresh_checker_evidence` tests | Live measurement |
+| Preflight Helper | Complete | The Scout receives a scouting brief and answers Constraints/Files/Tests/Capabilities/Risks; never the task | `tests/preflight_scout.rs` (12), `tests/helpers.rs` | — |
+| No-progress guard | Complete | `progress::Guard`: same calls, same failure, unchanged tree twice in a row → one notice; a succeeding frame resets the guard, so a repeated successful read is never a notice | `tests/no_progress.rs` (4); `tests/evidence_gate.rs::an_identical_failing_cell_repeated_is_noticed_once_and_counted` | — |
+| Verified checkpoint | Complete | `progress::Checkpoints`; the capsule shows `UnverifiedSince`; the gate flags stale verification | same | — |
+| Cut-off salvage | Complete | `Capsule::salvage` on the cell limit, a poisoned runtime or a provider failure; emitted as `telemetry.capsule` | `tests/task_capsule.rs` | Optional cheap summariser not added |
+| Adaptive orchestration | Complete | `[helpers] preflight_scope = "auto"` (default) scouts only on uncertainty signals | `tests/preflight_scout.rs` | — |
+| Recovery-cost attribution | Complete | `recovery.by_cause.{implementation,exploration,verification,repair}` with requests, token classes and wall time | `tests/session_output.rs::a_request_after_a_thrown_cell_is_charged_to_repair` | — |
+| Interface ablation runner | Complete | `pane ruler run --pane-interface hybrid,cells,tools --credit-ratio luna=…`, `pane-result.json` per arm, regret table; the Terminal-Bench adapter's `interface` option | `tests/interface_regret.rs`, `tests/ruler_run.rs`, `pane-benchmarks/tests` | The campaign |
+
+### The next model-backed ablation
+
+Not run in this session by instruction. The campaign that should follow:
+
+- **Arms:** `pane-terminal-bench` with `agent.interface` = `hybrid`, `cells`, `tools`;
+  same four tasks, three attempts each, concurrency two, official timeouts,
+  `gpt-5.6-sol` medium parent and `gpt-5.6-luna` helper, `preflight = true` with
+  the default `preflight_scope = "auto"`, `completion_check = true`.
+- **Expected attempts:** 36 trials (3 arms × 4 tasks × 3 attempts). The pilot's
+  12 trials took 27m 56s of campaign wall time at concurrency two, so budget
+  about 90 minutes of wall time.
+- **Expected subscription usage:** the pilot spent 1,371,727 known tokens for
+  12 trials (1,067,208 Sol, 304,519 Luna). With auto-scoped preflight and the
+  delta table the per-trial figure should fall; plan for up to 3 × the pilot,
+  roughly 4.1 M known tokens across both models, on the ChatGPT subscription
+  route (no API billing).
+- **What decides:** per task, `interface regret` from `pane ruler`'s report and
+  `metrics.py`'s per-trial sections — verified passes, parent requests, repair
+  requests, frames failed, observation bytes, weighted spend. The predeclared
+  test is non-inferiority of hybrid on verified passes plus lower Sol requests
+  per verified pass; zero `unexpected_artifact`/`coverage_outside_tree`
+  completions is the completion-integrity check.
+- **Before it:** replay the three final-state fixtures through the installed
+  binary as canaries (`tests/final_state_contract.rs` is the deterministic
+  half), and run one provider-free canary per arm with the adapter.

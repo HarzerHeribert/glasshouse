@@ -20768,3 +20768,51 @@ Success means competitor-level verified correctness at lower weighted cost per
 verified pass and lower Sol attention. Raw Luna tokens are not priced as Sol
 tokens. The implementation and measurement register is
 `docs/product/pane/smarter-cheaper-roadmap.md`.
+
+## Pane container mode, the interface-aware prompt, self-registered mutation versions and the evidence gate — 2026-09-13
+
+Four decisions the roadmap's implementation needed and the register did not
+state; each is the user's ruling of 2026-09-13 (*Pane wins by spending less
+expensive attention*) applied to a specific boundary.
+
+**Container mode is a named policy, not a wider sandbox.** Under the explicit
+`--yolo --dangerously-bypass-os-sandbox` (Linux, CLI only, never
+configuration) the compiled profile answers two questions differently, and
+only those two: a read outside the project root is granted unless a
+never-grantable rule or a `deny` pattern refuses it, and a debugger
+(`gdb`, `lldb`, `strace` and the rest of §4.6's attach set) is admitted. The
+sandbox launchers stay refused, writes stay root plus `--add-dir`, credential
+stores stay unreadable. The reason is the one §4.6 gives for refusing
+debuggers — attaching to a process escapes Pane's sandbox — and under the
+bypass there is no Pane sandbox to escape; the container is the named
+boundary. An ordinary session is byte-identical (`tests/container_profile.rs`).
+
+**The preamble is per interface.** The byte-for-byte block in
+`model-contract.md` §2 stays the cells-only contract; hybrid and tools modes
+render the same constant with the sentences that claim `execute_cell` is the
+only native tool replaced (§2.1 states them verbatim). A prompt that
+contradicts the tools it declares is a bias, and the roadmap forbids forcing
+either interface.
+
+**A mutation Pane performed is a version Pane knows.** A successful `edit` or
+`write` registers the resulting SHA-256 as the visible version of that path
+at once, so the next edit binds to it; the writer still compares disk, so an
+external change is still stale. The pilot's two "source version changed"
+refusals were Pane refusing its own work.
+
+**A terminal return is held once on fresh contradictory evidence.** The
+deterministic final-state contract (stray compiled artifacts beside a
+deliverable, coverage trees outside the source tree, stale verification,
+and missing verification only where the project declares a check or a
+`[contract]` — the unconditional form held two ordinary fixtures with no
+evidence behind the hold, so a project that declares nothing is not asked
+to verify anything — plus `[contract]` in `checks.toml`) and, when configured, one
+fresh independent checker run over the original request, the diff and the
+capsule's facts, hold the return and hand the findings to the next turn. The
+same findings a second time let the model finish, and the completion is
+recorded `verified = false` in the machine result rather than refused: the
+model owns the decision, Pane owns the evidence. `[limits] evidence_gate =
+false` is an ablation switch, not a product mode.
+
+The rows, tests and limits are in `docs/product/pane/smarter-cheaper-roadmap.md`
+(*Implementation status*) and `docs/product/evidence/phase-65.md`.
