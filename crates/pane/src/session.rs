@@ -442,9 +442,9 @@ pub struct SessionArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Which entry points the model is shown: `hybrid` (familiar tools and
-    /// `execute_cell`), `cells`, or `tools`. Visibility only -- every mode
-    /// runs the same capabilities through the same executor.
+    /// Which entry points the model is shown: `cells` (default, `execute_cell`
+    /// only), `hybrid` (familiar tools and `execute_cell`) or `tools`.
+    /// Visibility only -- every mode runs the same capabilities.
     #[arg(long, value_parser = crate::abi::Interface::parse)]
     pub interface: Option<crate::abi::Interface>,
 

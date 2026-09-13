@@ -178,6 +178,12 @@ Pane MAY expose runtime modes for benchmarking, compatibility, diagnostics, and 
 
 These modes MUST NOT select different execution architectures.
 
+`cells` is the default (the user's decision of 2026-09-13 on the matched
+ablation: cells-only 12/12 verified with the fewest parent requests, hybrid
+11/12 with a third more, tools-only 10/12 — `smarter-cheaper-roadmap.md`,
+*The 2026-09-13 ablation*). `hybrid` and `tools` stay available by flag; no
+quota of direct calls is forced in any mode.
+
 ### `--interface=cells`
 
 The parent sees only `execute_cell`.

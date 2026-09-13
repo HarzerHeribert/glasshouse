@@ -29,12 +29,16 @@ pub use provenance::{EvidenceClass, Provenance};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Interface {
     /// Only `execute_cell` is declared. The familiar bindings still exist
-    /// inside the cell.
+    /// inside the cell. **The default** — the user's decision of
+    /// 2026-09-13 on the matched ablation (`smarter-cheaper-roadmap.md`,
+    /// *The 2026-09-13 ablation*): cells-only passed 12/12 with the fewest
+    /// parent requests; hybrid 11/12 with a third more; tools-only 10/12.
+    #[default]
     Cells,
     /// Only the dialect's direct tools are declared.
     Tools,
-    /// Both. The intended product mode.
-    #[default]
+    /// Both: the measured alternative, kept as an option for callers that
+    /// want the familiar tools declared. No quota is forced either way.
     Hybrid,
 }
 
@@ -358,8 +362,10 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_is_the_default_mode() {
-        assert_eq!(Interface::default(), Interface::Hybrid);
+    fn cells_is_the_default_mode() {
+        // The user's decision of 2026-09-13 on the matched ablation; the
+        // behavioural pin is `tests/prompt_interface.rs`.
+        assert_eq!(Interface::default(), Interface::Cells);
     }
 
     #[test]

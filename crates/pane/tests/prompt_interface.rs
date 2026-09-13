@@ -216,3 +216,27 @@ fn a_manifest_renders_once_as_its_own_block_after_this_session() {
         "a manifest adds one block and changes nothing else"
     );
 }
+
+/// The default interface is cells-only — the user's decision of 2026-09-13
+/// on the matched ablation (`smarter-cheaper-roadmap.md`, *The 2026-09-13
+/// ablation*). Pinned twice: the value, and what a session started without
+/// `--interface` actually shows the model — the cells constant, with no
+/// direct tool declared.
+#[test]
+fn the_default_interface_is_cells_only() {
+    assert_eq!(Interface::default(), Interface::Cells);
+    assert_eq!(
+        system(Interface::default(), None),
+        system(Interface::Cells, None),
+        "a session without --interface must show the cells-only block"
+    );
+    assert_eq!(
+        prompt::preamble_for(Interface::default()),
+        prompt::preamble_for(Interface::Cells)
+    );
+    assert_ne!(
+        prompt::preamble_for(Interface::default()),
+        prompt::preamble_for(Interface::Hybrid),
+        "the default is no longer hybrid"
+    );
+}

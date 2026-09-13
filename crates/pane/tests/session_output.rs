@@ -405,7 +405,10 @@ fn direct_tool_and_authored_frames_are_counted_by_origin() {
     assert_eq!(by_origin["direct_tool"]["operations"], 1);
     assert_eq!(by_origin["authored_cell"]["executed"], 1);
     assert_eq!(by_origin["authored_cell"]["operations"], 0);
-    assert_eq!(telemetry["interface"]["mode"], "hybrid");
+    // The default interface is cells-only (2026-09-13), and a direct call a
+    // provider-native caller sends anyway still lowers and is counted by its
+    // origin: the mode is what the model was shown, never a quota.
+    assert_eq!(telemetry["interface"]["mode"], "cells");
     assert_eq!(telemetry["interface"]["dialect"], "anthropic");
     let events = result["events"].as_array().unwrap();
     let origins: Vec<&Value> = events

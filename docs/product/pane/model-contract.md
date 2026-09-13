@@ -82,7 +82,9 @@ the byte-for-byte text below remains the compatibility contract.
 ### 2.1 Interface variants
 
 `prompt::preamble_for(interface)` renders the block above for the interface the
-request declares (`tool-abi.md` §3). `Cells` is the block verbatim. `Hybrid` and
+request declares (`tool-abi.md` §3). `Cells` is the block verbatim and the
+default since 2026-09-13 (a session without `--interface` shows exactly the
+block in §2). `Hybrid` and
 `Tools` are the same constant with exactly the segments below replaced and
 nothing else changed, so every shared sentence has one copy;
 `prompt_bytes.rs::the_interface_variants_are_the_contracts_verbatim` pins each

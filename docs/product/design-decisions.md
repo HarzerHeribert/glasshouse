@@ -20819,3 +20819,15 @@ switch, not a product mode.
 
 The rows, tests and limits are in `docs/product/pane/smarter-cheaper-roadmap.md`
 (*Implementation status*) and `docs/product/evidence/phase-65.md`.
+
+## Cells-only is Pane's default interface — the user, 2026-09-13
+
+On the matched ablation (`docs/product/pane/smarter-cheaper-roadmap.md`, *The
+2026-09-13 ablation*: cells-only 12/12 verified with 114 parent requests,
+hybrid 11/12 with 145, tools-only 10/12 with 188), the user ruled that
+`--interface=cells` is the default. Hybrid stays an option, tools stays an
+option, and the roadmap's rule that no direct-call quota is ever forced is
+untouched: a default is a starting point, not a quota, and every mode still
+reaches the same kernel. The decision rests on three attempts per task, four
+tasks and one model; a future model that prefers the familiar tools re-opens
+it with the same three-arm measurement, not by argument.
