@@ -248,7 +248,7 @@ specified under *The next model-backed ablation*.
 | Row | State | What exists now | Evidence | Still open |
 |---|---|---|---|---|
 | Interface-origin telemetry | Complete | `telemetry.interface` (provider-selected `execute_cell` vs direct calls by name), `frames.by_origin`, `operations_per_frame_mean`, `operations_per_parent_request_mean`, `single_intent_cells`, `failures.by_kind`/`by_origin`, `lifting`, `observation`, `reductions`, `recovery.by_cause`, `completion`, `progress`, `capsule` in `--output-format json`/`stream-json` | `tests/telemetry_taxonomy.rs` (23), `tests/session_output.rs::{provider_selected_interface_is_counted_and_every_v1_field_stays, direct_tool_and_authored_frames_are_counted_by_origin, a_request_after_a_thrown_cell_is_charged_to_repair}` | The single-intent detector is a documented heuristic (false negatives only) |
-| Hybrid interface choice | Built, unproven | The prompt no longer biases the choice: `prompt::preamble_for(interface)` and `execute_cell_description(interface)` describe hybrid and tools modes truthfully (`model-contract.md` §2.1); the ruler runs matched `pane:hybrid/cells/tools` arms and computes interface regret | `tests/prompt_interface.rs` (7), `tests/interface_regret.rs` (5), `tests/ruler_run.rs` | The matched trials themselves |
+| Hybrid interface choice | Measured, and hybrid lost | Matched arms on 2026-09-13 (below): cells-only passed 12/12 with 114 parent requests, hybrid 11/12 with 145, tools-only 10/12 with 188. In hybrid the model chose `execute_cell` for 125 of 136 frames and `shell` for the rest; direct calls bought nothing it could not do in a cell and the tools-only arm hit the frame limit twice on the debugging task at about one operation per frame. The predeclared test (hybrid non-inferior on passes and lower parent requests per pass) fails against cells | `results/tb2-pane-ablation-20260913/` in pane-benchmarks; `TERMINAL-BENCH-RESULTS.md` *Interface ablation* | Whether the default interface becomes `cells` is a user decision; the direct path stays for provider-native callers and no quota is forced either way |
 | Familiar Tool ABI correctness | Complete | Multi-call direct frames isolate each call; `Edit`/`apply_patch` gain `old_strings`/`new_strings`; lowered `Bash` keeps `reduced`/`reduction_error` | `tests/direct_frame_outcomes.rs` (5), `tests/abi.rs`, `abi::tests::a_bounded_process_result_keeps_its_derived_view_beside_the_exact_bytes` | Real-work exercise of the façades is the campaign's |
 | TypeScript Cell contract | Complete | `FreeNames` never reads a type position; `cell::ERASABLE_CONSTRUCTS` (24) all compile, keep every column and run; `NOT_ERASABLE_CONSTRUCTS` (6) are refused by name with an alternative before execution | `tests/typescript_contract.rs` (4, incl. `as_const_in_an_object_literal_compiles_and_runs`), `runtime::cell::tests` | — |
 | Capability/environment manifest | Complete | `manifest::Manifest::collect` from the compiled profile plus a 24-executable `PATH` probe, rendered as `## Environment` in the system block (readable/writable roots, reserved paths, deny patterns, command policy, never-admitted names, absent executables, container mode, unavailable capabilities) | `tests/container_profile.rs`, `manifest::tests`, `tests/session.rs::the_system_block_is_render_systems_own_bytes` | — |
@@ -260,7 +260,7 @@ specified under *The next model-backed ablation*.
 | Semantic read/search lifting | Complete (dedup), proven deterministically | Repeated pure observations carry `repeat_of` and a header suffix; lifting counted by family | `tests/observation_dedup.rs` (7), `tests/lifting.rs` | Context/round-trip effect is the campaign's |
 | Adaptive result reduction | Complete | Threshold `[helpers] reduce_above_tokens` (default 2,048), attempted only when the expected parent saving is positive; `ReductionStats` in telemetry; exact output always complete | `tests/observation_dedup.rs` (reduction section) | Measured saving |
 | Structured task capsule | Complete | `runtime::capsule::Capsule` maintained from the trajectory; `## Task` block in live feedback when it changes; on every `CellView` and in the result telemetry | `tests/task_capsule.rs` (4); `tests/evidence_gate.rs::the_task_capsule_reaches_the_feedback_and_the_result` | — |
-| Evidence-gated completion | Complete | A terminal return is held once when findings exist; the same findings a second time finish with `completion.verified = false`; `completion.deferred` counts the holds | `session::TaskState::gate`; `tests/final_state_contract.rs`; `tests/evidence_gate.rs` (5 binary-level canaries through the built `pane` against a loopback provider: stray binary, misplaced coverage, declared-but-unrun check, planted repeat, capsule) | Live measurement |
+| Evidence-gated completion | Complete | A terminal return **or a prose completion** is held once when findings exist; the same findings a second time finish with `completion.verified = false`; `completion.deferred` counts the holds. The prose half landed 2026-09-13 after the first hybrid Terminal-Bench trial showed gpt-5.6-sol ending every task with a structured return and then prose, which a gate on returns alone never saw | `session::TaskState::gate`; `tests/final_state_contract.rs`; `tests/evidence_gate.rs` (7 binary-level canaries through the built `pane` against a loopback provider: stray binary held on a return and on a prose completion, misplaced coverage, declared-but-unrun check, a clean prose completion, planted repeat, capsule) | Live measurement |
 | Final-state contract checker | Complete | `completion::check`: unexpected compiled artifact beside a deliverable, coverage tree outside the source tree, stale verification, no verification only where the project declares checks or a `[contract]` (the unconditional form held two ordinary fixtures for no evidence — integration ruling), plus `[contract]` in `checks.toml` | `tests/final_state_contract.rs` (6, the three pilot fixtures) | — |
 | Fresh independent checker | Complete | `[helpers] completion_check = true` runs CHECKER once on the original request, the task diff, the capsule's facts and the findings only | `completion::fresh_checker_evidence` tests | Live measurement |
 | Preflight Helper | Complete | The Scout receives a scouting brief and answers Constraints/Files/Tests/Capabilities/Risks; never the task | `tests/preflight_scout.rs` (12), `tests/helpers.rs` | — |
@@ -269,30 +269,58 @@ specified under *The next model-backed ablation*.
 | Cut-off salvage | Complete | `Capsule::salvage` on the cell limit, a poisoned runtime or a provider failure; emitted as `telemetry.capsule` | `tests/task_capsule.rs` | Optional cheap summariser not added |
 | Adaptive orchestration | Complete | `[helpers] preflight_scope = "auto"` (default) scouts only on uncertainty signals | `tests/preflight_scout.rs` | — |
 | Recovery-cost attribution | Complete | `recovery.by_cause.{implementation,exploration,verification,repair}` with requests, token classes and wall time | `tests/session_output.rs::a_request_after_a_thrown_cell_is_charged_to_repair` | — |
-| Interface ablation runner | Complete | `pane ruler run --pane-interface hybrid,cells,tools --credit-ratio luna=…`, `pane-result.json` per arm, regret table; the Terminal-Bench adapter's `interface` option | `tests/interface_regret.rs`, `tests/ruler_run.rs`, `pane-benchmarks/tests` | The campaign |
+| Interface ablation runner | Complete, campaign run | `pane ruler run --pane-interface hybrid,cells,tools --credit-ratio luna=…`, `pane-result.json` per arm, regret table; the Terminal-Bench adapter's `interface` option and `scripts/compare_interfaces.py` over the arms' summaries | `tests/interface_regret.rs`, `tests/ruler_run.rs`, `pane-benchmarks/tests`; the 2026-09-13 campaign | — |
 
-### The next model-backed ablation
+### The 2026-09-13 ablation, and the next one
 
-Not run in this session by instruction. The campaign that should follow:
+Run 2026-09-13 exactly as specified above on the Linux artifact of commit
+`5290644` (Terminal-Bench 2.0, four tasks, three attempts, concurrency two,
+official timeouts, oracle 4/4 first; gpt-5.6-sol medium, gpt-5.6-luna helpers,
+Scout preflight on `auto`, `completion_check = true`). The arms ran one after
+another, 1 h 47 min of campaign wall time, 8.7 M known tokens on the
+subscription route (twice the plan: the tools-only arm alone took 4.4 M).
 
-- **Arms:** `pane-terminal-bench` with `agent.interface` = `hybrid`, `cells`, `tools`;
-  same four tasks, three attempts each, concurrency two, official timeouts,
-  `gpt-5.6-sol` medium parent and `gpt-5.6-luna` helper, `preflight = true` with
-  the default `preflight_scope = "auto"`, `completion_check = true`.
-- **Expected attempts:** 36 trials (3 arms × 4 tasks × 3 attempts). The pilot's
-  12 trials took 27m 56s of campaign wall time at concurrency two, so budget
-  about 90 minutes of wall time.
-- **Expected subscription usage:** the pilot spent 1,371,727 known tokens for
-  12 trials (1,067,208 Sol, 304,519 Luna). With auto-scoped preflight and the
-  delta table the per-trial figure should fall; plan for up to 3 × the pilot,
-  roughly 4.1 M known tokens across both models, on the ChatGPT subscription
-  route (no API billing).
-- **What decides:** per task, `interface regret` from `pane ruler`'s report and
-  `metrics.py`'s per-trial sections — verified passes, parent requests, repair
-  requests, frames failed, observation bytes, weighted spend. The predeclared
-  test is non-inferiority of hybrid on verified passes plus lower Sol requests
-  per verified pass; zero `unexpected_artifact`/`coverage_outside_tree`
-  completions is the completion-integrity check.
-- **Before it:** replay the three final-state fixtures through the installed
-  binary as canaries (`tests/final_state_contract.rs` is the deterministic
-  half), and run one provider-free canary per arm with the adapter.
+| Arm | Verified passes | Parent requests | Known tokens (Sol / Luna) | Provider-selected calls | Frames failed |
+|---|---|---|---|---|---|
+| hybrid | 11/12 | 145 | 2,033,915 / 296,883 | 125 `execute_cell`, 11 `shell` | 13/136 |
+| cells | **12/12** | **114** | **1,584,163** / 364,971 | 107 `execute_cell` | 6/107 |
+| tools | 10/12 | 188 | 4,145,330 / 288,565 | 209 `shell`, 3 `apply_patch` | 5/178 |
+
+Per task, mean parent requests per trial (passes): `custom-memory-heap-crash`
+hybrid 18.3 (3/3), cells 16.0 (3/3), tools 36.0 (1/3, two trials at the
+40-frame limit at about one operation per frame); `large-scale-text-editing`
+10.0 / 4.0 / 7.0 (all 3/3); `polyglot-c-py` 5.7 / 6.7 / 8.0 (all 3/3);
+`sqlite-with-gcov` 14.3 (2/3) / 11.3 (3/3) / 11.7 (3/3). Interface regret of
+hybrid against the best arm: 1.15× the requests per pass on the debugging task,
+2.5× on file processing, one pass behind on system administration, none on
+software engineering. **The predeclared test fails: hybrid is not
+non-inferior on passes and does not use fewer parent requests per pass than
+cells-only.** The one hybrid miss was the model concluding the container had
+no build toolchain and saying so — an honest report, not a false completion.
+
+What else the telemetry says, the same for every arm: the delta handle table
+suppressed 28–56 % of observation bytes per trial; no observation repeated
+byte for byte; no single-intent cell was authored. Failures in 36 trials: 12
+`bash` children killed by a signal (the debugging task's crashing target),
+seven thrown cells of the syntax kind (four JavaScript syntax errors of the
+model's own, two unbound names, one attempt to bind a local named `checks`
+over the host function), one `edit` refused for an ambiguous match, three
+`rg` calls at exit 127 because the official images have no ripgrep. None of
+the pilot's five causes recurred: no denial, no `/build` or `gdb` refusal,
+no TypeScript erasure refusal, no stale-version edit. The reducer ran 32
+times on build and test output; the Scout ran on every trial (each request
+carried at least one uncertainty signal); the no-progress guard never fired.
+The completion gate saw only the eight trials that ended in a string
+`return`, all verified with no finding; the other 28 ended in prose after a
+structured return, which the artifact's gate did not cover — fixed the same
+day (*Evidence-gated completion*, above) and not yet measured. One hybrid
+trial was cut off by a provider `408` after its fix had landed and passed on
+the salvaged state. Two small follow-ups the trials name: `rg` should fall
+back to `grep` where ripgrep is absent, and a cell that binds a host name
+should get the alternative in one line rather than a refusal.
+
+The next campaign, when the user decides the default: the cells-only and
+hybrid arms again on the artifact that carries the prose gate, with the
+completion-integrity columns filled (deferred holds, unverified completions),
+and the tools-only arm only on the two tasks where it was competitive. Same
+budget rule: about 2 M known tokens per arm on this route.

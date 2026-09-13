@@ -20811,8 +20811,11 @@ fresh independent checker run over the original request, the diff and the
 capsule's facts, hold the return and hand the findings to the next turn. The
 same findings a second time let the model finish, and the completion is
 recorded `verified = false` in the machine result rather than refused: the
-model owns the decision, Pane owns the evidence. `[limits] evidence_gate =
-false` is an ablation switch, not a product mode.
+model owns the decision, Pane owns the evidence. A prose answer is a
+completion claim and is gated the same way — the first live trial showed
+the model completing in prose after a structured return, which a gate on
+returns alone never saw. `[limits] evidence_gate = false` is an ablation
+switch, not a product mode.
 
 The rows, tests and limits are in `docs/product/pane/smarter-cheaper-roadmap.md`
 (*Implementation status*) and `docs/product/evidence/phase-65.md`.

@@ -2591,4 +2591,4 @@ direct-tool quota is ever forced.
 ☑ Offer a fresh independent checker the original request, the current diff and exact evidence, never the parent's rationale.
 ☑ Make preflight a scout that reports constraints, files, tests, capabilities and risks, and run it only on uncertainty signals.
 ☑ Detect no-progress repetition, protect the newest verified checkpoint, and salvage a cut-off task into the capsule.
-☐ Run matched tools-only, cells-only and hybrid arms and report interface regret from Pane's own telemetry.
+☑ Run matched tools-only, cells-only and hybrid arms and report interface regret from Pane's own telemetry.
