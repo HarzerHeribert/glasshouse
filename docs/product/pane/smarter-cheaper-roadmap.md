@@ -155,6 +155,8 @@ representative measurement supports the claim yet.
 | P1 | Adaptive orchestration | Redesign | Every benchmark task paid for preflight whether or not it helped | Direct execution remains the fast path; helpers and workers activate from complexity, uncertainty, failure or verification signals |
 | P0 | Recovery-cost attribution | Build | Failure counts do not reveal the Sol usage actually caused by recovery | Attribute parent requests, tokens and wall time to implementation, exploration, verification and repair causes |
 | P0 | Interface ablation runner | Build | One hybrid campaign cannot prove the Tool ABI's advantage | Run the same model, task, limits and environment in tools-only, cells-only and hybrid modes |
+| P0 | Request-derived acceptance list | Build | The full-suite run (2026-09-13) passed eight completions through the gate and the checker that the official verifier then failed: the gate reads a diff, never what the request asked for | Before the first turn, turn the request into verifiable items (files, commands, outputs, judged sentences); show them; decide each against the tree or a command at completion; hold an unmet item once |
+| P0 | Stall detection instead of a cell cap | Redesign | A 40-cell cap ended a task with 1.1 M tokens of real progress; other harnesses run to the task timeout | A run of cells that changes nothing gets a notice and a count, never a stop; the cap becomes a high backstop |
 
 ## GVS5H concepts worth adopting
 
@@ -270,6 +272,8 @@ specified under *The next model-backed ablation*.
 | Adaptive orchestration | Complete | `[helpers] preflight_scope = "auto"` (default) scouts only on uncertainty signals | `tests/preflight_scout.rs` | — |
 | Recovery-cost attribution | Complete | `recovery.by_cause.{implementation,exploration,verification,repair}` with requests, token classes and wall time | `tests/session_output.rs::a_request_after_a_thrown_cell_is_charged_to_repair` | — |
 | Interface ablation runner | Complete, campaign run | `pane ruler run --pane-interface hybrid,cells,tools --credit-ratio luna=…`, `pane-result.json` per arm, regret table; the Terminal-Bench adapter's `interface` option and `scripts/compare_interfaces.py` over the arms' summaries | `tests/interface_regret.rs`, `tests/ruler_run.rs`, `pane-benchmarks/tests`; the 2026-09-13 campaign | — |
+| Request-derived acceptance list | Complete (2026-09-14) | `acceptance.rs`: the `accept` helper (toolless, one-shot, roster entry, `[helpers] acceptance_list`, on by default with helpers) turns the request into at most eight items in five line forms; the list is shown to the model as `## Acceptance list`; at completion every file/run/output item is decided against the tree or a command through the one kernel, an unmet item is a final-state finding (held once, then `verified = false`), and judge items go to the fresh checker with the mechanical results | `acceptance::tests` (4), `tests/evidence_gate.rs::an_unmet_acceptance_item_holds_the_completion_with_what_was_observed`, `tests/config.rs` | The live measurement: the eight false completions of 2026-09-13 |
+| Stall detection instead of a cell cap | Complete (2026-09-14) | `progress::Stall`: six cells in a row with no tree change, no new fact and no verification produce one notice at the head of the next feedback and `progress.stall_notices`; never a stop. `[limits] cells` default 120 as a backstop; the adapter's default follows | `progress::stall_tests`, `tests/evidence_gate.rs::six_cells_without_progress_get_one_stall_notice_and_the_task_continues` | Whether a notice changes the model's course is the campaign's to measure |
 
 ### The 2026-09-13 ablation, and the next one
 
@@ -319,7 +323,17 @@ the salvaged state. Two small follow-ups the trials name: `rg` should fall
 back to `grep` where ripgrep is absent, and a cell that binds a host name
 should get the alternative in one line rather than a refusal.
 
-The next campaign: the cells-only (now the default) and hybrid arms again on the artifact that carries the prose gate, with the
-completion-integrity columns filled (deferred holds, unverified completions),
-and the tools-only arm only on the two tasks where it was competitive. Same
-budget rule: about 2 M known tokens per arm on this route.
+The 2026-09-13 full-suite pass (`campaign.full-cells.json`, 89 tasks, one
+attempt, cells-only, artifact of `37ac55b` then `58c23ee`) was paused at 37
+finished trials — 18 verified; 16 of 28 on oracle-passing tasks; three
+provider safety refusals on security tasks, which are not Pane's and leave
+the scored denominator — once it had shown two harness defects (the
+instruction-index budget, the adapter's positional task argument) and the
+two product gaps above. Its raw artifacts stay under
+`campaigns/tb2-pane-full-cells` unsealed. **The next campaign is a fresh
+full-suite pass on the artifact that carries the acceptance list, the stall
+notice and the 120-cell backstop**, with the same manifest shape, the
+oracle first, and `scripts/full_suite_report.py` over the oracle-passing
+tasks with provider refusals listed and excluded. Budget about 15 M known
+tokens on the subscription route; the run alone is four to five hours at
+concurrency two.

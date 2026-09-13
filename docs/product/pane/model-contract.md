@@ -79,6 +79,15 @@ the byte-for-byte text below remains the compatibility contract.
     that state; failed or skipped calls did not succeed. PermissionDenied is
     final: code cannot widen the session's sandbox grant.
 
+### 2.0 Pushed blocks after the preamble
+
+Two blocks may follow the project's instructions in the system block, both
+derived before the first turn and both paid for once: the Scout's preflight
+block (`## Scouting record`), and since 2026-09-14 the acceptance list
+(`## Acceptance list`, `acceptance.rs`) — the request's own verifiable items,
+which the completion is checked against. Neither changes a sentence of the
+preamble.
+
 ### 2.1 Interface variants
 
 `prompt::preamble_for(interface)` renders the block above for the interface the

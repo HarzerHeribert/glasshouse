@@ -20853,3 +20853,27 @@ blocked turn as the documents it did find, and the repeated call runs
 (`::an_exhausted_index_budget_is_a_notice_once_and_never_a_stop`). Host
 security is untouched: the sandbox profile, not the instruction index,
 decides what a command may reach.
+
+## Completion is checked against the request, and a stall is a notice, not a cap — the user, 2026-09-14
+
+Two rulings from reading the first full-suite Terminal-Bench run while it was
+still going. **The evidence gate reads a diff; the request is what done
+means.** Eight completions passed the deterministic contract and the fresh
+checker and then failed the official verifier: neither had seen what the
+request asked for as something checkable. So the request is turned into an
+acceptance list before the first turn — files that must exist or contain
+text, commands that must exit zero or print something, and sentences a
+reviewer must judge — by a toolless one-shot helper whose every line is
+parsed and then decided against the tree or a command through the one
+kernel, never believed. The list is shown to the model; an unmet item holds
+the completion once, exactly as the other findings do; judge items go to the
+fresh checker with the mechanical results beside them. It is on by default
+wherever helpers are configured (`[helpers] acceptance_list`). **A hard cap
+is not a stopping rule.** A 40-cell cap ended a task carrying 1.1 million
+tokens of real progress, and no harness on the leaderboard has such a cap;
+the user's rule is that there are always smarter ways to find a runaway or
+something stale. Progress is now what the trajectory can see — a tree change,
+a new fact, a verification — and six cells without it produce one notice and
+a count, never a stop; the task's wall clock is the boundary and the cap is a
+120-cell backstop against a true runaway. Both wait for the next campaign to
+be measured, on the artifact that carries them.

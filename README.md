@@ -134,7 +134,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1363 closed** · **90 active committed open** (93%)
+`█████████████████████████████████████░░░` **1365 closed** · **90 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -258,7 +258,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 63 — pane's terminal interface | 0/5 |
 | Phase 64 — pane: subagents | 0/5 |
 | Phase 61H — Runtime resilience across models and scripting styles | 0/8 |
-| Phase 65 — Pane: smarter-and-cheaper execution | 15/15 ✅ |
+| Phase 65 — Pane: smarter-and-cheaper execution | 17/17 ✅ |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 6/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 5/5 — deferred gate |
 

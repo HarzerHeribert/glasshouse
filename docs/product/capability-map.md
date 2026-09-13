@@ -2592,3 +2592,5 @@ direct-tool quota is ever forced.
 ☑ Make preflight a scout that reports constraints, files, tests, capabilities and risks, and run it only on uncertainty signals.
 ☑ Detect no-progress repetition, protect the newest verified checkpoint, and salvage a cut-off task into the capsule.
 ☑ Run matched tools-only, cells-only and hybrid arms and report interface regret from Pane's own telemetry.
+☑ Derive an acceptance list from the request before the first turn — files, commands, outputs and judged items — show it to the model, and decide every item against the tree or a command run through the one kernel when the model claims completion, holding an unmet item once.
+☑ Replace the cell cap as a working control with stall detection: a run of cells that changes nothing gets a notice and a count, never a stop; the task wall clock is the boundary and the cap is a backstop.
