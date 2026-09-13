@@ -1,4 +1,5 @@
 //! Local notebook inspection. Nothing here is sent to the model.
+use super::lane::helper_seconds;
 use super::*;
 
 #[derive(Debug, Clone, Default)]

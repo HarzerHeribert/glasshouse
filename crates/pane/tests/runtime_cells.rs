@@ -779,10 +779,19 @@ fn a_bound_tool_result_carries_its_calls_provenance() {
 /// turning the doctest into a tautology.
 #[test]
 fn the_runtime_cannot_be_built_without_a_profile() {
-    const SOURCE: &str = include_str!("../src/runtime/isolate.rs");
-    let production = SOURCE
-        .split_once("#[cfg(test)]")
-        .map_or(SOURCE, |(before, _)| before);
+    const SOURCES: [&str; 2] = [
+        include_str!("../src/runtime/isolate.rs"),
+        include_str!("../src/runtime/isolate/watchdog.rs"),
+    ];
+    let production = SOURCES
+        .iter()
+        .map(|source| {
+            source
+                .split_once("#[cfg(test)]")
+                .map_or(*source, |(before, _)| before)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     // A builder over an already-built runtime (`fn with_x(self, …) -> Self`)
     // is not a constructor: it cannot produce a `Runtime` that does not
     // already exist, so it cannot produce one without a profile. Everything

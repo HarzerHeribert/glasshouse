@@ -1,0 +1,268 @@
+//! The system block of one task: the prompt, its facts and manifest, and
+//! the scouting preflight block (moved out of `session.rs` for the Phase 59
+//! size ratchet, 2026-09-13; nothing here is new).
+
+use super::*;
+
+/// The system block, and it is [`prompt::render_system`]'s bytes and nothing
+/// else -- `model-contract.md` §1: the preamble, one declaration per
+/// registered tool, then the project's own instructions.
+///
+/// **The joining of the instruction documents is all this function decides.**
+/// Map line 2448 fixes what is loaded, not how it is joined; everything from
+/// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
+/// byte, so there is no second spelling of the contract here to drift from it.
+pub(super) fn build_system_prompt(
+    _project: &ProjectConfig,
+    profile: &Profile,
+    interface: crate::abi::Interface,
+    manifest: &crate::manifest::Manifest,
+) -> String {
+    // Configuration/grants remain session-scoped; guidance is read fresh.
+    let instructions = crate::project::instructions::root(profile);
+    let mut system = prompt::render_system(
+        &instructions,
+        &registry::ALL.iter().collect::<Vec<_>>(),
+        &session_facts_with(profile, interface, manifest),
+    );
+    if profile.os_sandbox_bypassed() {
+        system.push_str(
+            "\n\nDANGER: Pane's OS process sandbox is disabled by an explicit CLI bypass. The surrounding container or VM is the only process boundary.",
+        );
+    }
+    system.push_str("\n\n");
+    system.push_str(&crate::project::orientation::collect(profile));
+    system
+}
+/// The most files one preflight serves in full, and the most bytes one of
+/// them may hold to be served at all.
+///
+/// **A file too large to serve whole is not served.** The section says *in
+/// full*, and a truncated file under that heading is a claim the model cannot
+/// check: it would read the first half as the whole of it.
+pub(super) const PREFLIGHT_SERVE_FILES: usize = 6;
+pub(super) const PREFLIGHT_SERVE_BYTES: u64 = 32 * 1024;
+
+/// The stand-in gate: a request of fewer words than this gets no preflight.
+pub(super) const PREFLIGHT_MIN_WORDS: usize = 4;
+
+/// Whether this request plausibly needs the repository at all.
+///
+/// A request under [`PREFLIGHT_MIN_WORDS`] words — "hi", "thanks", "carry
+/// on" — gets no preflight; everything else is decided by
+/// [`crate::preflight::should_scout`] on the request's own signals.
+pub(super) fn request_may_need_the_repository(task: &str) -> bool {
+    task.split_whitespace().count() >= PREFLIGHT_MIN_WORDS
+}
+
+/// One preflight block to append to this task's system prompt, or `None` when
+/// no scout ran or none answered.
+///
+/// The invariant: **a failed preflight leaves the session exactly as it is
+/// today**, and **the scout never attempts the task**: it is handed a
+/// scouting brief built around the verbatim request and the manifest, and
+/// answers with constraints, files, tests, capabilities and risks
+/// (`smarter-cheaper-roadmap.md`, *Preflight Helper*). With
+/// `preflight_scope = "auto"` it runs only when the request carries an
+/// uncertainty signal, so a task that names existing files and available
+/// tools pays nothing.
+pub(super) fn preflight_block(
+    task: &str,
+    session: &Session<'_>,
+    transcript: &mut Transcript,
+) -> Option<String> {
+    let helpers = session.config().helpers.clone();
+    if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
+        return None;
+    }
+    let checks_configured = crate::verification::load(session.profile)
+        .map(|config| !config.checks.is_empty())
+        .unwrap_or(false);
+    let decision = crate::preflight::should_scout(
+        task,
+        &session.manifest,
+        helpers.preflight_scope,
+        checks_configured,
+    );
+    session_println!(
+        "preflight: {}",
+        crate::preflight::signals_summary(&decision)
+    );
+    if matches!(decision, crate::preflight::Decision::Skip(_)) {
+        return None;
+    }
+    let model = helpers.model.as_deref()?;
+    let effort = helpers.effort.for_helper("find")?;
+    let token = invoke::CancellationToken::new();
+    session.interrupt.arm(token.clone());
+    let brief = crate::preflight::scouting_brief(task, &session.manifest);
+    let record = crate::helpers::preflight(
+        &brief,
+        crate::helpers::HelperRoute { model, effort },
+        session.profile,
+        session.glasshouse,
+        session.id,
+        &token,
+        |record| {
+            let Some(ui) = session.ui else {
+                return;
+            };
+            // The real user turn is recorded below in the established rollout
+            // order. This snapshot makes the submitted request and its Scout
+            // visible immediately without adding a synthetic model turn.
+            let mut visible = transcript.clone();
+            visible
+                .conversation
+                .messages
+                .push(Message::text(Role::User, task));
+            visible.notebook.preflight = Some(record.clone());
+            ui.publish(&visible, &ServedBy::default(), tui::Activity::Searching);
+        },
+    )?;
+    if record.outcome.cancelled {
+        session.interrupt.consumed();
+    }
+    output::preflight(&record);
+    // Keep the resolved Scout beside this request for every later task-frame.
+    // The next task clears it before deciding whether another preflight runs.
+    transcript.notebook.preflight = Some(record.clone());
+    record.outcome.ok.then(|| {
+        let named = crate::preflight::spans(&record.outcome.text);
+        let served: Vec<(String, String)> = preflight_served(session.profile, &named)
+            .into_iter()
+            .map(|(path, _why, text)| (path, text))
+            .collect();
+        crate::preflight::render(task, &record.outcome.text, &served)
+    })
+}
+
+/// The named files that can be served whole: inside the grant, a regular
+/// file, UTF-8, and small enough that *in full* is true of it.
+///
+/// **The profile decides, not this function.** A scout that named a path
+/// outside the grant has it refused here for the same reason `read` would
+/// refuse it, and a preflight is not a way around a grant.
+pub(super) fn preflight_served(
+    profile: &Profile,
+    named: &[(String, String)],
+) -> Vec<(String, String, String)> {
+    let mut served = Vec::new();
+    for (path, why) in named {
+        if served.len() == PREFLIGHT_SERVE_FILES {
+            break;
+        }
+        let candidate = std::path::Path::new(path);
+        let absolute = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            profile.root().join(candidate)
+        };
+        let Ok(granted) = profile.check(
+            "preflight",
+            crate::sandbox::profile::Access::Read,
+            &absolute,
+        ) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&granted) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > PREFLIGHT_SERVE_BYTES {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&granted) else {
+            continue;
+        };
+        served.push((path.clone(), why.clone(), text));
+    }
+    served
+}
+
+/// The compiled profile, as the model needs to read it.
+///
+/// **The invariant: this reports the profile that is actually in force, never
+/// the one the configuration asked for.** It is built from `Profile`'s own
+/// accessors for that reason — a settings document that failed to parse
+/// grants nothing, and a model told otherwise would plan against grants it
+/// does not have.
+///
+/// `pub` so `tests/session.rs`'s byte-equality test can build the same facts
+/// the binary did rather than spelling them a second time — the same reason
+/// that test calls [`prompt::render_system`] instead of quoting its output.
+pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
+    let mut writable: Vec<String> = profile
+        .rules()
+        .filter(|rule| rule.write() && rule.effect() == crate::sandbox::profile::Effect::Allow)
+        .map(|rule| rule.written().to_string())
+        .collect();
+    writable.extend(
+        profile
+            .additional_roots()
+            .iter()
+            .map(|root| root.display().to_string()),
+    );
+    writable.sort();
+    writable.dedup();
+    prompt::SessionFacts {
+        root: profile.root().display().to_string(),
+        writable,
+        command_patterns: profile.command_pattern_count(),
+        // Not `args.yolo`: the flag is a request, the profile is the grant.
+        // A mutation that stopped `--yolo` reaching the compiler survived
+        // while this read the flag, because the model was still told the
+        // grant was open (2026-09-06).
+        all_commands: profile.admits_every_command(),
+        network: profile.grants_network(),
+        interface: crate::abi::Interface::default(),
+        manifest: None,
+    }
+}
+
+/// [`session_facts`] for the interface this session declares and the
+/// manifest it collected — the facts the binary actually renders.
+pub fn session_facts_with(
+    profile: &Profile,
+    interface: crate::abi::Interface,
+    manifest: &crate::manifest::Manifest,
+) -> prompt::SessionFacts {
+    let mut facts = session_facts(profile);
+    facts.interface = interface;
+    facts.manifest = Some(manifest.render());
+    facts
+}
+
+/// The executables the manifest looks for on `PATH`, so the model knows
+/// before acting which of the tools a task usually names are absent.
+pub const MANIFEST_PROBE: [&str; 24] = [
+    "bash", "sh", "python3", "python", "git", "cargo", "rustc", "gcc", "g++", "clang", "make",
+    "cmake", "node", "npm", "rg", "fd", "jq", "gdb", "lldb", "valgrind", "pytest", "go", "java",
+    "docker",
+];
+
+/// The effective capability and environment manifest for one session
+/// (`smarter-cheaper-roadmap.md`, *Capability/environment manifest*): the
+/// compiled profile's roots and policies, the probed executables, and the
+/// capabilities this configuration cannot provide.
+pub fn system_manifest(profile: &Profile, config: &PaneConfig) -> crate::manifest::Manifest {
+    let mut manifest = crate::manifest::Manifest::collect(profile, &MANIFEST_PROBE);
+    if !config.web.enabled {
+        manifest
+            .unavailable
+            .push("web.fetch and web.search: the host web broker is disabled".into());
+    } else if config.web.search_endpoint.is_none() {
+        manifest
+            .unavailable
+            .push("web.search: no search endpoint is configured".into());
+    }
+    if config.helpers.model.is_none() || !config.helpers.enabled {
+        manifest
+            .unavailable
+            .push("helper.*: no helper model is configured".into());
+    }
+    if matches!(config.agents.mode, crate::config::AgentsMode::Off) {
+        manifest
+            .unavailable
+            .push("agent.run: subagents are off in this configuration".into());
+    }
+    manifest
+}

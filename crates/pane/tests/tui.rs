@@ -646,6 +646,16 @@ fn the_tui_renders_no_handle_itself() {
     );
 }
 
+/// The helper lane lives in `tui/lane.rs` since the Phase 59 ratchet move of
+/// 2026-09-13; the scan above follows it there.
+#[test]
+fn the_helper_lane_renders_no_handle_itself() {
+    let source = include_str!("../src/tui/lane.rs");
+    assert!(!source.contains("runtime::preview::"), "{source}");
+    assert!(!source.contains("render_preview"), "{source}");
+    assert!(!source.contains("Value::"), "{source}");
+}
+
 #[test]
 fn the_sidebar_is_unchanged_by_the_notebook() {
     let baseline = rendered(
