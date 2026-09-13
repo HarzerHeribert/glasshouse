@@ -20831,3 +20831,25 @@ untouched: a default is a starting point, not a quota, and every mode still
 reaches the same kernel. The decision rests on three attempts per task, four
 tasks and one model; a future model that prefers the familiar tools re-opens
 it with the same three-arm measurement, not by argument.
+
+## An instruction-index budget that data exhausts is a notice, not a stop — 2026-09-13
+
+The directory-instruction gate indexes the project tree before an opaque
+`bash`, `bg.run` or `context` call so that no `AGENTS.md`/`CLAUDE.md` in
+scope is unread when a command runs. The index has a scan budget (10,000
+entries, depth 32, breadth-first). Until 2026-09-13 an index stopped by that
+budget was treated like a document that could not be read: the call stayed
+blocked and the task ended with *Directory instructions could not be loaded
+completely*. The full-suite Terminal-Bench run showed what that costs: a task
+that downloaded a 60,000-file dataset into the project died after 32 cells
+of correct work, on the budget alone. The two cases are now distinct.
+**A document that exists in scope and cannot be read — denied, oversized,
+unreadable — still stops the call, and acknowledging it changes nothing**
+(`tests/instruction_boundary.rs::incomplete_instruction_policy_cannot_be_acknowledged_into_permission`).
+**A budget the scan ran out of is a notice**: the index enumerated every
+directory it reached, shallow scopes first, so what it missed is deep data by
+volume; the notice names the limit, is delivered once per task in the same
+blocked turn as the documents it did find, and the repeated call runs
+(`::an_exhausted_index_budget_is_a_notice_once_and_never_a_stop`). Host
+security is untouched: the sandbox profile, not the instruction index,
+decides what a command may reach.

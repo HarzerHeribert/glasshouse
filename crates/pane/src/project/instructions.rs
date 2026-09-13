@@ -61,6 +61,24 @@ pub struct InstructionIndex {
     pub complete: bool,
 }
 
+/// The scan budgets: an index stopped by one of these has enumerated every
+/// directory it reached and simply ran out of allowance, in breadth-first
+/// order (shallow scopes first). A read failure or a denied document is
+/// never one of these.
+pub const BUDGET_OMISSIONS: [&str; 2] = ["directory entry limit", "directory depth limit"];
+
+impl InstructionIndex {
+    /// Incomplete only because a scan budget ran out, never because
+    /// something that exists could not be read.
+    #[must_use]
+    pub fn only_budget_omissions(&self) -> bool {
+        !self.complete
+            && self.omissions.iter().all(|omission| {
+                omission.path.is_none() && BUDGET_OMISSIONS.contains(&omission.reason.as_str())
+            })
+    }
+}
+
 #[derive(Default)]
 struct Limits {
     bytes: usize,

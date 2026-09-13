@@ -216,3 +216,56 @@ fn externally_changed_instruction_text_is_delivered_before_a_dependent_write() {
     assert!(pending.text.contains("replaces the earlier version"));
     assert!(!pending.text.contains("### `root policy`"));
 }
+
+/// The 2026-09-13 full-suite run: a downloaded dataset of tens of thousands
+/// of files exhausted the instruction index's entry budget and ended a
+/// 32-cell task as "could not be loaded completely". A scan budget is a
+/// notice, delivered once: the first shell call is blocked to deliver it and
+/// runs when repeated; a document that exists and cannot be read (the
+/// oversized test above) still stops the task.
+#[test]
+fn an_exhausted_index_budget_is_a_notice_once_and_never_a_stop() {
+    let fixture = Fixture::new("index-budget");
+    let data = fixture.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    for i in 0..10_050u32 {
+        std::fs::write(data.join(format!("{i}.bin")), b"x").unwrap();
+    }
+    let mut runtime = fixture.runtime(true);
+    let marker = fixture.root.join("ran.txt");
+    let source = format!(r#"await bash({{command: "touch {}"}});"#, marker.display());
+    assert!(matches!(
+        runtime.run_cell(&source),
+        CellOutcome::Yielded { .. }
+    ));
+    let pending = runtime.pending_instructions().unwrap();
+    assert!(!pending.fatal, "a budget is not a stop: {}", pending.text);
+    assert!(pending.text.contains("scan budget"), "{}", pending.text);
+    assert!(
+        pending.text.contains("directory entry limit"),
+        "{}",
+        pending.text
+    );
+    assert!(!marker.exists(), "the blocked call did not run");
+    runtime.acknowledge_instructions();
+    assert!(runtime.pending_instructions().is_none());
+    // A cell without a `return` yields; what matters is that nothing is
+    // pending and the command ran.
+    let _ = runtime.run_cell(&source);
+    assert!(
+        runtime.pending_instructions().is_none(),
+        "the repeated call must not block again: {:?}",
+        runtime.pending_instructions().map(|pending| pending.text)
+    );
+    assert!(marker.exists(), "the repeated call ran");
+    let again = format!(
+        r#"await bash({{command: "touch {}"}});"#,
+        fixture.root.join("again.txt").display()
+    );
+    let _ = runtime.run_cell(&again);
+    assert!(
+        runtime.pending_instructions().is_none(),
+        "the notice is delivered once"
+    );
+    assert!(fixture.root.join("again.txt").exists());
+}

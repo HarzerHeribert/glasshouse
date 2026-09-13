@@ -21,6 +21,9 @@ pub(crate) struct InstructionContext {
     known: BTreeMap<(PathBuf, PathBuf), String>,
     pending_documents: Vec<((PathBuf, PathBuf), String)>,
     pending: Option<PendingInstructions>,
+    /// The index's scan budget ran out once this task and the model was told;
+    /// the notice is delivered once, never as a stop (see `gate`).
+    budget_noticed: bool,
 }
 
 impl InstructionContext {
@@ -49,14 +52,32 @@ impl InstructionContext {
             return true;
         }
 
+        let mut budget_notice = None;
         let load = if matches!(tool, "bash" | "bg.run" | "bg.watch" | "context") {
             let index = instructions::index(profile);
-            if !index.complete {
+            // A budget the scan ran out of is a notice, not a stop: the
+            // index enumerated every directory it reached, shallow scopes
+            // first, and what it did not reach is data by volume (the
+            // 2026-09-13 full-suite run: a downloaded dataset of 60,000
+            // files ended a 32-cell task here). A document that exists and
+            // cannot be read stays fatal below.
+            let budget_only = index.only_budget_omissions();
+            if !index.complete && !budget_only {
                 self.pending = Some(PendingInstructions {
                     text: render_omissions(&index.omissions),
                     fatal: true,
                 });
                 return true;
+            }
+            if budget_only && !self.budget_noticed {
+                self.budget_noticed = true;
+                let mut notice = render_omissions(&index.omissions);
+                notice.push_str(
+                    "\nThe instruction index stopped at its scan budget, shallow directories \
+                     first; instruction files deeper than the scanned set are not loaded. \
+                     The blocked call did not run; it may be repeated.\n",
+                );
+                budget_notice = Some(notice);
             }
             let mut paths = index.paths;
             paths.push(profile.root().to_path_buf());
@@ -75,7 +96,7 @@ impl InstructionContext {
             .filter(|doc| self.known.get(&(doc.path.clone(), doc.scope.clone())) != Some(&doc.text))
             .collect();
         let fatal = !load.complete;
-        if fresh.is_empty() && !fatal {
+        if fresh.is_empty() && !fatal && budget_notice.is_none() {
             return false;
         }
         self.pending_documents = if fatal {
@@ -110,6 +131,9 @@ impl InstructionContext {
         }
         if !load.omissions.is_empty() {
             text.push_str(&render_omissions(&load.omissions));
+        }
+        if let Some(notice) = budget_notice {
+            text.push_str(&notice);
         }
         self.pending = Some(PendingInstructions { text, fatal });
         true
