@@ -289,3 +289,102 @@ mod tests {
         assert_eq!(checkpoints.status(), CheckpointStatus::Verified { cell: 9 });
     }
 }
+
+/// Cells in a row without progress before the stall notice fires.
+pub const DEFAULT_STALL_WINDOW: u32 = 6;
+
+/// The stall notice: a nudge with the count, never a stop. The task's own
+/// wall clock is the boundary; the cell cap is a backstop against a runaway.
+#[must_use]
+pub fn stall_notice(cells: u32) -> String {
+    format!(
+        "No progress for {cells} cells: the tree did not change, no new fact was recorded \
+         and no verification result changed. Say what is blocking, change the approach, \
+         or finish with what holds."
+    )
+}
+
+/// Watches for a run of cells that changes nothing — no tree change, no new
+/// fact, no verification — and says so once per window
+/// (`smarter-cheaper-roadmap.md`, *Stall detection replaces the cell cap*).
+///
+/// The invariant: **a stall never ends the task.** It is a notice at the
+/// head of the next feedback and a count in the telemetry; the task's
+/// wall clock and the cell backstop are the only hard limits.
+#[derive(Debug, Clone)]
+pub struct Stall {
+    window: u32,
+    since: u32,
+    notices: u32,
+}
+
+impl Default for Stall {
+    fn default() -> Self {
+        Self::new(DEFAULT_STALL_WINDOW)
+    }
+}
+
+impl Stall {
+    pub fn new(window: u32) -> Self {
+        Self {
+            window: window.max(1),
+            since: 0,
+            notices: 0,
+        }
+    }
+
+    /// `Some(notice)` on the `window`-th cell in a row without progress; the
+    /// count restarts after a notice so a long stall is noticed again.
+    pub fn observe(&mut self, progressed: bool) -> Option<String> {
+        if progressed {
+            self.since = 0;
+            return None;
+        }
+        self.since += 1;
+        if self.since >= self.window {
+            self.since = 0;
+            self.notices += 1;
+            return Some(stall_notice(self.window));
+        }
+        None
+    }
+
+    pub fn notices(&self) -> u32 {
+        self.notices
+    }
+
+    /// Cells since the last progress or notice.
+    pub fn since_progress(&self) -> u32 {
+        self.since
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    #[test]
+    fn a_stall_is_noticed_on_the_window_and_progress_resets_it() {
+        let mut stall = Stall::new(3);
+        assert!(stall.observe(false).is_none());
+        assert!(stall.observe(false).is_none());
+        assert!(stall.observe(true).is_none(), "progress resets the count");
+        assert!(stall.observe(false).is_none());
+        assert!(stall.observe(false).is_none());
+        let notice = stall.observe(false).expect("the third idle cell in a row");
+        assert!(notice.contains("No progress for 3 cells"), "{notice}");
+        assert_eq!(stall.notices(), 1);
+        assert_eq!(
+            stall.since_progress(),
+            0,
+            "the count restarts after a notice"
+        );
+        assert!(stall.observe(false).is_none());
+        assert!(stall.observe(false).is_none());
+        assert!(
+            stall.observe(false).is_some(),
+            "a long stall is noticed again"
+        );
+        assert_eq!(stall.notices(), 2);
+    }
+}

@@ -27,7 +27,10 @@ impl Default for Limits {
         Self {
             cell_wall_clock_s: 30,
             response_bytes: 16 * 1024,
-            cells: 40,
+            // A backstop against a runaway, not a working budget: the task's
+            // own wall clock and the stall notice are the controls
+            // (`progress::Stall`, 2026-09-14).
+            cells: 120,
             evidence_gate: true,
         }
     }
@@ -78,6 +81,10 @@ pub struct HelpersConfig {
     /// original request, the task's diff and its exact evidence, never the
     /// parent's rationale. Costs one cheap request per completed task.
     pub completion_check: bool,
+    /// Derive an acceptance list from the request before the first turn and
+    /// check it when the model claims completion (`acceptance.rs`). One
+    /// cheap toolless request per task; the list is shown to the model.
+    pub acceptance_list: bool,
     pub enabled: bool,
     /// The most helper calls one cell may make, so a loop cannot issue three
     /// hundred requests inside a single program.
@@ -126,6 +133,8 @@ pub struct HelperEfforts {
     pub find: crate::wire::Effort,
     pub reduce: crate::wire::Effort,
     pub check: crate::wire::Effort,
+    /// The acceptance lister: fixed line forms from a request.
+    pub accept: crate::wire::Effort,
 }
 
 impl HelperEfforts {
@@ -134,6 +143,7 @@ impl HelperEfforts {
             "find" => Some(self.find),
             "reduce" => Some(self.reduce),
             "check" => Some(self.check),
+            "accept" => Some(self.accept),
             // No silent provider-default fallback: a new helper must choose a
             // hard policy and become a config key before it can run.
             _ => None,
@@ -150,6 +160,7 @@ impl Default for HelperEfforts {
             find: crate::wire::Effort::Low,
             reduce: crate::wire::Effort::Medium,
             check: crate::wire::Effort::High,
+            accept: crate::wire::Effort::Low,
         }
     }
 }
@@ -190,6 +201,7 @@ impl Default for HelpersConfig {
             preflight_scope: PreflightScope::Auto,
             completion: CompletionStyle::Silent,
             completion_check: false,
+            acceptance_list: true,
             enabled: true,
             calls_per_cell: 8,
             reduce_above_tokens: 2048,
@@ -647,6 +659,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "calls_per_cell",
             "completion",
             "completion_check",
+            "acceptance_list",
             "reduce_above_tokens",
         ]
         .contains(&key.as_str())
@@ -702,6 +715,12 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
                 .ok_or_else(|| "pane.toml: `preflight_scope` must be a string".to_string())?,
         )?,
     };
+    let acceptance_list = match table.get("acceptance_list") {
+        None => defaults.acceptance_list,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `acceptance_list` must be true or false".to_string())?,
+    };
     let completion_check = match table.get("completion_check") {
         None => defaults.completion_check,
         Some(value) => value
@@ -720,6 +739,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         preflight_scope,
         completion,
         completion_check,
+        acceptance_list,
         enabled,
         calls_per_cell,
         reduce_above_tokens,
@@ -729,9 +749,9 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
 fn parse_helper_efforts(value: &toml::Value) -> Result<HelperEfforts, String> {
     let table = table_of(value, "helpers.effort")?;
     for key in table.keys() {
-        if !["find", "reduce", "check"].contains(&key.as_str()) {
+        if !["find", "reduce", "check", "accept"].contains(&key.as_str()) {
             return Err(format!(
-                "pane.toml: unknown key `{key}` in [helpers.effort]; only `find`, `reduce` and `check` are recognised"
+                "pane.toml: unknown key `{key}` in [helpers.effort]; only `find`, `reduce`, `check` and `accept` are recognised"
             ));
         }
     }
@@ -758,6 +778,7 @@ fn parse_helper_efforts(value: &toml::Value) -> Result<HelperEfforts, String> {
     Ok(HelperEfforts {
         find: read("find", defaults.find)?,
         reduce: read("reduce", defaults.reduce)?,
+        accept: read("accept", defaults.accept)?,
         check: read("check", defaults.check)?,
     })
 }

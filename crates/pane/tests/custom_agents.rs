@@ -111,7 +111,7 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
     std::fs::create_dir_all(fixture.0.join(".glasshouse")).unwrap();
     std::fs::write(
         fixture.0.join(".glasshouse/pane.toml"),
-        "[helpers]\nmodel='base-helper'\nenabled=true\n",
+        "[helpers]\nacceptance_list = false\nmodel='base-helper'\nenabled=true\n",
     )
     .unwrap();
     fixture.write(

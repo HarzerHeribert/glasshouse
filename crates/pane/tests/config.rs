@@ -40,7 +40,7 @@ fn absent_pane_toml_means_the_defaults() {
     assert_eq!(config, PaneConfig::default());
     assert_eq!(config.limits.cell_wall_clock_s, 30);
     assert_eq!(config.limits.response_bytes, 16384);
-    assert_eq!(config.limits.cells, 40);
+    assert_eq!(config.limits.cells, 120, "a backstop, not a working budget");
     assert_eq!(config.supervisor.every, 4);
     assert_eq!(config.supervisor.model, None);
     assert!(config.supervisor.enabled);
@@ -320,4 +320,31 @@ fn parent_and_helper_model_fields_require_concrete_ids() {
             "helper accepted {mode}"
         );
     }
+}
+
+/// `[helpers] acceptance_list` and `[helpers.effort] accept` (2026-09-14): on
+/// by default with helpers, off by config, and the lister's effort is a hard
+/// value like every helper's.
+#[test]
+fn the_acceptance_list_and_its_effort_are_configurable() {
+    let config = pane::config::PaneConfig::parse(
+        "[helpers]\nmodel = \"m\"\nacceptance_list = false\n[helpers.effort]\naccept = \"medium\"\n",
+    )
+    .unwrap();
+    assert!(!config.helpers.acceptance_list);
+    assert_eq!(
+        config.helpers.effort.for_helper("accept"),
+        Some(pane::wire::Effort::Medium)
+    );
+    let defaults = pane::config::PaneConfig::parse("[helpers]\nmodel = \"m\"\n").unwrap();
+    assert!(
+        defaults.helpers.acceptance_list,
+        "on by default beside a helper model"
+    );
+    assert_eq!(
+        defaults.helpers.effort.for_helper("accept"),
+        Some(pane::wire::Effort::Low)
+    );
+    let refused = pane::config::PaneConfig::parse("[helpers]\nacceptance_list = \"yes\"\n");
+    assert!(refused.is_err());
 }

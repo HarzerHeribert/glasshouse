@@ -76,14 +76,12 @@ fn prose(text: &str) -> Value {
 }
 
 fn exec_json(root: &std::path::Path, endpoint: &str) -> Value {
+    exec_json_task(root, endpoint, "finish the deliverable")
+}
+
+fn exec_json_task(root: &std::path::Path, endpoint: &str, task: &str) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
-        .args([
-            "exec",
-            "finish the deliverable",
-            "--output-format",
-            "json",
-            "--root",
-        ])
+        .args(["exec", task, "--output-format", "json", "--root"])
         .arg(root)
         .args(["--model", "test/model", "--glasshouse"])
         .arg(root.join("absent-glasshouse"))
@@ -329,5 +327,107 @@ fn a_prose_completion_with_nothing_to_find_completes_verified_in_one_turn() {
     assert_eq!(completion["deferred"], 0, "{completion}");
     assert_eq!(bodies.lock().unwrap().len(), 2);
     assert_eq!(result["answer"], "Done: notes written.");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The request-derived acceptance list (`acceptance.rs`): with helpers
+/// configured, the lister answers first, its items are shown to the model
+/// before its first turn, and an item the finished tree does not meet holds
+/// the completion once with the item and what was observed.
+#[test]
+fn an_unmet_acceptance_item_holds_the_completion_with_what_was_observed() {
+    let root = root("acceptance");
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
+    std::fs::write(
+        root.join(".pane/config.toml"),
+        "[helpers]\nmodel = \"test/helper\"\npreflight = false\n",
+    )
+    .unwrap();
+    let (endpoint, bodies) = providers(vec![
+        // The lister's answer: two file items and one judge item.
+        prose(
+            "file: out/a.txt exists\nfile: out/b.txt exists\njudge: the files are named as requested",
+        ),
+        cell(
+            "c1",
+            "await write({path: \"out/a.txt\", content: \"a\\n\"});\nreturn {ok: true};",
+        ),
+        prose("Done: both files are written."),
+        prose("Done: both files are written."),
+    ]);
+    // Four words or more: a shorter request needs no repository and gets no
+    // lister, the same rule as the preflight.
+    let result = exec_json_task(&root, &endpoint, "write out/a.txt and out/b.txt for me");
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        4,
+        "lister, first turn, held completion, finish"
+    );
+    assert!(
+        bodies[0].contains("acceptance items"),
+        "the first request is the lister's: {}",
+        &bodies[0][..bodies[0].len().min(600)]
+    );
+    assert!(
+        bodies[1].contains("## Acceptance list") && bodies[1].contains("file `out/b.txt` exists"),
+        "the model sees the list before its first turn: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[3].contains("Acceptance item not met: file `out/b.txt` exists — absent"),
+        "the held completion names the unmet item: {}",
+        bodies[3]
+    );
+    assert!(
+        !bodies[3].contains("out/a.txt` exists — absent"),
+        "the met item is not a finding: {}",
+        bodies[3]
+    );
+    let completion = &result["telemetry"]["completion"];
+    assert_eq!(completion["verified"], false, "{completion}");
+    assert_eq!(completion["deferred"], 1, "{completion}");
+    let acceptance = &result["telemetry"]["acceptance"];
+    assert_eq!(acceptance["items"], 3, "{acceptance}");
+    assert_eq!(acceptance["met"], 1, "{acceptance}");
+    assert_eq!(acceptance["unmet"], 1, "{acceptance}");
+    assert_eq!(acceptance["judged"], 1, "{acceptance}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The stall notice (`progress::Stall`): six cells in a row that change
+/// nothing — no tree change, no new fact, no verification — get one notice
+/// at the head of the next feedback, counted, and the task goes on.
+#[test]
+fn six_cells_without_progress_get_one_stall_notice_and_the_task_continues() {
+    let root = root("stall");
+    let mut responses = vec![cell(
+        "c1",
+        "await write({path: \"notes.txt\", content: \"hello\\n\"});",
+    )];
+    for i in 0..6 {
+        responses.push(cell(
+            &format!("r{i}"),
+            &format!("const look{i} = await read({{path: \"notes.txt\"}});"),
+        ));
+    }
+    responses.push(prose("Done: read it six times."));
+    let (endpoint, bodies) = providers(responses);
+    let result = exec_json(&root, &endpoint);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 8);
+    assert!(
+        !bodies[6].contains("No progress for"),
+        "five idle cells are not yet a stall: {}",
+        bodies[6]
+    );
+    assert!(
+        bodies[7].contains("No progress for 6 cells"),
+        "the sixth idle cell is noticed: {}",
+        bodies[7]
+    );
+    assert_eq!(result["telemetry"]["progress"]["stall_notices"], 1);
+    assert_eq!(result["telemetry"]["progress"]["no_progress_notices"], 0);
+    assert_eq!(result["answer"], "Done: read it six times.");
     let _ = std::fs::remove_dir_all(root);
 }

@@ -4,6 +4,7 @@
 //! crate. It builds and tests independently of the rest of the workspace.
 
 pub mod abi;
+pub mod acceptance;
 pub mod agent;
 pub mod approval;
 pub mod bg;

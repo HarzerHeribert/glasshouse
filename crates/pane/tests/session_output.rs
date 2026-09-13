@@ -185,7 +185,7 @@ fn machine_telemetry_splits_preflight_helper_and_parent_usage_by_model() {
     std::fs::create_dir_all(root.join(".pane")).unwrap();
     std::fs::write(
         root.join(".pane/config.toml"),
-        "[helpers]\nmodel = \"helper/model\"\npreflight = true\npreflight_scope = \"always\"\n",
+        "[helpers]\nacceptance_list = false\nmodel = \"helper/model\"\npreflight = true\npreflight_scope = \"always\"\n",
     )
     .unwrap();
     let helper = json!({

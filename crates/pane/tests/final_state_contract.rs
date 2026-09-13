@@ -224,7 +224,7 @@ fn fresh_checker_evidence_carries_no_narrative_and_bounds_the_diff() {
     }];
     let facts = vec!["edited /app/x.c (cell 1)".to_string()];
     let diff = "+line\n".repeat(10_000);
-    let evidence = fresh_checker_evidence("Add coverage to sqlite", &diff, &facts, &findings);
+    let evidence = fresh_checker_evidence("Add coverage to sqlite", &diff, &facts, &findings, &[]);
     let _ = control;
     assert!(!evidence.contains(control));
     assert!(evidence.starts_with("## Original request\nAdd coverage to sqlite\n"));

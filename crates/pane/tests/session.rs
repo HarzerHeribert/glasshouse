@@ -1534,8 +1534,12 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
     let root = scratch_dir("cell-cap-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
+    // The default cap is a 120-cell backstop since 2026-09-14; this test pins
+    // the cap's mechanics at a configured 40 so it stays forty-one turns.
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
+    std::fs::write(root.join(".pane/config.toml"), "[limits]\ncells = 40\n").unwrap();
 
-    // 40 is `CELL_CAP`; the forty-first turn is the final-answer turn.
+    // 40 is the configured cap; the forty-first turn is the final-answer turn.
     let turns = 41;
     let replies = (0..turns)
         .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
@@ -1631,7 +1635,7 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/40"),
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/120"),
         "the usage line must carry the gateway's own figures: {result_block}"
     );
 
@@ -2063,7 +2067,7 @@ fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1/40"),
+        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1/120"),
         "the usage line must carry the response's own usage: {result_block}"
     );
 
@@ -2159,7 +2163,7 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/40"),
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/120"),
         "the gateway's row (120) must win over the response's usage (30): {result_block}"
     );
 
@@ -4963,7 +4967,7 @@ fn write_helpers_pane_toml(root: &Path, model: &str) {
     fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
         root.join(".pane/config.toml"),
-        format!("[helpers]\nmodel = \"{model}\"\npreflight = true\npreflight_scope = \"always\"\n"),
+        format!("[helpers]\nacceptance_list = false\nmodel = \"{model}\"\npreflight = true\npreflight_scope = \"always\"\n"),
     )
     .unwrap();
 }
@@ -5034,7 +5038,7 @@ fn a_configured_helper_model_does_not_enable_preflight_by_itself() {
     fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
         root.join(".pane/config.toml"),
-        "[helpers]\nmodel = \"helper-tier\"\n",
+        "[helpers]\nacceptance_list = false\nmodel = \"helper-tier\"\n",
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");

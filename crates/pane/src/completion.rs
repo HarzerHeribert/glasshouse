@@ -110,6 +110,8 @@ pub enum FindingKind {
     CoverageOutsideTree,
     StaleVerification,
     NoVerification,
+    /// An item of the request-derived acceptance list was not met.
+    AcceptanceUnmet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -347,6 +349,7 @@ pub fn fresh_checker_evidence(
     diff: &str,
     facts: &[String],
     findings: &[Finding],
+    judge: &[String],
 ) -> String {
     let mut out = String::from("## Original request\n");
     out.push_str(task);
@@ -380,7 +383,18 @@ pub fn fresh_checker_evidence(
     for finding in findings {
         out.push_str(&format!("- {}\n", finding.sentence));
     }
-    out.push_str("\nDoes the current state satisfy the original request?\n");
+    if !judge.is_empty() {
+        out.push_str("\n## Acceptance items to judge\n");
+        for item in judge {
+            out.push_str(&format!("- {item}\n"));
+        }
+    }
+    out.push_str("\nDoes the current state satisfy the original request");
+    if judge.is_empty() {
+        out.push_str("?\n");
+    } else {
+        out.push_str(", and does each acceptance item above hold? Name any that does not.\n");
+    }
     out
 }
 

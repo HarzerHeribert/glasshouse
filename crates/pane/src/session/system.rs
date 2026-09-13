@@ -43,6 +43,74 @@ pub(super) fn build_system_prompt(
 pub(super) const PREFLIGHT_SERVE_FILES: usize = 6;
 pub(super) const PREFLIGHT_SERVE_BYTES: u64 = 32 * 1024;
 
+/// The acceptance lister: one toolless request that turns the task into the
+/// items its completion is checked against (`acceptance.rs`). Runs once per
+/// task before the first turn when `[helpers] acceptance_list` is on; a
+/// request too short to need the repository gets none.
+pub(super) fn acceptance_block(
+    task: &str,
+    session: &Session<'_>,
+) -> Option<(
+    String,
+    Vec<crate::acceptance::Item>,
+    crate::helpers::HelperRecord,
+)> {
+    let helpers = session.config().helpers.clone();
+    if !helpers.enabled || !helpers.acceptance_list || !request_may_need_the_repository(task) {
+        return None;
+    }
+    let model = helpers.model.as_deref()?;
+    let effort = helpers.effort.for_helper("accept")?;
+    let token = invoke::CancellationToken::new();
+    session.interrupt.arm(token.clone());
+    let record = crate::helpers::acceptance_list(
+        task,
+        crate::helpers::HelperRoute { model, effort },
+        session.profile,
+        session.glasshouse,
+        session.id,
+        &token,
+    )?;
+    if record.outcome.cancelled {
+        session.interrupt.consumed();
+    }
+    output::acceptance_helper(&record);
+    if !record.outcome.ok {
+        session_println!(
+            "acceptance: the lister did not answer ({})",
+            record.outcome.text.lines().next().unwrap_or("").trim()
+        );
+        return None;
+    }
+    let items = crate::acceptance::parse(&record.outcome.text);
+    if items.is_empty() {
+        session_println!("acceptance: the lister named nothing verifiable");
+        return None;
+    }
+    session_println!(
+        "acceptance: {} item(s) derived from the request",
+        items.len()
+    );
+    Some((crate::acceptance::render_list(&items), items, record))
+}
+
+/// The acceptance list in the task's system block: derived once from the
+/// request, shown beside the preflight, paid for as one helper call, and
+/// returned for the task state to check when the model claims completion.
+pub(super) fn append_acceptance(
+    task: &str,
+    session: &Session<'_>,
+    transcript: &mut Transcript,
+    budget: &mut TaskSpend,
+) -> Vec<crate::acceptance::Item> {
+    let Some((block, items, record)) = acceptance_block(task, session) else {
+        return Vec::new();
+    };
+    transcript.conversation.system.push_str(&block);
+    budget.add_helpers(std::slice::from_ref(&record));
+    items
+}
+
 /// The stand-in gate: a request of fewer words than this gets no preflight.
 pub(super) const PREFLIGHT_MIN_WORDS: usize = 4;
 

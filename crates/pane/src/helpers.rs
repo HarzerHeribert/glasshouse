@@ -60,6 +60,8 @@ pub enum OutputKind {
     Reduction,
     /// A judgement plus the evidence for it.
     Verdict,
+    /// Lines in fixed forms the caller parses, never trusts.
+    Checklist,
 }
 
 /// Where a helper may be invoked from.
@@ -73,6 +75,8 @@ pub enum CallSite {
     CompletionGate,
     /// From inside a cell, by the model itself.
     Cell,
+    /// Deriving the acceptance list from the request, before the first turn.
+    Acceptance,
 }
 
 /// One helper, entirely as data.
@@ -218,8 +222,25 @@ pub const CHECKER: HelperSpec = HelperSpec {
     call_sites: &[CallSite::CompletionGate, CallSite::Cell],
 };
 
+/// Turn a request into the acceptance items its completion is checked
+/// against (`acceptance.rs`). Toolless and one-shot: it reads the request
+/// and answers in fixed line forms, and everything it says is parsed and
+/// then decided against the tree, never believed.
+pub const ACCEPTANCE: HelperSpec = HelperSpec {
+    name: "accept",
+    summary: "Turn a request into a checklist of verifiable acceptance items, never a plan and never the work.",
+    verb: "listing",
+    preamble: crate::acceptance::DERIVE_PREAMBLE,
+    tools: &[],
+    max_tokens: 512,
+    max_turns: 1,
+    input: InputKind::Request,
+    output: OutputKind::Checklist,
+    call_sites: &[CallSite::Acceptance],
+};
+
 /// The roster. **This array is the whole extension point.**
-pub const HELPERS: &[HelperSpec] = &[SCOUT, REDUCER, CHECKER];
+pub const HELPERS: &[HelperSpec] = &[SCOUT, REDUCER, CHECKER, ACCEPTANCE];
 
 /// Find a helper by the name the model calls it with.
 pub fn lookup(name: &str) -> Option<&'static HelperSpec> {
@@ -890,6 +911,31 @@ pub fn preflight(
     Some(record)
 }
 
+/// ACCEPTANCE at `CallSite::Acceptance` -- once per task, before the first
+/// turn: the request in, the acceptance lines out.
+pub fn acceptance_list(
+    request: &str,
+    route: HelperRoute<'_>,
+    profile: &crate::sandbox::profile::Profile,
+    glasshouse: &crate::glasshouse::Glasshouse,
+    session: &crate::contract::SessionId,
+    token: &crate::tools::invoke::CancellationToken,
+) -> Option<HelperRecord> {
+    let spec = HELPERS
+        .iter()
+        .find(|spec| spec.call_sites.contains(&CallSite::Acceptance))?;
+    let call = run(spec, route, request, profile, glasshouse, session, token);
+    Some(HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: bounded_ask(request),
+        outcome: call.outcome,
+        turns: call.turns,
+        looked: call.looked,
+        usage: call.usage,
+    })
+}
+
 /// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted.
 pub fn check_completion(
     evidence: &str,
@@ -1028,9 +1074,13 @@ mod tests {
                 "`{name}` must be in the roster the model is offered"
             );
         }
+        // The acceptance lister (2026-09-14) is the fourth: pushed, never
+        // offered to a cell.
+        assert!(lookup("accept").is_some());
+        assert!(!ACCEPTANCE.call_sites.contains(&CallSite::Cell));
         assert_eq!(
             HELPERS.len(),
-            3,
+            4,
             "the roster is the whole extension point; nothing else may be in it"
         );
     }

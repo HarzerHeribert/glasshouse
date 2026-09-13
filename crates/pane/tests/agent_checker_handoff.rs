@@ -29,7 +29,7 @@ impl Fixture {
         std::fs::create_dir_all(root.join(".pane")).unwrap();
         std::fs::write(
             root.join(".pane/config.toml"),
-            "[helpers]\nmodel = \"checker-model\"\n\n[permissions]\nallow = [\"Read(**)\", \"Write(**)\"]\n",
+            "[helpers]\nacceptance_list = false\nmodel = \"checker-model\"\n\n[permissions]\nallow = [\"Read(**)\", \"Write(**)\"]\n",
         )
         .unwrap();
         Self { root }

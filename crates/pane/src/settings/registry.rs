@@ -261,6 +261,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "helpers.acceptance_list",
+        label: "Request-derived acceptance list",
+        description: "Derive a checklist of verifiable items from the request before the first turn and hold a completion that leaves one unmet.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "helpers.reduce_above_tokens",
         label: "Reduce above tokens",
         description: "Estimated command-output tokens above which the pushed reducer is worth a cheap request.",

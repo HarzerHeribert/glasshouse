@@ -246,6 +246,12 @@ pub(super) struct TaskState {
     pub(super) evidence_gate: bool,
     pub(super) completion_check: bool,
     pub(super) checker_ran: bool,
+    /// The request-derived acceptance list (`acceptance.rs`), empty when no
+    /// lister ran; its latest evaluation is what the result reports.
+    pub(super) acceptance: Vec<crate::acceptance::Item>,
+    pub(super) acceptance_verdicts: Vec<crate::acceptance::Verdict>,
+    /// Cells in a row that changed nothing (`progress::Stall`).
+    pub(super) stall: crate::progress::Stall,
 }
 
 impl TaskState {
@@ -268,7 +274,16 @@ impl TaskState {
             evidence_gate: config.limits.evidence_gate,
             completion_check: config.helpers.completion_check,
             checker_ran: false,
+            acceptance: Vec::new(),
+            acceptance_verdicts: Vec::new(),
+            stall: crate::progress::Stall::default(),
         }
+    }
+
+    /// The request-derived acceptance list this task is checked against.
+    pub(super) fn with_acceptance(mut self, items: Vec<crate::acceptance::Item>) -> Self {
+        self.acceptance = items;
+        self
     }
 
     /// Why the next parent request is being made, read from the last frame.
@@ -285,9 +300,11 @@ impl TaskState {
         plan: &[crate::runtime::outcome::PlanItem],
         snapshots: Option<(&crate::changes::Snapshot, &crate::changes::Snapshot)>,
     ) -> Observed {
+        let mut progressed = false;
         if let Some((before, after)) = snapshots {
             let changed = before.changed_paths(after);
             if !changed.is_empty() {
+                progressed = true;
                 self.files.observe(&changed);
                 self.last_mutation_cell = Some(record.cell);
                 let digest = after.digest();
@@ -297,9 +314,18 @@ impl TaskState {
         }
         self.capsule
             .observe_cell(record, error, plan, self.tree_digest.as_deref());
+        if self
+            .capsule
+            .facts()
+            .last()
+            .is_some_and(|fact| fact.evidence.cell == record.cell)
+        {
+            progressed = true;
+        }
         if let Some(verification) = self.capsule.last_verification()
             && verification.cell == record.cell
         {
+            progressed = true;
             self.last_verification_cell = Some(verification.cell);
             self.checkpoints.note_verification(
                 verification.cell,
@@ -326,6 +352,12 @@ impl TaskState {
             }
         } else {
             self.guard.reset();
+        }
+        // A stall is a run of cells that changed nothing: no tree change, no
+        // new fact, no verification. It is a notice, never a stop.
+        if let Some(notice) = self.stall.observe(progressed) {
+            output::stall_notice();
+            notices.push(notice);
         }
         let rendered = self.capsule.render();
         let capsule_block = (rendered != self.last_capsule_render).then(|| {
@@ -378,6 +410,32 @@ impl TaskState {
             self.last_verification_cell,
             last_mutation,
         );
+        let mut findings = findings;
+        if !self.acceptance.is_empty() {
+            // Every item is decided against the tree or a command run
+            // through the one kernel under the session's own profile.
+            let ctx = ToolContext {
+                profile: session.profile,
+                glasshouse: session.glasshouse,
+                session: session.id,
+            };
+            let mut runner = |command: &str| -> Result<(Option<i32>, String), String> {
+                match invoke::run(&ctx, "bash", &Args::new().with("command", command)) {
+                    Ok(result) => Ok((
+                        result.exit_code,
+                        format!("{}{}", result.stdout, result.stderr),
+                    )),
+                    Err(error) => Err(error.to_string()),
+                }
+            };
+            self.acceptance_verdicts =
+                crate::acceptance::evaluate(&self.acceptance, root, &mut runner);
+            findings.extend(crate::acceptance::findings(&self.acceptance_verdicts));
+            output::acceptance(crate::acceptance::summary(
+                &self.acceptance,
+                &self.acceptance_verdicts,
+            ));
+        }
         let mut sentences: Vec<String> = findings
             .iter()
             .map(|finding| finding.sentence.clone())
@@ -399,6 +457,7 @@ impl TaskState {
                     &diff,
                     &self.capsule.fact_lines(),
                     &findings,
+                    &crate::acceptance::judge_texts(&self.acceptance),
                 );
                 if let Some(record) = crate::helpers::check_completion(
                     &evidence,

@@ -86,7 +86,7 @@ mod system;
 mod task;
 
 pub use system::{MANIFEST_PROBE, session_facts, session_facts_with, system_manifest};
-use system::{build_system_prompt, preflight_block};
+use system::{append_acceptance, build_system_prompt, preflight_block};
 use task::{Observed, TaskSpend, TaskState, partial_effects};
 
 /// The longest a turn waits for an open event window to close before it is
@@ -443,8 +443,7 @@ pub struct SessionArgs {
     pub model: Option<String>,
 
     /// Which entry points the model is shown: `cells` (default, `execute_cell`
-    /// only), `hybrid` (familiar tools and `execute_cell`) or `tools`.
-    /// Visibility only -- every mode runs the same capabilities.
+    /// only), `hybrid` (both) or `tools`. Visibility only, one executor.
     #[arg(long, value_parser = crate::abi::Interface::parse)]
     pub interface: Option<crate::abi::Interface>,
 
@@ -1314,6 +1313,7 @@ fn run_task_inner(
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
+    let acceptance_items = append_acceptance(task, session, transcript, &mut budget);
     {
         let _line = session.interrupt.writing();
         rollout
@@ -1424,7 +1424,8 @@ fn run_task_inner(
     let supervisor_active =
         session.config().supervisor.enabled && session.config().supervisor.model.is_some();
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
-    let mut task_state = TaskState::new(task, session.profile, &session.config());
+    let mut task_state =
+        TaskState::new(task, session.profile, &session.config()).with_acceptance(acceptance_items);
 
     loop {
         let since = SystemTime::now();
@@ -2095,8 +2096,7 @@ fn act_on(
             // isolate holds -- an output region saying `(no outputs)` beside live
             // handles would be the screen disagreeing with the message sent in
             // the same breath.
-            // A prose answer is a completion claim; the gate covers it as it
-            // covers a terminal `return` (`TaskState::prose_completion`).
+            // A prose answer is a completion claim, gated like a `return`.
             Extracted::Prose if let Some(candidate) = prompt::completion_text(&assistant_text) => {
                 return Ok(task_state.prose_completion(&candidate, profile, session));
             }

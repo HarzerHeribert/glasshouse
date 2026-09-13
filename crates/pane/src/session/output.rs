@@ -175,6 +175,8 @@ struct Telemetry {
     current_cause: RequestCause,
     completion: Option<Value>,
     no_progress_notices: u64,
+    stall_notices: u64,
+    acceptance: Option<Value>,
     capsule: Option<Value>,
 }
 
@@ -210,6 +212,8 @@ impl Default for Telemetry {
             current_cause: RequestCause::Implementation,
             completion: None,
             no_progress_notices: 0,
+            stall_notices: 0,
+            acceptance: None,
             capsule: None,
         }
     }
@@ -442,7 +446,11 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
             "repair_usage": telemetry.recovery[cause_index(RequestCause::Repair)].value(),
         },
         "completion": telemetry.completion,
-        "progress": {"no_progress_notices": telemetry.no_progress_notices},
+        "progress": {
+            "no_progress_notices": telemetry.no_progress_notices,
+            "stall_notices": telemetry.stall_notices,
+        },
+        "acceptance": telemetry.acceptance,
         "capsule": telemetry.capsule,
     })
 }
@@ -680,6 +688,34 @@ fn helper(call_site: &str, record: &HelperRecord) {
 
 pub(super) fn preflight(record: &HelperRecord) {
     helper("preflight", record);
+}
+
+/// The acceptance lister ran before the first turn.
+pub(super) fn acceptance_helper(record: &HelperRecord) {
+    helper("acceptance", record);
+}
+
+/// Counts a stall notice at the head of a feedback.
+pub(super) fn stall_notice() {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.stall_notices = state.telemetry.stall_notices.saturating_add(1);
+        }
+    });
+}
+
+/// Stores the acceptance list's latest evaluation on the result and emits
+/// it as one `acceptance` event; a later evaluation replaces it.
+pub(super) fn acceptance(value: Value) {
+    if !active() {
+        return;
+    }
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.acceptance = Some(value.clone());
+        }
+    });
+    emit("acceptance", value);
 }
 
 pub(super) fn cell_helpers(records: &[HelperRecord]) {
