@@ -8,6 +8,10 @@ source, test, or live-harness evidence before its status is upgraded.
 The Claude Code and Codex columns are the current comparison baseline supplied
 for this audit; they are not independently verified by this document.
 
+The cross-cutting product target and the measured work needed to make familiar
+tool use cheaper in expensive-parent attention are maintained in
+[smarter-cheaper-roadmap.md](smarter-cheaper-roadmap.md).
+
 ## Implementation policy
 
 Target equivalent user outcomes, not identical command names or screens.

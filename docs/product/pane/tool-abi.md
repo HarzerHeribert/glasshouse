@@ -2,6 +2,12 @@
 
 Status: implementation spec
 
+The measured 2026-09-12 pilot and the resulting build/debug/redesign register
+are recorded in [smarter-cheaper-roadmap.md](smarter-cheaper-roadmap.md). In
+particular, an internally lowered Cell IR frame is not evidence that the model
+selected `execute_cell`: provider selection and execution origin must be
+measured separately.
+
 ## Thesis
 
 Pane should let a model work with the coding tools and interaction shapes it already knows, while compiling those familiar calls into a substantially stronger Pane execution substrate.

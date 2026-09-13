@@ -20754,3 +20754,17 @@ on its own before it kills. And Glasshouse's own launches resolved
 credentials from the Keychain and the shell only; they now read the gateway's
 credential file first, the same chain the gateway uses, so a key entered in
 Pane is what a hosted session gets.
+
+## Pane wins by spending less expensive attention, not by forcing an interface — the user, 2026-09-13
+
+Pane lets a model use provider-familiar direct tools or composed cells and
+lowers both through one canonical execution kernel. The product must not count
+an internal Cell IR frame as proof that the model chose `execute_cell`, nor
+force direct-tool usage as a goal. It must measure the provider-selected
+interface and make either choice smarter: deduplicate exact reads, compose
+dependent operations, apply mutations dependably, reduce noisy evidence with a
+cheap model, and return only decision-relevant state to the expensive parent.
+Success means competitor-level verified correctness at lower weighted cost per
+verified pass and lower Sol attention. Raw Luna tokens are not priced as Sol
+tokens. The implementation and measurement register is
+`docs/product/pane/smarter-cheaper-roadmap.md`.
