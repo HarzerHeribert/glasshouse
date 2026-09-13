@@ -71,6 +71,7 @@ const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 const MODES: &[&str] = &["build", "plan"];
 const AGENT_MODES: &[&str] = &["auto", "off", "pinned"];
 const COMPLETION: &[&str] = &["silent", "recap"];
+const PREFLIGHT_SCOPE: &[&str] = &["auto", "always"];
 
 /// The top-level tables `PaneConfig` parses. A key under one of these is
 /// validated by the runtime parser; everything else is owned here.
@@ -242,6 +243,33 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "helpers.preflight_scope",
+        label: "Preflight scope",
+        description: "With preflight on: `auto` runs the Scout only for a request with an uncertainty signal; `always` runs it for every task.",
+        kind: Kind::Choice,
+        choices: PREFLIGHT_SCOPE,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "helpers.completion_check",
+        label: "Fresh completion check",
+        description: "Run the independent checker on the terminal candidate with the original request, the diff and exact evidence only.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "helpers.reduce_above_tokens",
+        label: "Reduce above tokens",
+        description: "Estimated command-output tokens above which the pushed reducer is worth a cheap request.",
+        kind: Kind::Integer,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "supervisor.enabled",
         label: "Supervisor",
         description: "Whether the supervisor look runs.",
@@ -300,6 +328,15 @@ static SPECS: &[SettingSpec] = &[
         label: "Task token cap (retired)",
         description: "Accepted so an existing project still starts; spend is accounted and never capped here.",
         kind: Kind::Integer,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "limits.evidence_gate",
+        label: "Evidence gate",
+        description: "Hold a terminal return once for the deterministic final-state check and the no-progress guard's findings. Off is an ablation switch.",
+        kind: Kind::Bool,
         choices: &[],
         basic: false,
         restart: true,

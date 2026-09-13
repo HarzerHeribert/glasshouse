@@ -15,6 +15,11 @@ pub struct Limits {
     pub cell_wall_clock_s: u64,
     pub response_bytes: usize,
     pub cells: u64,
+    /// Whether a terminal return is held once for the deterministic
+    /// final-state contract check and the no-progress guard's findings
+    /// (`smarter-cheaper-roadmap.md`, *Evidence-gated completion*). On by
+    /// default; off is an ablation switch, not a product mode.
+    pub evidence_gate: bool,
 }
 
 impl Default for Limits {
@@ -23,6 +28,7 @@ impl Default for Limits {
             cell_wall_clock_s: 30,
             response_bytes: 16 * 1024,
             cells: 40,
+            evidence_gate: true,
         }
     }
 }
@@ -62,12 +68,55 @@ pub struct HelpersConfig {
     /// default: configured helpers remain callable without paying for a
     /// redundant repository scan on every request.
     pub preflight: bool,
+    /// When `preflight` is on, whether every task pays for the Scout or only
+    /// a task whose request carries an uncertainty signal
+    /// (`smarter-cheaper-roadmap.md`, *Adaptive orchestration*).
+    pub preflight_scope: PreflightScope,
     /// What the completion gate does once a task is accepted.
     pub completion: CompletionStyle,
+    /// Run the fresh independent checker on the terminal candidate: the
+    /// original request, the task's diff and its exact evidence, never the
+    /// parent's rationale. Costs one cheap request per completed task.
+    pub completion_check: bool,
     pub enabled: bool,
     /// The most helper calls one cell may make, so a loop cannot issue three
     /// hundred requests inside a single program.
     pub calls_per_cell: u32,
+    /// Estimated tokens of a command result above which the pushed reducer
+    /// is worth a cheap request. Below it the parent reads the output itself.
+    pub reduce_above_tokens: usize,
+}
+
+/// `[helpers] preflight_scope` -- which tasks the Scout runs for when
+/// preflight is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreflightScope {
+    /// Only when the request names a path that does not exist, a command the
+    /// session cannot run, verification the session cannot see, or is long
+    /// enough that a scan is expected to save parent attention.
+    #[default]
+    Auto,
+    /// Every task, as before this key existed.
+    Always,
+}
+
+impl PreflightScope {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "always" => Ok(Self::Always),
+            other => Err(format!(
+                "pane.toml: `preflight_scope` must be \"auto\" or \"always\", not `{other}`"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+        }
+    }
 }
 
 /// `[helpers.effort]` -- effort follows the work a helper does rather than
@@ -138,9 +187,12 @@ impl Default for HelpersConfig {
             model: None,
             effort: HelperEfforts::default(),
             preflight: false,
+            preflight_scope: PreflightScope::Auto,
             completion: CompletionStyle::Silent,
+            completion_check: false,
             enabled: true,
             calls_per_cell: 8,
+            reduce_above_tokens: 2048,
         }
     }
 }
@@ -230,6 +282,11 @@ const CALLS_PER_CELL: Range = Range {
     key: "calls_per_cell",
     min: 1,
     max: 64,
+};
+const REDUCE_ABOVE_TOKENS: Range = Range {
+    key: "reduce_above_tokens",
+    min: 256,
+    max: 32_768,
 };
 
 const EVERY: Range = Range {
@@ -498,12 +555,19 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             // spend but never use this value to control execution.
             "task_tokens",
             "cells",
+            "evidence_gate",
         ]
         .contains(&key.as_str())
         {
             return Err(format!("pane.toml: unknown key `{key}` in [limits]"));
         }
     }
+    let evidence_gate = match table.get("evidence_gate") {
+        None => defaults.evidence_gate,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `evidence_gate` must be true or false".to_string())?,
+    };
 
     let cell_wall_clock_s = match int_field(table, "cell_wall_clock_s")? {
         Some(v) => u64::try_from(CELL_WALL_CLOCK_S.check(v)?).expect("range is non-negative"),
@@ -527,6 +591,7 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         cell_wall_clock_s,
         response_bytes,
         cells,
+        evidence_gate,
     })
 }
 
@@ -578,8 +643,11 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "effort",
             "enabled",
             "preflight",
+            "preflight_scope",
             "calls_per_cell",
             "completion",
+            "completion_check",
+            "reduce_above_tokens",
         ]
         .contains(&key.as_str())
         {
@@ -626,14 +694,37 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
                 .ok_or_else(|| "pane.toml: `completion` must be a string".to_string())?,
         )?,
     };
+    let preflight_scope = match table.get("preflight_scope") {
+        None => defaults.preflight_scope,
+        Some(value) => PreflightScope::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `preflight_scope` must be a string".to_string())?,
+        )?,
+    };
+    let completion_check = match table.get("completion_check") {
+        None => defaults.completion_check,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `completion_check` must be true or false".to_string())?,
+    };
+    let reduce_above_tokens = match int_field(table, "reduce_above_tokens")? {
+        Some(v) => {
+            usize::try_from(REDUCE_ABOVE_TOKENS.check(v)?).expect("range is non-negative")
+        }
+        None => defaults.reduce_above_tokens,
+    };
 
     Ok(HelpersConfig {
         model,
         effort,
         preflight,
+        preflight_scope,
         completion,
+        completion_check,
         enabled,
         calls_per_cell,
+        reduce_above_tokens,
     })
 }
 

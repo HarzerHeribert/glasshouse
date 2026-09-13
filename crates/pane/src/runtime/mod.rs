@@ -13,6 +13,7 @@ pub mod handlers;
 pub mod handles;
 pub mod isolate;
 pub mod marshal;
+pub mod observation;
 pub mod outcome;
 pub mod preview;
 pub mod repair;

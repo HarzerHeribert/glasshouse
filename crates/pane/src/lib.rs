@@ -17,6 +17,7 @@ pub mod glasshouse;
 pub mod helper_context;
 pub mod helpers;
 pub mod images;
+pub mod manifest;
 pub mod project;
 pub mod prompt;
 pub mod rollout;
