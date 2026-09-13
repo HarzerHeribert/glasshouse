@@ -602,8 +602,14 @@ fn preflight_carries_its_helper_usage_into_the_returned_record() {
     );
     unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
 
-    let record = pane::helpers::preflight(
+    // The preflight is handed the scouting brief, never the raw request;
+    // the record still says what was asked.
+    let brief = pane::preflight::scouting_brief(
         "Find the repository entry point",
+        &pane::manifest::Manifest::default(),
+    );
+    let record = pane::helpers::preflight(
+        &brief,
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Low,
@@ -618,6 +624,7 @@ fn preflight_carries_its_helper_usage_into_the_returned_record() {
     unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
 
     assert!(record.outcome.ok, "{record:?}");
+    assert_eq!(record.asked, "Find the repository entry point");
     assert_eq!(record.usage.model, "test-helper-model");
     assert_eq!(record.usage.requests, 1);
     assert_eq!(record.usage.reported_requests, 1);
@@ -678,6 +685,35 @@ fn a_failed_helper_call_throws_and_is_recorded_as_failed() {
 /// The roster declares itself: appending a `HelperSpec` is what puts a helper
 /// in front of the model, with no second place to edit — and `call_sites` is
 /// what decides which helpers a cell is told about at all.
+/// The pilot's scouts, handed the raw request, tried to be the parent and
+/// reported that they could not run commands. The preamble now says what a
+/// scouting brief is for, and the toolset still cannot change anything.
+#[test]
+fn the_scout_preamble_says_it_scouts_for_the_actor_and_names_no_mutating_tool() {
+    let scout = pane::helpers::SCOUT;
+    assert!(
+        scout
+            .preamble
+            .contains("scouting for the model that will act"),
+        "{}",
+        scout.preamble
+    );
+    assert!(
+        scout.preamble.contains("never attempt the request"),
+        "{}",
+        scout.preamble
+    );
+    for tool in pane::helpers::FORBIDDEN_TOOLS {
+        assert!(!scout.tools.contains(&tool), "SCOUT holds `{tool}`");
+        assert!(
+            !scout.preamble.contains(&format!("`{tool}`")),
+            "the preamble names `{tool}`: {}",
+            scout.preamble
+        );
+    }
+    assert!(!scout.preamble.contains("bash"), "{}", scout.preamble);
+}
+
 #[test]
 fn every_helper_in_the_roster_is_declared_to_the_model() {
     let runtime = pane::prompt::render_runtime();

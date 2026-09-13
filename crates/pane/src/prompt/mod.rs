@@ -58,6 +58,104 @@ pub const PREAMBLE: &str = concat!(
     "final: code cannot widen the session's sandbox grant.",
 );
 
+/// One segment of [`PREAMBLE`] whose wording depends on the declared
+/// interface. `cells` is the segment's exact bytes in the constant; a `None`
+/// keeps it, `Some("")` drops it.
+struct Variant {
+    cells: &'static str,
+    hybrid: Option<&'static str>,
+    tools: Option<&'static str>,
+}
+
+/// The table [`preamble_for`] applies — `model-contract.md` §2.1.
+///
+/// The invariant: **every sentence the three preambles share is one copy in
+/// [`PREAMBLE`].** A variant is a replacement over that constant, never a
+/// second constant, so the shared guidance cannot drift between interfaces;
+/// `prompt::tests::every_variant_segment_occurs_exactly_once` fails when a
+/// segment stops matching.
+const VARIANTS: &[Variant] = &[
+    Variant {
+        cells: "To act with tools, make exactly one `execute_cell` call in an assistant turn.\n\
+                Put every operation in that one TypeScript program; `execute_cell` is the only\n\
+                provider-native tool. Runtime tools are callable only inside its code.\n",
+        hybrid: Some(
+            "To act, call a familiar tool directly for one independent operation, or make\n\
+             exactly one `execute_cell` call for dependent, branching, looped or batched\n\
+             work. Inside a cell the same tools are typed async functions with the same\n\
+             arguments and results.\n",
+        ),
+        tools: Some(
+            "To act, call the familiar tools directly; each call's result is runtime\n\
+             evidence.\n",
+        ),
+    },
+    Variant {
+        cells: "While you construct the call, none of THIS cell has executed. Code may await\n\
+                tools and branch on their actual returned values. Batch deterministic work\n\
+                when useful; stop at the next decision that needs unseen evidence. After\n\
+                submitting a cell, wait for its correlated result. Never invent output or\n\
+                infer success: only that result is runtime evidence.",
+        hybrid: None,
+        tools: Some(
+            "Stop at the next decision that needs unseen evidence. After each call, wait\n\
+             for its correlated result. Never invent output or infer success: only that\n\
+             result is runtime evidence.",
+        ),
+    },
+    Variant {
+        cells: "A cell is validated before it runs. A parse error runs nothing and may offer\n\
+                `pane-edit`; a return, yield, or throw stops later code. Tool results are live\n\
+                objects, but unseen fields are not model-visible. Use declared fields and\n\
+                standard JavaScript; do not bind a declared tool or host-global name. Reuse\n\
+                live handles rather than repeating reads. For an existing source change,\n\
+                `context({path, symbol})` is the first source-reading tool; do not `read` or\n\
+                print the whole source first. Its complete target is delivered automatically.\n\
+                Batch independent context calls in one inspection cell. After inspection,\n\
+                related edits, new tests and verification can run in one cell; yield when\n\
+                the next decision needs interpretation of new evidence.\n\
+                In the next cell use `edit({path, old, replacement})`; do not name a variable\n\
+                `new`. Pane binds the edit to the latest observed source version. For file or\n\
+                script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:\n\
+                one double-quoted JavaScript string per logical line, never a template literal.\n\
+                Pane supplies line separators. Use\n\
+                compact structured summaries or bounded excerpts instead of broad prints.\n\
+                `glob` may return directories, so select a file before `read`. A `bash`\n\
+                result succeeded only when its\n\
+                `exit_code` says so.",
+        hybrid: None,
+        tools: Some(
+            "Pane binds an edit to the latest observed source version. A command result\n\
+             succeeded only when its `exit_code` says so.",
+        ),
+    },
+    Variant {
+        cells: "A prose response with no `execute_cell` call ends the task as the answer.\n",
+        hybrid: Some("A prose response with no tool call ends the task as the answer.\n"),
+        tools: Some("A prose response with no tool call ends the task as the answer.\n"),
+    },
+];
+
+/// [`PREAMBLE`] as the declared interface needs it — `model-contract.md`
+/// §2.1. `Cells` is the constant verbatim; `Hybrid` describes both routes;
+/// `Tools` drops the cell mechanics a request without `execute_cell` cannot
+/// use. No variant says or implies that `execute_cell` is the only native
+/// tool, because in hybrid mode it is not.
+pub fn preamble_for(interface: abi::Interface) -> String {
+    let mut text = PREAMBLE.to_string();
+    for variant in VARIANTS {
+        let replacement = match interface {
+            abi::Interface::Cells => None,
+            abi::Interface::Hybrid => variant.hybrid,
+            abi::Interface::Tools => variant.tools,
+        };
+        if let Some(replacement) = replacement {
+            text = text.replacen(variant.cells, replacement, 1);
+        }
+    }
+    text
+}
+
 /// Request-only context; keeps user text and saved conversation unchanged.
 /// A new runtime is created per user request, not per inference turn.
 pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
@@ -162,6 +260,12 @@ pub struct SessionFacts {
     pub all_commands: bool,
     /// Whether the sandbox grants network access.
     pub network: bool,
+    /// Which tool definitions the request declares, so the preamble and the
+    /// *This session* block describe the routes the model actually has.
+    pub interface: abi::Interface,
+    /// The rendered `## Environment` block ([`crate::manifest::Manifest::render`]),
+    /// when the session collected one.
+    pub manifest: Option<String>,
 }
 
 /// §1's *This session* block: the facts above, rendered.
@@ -184,9 +288,17 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     } else {
         format!("{} command pattern(s) admitted", facts.command_patterns)
     };
+    let whole_set = match facts.interface {
+        abi::Interface::Cells => "The tools above are the whole set.",
+        abi::Interface::Hybrid => {
+            "The tools above are the whole set; the familiar ones are callable directly or\n\
+             inside a cell."
+        }
+        abi::Interface::Tools => "The familiar tools above are the whole set, called directly.",
+    };
     format!(
         "## This session\n\nThe project root is {root}. Relative paths resolve against it.\n\n\
-         The tools above are the whole set. To change existing source, call `context` with\n\
+         {whole_set} To change existing source, call `context` with\n\
          its target symbol, let that result reach the next turn, then call `edit` with the\n\
          exact old text and replacement. Use `write` for new files or deliberate whole-file\n\
          rewrites. File objects retain their bytes; do not print broad contents. Check the\n\
@@ -200,8 +312,9 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     )
 }
 
-/// §1's system block: the preamble, one declaration per tool in `tools`'
-/// order, this session's own facts, then the project's own instructions.
+/// §1's system block: the interface's preamble, one declaration per tool in
+/// `tools`' order, this session's own facts, its manifest when it has one,
+/// then the project's own instructions.
 pub fn render_system(instructions: &str, tools: &[&Tool], facts: &SessionFacts) -> String {
     render_system_for(instructions, tools, facts, HostGlobals::Every)
 }
@@ -219,13 +332,24 @@ pub fn render_system_for(
     globals: HostGlobals,
 ) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
-    format!(
-        "{PREAMBLE}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{}\n\n{instructions}",
+    let mut system = format!(
+        "{}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{}",
+        preamble_for(facts.interface),
         rendered.join("\n\n"),
         render_runtime_for(globals),
         render_abi_for(globals),
         render_session_facts(facts)
-    )
+    );
+    // The manifest is its own block, directly after *This session*: both
+    // describe what this particular session can do, and the manifest is the
+    // finer of the two.
+    if let Some(manifest) = &facts.manifest {
+        system.push_str("\n\n");
+        system.push_str(manifest);
+    }
+    system.push_str("\n\n");
+    system.push_str(instructions);
+    system
 }
 
 /// §1's *Familiar tools* block: the ABI's own types and declarations.
@@ -310,17 +434,18 @@ fn render_params(args: &[Arg]) -> String {
     if args.is_empty() {
         return "{}".to_string();
     }
-    let fields: Vec<String> = args
-        .iter()
-        .map(|arg| {
-            let optional_mark = if arg.is_required() { "" } else { "?" };
-            let value_type = match arg.kind() {
-                crate::tools::registry::ArgKind::Lines => "string[]",
-                _ => "string",
-            };
-            format!("{}{optional_mark}: {value_type}", arg.name())
-        })
-        .collect();
+    let fields: Vec<String> =
+        args.iter()
+            .map(|arg| {
+                let optional_mark = if arg.is_required() { "" } else { "?" };
+                let value_type = match arg.kind() {
+                    crate::tools::registry::ArgKind::Lines
+                    | crate::tools::registry::ArgKind::Texts => "string[]",
+                    _ => "string",
+                };
+                format!("{}{optional_mark}: {value_type}", arg.name())
+            })
+            .collect();
     format!("{{{}}}", fields.join("; "))
 }
 
@@ -652,4 +777,26 @@ pub fn checkpoint(
         out.push_str(&live_handles.join(", "));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The table's segments are byte-exact slices of the constant, each
+    /// occurring once, so a replacement can neither miss nor double.
+    #[test]
+    fn every_variant_segment_occurs_exactly_once() {
+        for variant in VARIANTS {
+            assert_eq!(
+                PREAMBLE.matches(variant.cells).count(),
+                1,
+                "segment is not a unique slice of PREAMBLE: {:?}",
+                variant.cells
+            );
+        }
+        assert_eq!(preamble_for(abi::Interface::Cells), PREAMBLE);
+        assert_ne!(preamble_for(abi::Interface::Hybrid), PREAMBLE);
+        assert_ne!(preamble_for(abi::Interface::Tools), PREAMBLE);
+    }
 }

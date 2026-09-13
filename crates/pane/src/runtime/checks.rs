@@ -126,6 +126,9 @@ fn execute(
             args,
             evidence: None,
             lifted_from: None,
+            exit_code: result.as_ref().ok().and_then(|result| result.exit_code),
+            repeat_of: None,
+            error: result.as_ref().err().cloned(),
             ended: match &result {
                 Ok(_) => Ended::Ok,
                 Err(_) => Ended::Threw {

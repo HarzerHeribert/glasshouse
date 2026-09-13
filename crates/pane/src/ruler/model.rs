@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use super::interface::Metrics;
+
 /// A workload tier, in the router's own vocabulary
 /// (`glasshouse::routing::classify::WorkloadTier`).
 ///
@@ -168,7 +170,7 @@ impl Outcome {
 
 /// One attempt of one task by one harness: everything the report and the
 /// JSONL line are rendered from, and the only thing [`super::score`] reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Attempt {
     pub task: &'static str,
     pub tier: Tier,
@@ -186,4 +188,10 @@ pub struct Attempt {
     pub turns: Option<u32>,
     /// The attempt's own `--shortstat` insertions plus deletions.
     pub changed_lines: Option<u32>,
+    /// The `--interface` mode a `pane:<mode>` ablation arm was launched
+    /// with; `None` for every other row.
+    pub interface: Option<String>,
+    /// What that arm's own telemetry document reported; `None` when no
+    /// document was captured -- unmeasured, never a zero.
+    pub metrics: Option<Metrics>,
 }

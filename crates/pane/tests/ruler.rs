@@ -30,6 +30,8 @@ fn attempt(
         wall_clock: Duration::from_secs(wall_secs),
         turns,
         changed_lines: None,
+        interface: None,
+        metrics: None,
     }
 }
 
@@ -261,6 +263,8 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
             "wall_ms",
             "turns",
             "exit_status",
+            "interface",
+            "metrics",
         ]
     );
 }

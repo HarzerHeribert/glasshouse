@@ -1,0 +1,218 @@
+//! The interface-aware system block — `model-contract.md` §2.1 and the
+//! `## Environment` manifest block (`smarter-cheaper-roadmap.md`, *Hybrid
+//! interface choice* and *Capability/environment manifest*).
+//!
+//! The measured defect: in hybrid mode the shipped preamble said
+//! `execute_cell` was the only provider-native tool while the same request
+//! declared the direct tools, and the pilot's model chose `execute_cell` for
+//! all 91 acting turns. These tests pin that each variant describes the
+//! routes the request actually declares.
+
+use pane::abi::Interface;
+use pane::manifest::{CommandPolicy, Manifest};
+use pane::prompt::{self, SessionFacts, declarations};
+use pane::tools::registry;
+
+fn facts(interface: Interface, manifest: Option<String>) -> SessionFacts {
+    SessionFacts {
+        root: "/tmp/x".to_string(),
+        writable: vec!["Write(src/**)".to_string()],
+        command_patterns: 2,
+        all_commands: false,
+        network: false,
+        interface,
+        manifest,
+    }
+}
+
+fn system(interface: Interface, manifest: Option<String>) -> String {
+    prompt::render_system(
+        "PROJECT-INSTRUCTION",
+        &registry::ALL.iter().collect::<Vec<_>>(),
+        &facts(interface, manifest),
+    )
+}
+
+/// The sentences every variant keeps: the guidance is shared, not copied.
+const SHARED: &[&str] = &[
+    "You are Pane, a coding assistant. Answer conversational questions naturally.",
+    "Bindings persist between cells of this user request",
+    "A top-level returned string\nends the task",
+    "Use prose-only output only when the request is finished",
+    "PermissionDenied is\nfinal: code cannot widen the session's sandbox grant.",
+];
+
+#[test]
+fn the_hybrid_preamble_names_both_routes_and_denies_neither() {
+    let hybrid = prompt::preamble_for(Interface::Hybrid);
+    for denial in [
+        "only provider-native tool",
+        "only\nprovider-native tool",
+        "callable only inside its code",
+        "no `execute_cell` call",
+    ] {
+        assert!(
+            !hybrid.contains(denial),
+            "hybrid preamble says {denial:?}:\n{hybrid}"
+        );
+    }
+    assert!(
+        hybrid.contains("call a familiar tool directly for one independent operation"),
+        "{hybrid}"
+    );
+    assert!(
+        hybrid.contains(
+            "exactly one `execute_cell` call for dependent, branching, looped or batched"
+        ),
+        "{hybrid}"
+    );
+    assert!(
+        hybrid.contains("Inside a cell the same tools are typed async functions"),
+        "{hybrid}"
+    );
+    // The cell mechanics still apply when a cell can be sent.
+    assert!(
+        hybrid.contains("A cell is validated before it runs."),
+        "{hybrid}"
+    );
+    assert!(
+        hybrid.contains("While you construct the call, none of THIS cell has executed."),
+        "{hybrid}"
+    );
+    for sentence in SHARED {
+        assert!(
+            hybrid.contains(sentence),
+            "hybrid lost {sentence:?}:\n{hybrid}"
+        );
+    }
+}
+
+#[test]
+fn the_tools_preamble_never_mentions_a_cell_it_cannot_send() {
+    let tools = prompt::preamble_for(Interface::Tools);
+    assert!(!tools.contains("execute_cell"), "{tools}");
+    assert!(!tools.contains("provider-native tool"), "{tools}");
+    assert!(!tools.contains("A cell is validated"), "{tools}");
+    assert!(!tools.contains("template literal"), "{tools}");
+    assert!(
+        tools.contains(
+            "To act, call the familiar tools directly; each call's result is runtime\nevidence."
+        ),
+        "{tools}"
+    );
+    assert!(
+        tools.contains("A prose response with no tool call ends the task as the answer."),
+        "{tools}"
+    );
+    for sentence in SHARED {
+        assert!(
+            tools.contains(sentence),
+            "tools lost {sentence:?}:\n{tools}"
+        );
+    }
+}
+
+#[test]
+fn the_cells_preamble_is_the_constant() {
+    assert_eq!(prompt::preamble_for(Interface::Cells), prompt::PREAMBLE);
+}
+
+#[test]
+fn the_hybrid_execute_cell_description_does_not_deny_direct_calls() {
+    let hybrid = declarations::execute_cell_description(Interface::Hybrid);
+    assert!(!hybrid.contains("not separate native calls"), "{hybrid}");
+    assert!(!hybrid.contains("exactly one native call"), "{hybrid}");
+    assert!(
+        hybrid.contains("The familiar tools are also callable directly"),
+        "{hybrid}"
+    );
+    assert!(hybrid.contains("Prose and comments are not runtime evidence."));
+    assert_eq!(
+        declarations::execute_cell_description(Interface::Cells),
+        declarations::EXECUTE_CELL_DESCRIPTION
+    );
+    assert!(declarations::EXECUTE_CELL_DESCRIPTION.contains("not separate native calls"));
+}
+
+#[test]
+fn the_system_block_carries_the_interfaces_preamble() {
+    let hybrid = system(Interface::Hybrid, None);
+    assert!(
+        hybrid.starts_with(&prompt::preamble_for(Interface::Hybrid)),
+        "{hybrid}"
+    );
+    assert!(
+        !hybrid.contains("callable only inside its code"),
+        "{hybrid}"
+    );
+    let cells = system(Interface::Cells, None);
+    assert!(cells.starts_with(prompt::PREAMBLE), "{cells}");
+}
+
+#[test]
+fn the_whole_set_sentence_is_interface_aware() {
+    let cells = prompt::render_session_facts(&facts(Interface::Cells, None));
+    assert!(
+        cells.contains("The tools above are the whole set. To change"),
+        "{cells}"
+    );
+
+    let hybrid = prompt::render_session_facts(&facts(Interface::Hybrid, None));
+    assert!(
+        hybrid.contains("the familiar ones are callable directly or\ninside a cell."),
+        "{hybrid}"
+    );
+    assert!(!hybrid.contains("whole set. To change"), "{hybrid}");
+
+    let tools = prompt::render_session_facts(&facts(Interface::Tools, None));
+    assert!(
+        tools.contains("The familiar tools above are the whole set, called directly."),
+        "{tools}"
+    );
+    // The facts after the sentence are the same in every variant.
+    for text in [&cells, &hybrid, &tools] {
+        assert!(
+            text.contains("Sandbox: write allow rules: Write(src/**)"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_manifest_renders_once_as_its_own_block_after_this_session() {
+    let manifest = Manifest {
+        root: "/tmp/x".into(),
+        readable_roots: vec!["/tmp/x".into()],
+        writable_roots: vec!["/tmp/x/src".into()],
+        commands: CommandPolicy::Patterns(vec!["Bash(cargo test:*)".into()]),
+        ..Manifest::default()
+    }
+    .render();
+    assert!(manifest.starts_with("## Environment\n\n"), "{manifest}");
+
+    let with = system(Interface::Hybrid, Some(manifest.clone()));
+    assert_eq!(
+        with.matches("## Environment\n").count(),
+        1,
+        "the manifest block renders exactly once:\n{with}"
+    );
+    let session_at = with.find("## This session").unwrap();
+    let manifest_at = with
+        .find(&manifest)
+        .expect("the rendered manifest, verbatim");
+    let instructions_at = with.rfind("PROJECT-INSTRUCTION").unwrap();
+    assert!(session_at < manifest_at, "{with}");
+    assert!(manifest_at < instructions_at, "{with}");
+    assert!(
+        with.contains(&format!("\n\n{manifest}\n\nPROJECT-INSTRUCTION")),
+        "the manifest is its own block between the session facts and the instructions:\n{with}"
+    );
+
+    let without = system(Interface::Hybrid, None);
+    assert!(!without.contains("## Environment\n"), "{without}");
+    assert_eq!(
+        with.replace(&format!("\n\n{manifest}"), ""),
+        without,
+        "a manifest adds one block and changes nothing else"
+    );
+}

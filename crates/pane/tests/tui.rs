@@ -709,6 +709,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
             returned: Some("\"total\": number".to_string()),
             answered: false,
             yield_reason: None,
+            capsule: None,
         },
     );
 
@@ -778,6 +779,7 @@ fn a_throw_renders_as_the_cells_error_region() {
             returned: None,
             answered: true,
             yield_reason: None,
+            capsule: None,
         },
     );
 
@@ -838,6 +840,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
             returned: None,
             answered: true,
             yield_reason: None,
+            capsule: None,
         },
     );
 
@@ -889,6 +892,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
             returned: Some("1".to_string()),
             answered: false,
             yield_reason: None,
+            capsule: None,
         },
     );
 
@@ -944,6 +948,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
             returned: None,
             answered: true,
             yield_reason: Some("why".to_string()),
+            capsule: None,
         },
     );
     notebook.set(
@@ -963,6 +968,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
             returned: Some("the answer".to_string()),
             answered: false,
             yield_reason: None,
+            capsule: None,
         },
     );
     assert_eq!(cell_ordinal(&conversation, &notebook), 2);

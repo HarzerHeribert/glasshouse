@@ -70,7 +70,7 @@ impl App {
             std::fs::create_dir_all(root.join(".pane")).unwrap();
             std::fs::write(
                 root.join(".pane/config.toml"),
-                format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
+                format!("[helpers]\nmodel = \"{model}\"\npreflight = true\npreflight_scope = \"always\"\n"),
             )
             .unwrap();
         }

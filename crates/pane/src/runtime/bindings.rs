@@ -25,8 +25,7 @@ use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
 use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence};
 use crate::runtime::preview::{
-    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, STDOUT_TOKEN_CAP, StringValue, Value,
-    estimate_tokens, thousands,
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, estimate_tokens, thousands,
 };
 use crate::runtime::state::{RecordedCall, RuntimeState, provenance};
 use crate::sandbox::profile::PermissionDenied;
@@ -532,6 +531,9 @@ fn web_callback(
         args: std::collections::BTreeMap::new(),
         evidence: None,
         lifted_from: None,
+        exit_code: None,
+        repeat_of: None,
+        error: result.as_ref().err().cloned(),
         ended: if result.is_ok() {
             Ended::Ok
         } else {
@@ -664,6 +666,9 @@ fn record_mcp_call<T>(scope: &mut v8::PinScope, name: &str, result: &Result<T, T
         args: std::collections::BTreeMap::new(),
         evidence: None,
         lifted_from: None,
+        exit_code: None,
+        repeat_of: None,
+        error: result.as_ref().err().map(ToString::to_string),
         ended,
     });
 }
@@ -877,24 +882,71 @@ fn tool_callback(
         )
     };
 
+    // The lift's exact range is applied before anything reads the result,
+    // so the trajectory, the repeat check and the handle all see the bytes
+    // the program was actually given.
+    let traced = invoke::Traced {
+        outcome: traced.outcome.map(|result| match projection {
+            Some(projection) => project(result, projection),
+            None => result,
+        }),
+        checked: traced.checked,
+    };
+
     // §9.4: recorded here because this is where every call funnels, and
     // recorded with the arguments `invoke` checked rather than the ones the
     // program wrote. Each class below is the class the matching throw
-    // constructs, so the line says what the program could have caught.
-    let ended = match &traced.outcome {
-        Ok(result) if call_failure(tool.name(), result).is_some() => Ended::Threw {
-            class: "ToolError".to_string(),
+    // constructs, so the line says what the program could have caught, and
+    // `error` is the message that throw carries.
+    let (ended, error) = match &traced.outcome {
+        Ok(result) => match call_failure(tool.name(), result) {
+            Some(message) => (
+                Ended::Threw {
+                    class: "ToolError".to_string(),
+                },
+                Some(message),
+            ),
+            None => (Ended::Ok, None),
         },
-        Ok(_) => Ended::Ok,
-        Err(ToolError::Denied(denied)) => Ended::Denied {
-            rule: denied.rule.clone(),
-        },
-        Err(ToolError::Cancelled { .. }) => Ended::Threw {
-            class: "Cancelled".to_string(),
-        },
-        Err(ToolError::Spawn { .. }) => Ended::Threw {
-            class: "ToolError".to_string(),
-        },
+        Err(ToolError::Denied(denied)) => (
+            Ended::Denied {
+                rule: denied.rule.clone(),
+            },
+            Some(denied.to_string()),
+        ),
+        Err(cancelled @ ToolError::Cancelled { .. }) => (
+            Ended::Threw {
+                class: "Cancelled".to_string(),
+            },
+            Some(cancelled.to_string()),
+        ),
+        Err(spawn @ ToolError::Spawn { .. }) => (
+            Ended::Threw {
+                class: "ToolError".to_string(),
+            },
+            Some(spawn.to_string()),
+        ),
+    };
+    // A process result carries the child's exit status; an in-process call's
+    // `Some(0)` is a convention and is not recorded as an observation.
+    let exit_code = traced
+        .outcome
+        .as_ref()
+        .ok()
+        .filter(|result| result.confinement != invoke::Confinement::InProcess)
+        .and_then(|result| result.exit_code);
+    // A pure call that returned bytes an earlier call already returned is a
+    // repeat. Decided after the call, by the digest: the call is never
+    // skipped, because only running it can say the file did not change.
+    let digest = traced.outcome.as_ref().ok().map(|result| {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(result.stdout.as_bytes()))
+    });
+    let repeat = match (&digest, ended == Ended::Ok, tool.purity()) {
+        (Some(digest), true, registry::Purity::Pure) => {
+            state.observation_repeat(tool.name(), &traced.checked, digest)
+        }
+        _ => None,
     };
     let evidence = traced
         .outcome
@@ -920,9 +972,12 @@ fn tool_callback(
     }
     trace(scope).record(CallRecord {
         tool: tool.name().to_string(),
-        args: traced.checked,
+        args: traced.checked.clone(),
         evidence: evidence.filter(|_| context_fits),
         lifted_from: lifted_from.clone(),
+        exit_code,
+        repeat_of: repeat.as_ref().map(|repeat| repeat.cell),
+        error,
         ended,
     });
 
@@ -945,17 +1000,29 @@ fn tool_callback(
 
     match traced.outcome {
         Ok(result) => {
-            let result = match projection {
-                Some(projection) => project(result, projection),
-                None => result,
-            };
-            let value = typed_result(scope, marshal_as, &call_args, &result, &state);
+            let (value, call) = typed_result(
+                scope,
+                marshal_as,
+                &call_args,
+                &result,
+                &state,
+                repeat.as_ref(),
+            );
+            if let (Some(digest), Some(_)) = (&digest, call) {
+                state.note_observation(tool.name(), &traced.checked, digest, call);
+            }
+            if call.is_some() {
+                note_mutation(&state, tool.name(), &traced.checked, &result);
+            }
             // The canonical typed result, captured as the model sees it, for a
             // frame lowered from direct provider calls. Stringifying the value
             // the isolate returns is what makes the provider result and the
-            // cell result one observation rather than two encodings.
+            // cell result one observation rather than two encodings. Only a
+            // call that minted a handle is captured: the session pairs these
+            // with the calls that ended `ok`, in order, and a failed call's
+            // `undefined` would shift every result after it.
             let trace = trace(scope);
-            if trace.captures_results() {
+            if trace.captures_results() && call.is_some() {
                 let json = v8::json::stringify(scope, value)
                     .map(|json| json.to_rust_string_lossy(scope))
                     .unwrap_or_else(|| "null".to_string());
@@ -1065,15 +1132,51 @@ fn js_type_of(value: v8::Local<v8::Value>) -> &'static str {
     }
 }
 
+/// A successful mutation makes its result the visible version of the path
+/// at once, so the next `edit` binds to what pane itself just wrote.
+///
+/// `edit` reports `after_sha256`; `write` hashes the checked text it wrote,
+/// which is byte for byte what reached the file. Anything else is not a
+/// mutation of a source version and registers nothing.
+fn note_mutation(
+    state: &Rc<RuntimeState>,
+    tool: &str,
+    checked: &invoke::CheckedArgs,
+    result: &ToolResult,
+) {
+    let Some(path) = checked.get("path") else {
+        return;
+    };
+    let sha256 = match tool {
+        "edit" => serde_json::from_str::<serde_json::Value>(&result.stdout)
+            .ok()
+            .and_then(|edit| edit.get("after_sha256")?.as_str().map(str::to_owned)),
+        "write" => checked
+            .get("content")
+            .or_else(|| checked.get("lines"))
+            .map(|text| {
+                use sha2::{Digest, Sha256};
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            }),
+        _ => None,
+    };
+    if let Some(sha256) = sha256 {
+        state.note_mutation(std::path::Path::new(path), &sha256);
+    }
+}
+
 /// Builds the tool's declared result type, records the call, and tags the
 /// object so the binding that holds it inherits the call's provenance.
+/// Answers with the value and the id the call was recorded under, which is
+/// `None` exactly when the call failed and no handle was minted.
 fn typed_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     tool: &Tool,
     args: &Args,
     result: &ToolResult,
     state: &Rc<RuntimeState>,
-) -> v8::Local<'s, v8::Value> {
+    repeat: Option<&crate::runtime::state::Repeat>,
+) -> (v8::Local<'s, v8::Value>, Option<u64>) {
     // Before the builders, because every one of them reads `stdout` and none
     // of them reads the exit code: a `read` of a missing file produced a
     // `File` handle of 0 bytes carrying the SHA-256 of the empty string, and
@@ -1084,7 +1187,7 @@ fn typed_result<'s>(
         // return value once one is pending, and nothing below has run, so no
         // handle is minted. The actual child call was already recorded as a
         // `ToolError` throw by the common callback.
-        return v8::undefined(scope).into();
+        return (v8::undefined(scope).into(), None);
     }
 
     let (value, preview, label) = match tool.name() {
@@ -1115,8 +1218,14 @@ fn typed_result<'s>(
         }
     };
 
+    // A repeat is said in the table header, where the model reads the type,
+    // so it can see the repetition without re-reading the body.
+    let type_label = match repeat {
+        Some(repeat) => format!("{label}{}", repeat.label_suffix()),
+        None => label.to_string(),
+    };
     let meta = HandleMeta {
-        type_label: Some(label.to_string()),
+        type_label: Some(type_label),
         size_estimate: (result.stdout.len() + result.stderr.len()) as u64,
         provenance: Some(provenance(
             tool.name(),
@@ -1133,7 +1242,7 @@ fn typed_result<'s>(
         let marker = v8::Number::new(scope, id as f64);
         object.set_private(scope, tag, marker.into());
     }
-    value
+    (value, Some(id))
 }
 
 fn build_structured_result<'s>(
@@ -1574,31 +1683,6 @@ fn build_glob<'s>(
     )
 }
 
-/// `little-helpers.md`'s `CallSite::PostResult`: a command result the model
-/// would otherwise have to page is reduced by REDUCER, without the model
-/// spending a turn to ask.
-///
-/// **The trigger is [`STDOUT_TOKEN_CAP`]**, which is not a number chosen
-/// here: it is the exact size at which this runtime stops carrying console
-/// output whole. Print less and nothing is lost; print more and
-/// `ConsoleCapture::tail` gives the model the suffix behind
-/// `[console: ~N tokens omitted before this true tail]`. Below the cap the
-/// reduction would buy nothing the model could not read for itself, so the
-/// cap is where a cheap request starts being worth making.
-///
-/// **Evidence, never substrate.** Only [`typed_result`]'s command-output arm
-/// reaches here, so `read`, `context`, `edit`, `grep` and `glob` — every
-/// shape a model edits or quotes from — are excluded structurally rather
-/// than by a list. (`write` builds this shape too; its output is one
-/// sentence and can never reach the cap.)
-///
-/// **It is additive.** `stdout` and `stderr` keep every byte and the handle
-/// is untouched; the reduction is one more property beside them.
-///
-/// Every refusal is `None`, which is today's behaviour exactly: under the
-/// cap, no spec serving this site, helpers unconfigured or off, the cell's
-/// ceiling spent, or a call that failed. **A helper failing here is never
-/// fatal** — the program gets the result it would have got anyway.
 /// What became of a pushed reduction, for a caller that must tell "not needed"
 /// from "attempted and failed".
 ///
@@ -1616,8 +1700,26 @@ enum Reduction {
     Failed(String),
 }
 
+/// `little-helpers.md`'s `CallSite::PostResult`: a command result the model
+/// would otherwise have to page is reduced by REDUCER, without the model
+/// spending a turn to ask.
+///
+/// **Cheap-model tokens are spent only to remove parent tokens, never to add
+/// a second view of a small output.** The trigger is `[helpers]
+/// reduce_above_tokens`, and above it a request is made only when the
+/// expected saving is positive: the output's estimated tokens minus the
+/// reducer's own `max_tokens` must exceed half the threshold. Below either
+/// line the parent reads the output itself.
+///
+/// Only [`typed_result`]'s command-output arm reaches here, so `read`,
+/// `context`, `edit`, `grep` and `glob` — every shape a model edits or quotes
+/// from — are excluded structurally. The exact `stdout` and `stderr` stay
+/// complete on the result; the reduction is one more property beside them,
+/// and a helper failing here is never fatal.
 fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction {
-    if estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr) <= STDOUT_TOKEN_CAP {
+    let threshold = state.reduce_above_tokens();
+    let tokens = estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr);
+    if tokens <= threshold {
         return Reduction::NotAttempted;
     }
     let Some(spec) = crate::helpers::HELPERS.iter().find(|spec| {
@@ -1626,6 +1728,9 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     }) else {
         return Reduction::NotAttempted;
     };
+    if tokens.saturating_sub(spec.max_tokens as usize) <= threshold / 2 {
+        return Reduction::NotAttempted;
+    }
     let Ok((model, effort)) = state.helper_route(spec.name) else {
         return Reduction::NotAttempted;
     };
@@ -1637,6 +1742,10 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     use sha2::{Digest, Sha256};
     let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
     if let Some(reduction) = state.reduction_of(&digest) {
+        state.count_reduction(|stats| {
+            stats.cached += 1;
+            stats.bytes_out += reduction.len() as u64;
+        });
         return Reduction::Made(reduction);
     }
     // After the cache and before the call: a served reduction spends neither
@@ -1644,6 +1753,10 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     if state.claim_pushed_helper_call().is_err() {
         return Reduction::NotAttempted;
     }
+    state.count_reduction(|stats| {
+        stats.attempted += 1;
+        stats.bytes_in += text.len() as u64;
+    });
 
     let asked = asked_summary(&text);
     let slot = state.begin_helper(crate::helpers::HelperRecord {
@@ -1673,6 +1786,7 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
         return Reduction::NotAttempted;
     }
     if !ok {
+        state.count_reduction(|stats| stats.failed += 1);
         // The exact output is untouched and still on the result; what the
         // parent is being told is that it will not get a summary of it unless
         // it narrows what the command prints.
@@ -1683,6 +1797,10 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
              before relying on a summary."
         ));
     }
+    state.count_reduction(|stats| {
+        stats.made += 1;
+        stats.bytes_out += reduction.len() as u64;
+    });
     state.remember_reduction(digest, reduction.clone());
     Reduction::Made(reduction)
 }
@@ -1752,6 +1870,7 @@ fn keep_callback(
         return;
     }
     capture(scope, &name, args.get(1), false);
+    state(scope).note_pin(&name);
 }
 
 fn free_callback(
@@ -1984,6 +2103,9 @@ fn capture(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>, la
         h.name_bound = true;
     }
     let (preview, meta) = preview_of(scope, &state, value);
+    if let Some(id) = recorded_call_id(scope, value) {
+        state.note_binding(id, name);
+    }
     state.capture(name, preview, meta);
 }
 
@@ -2031,13 +2153,19 @@ pub(crate) fn recorded_call(
     state: &Rc<RuntimeState>,
     value: v8::Local<v8::Value>,
 ) -> Option<RecordedCall> {
+    state.recorded(recorded_call_id(scope, value)?)
+}
+
+/// The id a tool-produced object was tagged with, or `None` for a value the
+/// program built itself.
+fn recorded_call_id(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<u64> {
     let object = v8::Local::<v8::Object>::try_from(value).ok()?;
     let tag = call_tag(scope);
     let id = object.get_private(scope, tag)?.number_value(scope)?;
     if !id.is_finite() || id < 1.0 {
         return None;
     }
-    state.recorded(id as u64)
+    Some(id as u64)
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -2469,6 +2597,9 @@ fn agent_run_callback(
             .collect(),
         evidence: None,
         lifted_from: None,
+        exit_code: None,
+        repeat_of: None,
+        error: None,
         ended: Ended::Ok,
     });
     let object = agent_object(scope, &handle);
@@ -2571,6 +2702,9 @@ fn helper_callback(
         args: [("asked".to_string(), asked)].into_iter().collect(),
         evidence: None,
         lifted_from: None,
+        exit_code: None,
+        repeat_of: None,
+        error: None,
         ended: if ok {
             Ended::Ok
         } else if cancelled {

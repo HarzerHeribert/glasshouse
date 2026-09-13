@@ -44,6 +44,15 @@ pub struct Snapshot {
     notes: Vec<String>,
 }
 
+/// How one path differs between two snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
 /// A checked reversal of one observed cell change.
 ///
 /// The plan contains only paths whose state changed between the cell's
@@ -266,6 +275,49 @@ impl Snapshot {
             out.push_str("\n[change output truncated]\n");
         }
         Some(out)
+    }
+
+    /// The paths whose state differs between `self` and `after`, relative to
+    /// the root, sorted. The same completeness rules as [`Snapshot::diff`]
+    /// hold: an incomplete baseline invents no creation and an incomplete
+    /// later scan invents no deletion.
+    pub fn changed_paths(&self, after: &Self) -> Vec<(PathBuf, ChangeKind)> {
+        let mut out = Vec::new();
+        for (path, current) in &after.files {
+            match self.files.get(path) {
+                None if self.complete => out.push((path.clone(), ChangeKind::Created)),
+                Some(previous) if changed(previous, current) => {
+                    out.push((path.clone(), ChangeKind::Modified));
+                }
+                _ => {}
+            }
+        }
+        if after.complete {
+            for path in self.files.keys() {
+                if !after.files.contains_key(path) {
+                    out.push((path.clone(), ChangeKind::Deleted));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// SHA-256 over the sorted (path, content digest) pairs, as hex. Two
+    /// snapshots with the same digest hold the same observed file set, so a
+    /// later capture can be compared to a verified one without keeping it.
+    pub fn digest(&self) -> String {
+        let mut hash = Sha256::new();
+        for (path, state) in &self.files {
+            hash.update(label(path).as_bytes());
+            hash.update([0]);
+            match state.digest {
+                Some(digest) => hash.update(digest),
+                None => hash.update(state.len.to_le_bytes()),
+            }
+            hash.update([0]);
+        }
+        format!("{:x}", hash.finalize())
     }
 
     /// Builds an exact rollback for the transition from `self` to `after`.
@@ -569,6 +621,55 @@ mod tests {
         );
         assert!(rendered.contains("--- a/deleted.txt"), "{rendered}");
         assert!(!rendered.contains("already-dirty"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_paths_name_each_kind_and_the_digest_tracks_content() {
+        let (root, profile) = fixture("changed-paths");
+        fs::write(root.join("held.txt"), "same\n").unwrap();
+        fs::write(root.join("changed.txt"), "before\n").unwrap();
+        fs::write(root.join("deleted.txt"), "gone\n").unwrap();
+        let before = Snapshot::capture(&profile);
+        let unchanged = Snapshot::capture(&profile);
+        assert_eq!(before.digest(), unchanged.digest());
+        assert!(before.changed_paths(&unchanged).is_empty());
+        fs::write(root.join("changed.txt"), "after\n").unwrap();
+        fs::write(root.join("added.txt"), "new\n").unwrap();
+        fs::remove_file(root.join("deleted.txt")).unwrap();
+        let after = Snapshot::capture(&profile);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![
+                (PathBuf::from("added.txt"), ChangeKind::Created),
+                (PathBuf::from("changed.txt"), ChangeKind::Modified),
+                (PathBuf::from("deleted.txt"), ChangeKind::Deleted),
+            ]
+        );
+        assert_ne!(before.digest(), after.digest());
+        fs::write(root.join("changed.txt"), "before\n").unwrap();
+        fs::remove_file(root.join("added.txt")).unwrap();
+        fs::write(root.join("deleted.txt"), "gone\n").unwrap();
+        assert_eq!(before.digest(), Snapshot::capture(&profile).digest());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_paths_honour_incomplete_captures() {
+        let (root, profile) = fixture("changed-paths-incomplete");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        let before = Snapshot::capture_with_limits(&profile, 1, 10, 10);
+        fs::write(root.join("0-added.txt"), "new").unwrap();
+        fs::remove_file(root.join("b.txt")).unwrap();
+        let after = Snapshot::capture_with_limits(&profile, 1, 10, 10);
+        assert!(before.changed_paths(&after).is_empty());
+        assert!(
+            before
+                .changed_paths(&Snapshot::capture(&profile))
+                .iter()
+                .all(|(_, kind)| *kind != ChangeKind::Created)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

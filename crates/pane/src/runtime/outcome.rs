@@ -52,6 +52,9 @@ pub struct CellTurn {
     /// (`runtime-contract.md` §4). An authored cell captures nothing and this
     /// stays empty — the model already holds those results as live handles.
     pub capability_results: Vec<String>,
+    /// What rendering `table` as a delta cost and saved this turn
+    /// (`smarter-cheaper-roadmap.md`, *Observation delta*).
+    pub observation: crate::runtime::observation::ObservationStats,
 }
 
 /// One item of the model's own plan — `todo.write`'s unit.
@@ -250,6 +253,21 @@ pub struct CallRecord {
     /// persisting its payload, and `tool` already names what really ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifted_from: Option<String>,
+    /// The child's exit status, for a call that ran a process (`bash`,
+    /// `checks.run`, a search or a read). Absent for an in-process call,
+    /// whose `Some(0)` is a convention rather than an observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// The cell of an earlier pure call with the same tool, the same checked
+    /// arguments and a byte-identical result. The call still ran — the file
+    /// may have changed — and the hash is what decided it had not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_of: Option<u64>,
+    /// The one-line message a failed call threw, so a frame that isolates
+    /// each call can still answer the provider with what went wrong. Absent
+    /// for a call that ended `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub ended: Ended,
 }
 
@@ -325,6 +343,9 @@ mod tests {
                     args: BTreeMap::from([("path".to_string(), "/tmp/root".to_string())]),
                     evidence: None,
                     lifted_from: None,
+                    exit_code: None,
+                    repeat_of: None,
+                    error: None,
                     ended: Ended::Ok,
                 },
                 CallRecord {
@@ -332,6 +353,9 @@ mod tests {
                     args: BTreeMap::new(),
                     evidence: None,
                     lifted_from: None,
+                    exit_code: None,
+                    repeat_of: None,
+                    error: None,
                     ended: Ended::Denied {
                         rule: "no allow".into(),
                     },
@@ -341,6 +365,9 @@ mod tests {
                     args: BTreeMap::new(),
                     evidence: None,
                     lifted_from: None,
+                    exit_code: None,
+                    repeat_of: None,
+                    error: None,
                     ended: Ended::Threw {
                         class: "Cancelled".into(),
                     },
@@ -358,6 +385,30 @@ mod tests {
         );
         assert!(json.contains(r#""ended":{"denied":"no allow"}"#), "{json}");
         assert!(json.contains(r#""ended":{"threw":"Cancelled"}"#), "{json}");
+        // The optional per-call facts are absent from a line that has none.
+        for absent in ["exit_code", "repeat_of", "\"error\""] {
+            assert!(!json.contains(absent), "{absent} leaked into {json}");
+        }
+    }
+
+    /// The three optional facts appear only when set, so an older rollout
+    /// row and a row for a plain in-process call read the same.
+    #[test]
+    fn a_call_line_carries_its_exit_code_repeat_and_error_only_when_set() {
+        let call = CallRecord {
+            tool: "bash".into(),
+            args: BTreeMap::new(),
+            evidence: None,
+            lifted_from: None,
+            exit_code: Some(7),
+            repeat_of: Some(3),
+            error: Some("`read` failed with exit 1: no such file".into()),
+            ended: Ended::Ok,
+        };
+        let json = serde_json::to_string(&call).unwrap();
+        assert!(json.contains(r#""exit_code":7"#), "{json}");
+        assert!(json.contains(r#""repeat_of":3"#), "{json}");
+        assert!(json.contains(r#""error":"`read` failed"#), "{json}");
     }
 
     fn turn() -> CellTurn {
@@ -376,6 +427,7 @@ mod tests {
             },
             plan: Vec::new(),
             capability_results: Vec::new(),
+            observation: Default::default(),
         }
     }
 

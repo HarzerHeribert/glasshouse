@@ -29,8 +29,11 @@ type SearchResult = Bounded & {matches: SearchMatch[]};
 type GlobInput = {pattern: string};
 type GlobResult = Bounded & {paths: string[]};
 
-type EditInput = {file_path: string; old_string: string; new_string: string};
-type EditResult = {path: string; before_sha256: string; after_sha256: string};
+// Give one pair: `old_string`/`new_string` for one hunk, or `old_strings`/
+// `new_strings` (same length, in order) for several applied together or not
+// at all. Every hunk must match exactly once in the file as it is now.
+type EditInput = {file_path: string; old_string?: string; new_string?: string; old_strings?: string[]; new_strings?: string[]};
+type EditResult = {path: string; before_sha256: string; after_sha256: string; hunks: {start: number; before: number; after: number}[]};
 
 type WriteInput = {file_path: string; content?: string; lines?: string[]};
 type WriteResult = {path: string};

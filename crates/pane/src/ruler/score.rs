@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use super::interface::{self, CreditRatios, RegretRow};
 use super::model::{Attempt, Harness, Outcome, Tier, Tokens};
 
 /// One aggregated row: the three numbers `ruler.md` §3 names, grouped over
@@ -68,16 +69,29 @@ pub struct AggregateRow {
 
 /// The three levels `ruler.md` §4 prints: a row per task, a row per tier,
 /// and an aggregate row -- the tier rows never replaced by the aggregate.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Score {
     pub task_rows: Vec<TaskRow>,
     pub tier_rows: Vec<TierRow>,
     pub aggregate_rows: Vec<AggregateRow>,
+    /// Interface regret rows -- empty unless some attempt is a `pane:<mode>`
+    /// ablation arm, so a run without `--pane-interface` renders exactly as
+    /// before.
+    pub regret: Vec<RegretRow>,
+    /// The credit ratios `regret`'s weighted spend used.
+    pub ratios: CreditRatios,
 }
 
 impl Score {
-    /// Scores a slice of attempts at all three levels.
+    /// Scores a slice of attempts at all three levels, weighting helper
+    /// tokens at the assumed 1:1 ratio.
     pub fn of(attempts: &[Attempt]) -> Score {
+        Score::with_ratios(attempts, CreditRatios::default())
+    }
+
+    /// Scores a slice of attempts at all three levels, and the interface
+    /// regret of any `pane:<mode>` arms under `ratios`.
+    pub fn with_ratios(attempts: &[Attempt], ratios: CreditRatios) -> Score {
         let mut by_task: BTreeMap<(Tier, &'static str), BTreeMap<Harness, Vec<&Attempt>>> =
             BTreeMap::new();
         let mut by_tier: BTreeMap<Tier, BTreeMap<Harness, Vec<&Attempt>>> = BTreeMap::new();
@@ -137,6 +151,8 @@ impl Score {
             task_rows,
             tier_rows,
             aggregate_rows,
+            regret: interface::regret(attempts, &ratios),
+            ratios,
         }
     }
 }

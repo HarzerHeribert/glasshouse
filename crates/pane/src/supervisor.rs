@@ -169,6 +169,9 @@ mod tests {
                 args: BTreeMap::from([("pattern".to_string(), "x".to_string())]),
                 evidence: None,
                 lifted_from: None,
+                exit_code: None,
+                repeat_of: None,
+                error: None,
                 ended: Ended::Ok,
             }],
         };

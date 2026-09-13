@@ -115,6 +115,10 @@ pub const SCOUT: HelperSpec = HelperSpec {
         You find where something lives in this project. You can read, glob, grep and \
         fetch context, and you can change nothing.\n\
         \n\
+        When your input is a scouting brief, answer its sections and nothing else: you are \
+        scouting for the model that will act, so never attempt the request it quotes and \
+        never report on work you did not do.\n\
+        \n\
         Answer with spans only. For each: the path and the line as `path/to/file.rs:120`, a line \
         you actually opened rather than one you inferred, then one short sentence saying what is \
         there in the file's own words. Put the spans that answer the question first. If nothing \
@@ -851,12 +855,15 @@ pub fn run_with_tools(
 /// SCOUT at `CallSite::Preflight` -- once per task, after the request arrives
 /// and before the model's first turn.
 ///
-/// Returns the block to append to the system prompt, or `None` when helpers
-/// are off, no spec serves this site, or the call failed. **A failed preflight
-/// is never fatal**: the task runs with the static orientation, exactly as it
-/// does today.
+/// `input` is the scouting brief `crate::preflight::scouting_brief` built,
+/// never the raw request: the brief is what keeps the scout from attempting
+/// the task, and the record's `asked` is the request quoted inside it.
+///
+/// Returns the record, or `None` when no spec serves this site. **A failed
+/// preflight is never fatal**: the task runs with the static orientation,
+/// exactly as it does today.
 pub fn preflight(
-    task: &str,
+    input: &str,
     route: HelperRoute<'_>,
     profile: &crate::sandbox::profile::Profile,
     glasshouse: &crate::glasshouse::Glasshouse,
@@ -870,11 +877,11 @@ pub fn preflight(
     let mut record = HelperRecord {
         helper: spec.name.to_string(),
         verb: spec.verb.to_string(),
-        asked: bounded_ask(task),
+        asked: bounded_ask(crate::preflight::request_in(input).unwrap_or(input)),
         ..HelperRecord::default()
     };
     progress(&record);
-    let call = run(spec, route, task, profile, glasshouse, session, token);
+    let call = run(spec, route, input, profile, glasshouse, session, token);
     record.outcome = call.outcome;
     record.turns = call.turns;
     record.looked = call.looked;

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pane::config::{AgentsMode, CompletionStyle, PaneConfig};
+use pane::config::{AgentsMode, CompletionStyle, PaneConfig, PreflightScope};
 use pane::wire::Effort;
 
 fn unique() -> u64 {
@@ -60,6 +60,34 @@ fn helper_preflight_is_an_explicit_boolean_opt_in() {
     write_pane_toml(&root, "[helpers]\npreflight = \"sometimes\"\n");
     let error = PaneConfig::load(&root).unwrap_err();
     assert!(error.contains("preflight"), "{error}");
+    assert_eq!(error.lines().count(), 1);
+}
+
+/// `preflight_scope` defaults to `auto` -- direct execution is the fast path
+/// and a scout runs from a signal -- and `always` is the pre-roadmap
+/// behaviour, spelled out.
+#[test]
+fn helper_preflight_scope_defaults_to_auto_and_parses_always() {
+    let root = scratch_dir("preflight-scope-default");
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.preflight_scope,
+        PreflightScope::Auto
+    );
+
+    let root = scratch_dir("preflight-scope-always");
+    write_pane_toml(
+        &root,
+        "[helpers]\nmodel = \"helper-tier\"\npreflight = true\npreflight_scope = \"always\"\n",
+    );
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.preflight_scope,
+        PreflightScope::Always
+    );
+
+    let root = scratch_dir("preflight-scope-unknown");
+    write_pane_toml(&root, "[helpers]\npreflight_scope = \"sometimes\"\n");
+    let error = PaneConfig::load(&root).unwrap_err();
+    assert!(error.contains("preflight_scope"), "{error}");
     assert_eq!(error.lines().count(), 1);
 }
 

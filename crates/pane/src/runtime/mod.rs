@@ -7,6 +7,7 @@
 //! nothing here executes anything.
 
 pub mod bindings;
+pub mod capsule;
 pub mod cell;
 pub(crate) mod excerpt;
 pub mod handlers;

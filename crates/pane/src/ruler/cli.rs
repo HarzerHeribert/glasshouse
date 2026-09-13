@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use super::attempt::{self, RunOpts};
+use super::attempt::{self, HarnessCommand, RunOpts};
+use super::interface::CreditRatios;
 use super::meter::Meter;
 use super::model::{Attempt, Harness, Task, Tier};
 use super::report;
@@ -32,6 +33,8 @@ pub const ACCEPTED_FLAGS: &[&str] = &[
     "--gateway",
     "--meter",
     "--via-glasshouse",
+    "--pane-interface",
+    "--credit-ratio",
     "--out",
 ];
 
@@ -73,6 +76,17 @@ pub struct RunArgs {
     /// standing gateway to point at).
     #[arg(long)]
     pub via_glasshouse: Vec<String>,
+    /// Expands the `pane` row into one `pane:<mode>` arm per listed mode
+    /// (`hybrid,cells,tools`), each launched with the row's own argv plus
+    /// `--interface <mode> --output-format json`, its stdout captured for
+    /// the interface-regret table. Refused unless `pane` is a selected row.
+    #[arg(long, value_delimiter = ',')]
+    pub pane_interface: Vec<String>,
+    /// Helper-token credit ratios for the regret table's weighted spend,
+    /// `luna=0.2,terra=0.1`. Both default to 1.0 and the table then says
+    /// "assumed ratio"; nothing here is a billed figure.
+    #[arg(long)]
+    pub credit_ratio: Option<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -111,8 +125,26 @@ fn run(flags: &[String]) -> Result<(), String> {
         );
     }
 
-    let harnesses = resolve_harnesses(&args)?;
-    let via_glasshouse = resolve_via_glasshouse(&args.via_glasshouse, &harnesses)?;
+    let selected = resolve_harnesses(&args)?;
+    let via_glasshouse = resolve_via_glasshouse(&args.via_glasshouse, &selected)?;
+    let ratios = match &args.credit_ratio {
+        Some(text) => CreditRatios::parse(text)?,
+        None => CreditRatios::default(),
+    };
+
+    let mut harness_table = attempt::default_harnesses();
+    let harnesses = expand_pane_interfaces(&selected, &args.pane_interface, &mut harness_table)?;
+    let via_glasshouse = via_glasshouse.map(|profiles| {
+        harnesses
+            .iter()
+            .filter_map(|row| {
+                let base = row.split_once(':').map_or(row.as_str(), |(base, _)| base);
+                profiles
+                    .get(base)
+                    .map(|profile| (row.clone(), profile.clone()))
+            })
+            .collect()
+    });
 
     let tasks = resolve_tasks(&args)?;
     if tasks.is_empty() {
@@ -129,7 +161,7 @@ fn run(flags: &[String]) -> Result<(), String> {
             },
             None => Meter::None,
         },
-        harnesses: attempt::default_harnesses(),
+        harnesses: harness_table,
     };
 
     // This loop must stay a plain sequential loop: `attempt::run_one` reads
@@ -148,7 +180,10 @@ fn run(flags: &[String]) -> Result<(), String> {
         }
     }
 
-    print!("{}", report::render_table(&Score::of(&attempts)));
+    print!(
+        "{}",
+        report::render_table(&Score::with_ratios(&attempts, ratios))
+    );
     write_records(&args.out, &attempts)
 }
 
@@ -181,6 +216,54 @@ fn resolve_tasks(args: &RunArgs) -> Result<Vec<&'static Task>, String> {
     }
 
     Ok(resolved)
+}
+
+/// Replaces the `pane` row in `selected` with one `pane:<mode>` row per
+/// mode, adding each arm's [`HarnessCommand`] to `table`. No modes: the
+/// selection is returned unchanged. Refuses a mode `Interface::parse` does
+/// not know, a mode listed twice, and any mode list when `pane` was not
+/// selected -- there is no row to expand.
+pub fn expand_pane_interfaces(
+    selected: &[String],
+    modes: &[String],
+    table: &mut HashMap<String, HarnessCommand>,
+) -> Result<Vec<String>, String> {
+    if modes.is_empty() {
+        return Ok(selected.to_vec());
+    }
+    if !selected.iter().any(|row| row == "pane") {
+        return Err(
+            "--pane-interface expands the pane row, and --harness did not select pane".to_string(),
+        );
+    }
+    let mut parsed = Vec::new();
+    for mode in modes {
+        let mode = crate::abi::Interface::parse(mode)?.as_str();
+        if parsed.contains(&mode) {
+            return Err(format!("--pane-interface names {mode} twice"));
+        }
+        parsed.push(mode);
+    }
+    let pane = table
+        .get("pane")
+        .cloned()
+        .ok_or_else(|| "the harness table has no pane row to expand".to_string())?;
+    let mut rows = Vec::new();
+    for row in selected {
+        if row != "pane" {
+            rows.push(row.clone());
+            continue;
+        }
+        for mode in &parsed {
+            let name = attempt::pane_arm_name(mode);
+            table.insert(
+                name.clone(),
+                HarnessCommand::pane_interface_arm(&pane, mode),
+            );
+            rows.push(name);
+        }
+    }
+    Ok(rows)
 }
 
 fn resolve_harnesses(args: &RunArgs) -> Result<Vec<String>, String> {

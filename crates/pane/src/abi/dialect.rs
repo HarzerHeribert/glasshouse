@@ -291,20 +291,32 @@ pub static ANTHROPIC: &[Shape] = &[
                 ParamType::Str,
                 "Path to the file to edit.",
             ),
-            Param::required(
+            Param::optional(
                 "old_string",
                 "old",
                 ParamType::Str,
-                "Exact text to replace; must match exactly once.",
+                "Exact text to replace; must match exactly once. Give old_string/new_string or old_strings/new_strings.",
             ),
-            Param::required(
+            Param::optional(
                 "new_string",
                 "replacement",
                 ParamType::Str,
                 "Replacement text.",
             ),
+            Param::optional(
+                "old_strings",
+                "olds",
+                ParamType::StrArray,
+                "Several exact texts to replace, each matching exactly once; applied together or not at all.",
+            ),
+            Param::optional(
+                "new_strings",
+                "replacements",
+                ParamType::StrArray,
+                "Replacement for each old_strings entry, same length and order.",
+            ),
         ],
-        description: "Replace one exact, uniquely matching string in a file. Stale, ambiguous, missing and no-op edits are refused without writing.",
+        description: "Replace one exact, uniquely matching string in a file, or several at once with old_strings/new_strings as one atomic edit. Stale, ambiguous, missing, overlapping and no-op edits are refused without writing.",
     },
     Shape {
         provider_name: "Write",
@@ -400,20 +412,32 @@ pub static OPENAI: &[Shape] = &[
                 ParamType::Str,
                 "Path the patch applies to.",
             ),
-            Param::required(
+            Param::optional(
                 "old_string",
                 "old",
                 ParamType::Str,
-                "Exact text the patch replaces; must match exactly once.",
+                "Exact text the patch replaces; must match exactly once. Give old_string/new_string or old_strings/new_strings.",
             ),
-            Param::required(
+            Param::optional(
                 "new_string",
                 "replacement",
                 ParamType::Str,
                 "Text the patch installs.",
             ),
+            Param::optional(
+                "old_strings",
+                "olds",
+                ParamType::StrArray,
+                "Several exact texts the patch replaces, each matching exactly once; applied together or not at all.",
+            ),
+            Param::optional(
+                "new_strings",
+                "replacements",
+                ParamType::StrArray,
+                "Text installed for each old_strings entry, same length and order.",
+            ),
         ],
-        description: "Apply one exact replacement to a file. A patch whose target state does not match is rejected without writing, and the observed diff is recorded.",
+        description: "Apply one exact replacement to a file, or several hunks at once with old_strings/new_strings as one atomic patch. A patch whose target state does not match is rejected without writing, and the observed diff is recorded.",
     },
     Shape {
         provider_name: "run_tests",
@@ -551,14 +575,18 @@ mod tests {
         let properties = definition["input_schema"]["properties"]
             .as_object()
             .unwrap();
-        assert_eq!(properties.len(), 3);
+        assert_eq!(properties.len(), 5);
         assert!(properties.contains_key("old_string"));
+        assert!(properties.contains_key("old_strings"));
+        assert_eq!(properties["old_strings"]["type"], json!("array"));
         assert_eq!(
             definition["input_schema"]["additionalProperties"],
             json!(false)
         );
+        // Only the path is required: a call gives one of the two pairs, and
+        // the kernel refuses a call that gives neither or both.
         let required = definition["input_schema"]["required"].as_array().unwrap();
-        assert_eq!(required.len(), 3);
+        assert_eq!(required, &vec![json!("file_path")]);
     }
 
     #[test]

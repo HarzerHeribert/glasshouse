@@ -8,7 +8,30 @@
 use crate::tools::registry::Purity;
 
 pub const EXECUTE_CELL_NAME: &str = "execute_cell";
+/// The `execute_cell` description for a cells-only request, where it is the
+/// only tool declared and saying so is true.
 pub const EXECUTE_CELL_DESCRIPTION: &str = "Make exactly one native call in this assistant turn to run one Pane TypeScript cell. Put every runtime operation inside its single program; functions such as read and bash are not separate native calls. While constructing the input, none of this cell has run. Code may branch on results returned by awaited tools inside the cell; after submitting it, stop and wait for the correlated tool result before interpreting outcomes. Prose and comments are not runtime evidence.";
+
+/// The description for a request that also declares the familiar tools.
+///
+/// The invariant: **a declaration never denies a route the same request
+/// declares.** The cells-only text says `read` and `bash` are not separate
+/// native calls; in hybrid mode they are, so this text names both routes and
+/// leaves the choice to the model (`smarter-cheaper-roadmap.md`, *Hybrid
+/// interface choice*: no forced quota either way).
+const EXECUTE_CELL_HYBRID_DESCRIPTION: &str = "Run one Pane TypeScript cell in this assistant turn. Use it when a later operation depends on an earlier result, or when loops, branching, batching or local transformation would otherwise cost extra turns. The familiar tools are also callable directly for one independent operation; inside a cell they are the same typed async functions with the same arguments and results. While constructing the input, none of this cell has run. Code may branch on results returned by awaited tools inside the cell; after submitting it, stop and wait for the correlated tool result before interpreting outcomes. Prose and comments are not runtime evidence.";
+
+/// The `execute_cell` description the declared interface can send truthfully.
+/// `Tools` never declares the tool; if a caller asks anyway it gets the text
+/// that does not deny direct calls, which is the only one that would be true.
+pub fn execute_cell_description(interface: crate::abi::Interface) -> &'static str {
+    match interface {
+        crate::abi::Interface::Cells => EXECUTE_CELL_DESCRIPTION,
+        crate::abi::Interface::Hybrid | crate::abi::Interface::Tools => {
+            EXECUTE_CELL_HYBRID_DESCRIPTION
+        }
+    }
+}
 
 /// One tool's return type and its own descriptive sentence.
 pub struct Entry {
@@ -65,8 +88,8 @@ pub const ENTRIES: &[Entry] = &[
     },
     Entry {
         name: "edit",
-        return_type: "{path: string; before_sha256: string; after_sha256: string; changed_lines: {start: number; before: number; after: number}}",
-        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`, or use `oldLines` and `replacementLines` for literal blocks. Each array item is one logical line; do not build a multiline template literal. Pass exactly one form for each side. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
+        return_type: "{path: string; before_sha256: string; after_sha256: string; changed_lines: {start: number; before: number; after: number}; hunks: {start: number; before: number; after: number}[]}",
+        summary: "After `const ctx = await context(...)` completed in the prior cell, call `edit({path, old, replacement})`, or use `oldLines` and `replacementLines` for literal blocks. For several hunks in one file pass `olds` and `replacements` (same length); they apply together or not at all, and a later `edit` of the same file binds to the version this one produced. Each array item is one logical line; do not build a multiline template literal. Pass exactly one form for each side. Pane supplies `expected_sha256` when exactly one complete version is visible; pass `expected_sha256: ctx.sha256` only to disambiguate. Stale, missing, ambiguous, unseen, and no-op edits do not write.",
     },
 ];
 

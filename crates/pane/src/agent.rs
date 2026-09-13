@@ -193,7 +193,8 @@ pub(crate) fn run_narrowed_metered(
         config,
     } = narrowed_run;
     let tools = toolset(narrowed);
-    let facts = crate::session::session_facts(profile);
+    let mut facts = crate::session::session_facts(profile);
+    facts.interface = crate::abi::Interface::Cells;
     let instructions = format!(
         "{}\n\n{}",
         narrowed.map_or(SUBAGENT_INSTRUCTIONS, |narrowed| narrowed.instructions),

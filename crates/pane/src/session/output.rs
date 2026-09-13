@@ -1,10 +1,15 @@
 //! Versioned machine output comes from typed session records, never the TUI.
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::Instant;
 
+use crate::abi::lift::Family;
+use crate::abi::telemetry::{self as taxonomy, FailureKind, RequestCause};
+use crate::abi::{Dialect, Interface, Origin};
 use crate::contract::{Block, Message, Role};
 use crate::helpers::HelperRecord;
+use crate::runtime::observation::{ObservationStats, ReductionStats};
 use crate::runtime::outcome::{CellOutcomeKind, CellRecord, Ended};
 use crate::telemetry::RequestMeasurement;
 use serde_json::{Value, json};
@@ -51,6 +56,92 @@ struct ModelUsage {
     usage: Usage,
 }
 
+/// Failures counted by [`FailureKind`], indexed in `FailureKind::ALL` order.
+#[derive(Default)]
+struct KindCounts([u64; 8]);
+
+impl KindCounts {
+    fn add(&mut self, kind: FailureKind) {
+        let index = FailureKind::ALL
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .expect("every kind is in ALL");
+        self.0[index] = self.0[index].saturating_add(1);
+    }
+
+    fn value(&self) -> Value {
+        Value::Object(
+            FailureKind::ALL
+                .iter()
+                .zip(self.0)
+                .map(|(kind, count)| (kind.as_str().to_string(), json!(count)))
+                .collect(),
+        )
+    }
+}
+
+/// One origin's frames, operations and failures.
+#[derive(Default)]
+struct OriginStats {
+    executed: u64,
+    failed: u64,
+    operations: u64,
+    failures: KindCounts,
+}
+
+const ORIGINS: [Origin; 3] = [
+    Origin::AuthoredCell,
+    Origin::DirectTool,
+    Origin::LittleHelper,
+];
+
+const FAMILIES: [Family; 5] = [
+    Family::Search,
+    Family::Read,
+    Family::List,
+    Family::RepositoryState,
+    Family::Verification,
+];
+
+/// Parent usage attributed to one [`RequestCause`].
+#[derive(Default)]
+struct CauseUsage {
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    wall_time_ms: u64,
+}
+
+impl CauseUsage {
+    fn value(&self) -> Value {
+        json!({
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "known_tokens": self.input_tokens
+                .saturating_add(self.output_tokens)
+                .saturating_add(self.cache_read_input_tokens)
+                .saturating_add(self.cache_creation_input_tokens),
+            "wall_time_ms": self.wall_time_ms,
+        })
+    }
+}
+
+/// The observation-delta figures summed over every frame.
+#[derive(Default)]
+struct ObservationTotals {
+    rows_rendered: u64,
+    rows_suppressed: u64,
+    bytes_rendered: u64,
+    bytes_suppressed: u64,
+    full_inventories: u64,
+    repeated_observations: u64,
+}
+
 struct Telemetry {
     started: Instant,
     parent: Usage,
@@ -65,6 +156,26 @@ struct Telemetry {
     cell_failures: u64,
     tool_calls: u64,
     tool_failures: u64,
+    interface: Option<(Interface, Dialect)>,
+    execute_cell_calls: u64,
+    direct_tool_calls: u64,
+    direct_tools_by_name: BTreeMap<String, u64>,
+    /// Indexed in [`ORIGINS`] order.
+    by_origin: [OriginStats; 3],
+    single_intent_cells: u64,
+    failures: KindCounts,
+    shell_shaped: u64,
+    lifted: u64,
+    /// Indexed in [`FAMILIES`] order.
+    by_family: [u64; 5],
+    observation: ObservationTotals,
+    reductions: ReductionStats,
+    /// Indexed in `RequestCause::ALL` order.
+    recovery: [CauseUsage; 4],
+    current_cause: RequestCause,
+    completion: Option<Value>,
+    no_progress_notices: u64,
+    capsule: Option<Value>,
 }
 
 impl Default for Telemetry {
@@ -83,7 +194,46 @@ impl Default for Telemetry {
             cell_failures: 0,
             tool_calls: 0,
             tool_failures: 0,
+            interface: None,
+            execute_cell_calls: 0,
+            direct_tool_calls: 0,
+            direct_tools_by_name: BTreeMap::new(),
+            by_origin: Default::default(),
+            single_intent_cells: 0,
+            failures: KindCounts::default(),
+            shell_shaped: 0,
+            lifted: 0,
+            by_family: [0; 5],
+            observation: ObservationTotals::default(),
+            reductions: ReductionStats::default(),
+            recovery: Default::default(),
+            current_cause: RequestCause::Implementation,
+            completion: None,
+            no_progress_notices: 0,
+            capsule: None,
         }
+    }
+}
+
+fn origin_index(origin: Origin) -> usize {
+    ORIGINS
+        .iter()
+        .position(|candidate| *candidate == origin)
+        .expect("every origin is in ORIGINS")
+}
+
+fn cause_index(cause: RequestCause) -> usize {
+    RequestCause::ALL
+        .iter()
+        .position(|candidate| *candidate == cause)
+        .expect("every cause is in ALL")
+}
+
+fn mean(total: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total as f64 / count as f64
     }
 }
 
@@ -243,7 +393,68 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
             "helpers": helpers,
         },
         "preflight_helpers": telemetry.preflight_helpers,
+        "interface": {
+            "mode": telemetry.interface.map(|(mode, _)| mode.as_str()),
+            "dialect": telemetry.interface.map(|(_, dialect)| dialect.as_str()),
+            "provider_selected": {
+                "execute_cell_calls": telemetry.execute_cell_calls,
+                "direct_tool_calls": telemetry.direct_tool_calls,
+                "direct_tools_by_name": telemetry.direct_tools_by_name,
+            },
+        },
+        "frames": {
+            "by_origin": by_origin(telemetry, |stats| json!({
+                "executed": stats.executed, "failed": stats.failed, "operations": stats.operations,
+            })),
+            "single_intent_cells": telemetry.single_intent_cells,
+            "operations_per_frame_mean": mean(telemetry.tool_calls, telemetry.cells),
+            "operations_per_parent_request_mean": mean(telemetry.tool_calls, telemetry.parent.requests),
+        },
+        "failures": {
+            "by_kind": telemetry.failures.value(),
+            "by_origin": by_origin(telemetry, |stats| json!({"by_kind": stats.failures.value()})),
+        },
+        "lifting": {
+            "shell_shaped": telemetry.shell_shaped,
+            "recognized": telemetry.lifted,
+            "fallback": telemetry.shell_shaped.saturating_sub(telemetry.lifted),
+            "by_family": Value::Object(
+                FAMILIES.iter().zip(telemetry.by_family)
+                    .map(|(family, count)| (family.as_str().to_string(), json!(count)))
+                    .collect(),
+            ),
+        },
+        "observation": {
+            "rows_rendered": telemetry.observation.rows_rendered,
+            "rows_suppressed": telemetry.observation.rows_suppressed,
+            "bytes_rendered": telemetry.observation.bytes_rendered,
+            "bytes_suppressed": telemetry.observation.bytes_suppressed,
+            "full_inventories": telemetry.observation.full_inventories,
+            "repeated_observations": telemetry.observation.repeated_observations,
+        },
+        "reductions": telemetry.reductions,
+        "recovery": {
+            "by_cause": Value::Object(
+                RequestCause::ALL.iter().zip(&telemetry.recovery)
+                    .map(|(cause, usage)| (cause.as_str().to_string(), usage.value()))
+                    .collect(),
+            ),
+            "repair_usage": telemetry.recovery[cause_index(RequestCause::Repair)].value(),
+        },
+        "completion": telemetry.completion,
+        "progress": {"no_progress_notices": telemetry.no_progress_notices},
+        "capsule": telemetry.capsule,
     })
+}
+
+fn by_origin(telemetry: &Telemetry, render: impl Fn(&OriginStats) -> Value) -> Value {
+    Value::Object(
+        ORIGINS
+            .iter()
+            .zip(&telemetry.by_origin)
+            .map(|(origin, stats)| (origin.as_str().to_string(), render(stats)))
+            .collect(),
+    )
 }
 
 impl Drop for Output {
@@ -337,8 +548,10 @@ fn add_parent_response(usage: &mut Usage, measurement: &RequestMeasurement) {
 }
 
 /// Counts the attempt before transport begins, so an HTTP, protocol, or
-/// context-overflow failure remains part of the benchmark denominator.
-pub(super) fn parent_request_started(model_name: &str) {
+/// context-overflow failure remains part of the benchmark denominator, and
+/// charges it to `cause`: every later [`parent_response`] lands in that
+/// cause's bucket until the next request starts.
+pub(super) fn parent_request_started_with(model_name: &str, cause: RequestCause) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(state) = state.as_mut() else {
@@ -348,6 +561,18 @@ pub(super) fn parent_request_started(model_name: &str) {
         let model = model(&mut state.telemetry.parent_models, model_name);
         model.calls = model.calls.saturating_add(1);
         model.usage.requests = model.usage.requests.saturating_add(1);
+        state.telemetry.current_cause = cause;
+        let bucket = &mut state.telemetry.recovery[cause_index(cause)];
+        bucket.requests = bucket.requests.saturating_add(1);
+    });
+}
+
+/// Records which entry points the parent was shown, once per session.
+pub(super) fn interface(mode: Interface, dialect: Dialect) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.interface = Some((mode, dialect));
+        }
     });
 }
 
@@ -365,6 +590,21 @@ pub(super) fn parent_response(measurement: &RequestMeasurement) {
             model.usage_known_calls = model.usage_known_calls.saturating_add(1);
         }
         add_parent_response(&mut model.usage, measurement);
+        let cause = state.telemetry.current_cause;
+        let bucket = &mut state.telemetry.recovery[cause_index(cause)];
+        bucket.input_tokens = bucket
+            .input_tokens
+            .saturating_add(measurement.input_tokens.unwrap_or(0));
+        bucket.output_tokens = bucket
+            .output_tokens
+            .saturating_add(measurement.output_tokens.unwrap_or(0));
+        bucket.cache_read_input_tokens = bucket
+            .cache_read_input_tokens
+            .saturating_add(measurement.cached_input_tokens.unwrap_or(0));
+        bucket.cache_creation_input_tokens = bucket
+            .cache_creation_input_tokens
+            .saturating_add(measurement.cache_creation_input_tokens.unwrap_or(0));
+        bucket.wall_time_ms = bucket.wall_time_ms.saturating_add(measurement.elapsed_ms);
     });
 }
 
@@ -459,6 +699,27 @@ pub(super) fn message(message: &Message) {
         Block::ToolResult { tool_use_id, content, is_error } => json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}),
     }).collect();
     if message.role == Role::Assistant {
+        STATE.with(|state| {
+            if let Some(state) = state.borrow_mut().as_mut() {
+                for block in &message.content {
+                    let Block::ToolUse { name, .. } = block else {
+                        continue;
+                    };
+                    let telemetry = &mut state.telemetry;
+                    if name == "execute_cell" {
+                        telemetry.execute_cell_calls =
+                            telemetry.execute_cell_calls.saturating_add(1);
+                    } else {
+                        telemetry.direct_tool_calls = telemetry.direct_tool_calls.saturating_add(1);
+                        let count = telemetry
+                            .direct_tools_by_name
+                            .entry(name.clone())
+                            .or_default();
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
+        });
         let texts: Vec<&str> = message
             .content
             .iter()
@@ -484,32 +745,150 @@ pub(super) fn message(message: &Message) {
     );
 }
 
-pub(super) fn cell(record: &CellRecord) {
-    if active() {
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            let state = state.as_mut().expect("active machine output has state");
-            state.telemetry.cells = state.telemetry.cells.saturating_add(1);
-            if record.outcome == CellOutcomeKind::Threw {
-                state.telemetry.cell_failures = state.telemetry.cell_failures.saturating_add(1);
-            }
-            state.telemetry.tool_calls = state
-                .telemetry
-                .tool_calls
-                .saturating_add(record.calls.len() as u64);
-            state.telemetry.tool_failures = state.telemetry.tool_failures.saturating_add(
-                record
-                    .calls
-                    .iter()
-                    .filter(|call| !matches!(&call.ended, Ended::Ok))
-                    .count() as u64,
-            );
-        });
-        emit(
-            "cell",
-            serde_json::to_value(record).expect("cell record is serializable"),
-        );
+/// Records one execution frame under its origin, with the cell's own throw
+/// (`class`, `message`) when it threw, and what its rendering cost.
+///
+/// A failure is counted once per failed call, and once for the frame's own
+/// throw only when no call failed — so a frame that threw because a call
+/// threw is one failure, not two.
+pub(super) fn cell_frame(
+    record: &CellRecord,
+    origin: Origin,
+    error: Option<(&str, &str)>,
+    observation: ObservationStats,
+    reduction: ReductionStats,
+    source_is_single_intent: bool,
+) {
+    if !active() {
+        return;
     }
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state.as_mut().expect("active machine output has state");
+        let telemetry = &mut state.telemetry;
+        let threw = record.outcome == CellOutcomeKind::Threw;
+        let first_frame = telemetry.cells == 0;
+        telemetry.cells = telemetry.cells.saturating_add(1);
+        if threw {
+            telemetry.cell_failures = telemetry.cell_failures.saturating_add(1);
+        }
+        telemetry.tool_calls = telemetry
+            .tool_calls
+            .saturating_add(record.calls.len() as u64);
+        telemetry.tool_failures = telemetry.tool_failures.saturating_add(
+            record
+                .calls
+                .iter()
+                .filter(|call| !matches!(&call.ended, Ended::Ok))
+                .count() as u64,
+        );
+
+        let index = origin_index(origin);
+        let stats = &mut telemetry.by_origin[index];
+        stats.executed = stats.executed.saturating_add(1);
+        if threw {
+            stats.failed = stats.failed.saturating_add(1);
+        }
+        stats.operations = stats.operations.saturating_add(record.calls.len() as u64);
+
+        let mut failed_call = false;
+        let mut repeated = 0u64;
+        for call in &record.calls {
+            if let Some(kind) = taxonomy::classify_call(call) {
+                failed_call = true;
+                telemetry.failures.add(kind);
+                telemetry.by_origin[index].failures.add(kind);
+            }
+            if call.tool == "bash" || call.lifted_from.is_some() {
+                telemetry.shell_shaped = telemetry.shell_shaped.saturating_add(1);
+                if call.lifted_from.is_some() {
+                    telemetry.lifted = telemetry.lifted.saturating_add(1);
+                }
+                if let Some(family) = taxonomy::shell_family(call)
+                    && let Some(slot) = FAMILIES.iter().position(|f| *f == family)
+                {
+                    telemetry.by_family[slot] = telemetry.by_family[slot].saturating_add(1);
+                }
+            }
+            if call.repeat_of.is_some() {
+                repeated = repeated.saturating_add(1);
+            }
+        }
+        if threw && !failed_call {
+            let kind = error.map_or(FailureKind::Runtime, |(class, message)| {
+                taxonomy::classify_cell_error(class, message)
+            });
+            telemetry.failures.add(kind);
+            telemetry.by_origin[index].failures.add(kind);
+        }
+        if origin == Origin::AuthoredCell && source_is_single_intent {
+            telemetry.single_intent_cells = telemetry.single_intent_cells.saturating_add(1);
+        }
+
+        let totals = &mut telemetry.observation;
+        totals.rows_rendered = totals
+            .rows_rendered
+            .saturating_add(observation.rows_rendered as u64);
+        totals.rows_suppressed = totals
+            .rows_suppressed
+            .saturating_add(observation.rows_suppressed as u64);
+        totals.bytes_rendered = totals
+            .bytes_rendered
+            .saturating_add(observation.bytes_rendered as u64);
+        totals.bytes_suppressed = totals
+            .bytes_suppressed
+            .saturating_add(observation.bytes_suppressed() as u64);
+        if observation.full_inventory && !first_frame {
+            totals.full_inventories = totals.full_inventories.saturating_add(1);
+        }
+        // Either producer may name a repeat: the trajectory's `repeat_of` or
+        // the renderer's count. The larger is the count, never the sum.
+        totals.repeated_observations = totals
+            .repeated_observations
+            .saturating_add(repeated.max(observation.repeated_observations as u64));
+        telemetry.reductions.add(&reduction);
+    });
+    let mut data = serde_json::to_value(record).expect("cell record is serializable");
+    data["origin"] = json!(origin.as_str());
+    emit("cell", data);
+}
+
+/// Records the completion claim and what verified it.
+pub(super) fn completion(claimed: bool, verified: bool, findings: &[String], deferred: u32) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.completion = Some(json!({
+                "claimed": claimed,
+                "verified": verified,
+                "findings": findings,
+                "deferred": deferred,
+            }));
+        }
+    });
+}
+
+/// Counts one no-progress notice shown to the parent.
+pub(super) fn no_progress_notice() {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.no_progress_notices =
+                state.telemetry.no_progress_notices.saturating_add(1);
+        }
+    });
+}
+
+/// Stores the task capsule, emits it as one `capsule` event, and carries it
+/// on the result. A later capsule replaces the stored one.
+pub(super) fn capsule(value: Value) {
+    if !active() {
+        return;
+    }
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.capsule = Some(value.clone());
+        }
+    });
+    emit("capsule", value);
 }
 
 #[cfg(test)]
@@ -545,6 +924,278 @@ mod tests {
                 write_json(&mut BrokenWriter { fail_write }, &json!({"success":true})).is_err()
             );
         }
+    }
+
+    fn call(tool: &str, ended: Ended) -> crate::runtime::outcome::CallRecord {
+        crate::runtime::outcome::CallRecord {
+            tool: tool.into(),
+            args: BTreeMap::new(),
+            evidence: None,
+            lifted_from: None,
+            exit_code: None,
+            repeat_of: None,
+            error: None,
+            ended,
+        }
+    }
+
+    fn record(
+        source: &str,
+        outcome: CellOutcomeKind,
+        calls: Vec<crate::runtime::outcome::CallRecord>,
+    ) -> CellRecord {
+        CellRecord {
+            cell: 1,
+            source: source.into(),
+            outcome,
+            handles: Vec::new(),
+            calls,
+        }
+    }
+
+    fn current_telemetry() -> Value {
+        STATE.with(|state| telemetry_value(&state.borrow().as_ref().unwrap().telemetry))
+    }
+
+    #[test]
+    fn frames_are_counted_by_origin_and_a_failure_once_per_frame() {
+        let _output = Output::start(Format::Json);
+        // A direct frame whose one call was denied: the denial is the
+        // frame's failure and the throw is not counted a second time.
+        let denied = record(
+            "await bash({command: 'rm -rf /'})",
+            CellOutcomeKind::Threw,
+            vec![call(
+                "bash",
+                Ended::Denied {
+                    rule: "no allow".into(),
+                },
+            )],
+        );
+        cell_frame(
+            &denied,
+            Origin::DirectTool,
+            Some(("PermissionDenied", "no allow")),
+            ObservationStats::default(),
+            ReductionStats::default(),
+            false,
+        );
+        // An authored frame that threw before any call ran.
+        let syntax = record("const = ;", CellOutcomeKind::Threw, Vec::new());
+        cell_frame(
+            &syntax,
+            Origin::AuthoredCell,
+            Some(("SyntaxError", "Unexpected token")),
+            ObservationStats::default(),
+            ReductionStats::default(),
+            false,
+        );
+        // An authored single-intent frame with two lifted searches.
+        let mut lifted = call("rg", Ended::Ok);
+        lifted.lifted_from = Some("rg".into());
+        let mut plain = call("bash", Ended::Ok);
+        plain.args.insert("command".into(), "cargo test".into());
+        plain.repeat_of = Some(1);
+        let searched = record(
+            "await rg({pattern: 'x'});",
+            CellOutcomeKind::Yielded,
+            vec![lifted, plain],
+        );
+        cell_frame(
+            &searched,
+            Origin::AuthoredCell,
+            None,
+            ObservationStats {
+                rows_rendered: 2,
+                rows_suppressed: 3,
+                bytes_rendered: 100,
+                bytes_full_inventory: 400,
+                full_inventory: true,
+                repeated_observations: 0,
+            },
+            ReductionStats {
+                attempted: 1,
+                made: 1,
+                bytes_in: 5_000,
+                bytes_out: 200,
+                ..ReductionStats::default()
+            },
+            true,
+        );
+        let value = current_telemetry();
+        assert_eq!(value["cells"]["executed"], 3);
+        assert_eq!(value["cells"]["failed"], 2);
+        assert_eq!(value["frames"]["by_origin"]["direct_tool"]["executed"], 1);
+        assert_eq!(value["frames"]["by_origin"]["direct_tool"]["failed"], 1);
+        assert_eq!(value["frames"]["by_origin"]["direct_tool"]["operations"], 1);
+        assert_eq!(value["frames"]["by_origin"]["authored_cell"]["executed"], 2);
+        assert_eq!(value["frames"]["by_origin"]["authored_cell"]["failed"], 1);
+        assert_eq!(
+            value["frames"]["by_origin"]["authored_cell"]["operations"],
+            2
+        );
+        assert_eq!(value["frames"]["single_intent_cells"], 1);
+        assert_eq!(value["frames"]["operations_per_frame_mean"], 1.0);
+        assert_eq!(value["failures"]["by_kind"]["denial"], 1);
+        assert_eq!(value["failures"]["by_kind"]["syntax"], 1);
+        assert_eq!(value["failures"]["by_kind"]["runtime"], 0);
+        assert_eq!(
+            value["failures"]["by_origin"]["direct_tool"]["by_kind"]["denial"],
+            1
+        );
+        assert_eq!(
+            value["failures"]["by_origin"]["authored_cell"]["by_kind"]["syntax"],
+            1
+        );
+        assert_eq!(value["lifting"]["shell_shaped"], 3);
+        assert_eq!(value["lifting"]["recognized"], 1);
+        assert_eq!(value["lifting"]["fallback"], 2);
+        assert_eq!(value["lifting"]["by_family"]["search"], 1);
+        assert_eq!(value["lifting"]["by_family"]["verification"], 1);
+        assert_eq!(value["observation"]["rows_rendered"], 2);
+        assert_eq!(value["observation"]["rows_suppressed"], 3);
+        assert_eq!(value["observation"]["bytes_rendered"], 100);
+        assert_eq!(value["observation"]["bytes_suppressed"], 300);
+        assert_eq!(value["observation"]["full_inventories"], 1);
+        assert_eq!(value["observation"]["repeated_observations"], 1);
+        assert_eq!(value["reductions"]["attempted"], 1);
+        assert_eq!(value["reductions"]["bytes_out"], 200);
+        let origins: Vec<Value> = STATE.with(|state| {
+            state
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .events
+                .iter()
+                .map(|event| event["data"]["origin"].clone())
+                .collect()
+        });
+        assert_eq!(
+            origins,
+            vec![
+                json!("direct_tool"),
+                json!("authored_cell"),
+                json!("authored_cell")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_first_full_inventory_is_free_and_a_throw_without_a_cause_is_runtime() {
+        let _output = Output::start(Format::Json);
+        let full = ObservationStats {
+            full_inventory: true,
+            ..ObservationStats::default()
+        };
+        let threw = record("throw new Error('x')", CellOutcomeKind::Threw, Vec::new());
+        cell_frame(
+            &threw,
+            Origin::AuthoredCell,
+            None,
+            full,
+            ReductionStats::default(),
+            false,
+        );
+        cell_frame(
+            &threw,
+            Origin::AuthoredCell,
+            None,
+            full,
+            ReductionStats::default(),
+            false,
+        );
+        let value = current_telemetry();
+        assert_eq!(value["observation"]["full_inventories"], 1);
+        assert_eq!(value["failures"]["by_kind"]["runtime"], 2);
+    }
+
+    #[test]
+    fn a_response_lands_in_the_bucket_of_the_cause_its_request_started_with() {
+        let _output = Output::start(Format::Json);
+        let measurement = |input: u64, elapsed: u64| RequestMeasurement {
+            cell: 1,
+            model: "m".into(),
+            elapsed_ms: elapsed,
+            input_tokens: Some(input),
+            output_tokens: Some(1),
+            cached_input_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            served: crate::contract::ServedBy::default(),
+        };
+        parent_request_started_with("m", RequestCause::Implementation);
+        parent_response(&measurement(10, 5));
+        parent_request_started_with("m", RequestCause::Repair);
+        parent_response(&measurement(100, 7));
+        parent_request_started_with("m", RequestCause::Repair);
+        // No response: the request still counts, its tokens do not.
+        let value = current_telemetry();
+        let by_cause = &value["recovery"]["by_cause"];
+        assert_eq!(by_cause["implementation"]["requests"], 1);
+        assert_eq!(by_cause["implementation"]["input_tokens"], 10);
+        assert_eq!(by_cause["implementation"]["known_tokens"], 13);
+        assert_eq!(by_cause["implementation"]["wall_time_ms"], 5);
+        assert_eq!(by_cause["repair"]["requests"], 2);
+        assert_eq!(by_cause["repair"]["input_tokens"], 100);
+        assert_eq!(by_cause["repair"]["cache_read_input_tokens"], 2);
+        assert_eq!(by_cause["repair"]["wall_time_ms"], 7);
+        assert_eq!(by_cause["exploration"]["requests"], 0);
+        assert_eq!(value["recovery"]["repair_usage"], by_cause["repair"]);
+        assert_eq!(value["tokens"]["parent"]["requests"], 3);
+        assert_eq!(value["frames"]["operations_per_parent_request_mean"], 0.0);
+    }
+
+    #[test]
+    fn the_interface_and_the_provider_selection_are_recorded() {
+        let _output = Output::start(Format::Json);
+        interface(Interface::Tools, Dialect::OpenAi);
+        message(&Message {
+            role: Role::Assistant,
+            content: vec![
+                Block::ToolUse {
+                    id: "1".into(),
+                    name: "shell".into(),
+                    input: json!({}),
+                },
+                Block::ToolUse {
+                    id: "2".into(),
+                    name: "execute_cell".into(),
+                    input: json!({}),
+                },
+                Block::ToolUse {
+                    id: "3".into(),
+                    name: "shell".into(),
+                    input: json!({}),
+                },
+            ],
+            historical: None,
+        });
+        let value = current_telemetry();
+        assert_eq!(value["interface"]["mode"], "tools");
+        assert_eq!(value["interface"]["dialect"], "openai");
+        let selected = &value["interface"]["provider_selected"];
+        assert_eq!(selected["execute_cell_calls"], 1);
+        assert_eq!(selected["direct_tool_calls"], 2);
+        assert_eq!(selected["direct_tools_by_name"]["shell"], 2);
+    }
+
+    #[test]
+    fn completion_progress_and_the_capsule_ride_the_result_and_the_capsule_is_an_event() {
+        let _output = Output::start(Format::Json);
+        completion(true, false, &["tests not run".into()], 2);
+        no_progress_notice();
+        no_progress_notice();
+        capsule(json!({"summary": "did the thing"}));
+        let value = current_telemetry();
+        assert_eq!(value["completion"]["claimed"], true);
+        assert_eq!(value["completion"]["verified"], false);
+        assert_eq!(value["completion"]["findings"][0], "tests not run");
+        assert_eq!(value["completion"]["deferred"], 2);
+        assert_eq!(value["progress"]["no_progress_notices"], 2);
+        assert_eq!(value["capsule"]["summary"], "did the thing");
+        let events = STATE.with(|state| state.borrow().as_ref().unwrap().events.clone());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "capsule");
+        assert_eq!(events[0]["data"]["summary"], "did the thing");
     }
 
     #[test]

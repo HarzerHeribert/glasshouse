@@ -824,6 +824,24 @@ impl Runtime {
         self.state.table.borrow().is_live(name)
     }
 
+    /// How many pure calls this task repeated byte for byte — the count
+    /// behind every `repeat_of` in the trajectory. Reset at task end.
+    pub fn observation_repeats(&self) -> usize {
+        self.state.repeated_observations()
+    }
+
+    /// The pushed reducer's work this task. Reset at task end.
+    pub fn reduction_stats(&self) -> crate::runtime::observation::ReductionStats {
+        self.state.reduction_stats()
+    }
+
+    /// The version of `path` an implicit `edit` would bind to right now: the
+    /// last complete context that reached the model, or the last version
+    /// pane itself wrote.
+    pub fn visible_version(&self, path: &std::path::Path) -> Option<String> {
+        self.state.visible_version(path)
+    }
+
     /// The model's own plan for this task, for the checkpoint a compaction
     /// writes. Task-scoped like the handles beside it.
     pub fn plan(&self) -> Vec<crate::runtime::outcome::PlanItem> {
@@ -1184,6 +1202,37 @@ impl Runtime {
         outcome
     }
 
+    /// Frees every name in `names` whose value is `undefined`.
+    ///
+    /// The invariant: **only a successful direct call leaves a handle.** A
+    /// lowered frame declares each call's binding ahead of the guarded call,
+    /// so a call that threw leaves its name bound to `undefined`; that is not
+    /// an observation, and a handle to it would be listed, rendered and
+    /// resumable as if it were one. Called by `finish` for a direct frame,
+    /// after the captures reach the table and before the record is built.
+    fn free_undefined_direct_bindings(&mut self, names: &[String]) {
+        let undefined: Vec<String> = names
+            .iter()
+            .filter(|name| matches!(self.state.table.borrow().get(name), Some(Value::Undefined)))
+            .cloned()
+            .collect();
+        if undefined.is_empty() {
+            return;
+        }
+        for name in &undefined {
+            self.state.table.borrow_mut().free(name);
+        }
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        let global = context.global(scope);
+        for name in &undefined {
+            if let Some(key) = v8::String::new(scope, name) {
+                global.delete(scope, key.into());
+            }
+        }
+    }
+
     fn run_program(
         &mut self,
         source: &str,
@@ -1198,6 +1247,7 @@ impl Runtime {
         }
         let started = Instant::now();
         let cell = self.state.begin_cell();
+        self.state.table.borrow_mut().begin_cell(cell);
         self.trace().begin_cell();
         // Before anything touches V8: an isolate that ignored every
         // termination is one this runtime no longer runs code in, and the
@@ -1748,13 +1798,29 @@ impl Runtime {
         budget: &EpilogueBudget,
     ) -> CellOutcome {
         let captures = std::mem::take(&mut self.state.current.borrow_mut().captures);
+        let direct = self.trace().captures_results();
+        let mut declared_now: Vec<String> = Vec::new();
         for capture in captures {
+            if direct {
+                declared_now.push(capture.name.clone());
+            }
             self.state.table.borrow_mut().declare_with(
                 capture.name,
                 capture.value,
                 cell,
                 capture.meta,
             );
+        }
+        // A `keep` pins after the declare, because a redeclaration frees the
+        // old entry and the new one starts unpinned.
+        let pinned = std::mem::take(&mut self.state.current.borrow_mut().pinned);
+        for name in &pinned {
+            self.state.table.borrow_mut().pin(name);
+        }
+        // Before the record and the table are rendered, so neither carries a
+        // name whose call failed.
+        if direct {
+            self.free_undefined_direct_bindings(&declared_now);
         }
 
         // After the captures are in the table, because both of these read it:
@@ -1807,7 +1873,15 @@ impl Runtime {
             other => other,
         };
 
-        let table = self.render_handles();
+        // The turn's table is the delta (`smarter-cheaper-roadmap.md`,
+        // *Observation delta*): entries this cell changed in full, the rest
+        // as one line each. `handles()` and the rollout keep the inventory.
+        let (table, mut observation) = handles::render_table_delta(
+            &self.state.table.borrow(),
+            preview::PREVIEW_TOKEN_CAP,
+            preview::TABLE_TOKEN_CAP,
+        );
+        observation.repeated_observations = self.state.repeated_observations();
         self.state.flush_source_context();
         let (stdout_tail, stdout_dropped_tokens) = self.state.current.borrow_mut().console.tail();
         let kind = match &ending {
@@ -1848,6 +1922,7 @@ impl Runtime {
             record,
             plan: self.state.plan(),
             capability_results: self.trace().take_results(),
+            observation,
         };
 
         match ending {

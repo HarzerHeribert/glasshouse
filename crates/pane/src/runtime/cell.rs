@@ -38,11 +38,12 @@ use oxc::ast::ast::{
     AccessorProperty, AssignmentTarget, BindingIdentifier, BindingPattern, Class, Expression,
     FormalParameter, Function, IdentifierReference, MethodDefinition, MethodDefinitionType,
     Program, PropertyDefinition, PropertyDefinitionType, Statement, TSAsExpression,
-    TSEnumDeclaration, TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
-    TSInstantiationExpression, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNonNullExpression,
-    TSSatisfiesExpression, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeAssertion,
-    TSTypeParameterDeclaration, TSTypeParameterInstantiation, UnaryExpression, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator,
+    TSClassImplements, TSEnumDeclaration, TSExternalModuleDeclaration, TSGlobalDeclaration,
+    TSImportEqualsDeclaration, TSInstantiationExpression, TSInterfaceDeclaration,
+    TSNamespaceDeclaration, TSNonNullExpression, TSSatisfiesExpression, TSType,
+    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeAssertion, TSTypeParameterDeclaration,
+    TSTypeParameterInstantiation, UnaryExpression, VariableDeclaration, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::{ParseOptions, Parser};
@@ -103,6 +104,165 @@ const MADE: &str = "__pane_made";
 /// prologue is exactly one line, so a V8 position maps back by subtracting
 /// it and columns need no adjustment at all.
 pub const LINE_OFFSET: u32 = 1;
+
+/// Every TypeScript construct pane advertises as erasable, each with a
+/// one-line program that returns `"ok"` when the construct erased correctly.
+///
+/// **This table is the contract.** `tests/typescript_contract.rs` compiles
+/// every program, checks that no line changed width, and runs it in a real
+/// isolate; a construct is advertised in `model-contract.md` only if its row
+/// is here.
+pub const ERASABLE_CONSTRUCTS: &[(&str, &str)] = &[
+    (
+        "type annotation on const",
+        "const n: number = 1;\nreturn n === 1 ? \"ok\" : \"no\";\n",
+    ),
+    (
+        "type annotation on let",
+        "let s: string = \"o\";\ns = s + \"k\";\nreturn s;\n",
+    ),
+    (
+        "type annotation on a parameter",
+        "function f(x: string) { return x; }\nreturn f(\"ok\");\n",
+    ),
+    (
+        "type annotation on a return",
+        "function f(): string { return \"ok\"; }\nreturn f();\n",
+    ),
+    (
+        "as const",
+        "const t = { text: \"x\", status: \"ok\" as const };\nreturn t.status;\n",
+    ),
+    (
+        "as a declared interface",
+        "interface Row { v: string }\nconst r = { v: \"ok\" } as Row;\nreturn r.v;\n",
+    ),
+    (
+        "as an undeclared type name",
+        "const r = { v: \"ok\" } as Undeclared;\nreturn r.v;\n",
+    ),
+    (
+        "satisfies",
+        "const r = { v: \"ok\" } satisfies { v: string };\nreturn r.v;\n",
+    ),
+    (
+        "<T>expr assertion",
+        "const r = <{ v: string }>{ v: \"ok\" };\nreturn r.v;\n",
+    ),
+    (
+        "generic call f<T>(x)",
+        "function id(x) { return x; }\nreturn id<string>(\"ok\");\n",
+    ),
+    (
+        "generic arrow",
+        "const id = <T,>(x: T) => x;\nreturn id(\"ok\");\n",
+    ),
+    (
+        "generic function",
+        "function first<T>(xs: T[]): T { return xs[0]; }\nreturn first([\"ok\"]);\n",
+    ),
+    (
+        "generic class",
+        "class Box<T> { v: T; constructor(v: T) { this.v = v; } }\nreturn new Box(\"ok\").v;\n",
+    ),
+    (
+        "non-null !",
+        "const m = new Map<string, string>([[\"k\", \"ok\"]]);\nreturn m.get(\"k\")!;\n",
+    ),
+    (
+        "optional parameter x?: T",
+        "function f(x?: string) { return x ?? \"ok\"; }\nreturn f();\n",
+    ),
+    (
+        "definite assignment let x!: T",
+        "let x!: string;\nx = \"ok\";\nreturn x;\n",
+    ),
+    (
+        "type alias",
+        "type Marker = \"ok\";\nconst m: Marker = \"ok\";\nreturn m;\n",
+    ),
+    (
+        "interface",
+        "interface Row { v: string }\nconst r: Row = { v: \"ok\" };\nreturn r.v;\n",
+    ),
+    (
+        "declare const",
+        "declare const missing: number;\nreturn \"ok\";\n",
+    ),
+    (
+        "declare function",
+        "declare function foo(a: number): void;\nreturn \"ok\";\n",
+    ),
+    (
+        "declare class",
+        "declare class Z { n: number }\nreturn \"ok\";\n",
+    ),
+    (
+        "abstract class with an abstract member",
+        "abstract class Shape {\n  abstract name(): string;\n  describe(): string { return this.name(); }\n}\nclass Ok extends Shape { name() { return \"ok\"; } }\nreturn new Ok().describe();\n",
+    ),
+    (
+        "readonly/public/private/protected/override members",
+        "class Base { protected v = \"o\"; describe(): string { return this.v; } }\nclass K extends Base {\n  public readonly a = \"k\";\n  private b = \"\";\n  override describe(): string { return super.describe() + this.a; }\n}\nreturn new K().describe();\n",
+    ),
+    (
+        "implements",
+        "interface Named { name(): string }\nclass K implements Named { name() { return \"ok\"; } }\nreturn new K().name();\n",
+    ),
+];
+
+/// Every TypeScript construct pane refuses, with a one-line example and the
+/// alternative [`CellError::NotErasable`]'s message names. `tsc` compiles
+/// each of these by *emitting* code; a type eraser cannot, and running a
+/// program that means something else is worse than refusing it.
+///
+/// `tests/typescript_contract.rs` runs every example and checks the refusal
+/// arrives before execution, at the model's own line, naming the construct
+/// and the alternative.
+pub const NOT_ERASABLE_CONSTRUCTS: &[(&str, &str, &str)] = &[
+    (
+        "enum",
+        "enum Colour { Red, Green }",
+        "a plain object: `const Colour = { Red: 0, Green: 1 } as const`",
+    ),
+    (
+        "namespace",
+        "namespace N { export const x = 1; }",
+        "a plain object: `const N = { x: 1 }`",
+    ),
+    (
+        "parameter property",
+        "class K { constructor(private x: number) {} }",
+        "a plain parameter and a field assignment: `constructor(x: number) { this.x = x; }`",
+    ),
+    (
+        "declare global",
+        "declare global { const x: number; }",
+        "a top-level `declare const x: T` for the one name you need; a cell has no global \
+         scope to augment",
+    ),
+    (
+        "declare module",
+        "declare module \"m\" { export const x: number; }",
+        "nothing: a cell has no modules to describe; `declare const x: T` names a binding an \
+         earlier cell made",
+    ),
+    (
+        "import =",
+        "import fs = require(\"fs\");",
+        "no import at all: every capability is already a global; `const alias = existing;` \
+         makes an alias",
+    ),
+];
+
+/// What [`CellError::NotErasable`]'s message tells the model to write
+/// instead, from [`NOT_ERASABLE_CONSTRUCTS`].
+fn alternative_for(construct: &str) -> Option<&'static str> {
+    NOT_ERASABLE_CONSTRUCTS
+        .iter()
+        .find(|(name, _, _)| *name == construct)
+        .map(|(_, _, alternative)| *alternative)
+}
 
 /// A cell's source, erased and wrapped, with everything the isolate needs to
 /// map V8's answers back onto the model's own program.
@@ -206,10 +366,16 @@ impl CellError {
                  literal or heredoc."
             ),
             CellError::Parse { message, .. } => message.clone(),
-            CellError::NotErasable { construct, .. } => format!(
-                "`{construct}` is TypeScript that has no JavaScript to erase to; pane strips \
-                 types, it does not compile them"
-            ),
+            CellError::NotErasable { construct, .. } => {
+                let mut text = format!(
+                    "`{construct}` is TypeScript that has no JavaScript to erase to; pane strips \
+                     types, it does not compile them."
+                );
+                if let Some(alternative) = alternative_for(construct) {
+                    text.push_str(&format!(" Use {alternative} instead."));
+                }
+                text
+            }
             CellError::ReservedName { name, .. } => format!(
                 "`{name}` starts with `{RESERVED_PREFIX}`, which the runtime reserves for its own \
                  bindings"
@@ -742,6 +908,53 @@ impl<'a> Visit<'a> for FreeNames {
             self.typeof_operands.insert(name.span.start);
         }
         walk::walk_unary_expression(self, it);
+    }
+
+    // **A type position neither reads nor binds a value-level name**, and
+    // the eraser blanks every one of them before V8 sees the program. oxc
+    // spells a type's name as an `IdentifierReference` all the same, so
+    // `"active" as const` used to record a read of `const`, `x as Foo` a
+    // read of `Foo`, and `type T = …` a binding of `T` that hid a real free
+    // `T` at value level. Every `TSType` is one node, so the annotation,
+    // the `as`/`satisfies`/`<T>` operand, the generic argument and the
+    // alias or interface body all stop here; the entry points that hold a
+    // `BindingIdentifier` or a type name outside a `TSType` are the
+    // remaining overrides.
+    fn visit_ts_type(&mut self, _: &TSType<'a>) {}
+
+    fn visit_ts_type_parameter_declaration(&mut self, _: &TSTypeParameterDeclaration<'a>) {}
+
+    fn visit_ts_type_parameter_instantiation(&mut self, _: &TSTypeParameterInstantiation<'a>) {}
+
+    fn visit_ts_type_alias_declaration(&mut self, _: &TSTypeAliasDeclaration<'a>) {}
+
+    fn visit_ts_interface_declaration(&mut self, _: &TSInterfaceDeclaration<'a>) {}
+
+    fn visit_ts_class_implements(&mut self, _: &TSClassImplements<'a>) {}
+
+    /// `declare const x: T` erases to nothing, so it binds nothing: a later
+    /// read of `x` is free unless an earlier cell made the handle.
+    fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
+        if it.declare {
+            return;
+        }
+        walk::walk_variable_declaration(self, it);
+    }
+
+    /// A function without a body — a `declare function`, an overload
+    /// signature, an `abstract` method — erases to nothing and binds nothing.
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if it.body.is_none() {
+            return;
+        }
+        walk::walk_function(self, it, flags);
+    }
+
+    fn visit_class(&mut self, it: &Class<'a>) {
+        if it.declare {
+            return;
+        }
+        walk::walk_class(self, it);
     }
 }
 
@@ -1347,5 +1560,100 @@ mod tests {
         let body = body_of(&compiled.javascript);
         assert!(body.starts_with("var   { a, b } = obj;"), "{body:?}");
         assert_eq!(compiled.declared, vec!["a", "b", "c", "d"]);
+    }
+
+    /// Every free name of `source`, so a test can say "none" outright.
+    fn free(source: &str) -> Vec<String> {
+        compile(source, 1)
+            .unwrap()
+            .free_names
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// `"active" as const` parses as a type reference named `const`, and the
+    /// scan used to report `const` as undefined — two Terminal-Bench cells
+    /// were refused before execution on exactly that. Every type position is
+    /// here: the operand of `as`/`satisfies`/`<T>`, a generic argument, an
+    /// annotation, a type parameter, `implements`, a type alias or interface
+    /// body, and a `declare` shape.
+    #[test]
+    fn a_type_position_contributes_no_free_name() {
+        let source = "const x = 1;\n\
+            const a = { s: \"active\" as const };\n\
+            const b = x as Foo;\n\
+            const c = x satisfies Bar;\n\
+            const d = <Baz>x;\n\
+            const m = new Map<Qux, Quux>();\n\
+            function g(p: P1, q?: P2): P3 { return p; }\n\
+            const id = <T,>(v: T): T => v;\n\
+            let y: typeof undeclared;\n\
+            class K<U> implements Iface { v!: U; }\n\
+            type A<P> = P | Alias;\n\
+            interface I extends Base { n: Num }\n\
+            declare const dc: Dt;\n\
+            declare function df(a: Da): Dr;\n\
+            declare class Dc { n: Dn }\n";
+        assert_eq!(free(source), vec!["Map"]);
+    }
+
+    /// The other direction of the same rule: a type-only declaration binds
+    /// nothing at value level, so a value-level read of its name is still
+    /// free and is still reported before the cell runs.
+    #[test]
+    fn a_type_only_name_does_not_hide_a_value_level_free_variable() {
+        assert_eq!(free("type T = string;\nreturn T;\n"), vec!["T"]);
+        assert_eq!(free("interface I { n: number }\nreturn I;\n"), vec!["I"]);
+        assert_eq!(
+            free("function f<U>(x: U) { return x; }\nreturn U;\n"),
+            vec!["U"]
+        );
+        assert_eq!(free("declare const dc: number;\nreturn dc;\n"), vec!["dc"]);
+    }
+
+    /// The advertised half of the contract, at the compiler: every row of
+    /// [`ERASABLE_CONSTRUCTS`] compiles and its erasure moves no column.
+    /// `tests/typescript_contract.rs` runs the same rows in an isolate.
+    #[test]
+    fn every_advertised_construct_compiles_and_keeps_every_column() {
+        for (construct, program) in ERASABLE_CONSTRUCTS {
+            let compiled =
+                compile(program, 1).unwrap_or_else(|error| panic!("{construct}: {error:?}"));
+            let body = body_of(&compiled.javascript);
+            assert_eq!(program.lines().count(), body.lines().count(), "{construct}");
+            for (original, erased) in program.lines().zip(body.lines()) {
+                assert_eq!(
+                    original.chars().count(),
+                    erased.chars().count(),
+                    "{construct}: a line changed width: {original:?} -> {erased:?}"
+                );
+            }
+        }
+    }
+
+    /// The refused half: every row of [`NOT_ERASABLE_CONSTRUCTS`] is refused
+    /// under the construct name the row carries, at the model's own line,
+    /// with a message that names the construct and the alternative.
+    #[test]
+    fn every_refused_construct_is_refused_by_name_with_an_alternative() {
+        for (construct, example, alternative) in NOT_ERASABLE_CONSTRUCTS {
+            let error = compile(&format!("const ok = 1;\n{example}\n"), 1).expect_err(construct);
+            match &error {
+                CellError::NotErasable {
+                    construct: found,
+                    line,
+                    ..
+                } => {
+                    assert_eq!(found, construct);
+                    assert_eq!(*line, 2, "{construct}");
+                }
+                other => panic!("{construct}: {other:?}"),
+            }
+            let message = error.message();
+            assert!(message.contains(construct), "{message}");
+            assert!(message.contains(alternative), "{message}");
+            assert_eq!(error.class(), "TypeScriptNotErasable");
+        }
     }
 }

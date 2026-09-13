@@ -390,14 +390,20 @@ fn write_message(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_cell(
     interrupt: &Interrupter,
     rollout: &mut Rollout,
     record: &CellRecord,
+    origin: crate::abi::Origin,
+    error: Option<(&str, &str)>,
+    observation: crate::runtime::observation::ObservationStats,
+    reduction: crate::runtime::observation::ReductionStats,
+    single_intent: bool,
 ) -> io::Result<()> {
     let _line = interrupt.writing();
     rollout.record_cell(record)?;
-    output::cell(record);
+    output::cell_frame(record, origin, error, observation, reduction, single_intent);
     Ok(())
 }
 
@@ -548,13 +554,18 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
 /// Map line 2448 fixes what is loaded, not how it is joined; everything from
 /// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
 /// byte, so there is no second spelling of the contract here to drift from it.
-fn build_system_prompt(_project: &ProjectConfig, profile: &Profile) -> String {
+fn build_system_prompt(
+    _project: &ProjectConfig,
+    profile: &Profile,
+    interface: crate::abi::Interface,
+    manifest: &crate::manifest::Manifest,
+) -> String {
     // Configuration/grants remain session-scoped; guidance is read fresh.
     let instructions = crate::project::instructions::root(profile);
     let mut system = prompt::render_system(
         &instructions,
         &registry::ALL.iter().collect::<Vec<_>>(),
-        &session_facts(profile),
+        &session_facts_with(profile, interface, manifest),
     );
     if profile.os_sandbox_bypassed() {
         system.push_str(
@@ -574,22 +585,14 @@ fn build_system_prompt(_project: &ProjectConfig, profile: &Profile) -> String {
 const PREFLIGHT_SERVE_FILES: usize = 6;
 const PREFLIGHT_SERVE_BYTES: u64 = 32 * 1024;
 
-/// How many lines of the scout's own report are kept as advisory reading;
-/// `little-helpers.md`'s format fixes it at three.
-const PREFLIGHT_READING_LINES: usize = 3;
-
 /// The stand-in gate: a request of fewer words than this gets no preflight.
 const PREFLIGHT_MIN_WORDS: usize = 4;
 
 /// Whether this request plausibly needs the repository at all.
 ///
-/// **This is a stand-in, and it is not the gate the spec asks for.**
-/// `little-helpers.md` names `glasshouse classify` as the producer of that
-/// judgement; it is not wired to pane, so the only honest gate available is a
-/// cheap one that says what it is. A request under [`PREFLIGHT_MIN_WORDS`]
-/// words — "hi", "thanks", "carry on" — gets no preflight and everything else
-/// does: it keeps chatter out, not irrelevant files, and it is what a real
-/// classification replaces the day one arrives.
+/// A request under [`PREFLIGHT_MIN_WORDS`] words — "hi", "thanks", "carry
+/// on" — gets no preflight; everything else is decided by
+/// [`crate::preflight::should_scout`] on the request's own signals.
 fn request_may_need_the_repository(task: &str) -> bool {
     task.split_whitespace().count() >= PREFLIGHT_MIN_WORDS
 }
@@ -598,13 +601,13 @@ fn request_may_need_the_repository(task: &str) -> bool {
 /// no scout ran or none answered.
 ///
 /// The invariant: **a failed preflight leaves the session exactly as it is
-/// today.** Helpers off, `[helpers] model` unset, a request that needs no
-/// repository, or a scout that failed all return `None`, and the system block
-/// stays [`build_system_prompt`]'s bytes.
-///
-/// The configuration gate is here rather than in `helpers::preflight`, which
-/// is handed a model and so cannot see that there is none. This is the call
-/// site, and *not configured, not run* is decided where the money is spent.
+/// today**, and **the scout never attempts the task**: it is handed a
+/// scouting brief built around the verbatim request and the manifest, and
+/// answers with constraints, files, tests, capabilities and risks
+/// (`smarter-cheaper-roadmap.md`, *Preflight Helper*). With
+/// `preflight_scope = "auto"` it runs only when the request carries an
+/// uncertainty signal, so a task that names existing files and available
+/// tools pays nothing.
 fn preflight_block(
     task: &str,
     session: &Session<'_>,
@@ -614,12 +617,29 @@ fn preflight_block(
     if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
         return None;
     }
+    let checks_configured = crate::verification::load(session.profile)
+        .map(|config| !config.checks.is_empty())
+        .unwrap_or(false);
+    let decision = crate::preflight::should_scout(
+        task,
+        &session.manifest,
+        helpers.preflight_scope,
+        checks_configured,
+    );
+    session_println!(
+        "preflight: {}",
+        crate::preflight::signals_summary(&decision)
+    );
+    if matches!(decision, crate::preflight::Decision::Skip(_)) {
+        return None;
+    }
     let model = helpers.model.as_deref()?;
     let effort = helpers.effort.for_helper("find")?;
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
+    let brief = crate::preflight::scouting_brief(task, &session.manifest);
     let record = crate::helpers::preflight(
-        task,
+        &brief,
         crate::helpers::HelperRoute { model, effort },
         session.profile,
         session.glasshouse,
@@ -648,107 +668,14 @@ fn preflight_block(
     // Keep the resolved Scout beside this request for every later task-frame.
     // The next task clears it before deciding whether another preflight runs.
     transcript.notebook.preflight = Some(record.clone());
-    record
-        .outcome
-        .ok
-        .then(|| render_preflight(task, &record.outcome.text, session.profile))
-}
-
-/// The block `little-helpers.md`'s *What preflight emits* specifies, in its
-/// order: the request first and authoritative, the scout's reading advisory
-/// under it, the files it named served whole, then one line of record.
-///
-/// **The scout's own report is not a section.** A heading that reads as an
-/// open question gets answered and a list of rejected candidates is a menu to
-/// browse — measured at 2/5 first turns spent on the meta-material with the
-/// record inline against 0/5 with it held back — so the counts go in the
-/// record and the report itself stays out of the prompt.
-fn render_preflight(task: &str, report: &str, profile: &Profile) -> String {
-    let named = preflight_spans(report);
-    let served = preflight_served(profile, &named);
-
-    let mut block = String::from("\n\n## Request (verbatim, authoritative)\n");
-    block.push_str(task);
-    block.push_str("\n\n## Reading (advisory, at most three lines — the request above governs)\n");
-    for line in report
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(PREFLIGHT_READING_LINES)
-    {
-        block.push_str(line);
-        block.push('\n');
-    }
-    block.push_str(&format!("\n## Served in full ({})\n", served.len()));
-    for (path, why, text) in &served {
-        block.push_str(&format!(
-            "### {path}\n{why}\n```\n{}\n```\n\n",
-            text.trim_end()
-        ));
-    }
-    block.push_str(&format!(
-        "## Selection record\nscout · {} named · {} served in full · {} not served · the rest of its report is not carried here.\n",
-        named.len(),
-        served.len(),
-        named.len() - served.len(),
-    ));
-    block
-}
-
-/// The `file:line` spans a scout named, in its own order, one entry per path
-/// with the rest of that line as its single line of why.
-///
-/// **Text is what a scout returns today**, so this reads its lines rather
-/// than a structured span; `little-helpers.md` keeps the structured type as a
-/// separate change, and until then a line naming no path is simply not a
-/// span.
-fn preflight_spans(report: &str) -> Vec<(String, String)> {
-    let mut named: Vec<(String, String)> = Vec::new();
-    for line in report.lines() {
-        let Some((path, why)) = preflight_span(line) else {
-            continue;
-        };
-        if named.iter().any(|(seen, _)| *seen == path) {
-            continue;
-        }
-        named.push((path, why));
-    }
-    named
-}
-
-/// The first `path:line` on one line of a report, and the rest of that line.
-///
-/// A path must carry an extension: `line 12:3` and a bare `Makefile:9` are
-/// not spans here, and serving nothing is the safe direction — the request
-/// above the reading is what governs either way.
-fn preflight_span(line: &str) -> Option<(String, String)> {
-    let words: Vec<&str> = line.split_whitespace().collect();
-    for (index, word) in words.iter().enumerate() {
-        let token = word.trim_matches(|c: char| {
-            !c.is_ascii_alphanumeric() && !matches!(c, '.' | '/' | '_' | '-' | ':')
-        });
-        let Some((path, number)) = token.rsplit_once(':') else {
-            continue;
-        };
-        if path.is_empty()
-            || !path.contains('.')
-            || number.is_empty()
-            || !number.chars().all(|c| c.is_ascii_digit())
-        {
-            continue;
-        }
-        let rest = words[index + 1..].join(" ");
-        let why = rest.trim_start_matches(['-', '—', '–', ':', ' ']).trim();
-        return Some((
-            path.to_string(),
-            if why.is_empty() {
-                "named by the scout.".to_string()
-            } else {
-                why.to_string()
-            },
-        ));
-    }
-    None
+    record.outcome.ok.then(|| {
+        let named = crate::preflight::spans(&record.outcome.text);
+        let served: Vec<(String, String)> = preflight_served(session.profile, &named)
+            .into_iter()
+            .map(|(path, _why, text)| (path, text))
+            .collect();
+        crate::preflight::render(task, &record.outcome.text, &served)
+    })
 }
 
 /// The named files that can be served whole: inside the grant, a regular
@@ -828,7 +755,58 @@ pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
         // grant was open (2026-09-06).
         all_commands: profile.admits_every_command(),
         network: profile.grants_network(),
+        interface: crate::abi::Interface::default(),
+        manifest: None,
     }
+}
+
+/// [`session_facts`] for the interface this session declares and the
+/// manifest it collected — the facts the binary actually renders.
+pub fn session_facts_with(
+    profile: &Profile,
+    interface: crate::abi::Interface,
+    manifest: &crate::manifest::Manifest,
+) -> prompt::SessionFacts {
+    let mut facts = session_facts(profile);
+    facts.interface = interface;
+    facts.manifest = Some(manifest.render());
+    facts
+}
+
+/// The executables the manifest looks for on `PATH`, so the model knows
+/// before acting which of the tools a task usually names are absent.
+pub const MANIFEST_PROBE: [&str; 24] = [
+    "bash", "sh", "python3", "python", "git", "cargo", "rustc", "gcc", "g++", "clang", "make",
+    "cmake", "node", "npm", "rg", "fd", "jq", "gdb", "lldb", "valgrind", "pytest", "go", "java",
+    "docker",
+];
+
+/// The effective capability and environment manifest for one session
+/// (`smarter-cheaper-roadmap.md`, *Capability/environment manifest*): the
+/// compiled profile's roots and policies, the probed executables, and the
+/// capabilities this configuration cannot provide.
+pub fn system_manifest(profile: &Profile, config: &PaneConfig) -> crate::manifest::Manifest {
+    let mut manifest = crate::manifest::Manifest::collect(profile, &MANIFEST_PROBE);
+    if !config.web.enabled {
+        manifest
+            .unavailable
+            .push("web.fetch and web.search: the host web broker is disabled".into());
+    } else if config.web.search_endpoint.is_none() {
+        manifest
+            .unavailable
+            .push("web.search: no search endpoint is configured".into());
+    }
+    if config.helpers.model.is_none() || !config.helpers.enabled {
+        manifest
+            .unavailable
+            .push("helper.*: no helper model is configured".into());
+    }
+    if matches!(config.agents.mode, crate::config::AgentsMode::Off) {
+        manifest
+            .unavailable
+            .push("agent.run: subagents are off in this configuration".into());
+    }
+    manifest
 }
 
 fn message_text(message: &Message) -> String {
@@ -1057,6 +1035,9 @@ fn run(args: SessionArgs) -> Result<(), String> {
         );
     }
 
+    // Collected once the profile is final: the manifest reports the grants
+    // in force, and a bypass applied above changes what it says.
+    let manifest = system_manifest(&profile, &config.borrow());
     let glasshouse = match &args.glasshouse {
         Some(path) => Glasshouse::Command {
             glasshouse: path.clone(),
@@ -1093,7 +1074,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     } else {
         (
             Conversation {
-                system: build_system_prompt(&project, &profile),
+                system: build_system_prompt(
+                    &project,
+                    &profile,
+                    args.interface.unwrap_or_default(),
+                    &manifest,
+                ),
                 messages: Vec::new(),
             },
             None,
@@ -1242,9 +1228,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
         mode: Cell::new(initial_mode),
         effort: Cell::new(initial_effort),
         interface: Cell::new(args.interface.unwrap_or_default()),
+        manifest,
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
     };
+    output::interface(session.interface.get(), session.dialect());
     controls::announce_missing_credential(&session, _serving.is_some());
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
     // §5 again, and this one is the promise `session::run` itself makes: an
@@ -1289,6 +1277,10 @@ struct Session<'a> {
     effort: Cell<wire::Effort>,
     /// The entry points this session shows the parent model.
     interface: Cell<crate::abi::Interface>,
+    /// The environment manifest collected once at session start from the
+    /// compiled profile; rendered into the system block and read by the
+    /// scouting preflight.
+    manifest: crate::manifest::Manifest,
     project: &'a ProjectConfig,
     config: &'a RefCell<PaneConfig>,
     /// The keyboard's end of the cancellation facility: the SIGINT handler's
@@ -1498,6 +1490,9 @@ struct TaskSpend {
     reported: bool,
     estimated: bool,
     cells_cap: u64,
+    /// The runtime's cumulative reduction ledger as last reported, so each
+    /// frame's telemetry carries only what that frame added.
+    reductions_seen: crate::runtime::observation::ReductionStats,
 }
 
 impl TaskSpend {
@@ -1509,6 +1504,23 @@ impl TaskSpend {
             reported: false,
             estimated: false,
             cells_cap,
+            reductions_seen: Default::default(),
+        }
+    }
+
+    /// What the runtime's reduction ledger gained since the last frame.
+    fn reduction_delta(
+        &mut self,
+        current: crate::runtime::observation::ReductionStats,
+    ) -> crate::runtime::observation::ReductionStats {
+        let seen = std::mem::replace(&mut self.reductions_seen, current);
+        crate::runtime::observation::ReductionStats {
+            attempted: current.attempted.saturating_sub(seen.attempted),
+            made: current.made.saturating_sub(seen.made),
+            failed: current.failed.saturating_sub(seen.failed),
+            cached: current.cached.saturating_sub(seen.cached),
+            bytes_in: current.bytes_in.saturating_sub(seen.bytes_in),
+            bytes_out: current.bytes_out.saturating_sub(seen.bytes_out),
         }
     }
 
@@ -1674,6 +1686,250 @@ impl TaskSpend {
     }
 }
 
+/// What one cell's observation added to the next turn's feedback.
+struct Observed {
+    /// Lines every form of the feedback carries — a no-progress notice.
+    notices: Vec<String>,
+    /// The `## Task` block for the live feedback only: state the next
+    /// request replaces, never history.
+    capsule_block: Option<String>,
+}
+
+/// Everything the task loop learns across cells that a terminal return is
+/// judged against — `smarter-cheaper-roadmap.md`'s *Structured task capsule*,
+/// *Evidence-gated completion*, *No-progress guard*, *Verified checkpoint*
+/// and *Cut-off salvage* rows.
+///
+/// The invariant: **every field is derived from the trajectory and the
+/// tree, never from the model's narrative.** The capsule's facts cite cells,
+/// the checkpoints hold tree digests, and the gate's findings come from the
+/// filesystem the task changed.
+struct TaskState {
+    task: String,
+    capsule: crate::runtime::capsule::Capsule,
+    guard: crate::progress::Guard,
+    checkpoints: crate::progress::Checkpoints,
+    files: crate::completion::TaskFiles,
+    task_start: crate::changes::Snapshot,
+    last_verification_cell: Option<u64>,
+    last_mutation_cell: Option<u64>,
+    tree_digest: Option<String>,
+    deferred_findings: Option<Vec<String>>,
+    gate_deferrals: u32,
+    last_capsule_render: String,
+    previous_frame: Option<CellRecord>,
+    previous_failed: bool,
+    evidence_gate: bool,
+    completion_check: bool,
+    checker_ran: bool,
+}
+
+impl TaskState {
+    fn new(task: &str, profile: &Profile, config: &PaneConfig) -> Self {
+        Self {
+            task: task.to_string(),
+            capsule: crate::runtime::capsule::Capsule::new(task),
+            guard: crate::progress::Guard::new(crate::progress::DEFAULT_THRESHOLD),
+            checkpoints: crate::progress::Checkpoints::default(),
+            files: crate::completion::TaskFiles::default(),
+            task_start: crate::changes::Snapshot::capture(profile),
+            last_verification_cell: None,
+            last_mutation_cell: None,
+            tree_digest: None,
+            deferred_findings: None,
+            gate_deferrals: 0,
+            last_capsule_render: String::new(),
+            previous_frame: None,
+            previous_failed: false,
+            evidence_gate: config.limits.evidence_gate,
+            completion_check: config.helpers.completion_check,
+            checker_ran: false,
+        }
+    }
+
+    /// Why the next parent request is being made, read from the last frame.
+    fn next_cause(&self) -> crate::abi::telemetry::RequestCause {
+        crate::abi::telemetry::request_cause(self.previous_frame.as_ref(), self.previous_failed)
+    }
+
+    /// Folds one finished cell into the capsule, the checkpoints and the
+    /// no-progress guard.
+    fn observe(
+        &mut self,
+        record: &CellRecord,
+        error: Option<(&str, &str)>,
+        plan: &[crate::runtime::outcome::PlanItem],
+        snapshots: Option<(&crate::changes::Snapshot, &crate::changes::Snapshot)>,
+    ) -> Observed {
+        if let Some((before, after)) = snapshots {
+            let changed = before.changed_paths(after);
+            if !changed.is_empty() {
+                self.files.observe(&changed);
+                self.last_mutation_cell = Some(record.cell);
+                let digest = after.digest();
+                self.checkpoints.note_mutation(record.cell, &digest);
+                self.tree_digest = Some(digest);
+            }
+        }
+        self.capsule
+            .observe_cell(record, error, plan, self.tree_digest.as_deref());
+        if let Some(verification) = self.capsule.last_verification()
+            && verification.cell == record.cell
+        {
+            self.last_verification_cell = Some(verification.cell);
+            self.checkpoints.note_verification(
+                verification.cell,
+                self.tree_digest.as_deref().unwrap_or(""),
+                verification.exit_code == Some(0),
+            );
+        }
+        let mut notices = Vec::new();
+        // Only a failing frame can repeat without progress: a denied or
+        // thrown call, or a thrown cell. A successful frame ends the streak.
+        let failed = error.is_some()
+            || record
+                .calls
+                .iter()
+                .any(|call| !matches!(call.ended, Ended::Ok));
+        if failed {
+            if let Some(notice) = self.guard.observe(crate::progress::fingerprint(
+                record,
+                error,
+                self.tree_digest.as_deref(),
+            )) {
+                output::no_progress_notice();
+                notices.push(notice);
+            }
+        } else {
+            self.guard.reset();
+        }
+        let rendered = self.capsule.render();
+        let capsule_block = (rendered != self.last_capsule_render).then(|| {
+            self.last_capsule_render = rendered.clone();
+            rendered
+        });
+        self.previous_frame = Some(record.clone());
+        Observed {
+            notices,
+            capsule_block,
+        }
+    }
+
+    /// The evidence gate on a terminal candidate: the deterministic
+    /// final-state contract, then once per task the fresh independent
+    /// checker. Findings hold the return once; the same findings a second
+    /// time let the model finish with the completion recorded unverified.
+    fn gate(
+        &mut self,
+        candidate: &str,
+        cell: u64,
+        before: &crate::changes::Snapshot,
+        after: &crate::changes::Snapshot,
+        session: &Session<'_>,
+    ) -> (Option<String>, Option<crate::helpers::HelperRecord>) {
+        if !self.evidence_gate {
+            output::completion(true, true, &[], 0);
+            return (None, None);
+        }
+        let mut files = self.files.clone();
+        let changed = before.changed_paths(after);
+        files.observe(&changed);
+        let last_mutation = if changed.is_empty() {
+            self.last_mutation_cell
+        } else {
+            Some(cell)
+        };
+        let root = session.profile.root();
+        let contract = match crate::completion::load_contract(root) {
+            Ok(contract) => contract,
+            Err(error) => {
+                session_println!("completion: {error}");
+                crate::completion::Contract::default()
+            }
+        };
+        let findings = crate::completion::check(
+            &contract,
+            root,
+            &files,
+            self.last_verification_cell,
+            last_mutation,
+        );
+        let mut sentences: Vec<String> = findings
+            .iter()
+            .map(|finding| finding.sentence.clone())
+            .collect();
+        let mut checker = None;
+        if self.completion_check && !self.checker_ran {
+            let helpers = session.config().helpers.clone();
+            if helpers.enabled
+                && let Some(model) = helpers.model.as_deref()
+                && let Some(effort) = helpers.effort.for_helper("check")
+            {
+                self.checker_ran = true;
+                let diff = self
+                    .task_start
+                    .diff(after)
+                    .unwrap_or_else(|| "(no observed changes)".to_string());
+                let evidence = crate::completion::fresh_checker_evidence(
+                    &self.task,
+                    &diff,
+                    &self.capsule.fact_lines(),
+                    &findings,
+                );
+                if let Some(record) = crate::helpers::check_completion(
+                    &evidence,
+                    crate::helpers::HelperRoute { model, effort },
+                    session.profile,
+                    session.glasshouse,
+                    session.id,
+                ) {
+                    let verdict = record
+                        .outcome
+                        .text
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if record.outcome.ok && verdict.starts_with("does not hold") {
+                        sentences.push(format!(
+                            "Independent checker: {}",
+                            crate::helper_context::bounded_string(&record.outcome.text, 600)
+                        ));
+                    }
+                    checker = Some(record);
+                }
+            }
+        }
+        if sentences.is_empty() {
+            output::completion(true, true, &[], self.gate_deferrals);
+            return (None, checker);
+        }
+        if self.deferred_findings.as_ref() == Some(&sentences) {
+            output::completion(true, false, &sentences, self.gate_deferrals);
+            return (None, checker);
+        }
+        self.deferred_findings = Some(sentences.clone());
+        self.gate_deferrals += 1;
+        let listed: Vec<String> = sentences.iter().map(|s| format!("- {s}")).collect();
+        let text = format!(
+            "## Candidate completion (deferred)\n{candidate}\n\n## Final-state findings\n{}\n\n\
+             Resolve each finding, or return the same final answer again to finish with the \
+             completion recorded as unverified.\n\n{}",
+            listed.join("\n"),
+            self.capsule.render()
+        );
+        (Some(text), checker)
+    }
+
+    /// A task that ended without completing keeps its established facts and
+    /// its unfinished work in the capsule, without claiming completion.
+    fn salvage(&mut self, reason: &str) {
+        self.capsule.salvage(reason);
+        output::capsule(self.capsule.to_json());
+    }
+}
+
 /// What one assistant message asked the session to do.
 struct Step {
     /// The next user message, or `None` when the task is over: a top-level
@@ -1738,7 +1994,12 @@ fn run_task_inner(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
-    transcript.conversation.system = build_system_prompt(session.project, session.profile);
+    transcript.conversation.system = build_system_prompt(
+        session.project,
+        session.profile,
+        session.interface.get(),
+        &session.manifest,
+    );
     if session.config().web.enabled {
         transcript.conversation.system.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
         transcript.conversation.system.push_str(
@@ -1807,8 +2068,13 @@ fn run_task_inner(
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
-        let (turn, elapsed_ms) = timed_send_task_turn(&request, session, task)
-            .map_err(|e| format!("request failed: {e}"))?;
+        let (turn, elapsed_ms) = timed_send_task_turn(
+            &request,
+            session,
+            task,
+            crate::abi::telemetry::RequestCause::Implementation,
+        )
+        .map_err(|e| format!("request failed: {e}"))?;
         let served = gateway::served_by(session.gateway, since);
         record_request(
             &mut transcript.notebook,
@@ -1865,6 +2131,7 @@ fn run_task_inner(
     let supervisor_active =
         session.config().supervisor.enabled && session.config().supervisor.model.is_some();
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
+    let mut task_state = TaskState::new(task, session.profile, &session.config());
 
     loop {
         let since = SystemTime::now();
@@ -1879,8 +2146,15 @@ fn run_task_inner(
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
+        let cause = task_state.next_cause();
         let (turn, elapsed_ms) =
-            send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
+            match send_task_turn_recovering(transcript, session, &runtime, task, rollout, cause) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    task_state.salvage(&error);
+                    return Err(error);
+                }
+            };
         let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
         let served = gateway::served_by(session.gateway, since);
         record_request(
@@ -2003,6 +2277,8 @@ fn run_task_inner(
             session.interrupt,
             session.profile,
             session.dialect(),
+            session,
+            &mut task_state,
         );
         crate::runtime::state::install_helper_progress(previous);
         let mut step = step?;
@@ -2012,7 +2288,27 @@ fn run_task_inner(
         output::cell_helpers(&step.view.helpers);
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
-        let notices = runtime.take_handler_notices().join("\n");
+        let mut observed = Observed {
+            notices: Vec::new(),
+            capsule_block: None,
+        };
+        if let Some(record) = &step.record {
+            let error = step
+                .view
+                .error
+                .as_ref()
+                .map(|error| (error.class.as_str(), error.message.as_str()));
+            let snapshots = step
+                .rollback
+                .as_ref()
+                .map(|(before, after)| (before, after));
+            observed = task_state.observe(record, error, &runtime.plan(), snapshots);
+            step.view.capsule = Some(task_state.capsule.to_json());
+        }
+        task_state.previous_failed = step.view.error.is_some();
+        let mut notice_lines = runtime.take_handler_notices();
+        notice_lines.extend(observed.notices);
+        let notices = notice_lines.join("\n");
         if !notices.is_empty() {
             if let Some(answer) = &mut step.answer {
                 answer.push_str(&format!("\n{notices}"));
@@ -2024,6 +2320,23 @@ fn run_task_inner(
                 for block in &mut result.content {
                     if let Block::ToolResult { content, .. } = block {
                         content.push_str(&format!("\n{notices}"));
+                    }
+                }
+            }
+        }
+        // The `## Task` block rides the live feedback only: it is state the
+        // next request replaces, so the historical projection never carries
+        // it (the same rule as `## Handles`).
+        if let Some(block) = observed.capsule_block {
+            if let Some(answer) = &mut step.answer {
+                answer.push_str("\n\n");
+                answer.push_str(&block);
+            }
+            if let Some(result) = &mut step.native_result {
+                for content in &mut result.content {
+                    if let Block::ToolResult { content, .. } = content {
+                        content.push_str("\n\n");
+                        content.push_str(&block);
                     }
                 }
             }
@@ -2235,11 +2548,14 @@ fn run_task_inner(
     // the isolate that could have read its result is gone.
     bg::shutdown(session.id);
     if incomplete {
-        Err(terminal_failure.unwrap_or_else(|| {
+        let reason = terminal_failure.unwrap_or_else(|| {
             "The task stopped without confirmed completion; requested work may be unfinished."
                 .into()
-        }))
+        });
+        task_state.salvage(&reason);
+        Err(reason)
     } else {
+        output::capsule(task_state.capsule.to_json());
         Ok(())
     }
 }
@@ -2349,6 +2665,7 @@ fn partial_effects(record: &CellRecord, threw: bool) -> Option<String> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn act_on(
     assistant: &Message,
     runtime: &mut Runtime,
@@ -2357,6 +2674,8 @@ fn act_on(
     interrupt: &Interrupter,
     profile: &Profile,
     dialect: crate::abi::Dialect,
+    session: &Session<'_>,
+    task_state: &mut TaskState,
 ) -> Result<Step, String> {
     let assistant_text = message_text(assistant);
     let calls: Vec<_> = assistant
@@ -2613,12 +2932,35 @@ fn act_on(
     };
     let after = crate::changes::Snapshot::capture(profile);
     let changes = before.diff(&after);
-    let rollback = changes.is_some().then_some((before, after));
+    let rollback = changes.is_some().then(|| (before.clone(), after.clone()));
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
     let record = turn.record.clone();
-    write_cell(interrupt, rollout, &turn.record)
-        .map_err(|e| format!("could not record the cell: {e}"))?;
+    let origin = if lowered.is_some() {
+        crate::abi::Origin::DirectTool
+    } else {
+        crate::abi::Origin::AuthoredCell
+    };
+    let thrown = match &outcome {
+        CellOutcome::Threw { error, .. } => Some((error.class.as_str(), error.message.as_str())),
+        _ => None,
+    };
+    let reduction = budget.reduction_delta(runtime.reduction_stats());
+    write_cell(
+        interrupt,
+        rollout,
+        &turn.record,
+        origin,
+        thrown,
+        turn.observation,
+        reduction,
+        lowered.is_none()
+            && crate::abi::telemetry::is_single_intent_cell(
+                &turn.record.source,
+                &turn.record.calls,
+            ),
+    )
+    .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
         // Read after the cell rather than from the trajectory: the record
@@ -2726,8 +3068,22 @@ fn act_on(
                 view.output = Some(handoff.clone());
                 result.output = Some(handoff);
             } else {
-                view.returned = Some(text.clone());
-                response = Some(text);
+                // The evidence gate: fresh contradictory evidence overrides
+                // `done` (`smarter-cheaper-roadmap.md`, *Evidence-gated
+                // completion*). The candidate is kept as notebook output and
+                // the findings reach the next turn.
+                let (gate, checker) =
+                    task_state.gate(&text, turn.record.cell, &before, &after, session);
+                if let Some(checker) = checker {
+                    view.helpers.push(checker);
+                }
+                if let Some(gate) = gate {
+                    view.output = Some(gate.clone());
+                    result.output = Some(gate);
+                } else {
+                    view.returned = Some(text.clone());
+                    response = Some(text);
+                }
             }
         }
         CellOutcome::Returned {
@@ -2823,7 +3179,17 @@ fn act_on(
                     },
                     Some(crate::runtime::outcome::Ended::Threw { class }) => Block::ToolResult {
                         tool_use_id: call.id.clone(),
-                        content: format!("{class}: {}", cell_error_text(&outcome)),
+                        // An isolated multi-call frame does not throw, so the
+                        // call's own recorded message is the truthful text;
+                        // the frame's error is the fallback for a lone call.
+                        content: format!(
+                            "{class}: {}",
+                            record
+                                .calls
+                                .get(index)
+                                .and_then(|call| call.error.clone())
+                                .unwrap_or_else(|| cell_error_text(&outcome))
+                        ),
                         is_error: true,
                     },
                     None => Block::ToolResult {
@@ -2898,6 +3264,7 @@ fn send_task_turn_recovering(
     runtime: &Runtime,
     task: &str,
     rollout: &mut Rollout,
+    cause: crate::abi::telemetry::RequestCause,
 ) -> Result<(wire::Turn, u64), String> {
     let provider_view = |transcript: &Transcript| {
         if let Some(checkpoint) = &transcript.provider_checkpoint {
@@ -2919,7 +3286,7 @@ fn send_task_turn_recovering(
         }
     };
     let first_request = provider_view(transcript);
-    let first = match timed_send_task_turn(&first_request, session, task) {
+    let first = match timed_send_task_turn(&first_request, session, task, cause) {
         Ok(turn) => return Ok(turn),
         Err(error) if error.is_context_overflow() => error,
         Err(error) => return Err(format!("request failed: {error}")),
@@ -2945,7 +3312,7 @@ fn send_task_turn_recovering(
         runtime.handle_names().len()
     );
     let retry = provider_view(transcript);
-    timed_send_task_turn(&retry, session, task)
+    timed_send_task_turn(&retry, session, task, cause)
         .map_err(|error| format!("request failed after a checkpoint: {error}"))
 }
 
@@ -2954,9 +3321,10 @@ fn timed_send_task_turn(
     conversation: &Conversation,
     session: &Session<'_>,
     task: &str,
+    cause: crate::abi::telemetry::RequestCause,
 ) -> Result<(wire::Turn, u64), wire::WireError> {
     let start = Instant::now();
-    output::parent_request_started(&session.model.borrow());
+    output::parent_request_started_with(&session.model.borrow(), cause);
     let turn = send_task_turn(conversation, session, task)?;
     let elapsed = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     Ok((turn, elapsed))
@@ -3400,6 +3768,42 @@ mod tests {
         let mut rollout =
             Rollout::create(&root.join("rollout.jsonl"), session.clone(), "system").unwrap();
         let interrupt = Interrupter::new(session.clone());
+        let project = ProjectConfig {
+            root: root.to_path_buf(),
+            ..ProjectConfig::default()
+        };
+        let config = RefCell::new(PaneConfig::default());
+        let glasshouse = Glasshouse::None;
+        let gateway = crate::gateway::Gateway::Command {
+            gateway: root.join("absent-gateway"),
+        };
+        let memory = LocalMemory::new(root);
+        let live = Session {
+            selected_profile: None,
+            pending_images: RefCell::new(Vec::new()),
+            approval_gate: None,
+            inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
+            window: RefCell::new(crate::events::window::Window::new(Default::default())),
+            messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
+            ui: None,
+            model: RefCell::new("test".into()),
+            context_window: None,
+            interface: Cell::new(crate::abi::Interface::default()),
+            manifest: crate::manifest::Manifest::default(),
+            mode: Cell::new(tui::Mode::Execute),
+            effort: Cell::new(wire::Effort::Default),
+            project: &project,
+            config: &config,
+            interrupt: &interrupt,
+            profile,
+            glasshouse: &glasshouse,
+            gateway: &gateway,
+            id: &session,
+            memory: &memory,
+            rollbacks: RefCell::new(Vec::new()),
+            rollback_pending: Cell::new(None),
+        };
+        let mut task_state = TaskState::new("admit", profile, &config.borrow());
         act_on(
             assistant,
             &mut runtime,
@@ -3408,6 +3812,8 @@ mod tests {
             &interrupt,
             profile,
             dialect,
+            &live,
+            &mut task_state,
         )
         .expect("the turn is acted on")
     }
@@ -3914,6 +4320,9 @@ mod tests {
             args: BTreeMap::from([(key.to_string(), value.to_string())]),
             evidence: None,
             lifted_from: None,
+            exit_code: None,
+            repeat_of: None,
+            error: None,
             ended,
         };
         let record = CellRecord {

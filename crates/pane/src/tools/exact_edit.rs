@@ -1,4 +1,11 @@
 //! Version-bound, exact text replacement for an already existing file.
+//!
+//! The invariant: **nothing is written until every hunk has been checked
+//! against the original text.** One hunk or several, the file is read once,
+//! compared against the version the caller saw, every replacement is located
+//! in that one reading, and the whole result is installed by a single
+//! same-directory rename — so a hunk that does not match leaves the file
+//! byte-identical rather than half-edited.
 
 use crate::sandbox::profile::{Access, Profile};
 use serde::Serialize;
@@ -16,7 +23,11 @@ pub struct EditResult {
     pub path: PathBuf,
     pub before_sha256: String,
     pub after_sha256: String,
+    /// The first hunk's lines, kept for callers that predate `hunks`.
     pub changed_lines: ChangedLines,
+    /// One entry per hunk, in the order the caller gave them; `start` is
+    /// the line in the original text.
+    pub hunks: Vec<ChangedLines>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -66,17 +77,131 @@ pub fn apply(
     expected: &str,
     replacement: &str,
 ) -> Result<EditResult, EditError> {
-    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err("expected SHA-256 must be 64 hexadecimal characters".into());
-    }
     if expected.is_empty() {
         return Err("exact match must be nonempty".into());
     }
     if expected == replacement {
         return Err("replacement would make no change".into());
     }
+    let source = open(profile, path, expected_sha256)?;
+    let offset = locate(&source.before, expected).map_err(|reason| match reason {
+        Match::Missing => EditError::new("missing_match", "exact match was not found"),
+        Match::Ambiguous => EditError::new("ambiguous_match", "exact match is ambiguous"),
+    })?;
+    let mut after = String::with_capacity(source.before.len() - expected.len() + replacement.len());
+    after.push_str(&source.before[..offset]);
+    after.push_str(replacement);
+    after.push_str(&source.before[offset + expected.len()..]);
+    let changed = changed_lines(&source.before, offset, expected, replacement);
+    finish(source, after, vec![changed])
+}
 
+/// Replace every `olds[i]` with `replacements[i]` as one checked mutation.
+///
+/// Each hunk must match exactly once in the **original** text and the
+/// matched ranges must not overlap; a refusal names the hunk by index and
+/// the reason (`hunk_count_mismatch`, `missing_match`, `ambiguous_match`,
+/// `overlapping_hunks`) and writes nothing.
+pub fn apply_hunks(
+    profile: &Profile,
+    path: &Path,
+    expected_sha256: &str,
+    olds: &[String],
+    replacements: &[String],
+) -> Result<EditResult, EditError> {
+    if olds.is_empty() {
+        return Err(EditError::new(
+            "hunk_count_mismatch",
+            "a multi-hunk edit needs at least one hunk",
+        ));
+    }
+    if olds.len() != replacements.len() {
+        return Err(EditError::new(
+            "hunk_count_mismatch",
+            format!(
+                "olds has {} hunk(s) and replacements has {}; they must pair up",
+                olds.len(),
+                replacements.len()
+            ),
+        ));
+    }
+    for (index, (old, replacement)) in olds.iter().zip(replacements).enumerate() {
+        if old.is_empty() {
+            return Err(format!("hunk {index}: exact match must be nonempty").into());
+        }
+        if old == replacement {
+            return Err(format!("hunk {index}: replacement would make no change").into());
+        }
+    }
+    let source = open(profile, path, expected_sha256)?;
+    // Every hunk is located against the original text, so a hunk's match
+    // cannot depend on what an earlier hunk changed.
+    let mut located: Vec<(usize, usize)> = Vec::with_capacity(olds.len());
+    for (index, old) in olds.iter().enumerate() {
+        let offset = locate(&source.before, old).map_err(|reason| match reason {
+            Match::Missing => EditError::new(
+                "missing_match",
+                format!("hunk {index} (missing_match): exact match was not found"),
+            ),
+            Match::Ambiguous => EditError::new(
+                "ambiguous_match",
+                format!("hunk {index} (ambiguous_match): exact match is ambiguous"),
+            ),
+        })?;
+        located.push((offset, index));
+    }
+    let mut ordered = located.clone();
+    ordered.sort_unstable();
+    for pair in ordered.windows(2) {
+        let (first_offset, first) = pair[0];
+        let (second_offset, second) = pair[1];
+        if first_offset + olds[first].len() > second_offset {
+            return Err(EditError::new(
+                "overlapping_hunks",
+                format!("hunks {first} and {second} (overlapping_hunks): their matches overlap"),
+            ));
+        }
+    }
+    let mut after = String::with_capacity(source.before.len());
+    let mut cursor = 0usize;
+    for (offset, index) in &ordered {
+        after.push_str(&source.before[cursor..*offset]);
+        after.push_str(&replacements[*index]);
+        cursor = offset + olds[*index].len();
+    }
+    after.push_str(&source.before[cursor..]);
+    let hunks = located
+        .iter()
+        .map(|(offset, index)| {
+            changed_lines(
+                &source.before,
+                *offset,
+                &olds[*index],
+                &replacements[*index],
+            )
+        })
+        .collect();
+    finish(source, after, hunks)
+}
+
+/// The file as read once, with the version check already passed.
+struct Source {
+    readable: PathBuf,
+    metadata: fs::Metadata,
+    before: String,
+    before_hash: String,
+}
+
+enum Match {
+    Missing,
+    Ambiguous,
+}
+
+fn open(profile: &Profile, path: &Path, expected_sha256: &str) -> Result<Source, EditError> {
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("expected SHA-256 must be 64 hexadecimal characters".into());
+    }
     let readable = profile
         .check("edit", Access::Read, path)
         .map_err(|error| EditError::new("permission_denied", error.to_string()))?;
@@ -99,33 +224,35 @@ pub fn apply(
     if before_bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("edit target exceeds {MAX_FILE_BYTES} bytes").into());
     }
-    let before = std::str::from_utf8(&before_bytes).map_err(|_| "edit target is not UTF-8")?;
-    let before_hash = sha256(&before_bytes);
+    let before = String::from_utf8(before_bytes).map_err(|_| "edit target is not UTF-8")?;
+    let before_hash = sha256(before.as_bytes());
     if !before_hash.eq_ignore_ascii_case(expected_sha256) {
         return Err(EditError::new(
             "stale_hash",
             "The source version changed; refresh context before editing.",
         ));
     }
+    Ok(Source {
+        readable,
+        metadata,
+        before,
+        before_hash,
+    })
+}
+
+fn locate(before: &str, expected: &str) -> Result<usize, Match> {
     let mut matches = before.match_indices(expected);
     let Some((offset, _)) = matches.next() else {
-        return Err(EditError::new("missing_match", "exact match was not found"));
+        return Err(Match::Missing);
     };
     if matches.next().is_some() {
-        return Err(EditError::new(
-            "ambiguous_match",
-            "exact match is ambiguous",
-        ));
+        return Err(Match::Ambiguous);
     }
+    Ok(offset)
+}
 
-    let mut after = String::with_capacity(before.len() - expected.len() + replacement.len());
-    after.push_str(&before[..offset]);
-    after.push_str(replacement);
-    after.push_str(&before[offset + expected.len()..]);
-    if after.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!("edited file exceeds {MAX_FILE_BYTES} bytes").into());
-    }
-    let changed_lines = ChangedLines {
+fn changed_lines(before: &str, offset: usize, expected: &str, replacement: &str) -> ChangedLines {
+    ChangedLines {
         start: before[..offset]
             .bytes()
             .filter(|byte| *byte == b'\n')
@@ -133,12 +260,28 @@ pub fn apply(
             + 1,
         before: line_count(expected),
         after: line_count(replacement),
-    };
+    }
+}
+
+/// Installs `after` over the file `source` was read from, rechecking that
+/// nothing else changed it in between.
+fn finish(
+    source: Source,
+    after: String,
+    hunks: Vec<ChangedLines>,
+) -> Result<EditResult, EditError> {
+    if after.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("edited file exceeds {MAX_FILE_BYTES} bytes").into());
+    }
     let after_hash = sha256(after.as_bytes());
-    let parent = readable
+    let parent = source
+        .readable
         .parent()
         .ok_or("edit target has no parent directory")?;
-    let name = readable.file_name().ok_or("edit target has no file name")?;
+    let name = source
+        .readable
+        .file_name()
+        .ok_or("edit target has no file name")?;
     let temp = parent.join(format!(
         ".{}.pane-edit-{}-{}",
         name.to_string_lossy(),
@@ -152,28 +295,33 @@ pub fn apply(
             .open(&temp)
             .map_err(|error| format!("could not create temporary edit file: {error}"))?;
         output
-            .set_permissions(metadata.permissions())
+            .set_permissions(source.metadata.permissions())
             .map_err(|error| format!("could not preserve file permissions: {error}"))?;
         output
             .write_all(after.as_bytes())
             .and_then(|()| output.sync_all())
             .map_err(|error| format!("could not write temporary edit file: {error}"))?;
-        let latest =
-            fs::read(&readable).map_err(|error| format!("could not recheck file: {error}"))?;
-        if sha256(&latest) != before_hash {
+        let latest = fs::read(&source.readable)
+            .map_err(|error| format!("could not recheck file: {error}"))?;
+        if sha256(&latest) != source.before_hash {
             return Err("file changed while the edit was being prepared".into());
         }
-        install(&temp, &readable)
+        install(&temp, &source.readable)
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     write_result?;
+    let changed_lines = hunks
+        .first()
+        .cloned()
+        .expect("an edit carries at least one hunk");
     Ok(EditResult {
-        path: readable,
-        before_sha256: before_hash,
+        path: source.readable,
+        before_sha256: source.before_hash,
         after_sha256: after_hash,
         changed_lines,
+        hunks,
     })
 }
 

@@ -10,7 +10,7 @@
 //! objects.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,7 @@ use crate::glasshouse::Glasshouse;
 use crate::helpers::{HelperCall, HelperRecord};
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
 use crate::runtime::instructions::{InstructionContext, PendingInstructions};
+use crate::runtime::observation::ReductionStats;
 use crate::runtime::outcome::{PlanItem, SourceEvidence};
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::{Access, Profile};
@@ -155,6 +156,9 @@ pub(crate) struct Capture {
 pub(crate) struct CellState {
     pub(crate) console: ConsoleCapture,
     pub(crate) captures: Vec<Capture>,
+    /// Names the model `keep`t this cell: they render in full every turn
+    /// until redeclared (`handles::HandleTable::pin`).
+    pub(crate) pinned: Vec<String>,
     /// Names the model's own `free` released during this cell. A capture of
     /// one is skipped: `runtime-contract.md` §2 makes `free` a lifetime
     /// event, and re-capturing at the end of the cell would undo it.
@@ -249,6 +253,52 @@ pub(crate) struct RuntimeState {
     /// the next cell boundary, never earlier merely because code holds it.
     pending_sources: RefCell<Vec<(PathBuf, String)>>,
     pending_context_output: RefCell<Vec<String>>,
+    /// Every pure observation this task has made, by tool, checked arguments
+    /// and result digest, with the first call that made it.
+    ///
+    /// The invariant: **a repeat is decided by the bytes, never by skipping
+    /// the call.** The call runs and the hash says whether the observation
+    /// changed, so an unchanged file is reported as a repeat and a changed
+    /// one is not. Task-scoped like [`calls`](Self::calls).
+    observations: RefCell<HashMap<ObservationKey, Observed>>,
+    /// The binding each recorded call's result was captured under, so a
+    /// repeat can name the handle that already holds the same bytes.
+    bindings: RefCell<HashMap<u64, String>>,
+    repeated_observations: std::cell::Cell<usize>,
+    /// The pushed reducer's work this task, reset with the handles.
+    reduction: RefCell<ReductionStats>,
+}
+
+/// One pure observation's identity: the tool, its arguments as checked, and
+/// the SHA-256 of what it returned.
+type ObservationKey = (String, BTreeMap<String, String>, String);
+
+/// Where an observation was first made.
+#[derive(Debug, Clone, Copy)]
+struct Observed {
+    cell: u64,
+    call: Option<u64>,
+}
+
+/// An earlier pure call whose observation the new one repeated byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Repeat {
+    /// The cell of the first call that made this observation.
+    pub(crate) cell: u64,
+    /// The handle that already holds the same bytes, when the first call's
+    /// result was bound to a name.
+    pub(crate) binding: Option<String>,
+}
+
+impl Repeat {
+    /// The suffix a repeated handle's type label carries, so the table header
+    /// says the repetition without the body being re-read.
+    pub(crate) fn label_suffix(&self) -> String {
+        match &self.binding {
+            Some(binding) => format!(" (unchanged since cell {}, same as `{binding}`)", self.cell),
+            None => format!(" (unchanged since cell {})", self.cell),
+        }
+    }
 }
 
 /// Slots a pushed helper may never take, so the model's own `helper.*` calls
@@ -286,6 +336,10 @@ impl RuntimeState {
             visible_sources: RefCell::new(HashMap::new()),
             pending_sources: RefCell::new(Vec::new()),
             pending_context_output: RefCell::new(Vec::new()),
+            observations: RefCell::new(HashMap::new()),
+            bindings: RefCell::new(HashMap::new()),
+            repeated_observations: std::cell::Cell::new(0),
+            reduction: RefCell::new(ReductionStats::default()),
         }
     }
 
@@ -349,6 +403,7 @@ impl RuntimeState {
         current.console.clear();
         current.captures.clear();
         current.freed.clear();
+        current.pinned.clear();
         current.helpers.clear();
         current.helper_calls = 0;
         cell
@@ -356,6 +411,73 @@ impl RuntimeState {
 
     pub(crate) fn set_helpers(&self, helpers: HelpersConfig) {
         *self.helpers.borrow_mut() = helpers;
+    }
+
+    /// `[helpers] reduce_above_tokens`: the estimated size above which a
+    /// command result is worth a pushed reduction.
+    pub(crate) fn reduce_above_tokens(&self) -> usize {
+        self.helpers.borrow().reduce_above_tokens
+    }
+
+    /// Adds to this task's reduction figures.
+    pub(crate) fn count_reduction(&self, count: impl FnOnce(&mut ReductionStats)) {
+        count(&mut self.reduction.borrow_mut());
+    }
+
+    pub(crate) fn reduction_stats(&self) -> ReductionStats {
+        *self.reduction.borrow()
+    }
+
+    /// Whether a pure call with these checked arguments already returned
+    /// exactly these bytes this task, and if so which call did.
+    pub(crate) fn observation_repeat(
+        &self,
+        tool: &str,
+        args: &BTreeMap<String, String>,
+        sha256: &str,
+    ) -> Option<Repeat> {
+        let key = (tool.to_string(), args.clone(), sha256.to_string());
+        let observed = *self.observations.borrow().get(&key)?;
+        self.repeated_observations
+            .set(self.repeated_observations.get() + 1);
+        Some(Repeat {
+            cell: observed.cell,
+            binding: observed
+                .call
+                .and_then(|id| self.bindings.borrow().get(&id).cloned()),
+        })
+    }
+
+    /// Remembers a pure observation under the call that made it. The first
+    /// call keeps the entry, so every later repeat points at it.
+    pub(crate) fn note_observation(
+        &self,
+        tool: &str,
+        args: &BTreeMap<String, String>,
+        sha256: &str,
+        call: Option<u64>,
+    ) {
+        self.observations
+            .borrow_mut()
+            .entry((tool.to_string(), args.clone(), sha256.to_string()))
+            .or_insert(Observed {
+                cell: self.cell.get(),
+                call,
+            });
+    }
+
+    /// The name a recorded call's result was bound under, for a later repeat
+    /// to point at. The first binding wins: it is the one the model will
+    /// still recognise.
+    pub(crate) fn note_binding(&self, call: u64, name: &str) {
+        self.bindings
+            .borrow_mut()
+            .entry(call)
+            .or_insert_with(|| name.to_string());
+    }
+
+    pub(crate) fn repeated_observations(&self) -> usize {
+        self.repeated_observations.get()
     }
 
     /// The model helpers run on, or the sentence saying why there is none.
@@ -552,6 +674,10 @@ impl RuntimeState {
         self.visible_sources.borrow_mut().clear();
         self.pending_sources.borrow_mut().clear();
         self.pending_context_output.borrow_mut().clear();
+        self.observations.borrow_mut().clear();
+        self.bindings.borrow_mut().clear();
+        self.repeated_observations.set(0);
+        *self.reduction.borrow_mut() = ReductionStats::default();
     }
 
     /// Queue only whole contexts that fit the existing feedback budget. Keep
@@ -601,6 +727,31 @@ impl RuntimeState {
         self.visible_sources.borrow().get(&path).cloned()
     }
 
+    /// The version of `path` an implicit `edit` would bind to right now.
+    pub(crate) fn visible_version(&self, path: &Path) -> Option<String> {
+        let path = self.absolute_source_path(path);
+        self.visible_sources.borrow().get(&path).cloned()
+    }
+
+    /// A successful `edit` or `write` made `sha256` the version on disk, and
+    /// the model holds the result that says so — so it is visible at once,
+    /// in this cell and every later one, and the next edit binds to it.
+    ///
+    /// The invariant: **only pane's own mutation moves the visible version.**
+    /// The writer still compares the disk hash, so a change something else
+    /// made between two of pane's edits stays a stale refusal. A context of
+    /// the same path still pending from earlier in this cell is dropped: it
+    /// describes bytes the mutation just replaced.
+    pub(crate) fn note_mutation(&self, path: &Path, sha256: &str) {
+        let path = self.absolute_source_path(path);
+        self.pending_sources
+            .borrow_mut()
+            .retain(|(pending, _)| pending != &path);
+        self.visible_sources
+            .borrow_mut()
+            .insert(path, sha256.to_ascii_lowercase());
+    }
+
     fn absolute_source_path(&self, path: &Path) -> PathBuf {
         self.profile
             .check("edit", Access::Read, path)
@@ -638,6 +789,14 @@ impl RuntimeState {
             value,
             meta,
         });
+    }
+
+    /// A `keep` is an explicit pin: the model asked to see this value again.
+    pub(crate) fn note_pin(&self, name: &str) {
+        let mut current = self.current.borrow_mut();
+        if !current.pinned.iter().any(|pinned| pinned == name) {
+            current.pinned.push(name.to_string());
+        }
     }
 
     pub(crate) fn note_free(&self, name: &str) {

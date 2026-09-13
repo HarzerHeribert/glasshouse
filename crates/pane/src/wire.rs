@@ -259,7 +259,7 @@ impl Surface {
         if interface.declares_cell() {
             tools.push(serde_json::json!({
                 "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
-                "description": crate::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
+                "description": crate::prompt::declarations::execute_cell_description(interface),
                 "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
             }));
         }

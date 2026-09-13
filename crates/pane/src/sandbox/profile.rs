@@ -41,11 +41,22 @@ impl Access {
     }
 
     /// The refusal sentence for a path no grant covers, §5.
-    fn only_root_sentence(self) -> &'static str {
-        match self {
-            Access::Read => "no grant covers this path; the project root is the only readable root",
-            Access::Write => {
+    ///
+    /// In container mode a read outside every root is granted before this
+    /// sentence is reached, so a container-mode read refusal always carries
+    /// the never-grantable rule or the `deny` entry that decided it; the
+    /// container-mode write sentence names the asymmetry instead of claiming
+    /// a root is the only readable one.
+    fn only_root_sentence(self, container_mode: bool) -> &'static str {
+        match (self, container_mode) {
+            (Access::Read, _) => {
+                "no grant covers this path; the project root is the only readable root"
+            }
+            (Access::Write, false) => {
                 "no grant covers this path; the project root is the only writable root"
+            }
+            (Access::Write, true) => {
+                "no grant covers this path; container mode widens reads only, and the project root and the additional roots are the only writable roots"
             }
         }
     }
@@ -170,13 +181,18 @@ impl CommandGrant {
 /// The five `$HOME` directories §4.3 names, refusable by no pattern at all.
 const NEVER_GRANTABLE_HOME: [&str; 5] = [".claude", ".codex", ".ssh", ".aws", ".config"];
 
-/// Command names that re-enter the sandbox launcher or attach a debugger,
-/// §4.6. Matched on every word of a command line, stripped of its directory
-/// part, so `sh -c "sandbox-exec …"` is the same refusal as `sandbox-exec`.
-const NEVER_GRANTABLE_COMMANDS: [&str; 12] = [
-    "sandbox-exec",
-    "bwrap",
-    "bubblewrap",
+/// Command names that re-enter the sandbox launcher, §4.6 — refused in
+/// every mode, because a nested launcher is a second sandbox no profile
+/// described. Matched on every word of a command line, stripped of its
+/// directory part, so `sh -c "sandbox-exec …"` is the same refusal as
+/// `sandbox-exec`.
+const NEVER_GRANTABLE_LAUNCHERS: [&str; 3] = ["sandbox-exec", "bwrap", "bubblewrap"];
+
+/// Command names that attach a debugger, §4.6. Refused outside container
+/// mode, where attaching to a process is a way out of Pane's own OS
+/// sandbox; admitted under [`Profile::container_mode`], where that sandbox
+/// is not applied and the container is the named boundary.
+const NEVER_GRANTABLE_DEBUGGERS: [&str; 9] = [
     "lldb",
     "gdb",
     "strace",
@@ -187,6 +203,20 @@ const NEVER_GRANTABLE_COMMANDS: [&str; 12] = [
     "x64dbg",
     "vsjitdebugger.exe",
 ];
+
+/// §4.6's table for one mode: the launchers always, the debuggers only
+/// while Pane's own sandbox is what a debugger could escape.
+fn never_grantable_commands(container_mode: bool) -> impl Iterator<Item = &'static str> {
+    let debuggers = if container_mode {
+        &NEVER_GRANTABLE_DEBUGGERS[..0]
+    } else {
+        &NEVER_GRANTABLE_DEBUGGERS[..]
+    };
+    NEVER_GRANTABLE_LAUNCHERS
+        .iter()
+        .chain(debuggers.iter())
+        .copied()
+}
 
 impl Profile {
     /// Compiles the profile a project's loaded configuration implies.
@@ -476,8 +506,13 @@ fn register(profile: &mut Profile, pattern: &str, denying: bool) {
 impl Profile {
     /// Records the host-selected native-sandbox bypass before the immutable
     /// session profile is shared with any runtime.
+    ///
+    /// Host-only construction step, never reachable from a program: it
+    /// consumes the profile, so it can only run before the profile is shared,
+    /// and the session refuses the flag that reaches it without `--yolo` and
+    /// on every non-Linux host. No permission pattern can spell it.
     #[must_use]
-    pub(crate) fn with_os_sandbox_bypass(mut self) -> Self {
+    pub fn with_os_sandbox_bypass(mut self) -> Self {
         self.bypass_os_sandbox = true;
         self
     }
@@ -485,6 +520,14 @@ impl Profile {
     /// Whether this session explicitly acknowledged running children without
     /// Pane's own OS confinement layer.
     pub(crate) fn os_sandbox_bypassed(&self) -> bool {
+        self.bypass_os_sandbox
+    }
+
+    /// The same fact as [`Profile::os_sandbox_bypassed`], named for what it
+    /// means to the policy: the outer container is the process boundary, so
+    /// reads span it and a debugger is admissible, while writes, the
+    /// never-grantable set and every `deny` pattern hold unchanged.
+    pub fn container_mode(&self) -> bool {
         self.bypass_os_sandbox
     }
 
@@ -543,7 +586,13 @@ impl Profile {
                 return Err(format!("additional directory refused: {}", never.rule));
             }
         }
-        for name in [".claude", ".pane"] {
+        for (name, affordance) in [
+            (".claude", ""),
+            (
+                ".pane",
+                "; write scratch files elsewhere under the project root",
+            ),
+        ] {
             let protected = spelling(&root.join(name));
             self.never.push(NeverRule {
                 glob: subtree_glob(&protected),
@@ -551,7 +600,9 @@ impl Profile {
                 except: None,
                 except_spelling: None,
                 write_only: true,
-                rule: format!("`{name}/**` in an additional directory is never writable"),
+                rule: format!(
+                    "`{name}/**` in an additional directory is never writable{affordance}"
+                ),
             });
         }
         self.additional_roots.push(root);
@@ -624,6 +675,22 @@ impl Profile {
     /// How many command-line patterns were admitted.
     pub fn command_pattern_count(&self) -> usize {
         self.command_allow.len()
+    }
+
+    /// Every admitted command-line pattern in its written `Bash(...)` form,
+    /// in document order. A bare `Bash` is stored as `*` and renders as
+    /// `Bash(*)`, which names the same grant.
+    pub fn command_patterns(&self) -> Vec<String> {
+        self.command_allow
+            .iter()
+            .map(|pattern| format!("Bash({pattern})"))
+            .collect()
+    }
+
+    /// §4.6's command names as this profile's mode refuses them: the sandbox
+    /// launchers always, the debuggers only outside container mode.
+    pub fn never_grantable_commands(&self) -> Vec<&'static str> {
+        never_grantable_commands(self.container_mode()).collect()
     }
 
     /// How many MCP tool patterns were admitted. A pattern may glob, so this
@@ -699,7 +766,7 @@ impl Profile {
         if let Some(reason) = &self.invalid_root {
             return denied(reason.clone());
         }
-        if let Some(name) = escaping_command(command_line) {
+        if let Some(name) = escaping_command(command_line, self.container_mode()) {
             return denied(format!(
                 "`{name}` re-enters the sandbox launcher or attaches a debugger and is never grantable by any pattern (sandbox-grants.md §4.6)"
             ));
@@ -912,7 +979,15 @@ impl Profile {
         if granted {
             return grant(resolved);
         }
-        denied(access.only_root_sentence().to_string())
+        // Container mode, reads only: the container is the boundary, and
+        // every refusing rule — never-grantable, `deny` — has already had its
+        // turn above, so a read that reaches here is one nothing refused.
+        // Writes keep the roots, which is why this is the last step and not
+        // an early grant.
+        if access == Access::Read && self.container_mode() {
+            return grant(resolved);
+        }
+        denied(access.only_root_sentence(self.container_mode()).to_string())
     }
 }
 
@@ -948,7 +1023,7 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
         except: None,
         except_spelling: None,
         write_only: true,
-        rule: "`.pane/**` is host-owned configuration and never writable by agent tools".into(),
+        rule: "`.pane/**` is host-owned configuration and never writable by agent tools; write scratch files elsewhere under the project root".into(),
     });
     // `Some(root)`, and it is what makes §4.2 hold on Windows: `/etc/sudoers`
     // has a root and no drive there, so a candidate spelled that way acquires
@@ -1119,17 +1194,14 @@ fn glasshouse_state_dirs(home: Option<&Path>) -> Vec<PathBuf> {
 /// walks straight past; a command line that merely mentions one of these
 /// names is refused too, which is the direction a never-grantable set must
 /// err in.
-fn escaping_command(command_line: &str) -> Option<&'static str> {
+fn escaping_command(command_line: &str, container_mode: bool) -> Option<&'static str> {
     command_line.split_whitespace().find_map(|word| {
         let base = word
             .trim_matches(['"', '\'', '`', '(', ')', ';', '&', '|'])
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or(word);
-        NEVER_GRANTABLE_COMMANDS
-            .iter()
-            .copied()
-            .find(|name| base.eq_ignore_ascii_case(name))
+        never_grantable_commands(container_mode).find(|name| base.eq_ignore_ascii_case(name))
     })
 }
 

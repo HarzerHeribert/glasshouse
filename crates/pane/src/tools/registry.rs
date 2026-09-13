@@ -89,6 +89,11 @@ pub enum ArgKind {
     /// the invoker, without JavaScript template interpolation or shell
     /// expansion. Only in-process file tools admit this structured value.
     Lines,
+    /// An array of opaque strings, each kept as one item: never joined,
+    /// parsed or expanded. The multi-hunk `edit` takes its hunks this way
+    /// because a hunk spans lines and [`ArgKind::Lines`] refuses an embedded
+    /// newline.
+    Texts,
     /// A whole command line. Goes through `Profile::admits_command` and
     /// through nothing else — it grants no file access whatsoever (§2).
     CommandLine,
@@ -465,7 +470,8 @@ const CONTEXT: Tool = Tool::declare_in_process(
 );
 
 /// `edit({ path, expected_sha256?, old, replacement })` — one exact replacement tied
-/// to source the model actually inspected.
+/// to source the model actually inspected, or `edit({ path, olds, replacements })`
+/// for several hunks applied as one checked mutation.
 const EDIT: Tool = Tool::declare_in_process(
     "edit",
     &[
@@ -475,6 +481,8 @@ const EDIT: Tool = Tool::declare_in_process(
         Arg::optional("oldLines", ArgKind::Lines),
         Arg::optional("replacement", ArgKind::Pattern),
         Arg::optional("replacementLines", ArgKind::Lines),
+        Arg::optional("olds", ArgKind::Texts),
+        Arg::optional("replacements", ArgKind::Texts),
     ],
     Purity::Effectful,
 );

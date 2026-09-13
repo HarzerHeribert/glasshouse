@@ -244,6 +244,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         HarnessCommand {
             program: harness_program,
             args: vec!["{statement}".to_string()],
+            interface: None,
         },
     );
     RunOpts {
@@ -519,6 +520,7 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
         HarnessCommand {
             program: fake_pane,
             args: pane_row.args,
+            interface: None,
         },
     );
 
@@ -572,6 +574,7 @@ fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
         HarnessCommand {
             program: fake_claude,
             args: claude_row.args,
+            interface: None,
         },
     );
 
@@ -616,6 +619,7 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
         HarnessCommand {
             program: fake_codex,
             args: codex_row.args,
+            interface: None,
         },
     );
 
@@ -670,6 +674,7 @@ fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
         HarnessCommand {
             program: fake_pane,
             args: pane_row.args,
+            interface: None,
         },
     );
 
@@ -735,6 +740,8 @@ fn the_accepted_flags_are_exactly_these() {
             "--gateway",
             "--meter",
             "--via-glasshouse",
+            "--pane-interface",
+            "--credit-ratio",
             "--out"
         ]
     );
@@ -1372,4 +1379,209 @@ fn an_attempt_worktree_name_carries_the_pid_and_a_counter() {
         counter_part, "1",
         "the first attempt in a fresh process must end -<pid>-1: {name}"
     );
+}
+
+/// Writes an executable shell script that records its NUL-separated argv
+/// to `argv_record` and prints `stdout` -- a stand-in for `pane session
+/// --output-format json` whose stdout is the telemetry document.
+fn write_stdout_script(dir: &Path, name: &str, argv_record: &Path, stdout: &str) -> PathBuf {
+    let path = dir.join(name);
+    let contents = format!(
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"{}\"\ncat <<'PANE_RESULT'\n{}\nPANE_RESULT\nexit 0\n",
+        argv_record.display(),
+        stdout
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Contract 1: `--pane-interface hybrid,cells,tools` turns the `pane` row
+/// into three `pane:<mode>` rows, each carrying `--interface <mode>
+/// --output-format json` after the row's own template, and leaves every
+/// other row alone.
+#[test]
+fn pane_interface_expands_the_pane_row_into_one_arm_per_mode() {
+    let mut table = attempt::default_harnesses();
+    let selected = vec!["claude-code".to_string(), "pane".to_string()];
+    let modes = vec![
+        "hybrid".to_string(),
+        "cells".to_string(),
+        "tools".to_string(),
+    ];
+
+    let rows = cli::expand_pane_interfaces(&selected, &modes, &mut table).unwrap();
+
+    assert_eq!(
+        rows,
+        vec!["claude-code", "pane:hybrid", "pane:cells", "pane:tools"]
+    );
+    for mode in ["hybrid", "cells", "tools"] {
+        let arm = &table[&format!("pane:{mode}")];
+        assert_eq!(arm.program, PathBuf::from("pane"));
+        assert_eq!(
+            arm.args,
+            vec![
+                "session",
+                "--root",
+                "{root}",
+                "--task",
+                "{statement}",
+                "--interface",
+                mode,
+                "--output-format",
+                "json"
+            ]
+        );
+        assert_eq!(arm.interface.as_deref(), Some(mode));
+    }
+    assert_eq!(
+        table["claude-code"].args,
+        vec!["--print", "--dangerously-skip-permissions", "{statement}"]
+    );
+    assert!(table["claude-code"].interface.is_none());
+
+    let mut untouched = attempt::default_harnesses();
+    assert_eq!(
+        cli::expand_pane_interfaces(&selected, &[], &mut untouched).unwrap(),
+        selected,
+        "no modes: the selection is returned as it was"
+    );
+}
+
+/// Contract 1: `--pane-interface` without `pane` among the selected rows is
+/// refused, before `resolve_tasks` runs or any attempt starts, in one
+/// sentence naming the flag; an unknown mode is refused too.
+#[test]
+fn pane_interface_without_the_pane_row_is_refused() {
+    let out = scratch_dir("pane-interface-refused");
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--pane-interface".to_string(),
+        "hybrid,cells".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+    let message = result.expect_err("--pane-interface without pane must be refused");
+    assert!(message.contains("--pane-interface"), "{message}");
+    assert!(message.contains("pane"), "{message}");
+    assert_eq!(
+        message.matches(". ").count(),
+        0,
+        "one sentence, not a paragraph: {message}"
+    );
+
+    let mut table = attempt::default_harnesses();
+    let unknown =
+        cli::expand_pane_interfaces(&["pane".to_string()], &["turbo".to_string()], &mut table)
+            .expect_err("an unknown mode must be refused");
+    assert!(unknown.contains("turbo"), "{unknown}");
+}
+
+/// Contracts 1 and 2, end to end through `run_one`: a `pane:hybrid` arm's
+/// argv carries `--interface hybrid --output-format json`, its stdout lands
+/// in the attempt's `pane-result.json`, and the attempt carries the mode
+/// and the telemetry the document reported.
+#[test]
+fn a_pane_arm_captures_its_stdout_and_carries_the_metrics() {
+    let scratch = scratch_dir("pane-arm-metrics");
+    let argv_record = scratch.join("argv.txt");
+    let document = r#"{"type":"result","telemetry":{"wall_time_ms":1234,"tokens":{"parent":{"requests":7,"known_tokens":900},"helpers":{"known_tokens":300}},"interface":{"provider_selected":{"execute_cell_calls":5,"direct_tool_calls":2}},"cells":{"executed":6,"failed":1},"failures":{"by_kind":{"denied":1}},"recovery":{"by_cause":{"repair":{"requests":2}}},"observation":{"bytes_rendered":4096},"completion":{"verified":true}}}"#;
+    let fake_pane = write_stdout_script(&scratch, "fake_pane.sh", &argv_record, document);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let mut table = attempt::default_harnesses();
+    let rows =
+        cli::expand_pane_interfaces(&["pane".to_string()], &["hybrid".to_string()], &mut table)
+            .unwrap();
+    assert_eq!(rows, vec!["pane:hybrid"]);
+    let mut arm = table.remove("pane:hybrid").unwrap();
+    arm.program = fake_pane;
+    let mut harnesses = HashMap::new();
+    harnesses.insert("pane:hybrid".to_string(), arm);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("pane:hybrid");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(argv[0], "session");
+    assert_eq!(
+        &argv[5..],
+        ["--interface", "hybrid", "--output-format", "json"]
+    );
+
+    assert_eq!(result.interface.as_deref(), Some("hybrid"));
+    let metrics = result
+        .metrics
+        .clone()
+        .expect("the captured document is parsed");
+    assert_eq!(metrics.parent_requests, Some(7));
+    assert_eq!(metrics.parent_known_tokens, Some(900));
+    assert_eq!(metrics.helper_known_tokens, Some(300));
+    assert_eq!(metrics.execute_cell_calls, Some(5));
+    assert_eq!(metrics.direct_tool_calls, Some(2));
+    assert_eq!(metrics.frames_failed, Some(1));
+    assert_eq!(metrics.repair_requests, Some(2));
+    assert_eq!(metrics.observation_bytes_rendered, Some(4096));
+    assert_eq!(metrics.wall_time_ms, Some(1234));
+    assert_eq!(metrics.completion_verified, Some(true));
+    assert_eq!(
+        metrics.failures_by_kind.unwrap().get("denied").copied(),
+        Some(1)
+    );
+
+    let jsonl = pane::ruler::report::render_jsonl(std::slice::from_ref(&result));
+    assert!(jsonl.contains("\"interface\":\"hybrid\""), "{jsonl}");
+    assert!(jsonl.contains("\"parent_requests\":7"), "{jsonl}");
+}
+
+/// A pane arm whose stdout carries no telemetry document is unmeasured --
+/// `metrics: None` -- and still a completed attempt.
+#[test]
+fn a_pane_arm_without_a_telemetry_document_is_unmeasured_not_zero() {
+    let scratch = scratch_dir("pane-arm-unmeasured");
+    let argv_record = scratch.join("argv.txt");
+    let fake_pane = write_stdout_script(&scratch, "fake_pane.sh", &argv_record, "not json");
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let mut table = attempt::default_harnesses();
+    cli::expand_pane_interfaces(&["pane".to_string()], &["cells".to_string()], &mut table).unwrap();
+    let mut arm = table.remove("pane:cells").unwrap();
+    arm.program = fake_pane;
+    let mut harnesses = HashMap::new();
+    harnesses.insert("pane:cells".to_string(), arm);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch,
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+
+    let result = attempt::run_one(&task, &Harness::new("pane:cells"), 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+    assert_eq!(result.interface.as_deref(), Some("cells"));
+    assert_eq!(result.metrics, None);
 }

@@ -88,6 +88,19 @@ impl Intent {
             js_object_literal(&self.args)
         )
     }
+
+    /// The same call, isolated: the binding is declared ahead of a guarded
+    /// call, so a throw inside it stops nothing after it and leaves the name
+    /// bound to `undefined` — which the runtime then frees rather than
+    /// listing. One line, so a frame of N calls is N lines.
+    #[must_use]
+    pub fn guarded_statement(&self, binding: &str) -> String {
+        format!(
+            "let {binding}; try {{ {binding} = await {}({}); }} catch {{}}",
+            self.capability.callee(),
+            js_object_literal(&self.args)
+        )
+    }
 }
 
 fn type_matches(ty: ParamType, value: &Value) -> bool {
@@ -153,6 +166,12 @@ pub struct Lowered {
 /// to the model in each result envelope, which is how this satisfies
 /// `runtime-contract.md` §2 without a parallel naming system: the model is
 /// never asked to guess a name it did not write, it is told the name.
+///
+/// **Provider-native parallel calls are independent, so the frame isolates
+/// each one**: for two or more calls every statement is guarded, a denial or
+/// throw in one stops none of the others, and the trajectory still records
+/// every call in order. A single call keeps the plain statement, so its
+/// failure throws and the one `tool_result` is an error.
 pub fn lower(
     dialect: Dialect,
     calls: &[(String, String, Value)],
@@ -160,10 +179,15 @@ pub fn lower(
 ) -> Result<Lowered, AbiError> {
     let mut lowered = Vec::new();
     let mut source = String::new();
+    let isolated = calls.len() >= 2;
     for (index, (id, name, input)) in calls.iter().enumerate() {
         let intent = Intent::decode(dialect, name, input)?;
         let binding = binding_name(intent.capability, cell, index + 1);
-        source.push_str(&intent.statement(&binding));
+        source.push_str(&if isolated {
+            intent.guarded_statement(&binding)
+        } else {
+            intent.statement(&binding)
+        });
         source.push('\n');
         lowered.push(LoweredCall {
             id: id.clone(),
@@ -311,10 +335,92 @@ mod tests {
         let lowered = lower(Dialect::Anthropic, &calls, 3).unwrap();
         let lines: Vec<_> = lowered.source.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("const read_3_1 = await read("));
-        assert!(lines[1].starts_with("const grep_3_2 = await grep("));
+        // Each call is isolated: its binding is declared ahead of a guarded
+        // call, so a failure in one leaves the other's statement to run.
+        assert_eq!(
+            lines[0],
+            "let read_3_1; try { read_3_1 = await read({\"path\":\"one.rs\"}); } catch {}"
+        );
+        assert!(lines[1].starts_with("let grep_3_2; try { grep_3_2 = await grep("));
+        assert!(lines[1].ends_with("} catch {}"));
         assert_eq!(lowered.calls.len(), 2);
         assert_eq!(lowered.calls[1].id, "b");
+    }
+
+    /// The isolating shape must not lean on the runtime's own names: a
+    /// `__pane_` declaration is refused by the compiler and `__pane_cell` is
+    /// the epilogue's private handle.
+    #[test]
+    fn an_isolated_frame_declares_no_reserved_name() {
+        let calls = vec![
+            (
+                "a".to_string(),
+                "Read".to_string(),
+                json!({"file_path": "a"}),
+            ),
+            (
+                "b".to_string(),
+                "Read".to_string(),
+                json!({"file_path": "b"}),
+            ),
+            ("c".to_string(), "Glob".to_string(), json!({"pattern": "*"})),
+        ];
+        let lowered = lower(Dialect::Anthropic, &calls, 2).unwrap();
+        assert!(!lowered.source.contains("__pane_"), "{}", lowered.source);
+        assert_eq!(lowered.source.lines().count(), 3);
+        for (line, call) in lowered.source.lines().zip(&lowered.calls) {
+            assert!(line.starts_with(&format!("let {}; try {{", call.binding)));
+        }
+    }
+
+    /// One call keeps the plain statement, so its failure still throws and
+    /// the session answers the one result as an error.
+    #[test]
+    fn a_single_call_is_not_guarded() {
+        let calls = vec![(
+            "a".to_string(),
+            "Read".to_string(),
+            json!({"file_path": "one.rs"}),
+        )];
+        let lowered = lower(Dialect::Anthropic, &calls, 3).unwrap();
+        assert_eq!(
+            lowered.source,
+            "const read_3_1 = await read({\"path\":\"one.rs\"});\n"
+        );
+    }
+
+    /// A direct multi-hunk `Edit` lowers to the same `olds`/`replacements`
+    /// call a cell would write, arrays intact.
+    #[test]
+    fn a_multi_hunk_edit_lowers_with_its_arrays_intact() {
+        let calls = vec![(
+            "e".to_string(),
+            "Edit".to_string(),
+            json!({
+                "file_path": "a.rs",
+                "old_strings": ["fn a() {}", "fn b() {}"],
+                "new_strings": ["fn a() { 1 }", "fn b() { 2 }"]
+            }),
+        )];
+        let lowered = lower(Dialect::Anthropic, &calls, 4).unwrap();
+        let intent = &lowered.calls[0].intent;
+        assert_eq!(
+            intent.args.get("olds").unwrap(),
+            &json!(["fn a() {}", "fn b() {}"])
+        );
+        assert_eq!(
+            intent.args.get("replacements").unwrap(),
+            &json!(["fn a() { 1 }", "fn b() { 2 }"])
+        );
+        assert!(intent.args.get("old_strings").is_none());
+        assert!(intent.args.get("old").is_none());
+        assert!(
+            lowered
+                .source
+                .starts_with("const edit_4_1 = await edit({\"olds\":[\"fn a() {}\",\"fn b() {}\"]"),
+            "{}",
+            lowered.source
+        );
     }
 
     #[test]
@@ -332,8 +438,9 @@ mod tests {
     #[test]
     fn a_missing_required_parameter_is_refused() {
         let error =
-            Intent::decode(Dialect::Anthropic, "Edit", &json!({"file_path": "a.rs"})).unwrap_err();
+            Intent::decode(Dialect::Anthropic, "Write", &json!({"content": "x"})).unwrap_err();
         assert_eq!(error.kind, ErrorKind::MissingParameter);
+        assert_eq!(error.target, "Write.file_path");
     }
 
     #[test]

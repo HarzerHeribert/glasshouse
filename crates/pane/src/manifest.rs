@@ -10,7 +10,13 @@
 //! Bench pilot paid six of thirteen failed cells for exactly that
 //! (`gdb` refused three times, `/build` refused three times).
 
+use crate::sandbox::profile::{Effect, Profile};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+/// The line `readable_roots` carries in container mode, after the roots.
+const CONTAINER_READ_ROOT: &str =
+    "/ (container mode: everything except credential stores and denied patterns)";
 
 /// How command lines are admitted, as the manifest states it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -65,6 +71,68 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Reads the manifest off a compiled profile.
+    ///
+    /// Every field is an answer the profile already holds — its roots, its
+    /// mode, its written `deny` and `Bash(...)` patterns, §4.6's table for
+    /// the mode — plus one `PATH` lookup per name in `probe`. No process
+    /// runs and nothing is created: an absent executable is reported as
+    /// `path: None`, never installed or guessed. `unavailable` is left empty
+    /// for the session to fill with what it alone knows.
+    #[must_use]
+    pub fn collect(profile: &Profile, probe: &[&str]) -> Manifest {
+        let roots: Vec<&Path> = std::iter::once(profile.root())
+            .chain(profile.additional_roots().iter().map(PathBuf::as_path))
+            .collect();
+        let shown = |path: &Path| path.display().to_string();
+        let mut readable_roots: Vec<String> = roots.iter().map(|root| shown(root)).collect();
+        if profile.container_mode() {
+            readable_roots.push(CONTAINER_READ_ROOT.to_string());
+        }
+        let writable_roots: Vec<String> = roots.iter().map(|root| shown(root)).collect();
+        let reserved_paths: Vec<String> = roots
+            .iter()
+            .flat_map(|root| [".pane", ".claude"].map(|name| shown(&root.join(name))))
+            .collect();
+        let denied_patterns: Vec<String> = profile
+            .rules()
+            .filter(|rule| rule.effect() == Effect::Deny)
+            .map(|rule| rule.written().to_string())
+            .collect();
+        let commands = if profile.admits_every_command() {
+            CommandPolicy::All
+        } else if profile.command_pattern_count() > 0 {
+            CommandPolicy::Patterns(profile.command_patterns())
+        } else {
+            CommandPolicy::None
+        };
+        let never_grantable_commands = profile
+            .never_grantable_commands()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let executables = probe
+            .iter()
+            .map(|name| Executable {
+                name: (*name).to_string(),
+                path: crate::tools::invoke::resolve_program(name).map(|path| shown(&path)),
+            })
+            .collect();
+        Manifest {
+            root: shown(profile.root()),
+            readable_roots,
+            writable_roots,
+            reserved_paths,
+            denied_patterns,
+            commands,
+            never_grantable_commands,
+            executables,
+            network: profile.grants_network(),
+            container_mode: profile.container_mode(),
+            unavailable: Vec::new(),
+        }
+    }
+
     /// The `## Environment` block, bounded and deterministic for one profile.
     #[must_use]
     pub fn render(&self) -> String {

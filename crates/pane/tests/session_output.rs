@@ -185,7 +185,7 @@ fn machine_telemetry_splits_preflight_helper_and_parent_usage_by_model() {
     std::fs::create_dir_all(root.join(".pane")).unwrap();
     std::fs::write(
         root.join(".pane/config.toml"),
-        "[helpers]\nmodel = \"helper/model\"\npreflight = true\n",
+        "[helpers]\nmodel = \"helper/model\"\npreflight = true\npreflight_scope = \"always\"\n",
     )
     .unwrap();
     let helper = json!({
@@ -290,4 +290,158 @@ fn machine_output_requires_a_single_task_without_starting_a_session() {
             .unwrap()
             .contains("requires --task")
     );
+}
+
+/// A direct `Read` answered by the fake provider, then an `execute_cell`
+/// return: one frame of each origin.
+fn read_then_return(label: &str) -> (std::path::PathBuf, String) {
+    let root = root(label);
+    std::fs::write(root.join("fixture.txt"), "the answer is 42\n").unwrap();
+    let direct = json!({
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "call-read", "name": "Read",
+            "input": {"file_path": "fixture.txt"}}],
+        "usage": {"input_tokens": 20, "output_tokens": 7, "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 1}
+    });
+    let endpoint = providers(vec![(200, direct), (200, native_return())]);
+    (root, endpoint)
+}
+
+fn exec_json(root: &std::path::Path, endpoint: &str) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .args(["exec", "compute", "--output-format", "json", "--root"])
+        .arg(root)
+        .args(["--model", "test/model", "--glasshouse"])
+        .arg(root.join("absent-glasshouse"))
+        .env("ANTHROPIC_BASE_URL", endpoint)
+        .env("ANTHROPIC_API_KEY", "test-only")
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn provider_selected_interface_is_counted_and_every_v1_field_stays() {
+    let (root, endpoint) = read_then_return("provider-selected");
+    let result = exec_json(&root, &endpoint);
+    let telemetry = &result["telemetry"];
+    let selected = &telemetry["interface"]["provider_selected"];
+    assert_eq!(selected["execute_cell_calls"], 1);
+    assert_eq!(selected["direct_tool_calls"], 1);
+    assert_eq!(selected["direct_tools_by_name"]["Read"], 1);
+    // The additive sections are present in their v1-compatible shape.
+    for key in [
+        "interface",
+        "frames",
+        "failures",
+        "lifting",
+        "observation",
+        "reductions",
+        "recovery",
+        "progress",
+    ] {
+        assert!(telemetry[key].is_object(), "{key}: {telemetry}");
+    }
+    assert!(telemetry.get("completion").is_some());
+    assert!(telemetry.get("capsule").is_some());
+    let by_cause = &telemetry["recovery"]["by_cause"];
+    let charged: u64 = ["implementation", "exploration", "verification", "repair"]
+        .iter()
+        .map(|cause| by_cause[cause]["requests"].as_u64().unwrap())
+        .sum();
+    assert_eq!(charged, 2);
+    assert_eq!(telemetry["recovery"]["repair_usage"]["requests"], 0);
+    assert_eq!(telemetry["frames"]["operations_per_frame_mean"], 0.5);
+    // Everything the v1 document already carried.
+    assert_eq!(result["answer"], "answer 42");
+    assert_eq!(result["success"], true);
+    assert_eq!(telemetry["cells"]["executed"], 2);
+    assert_eq!(telemetry["cells"]["failed"], 0);
+    assert_eq!(telemetry["tools"]["calls"], 1);
+    assert_eq!(telemetry["tools"]["failures"], 0);
+    assert_eq!(telemetry["provider_requests"]["total"], 2);
+    assert_eq!(telemetry["provider_requests"]["coverage_complete"], true);
+    assert_eq!(telemetry["tokens"]["known_total"], 64);
+    assert_eq!(telemetry["tokens"]["parent"]["requests"], 2);
+    assert_eq!(
+        telemetry["tokens"]["parent"]["models"][0]["model"],
+        "test/model"
+    );
+    assert_eq!(telemetry["preflight_helpers"].as_array().unwrap().len(), 0);
+    assert!(telemetry["wall_time_ms"].is_u64());
+    let events = result["events"].as_array().unwrap();
+    assert_eq!(events[0]["type"], "session_started");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "cell")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn direct_tool_and_authored_frames_are_counted_by_origin() {
+    let (root, endpoint) = read_then_return("frames-by-origin");
+    let result = exec_json(&root, &endpoint);
+    let telemetry = &result["telemetry"];
+    assert_eq!(
+        telemetry["interface"]["provider_selected"]["execute_cell_calls"],
+        1
+    );
+    assert_eq!(
+        telemetry["interface"]["provider_selected"]["direct_tool_calls"],
+        1
+    );
+    let by_origin = &telemetry["frames"]["by_origin"];
+    assert_eq!(by_origin["direct_tool"]["executed"], 1);
+    assert_eq!(by_origin["direct_tool"]["operations"], 1);
+    assert_eq!(by_origin["authored_cell"]["executed"], 1);
+    assert_eq!(by_origin["authored_cell"]["operations"], 0);
+    assert_eq!(telemetry["interface"]["mode"], "hybrid");
+    assert_eq!(telemetry["interface"]["dialect"], "anthropic");
+    let events = result["events"].as_array().unwrap();
+    let origins: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "cell")
+        .map(|event| &event["data"]["origin"])
+        .collect();
+    assert_eq!(origins, vec!["direct_tool", "authored_cell"]);
+    assert_eq!(result["answer"], "answer 42");
+    assert_eq!(telemetry["cells"]["executed"], 2);
+    assert_eq!(telemetry["tokens"]["known_total"], 64);
+}
+
+#[test]
+fn a_request_after_a_thrown_cell_is_charged_to_repair() {
+    let root = root("repair-cause");
+    let failed = json!({
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "call-fail", "name": "execute_cell",
+            "input": {"code": "await read({path:'definitely-absent'});"}}],
+        "usage": {"input_tokens": 3, "output_tokens": 2,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    });
+    let endpoint = providers(vec![(200, failed), (200, native_return())]);
+    let result = exec_json(&root, &endpoint);
+    let telemetry = &result["telemetry"];
+    assert_eq!(telemetry["cells"]["failed"], 1);
+    let by_cause = &telemetry["recovery"]["by_cause"];
+    assert_eq!(by_cause["implementation"]["requests"], 1);
+    assert_eq!(by_cause["implementation"]["input_tokens"], 3);
+    assert_eq!(by_cause["repair"]["requests"], 1);
+    assert_eq!(by_cause["repair"]["input_tokens"], 20);
+    assert_eq!(by_cause["repair"]["output_tokens"], 7);
+    assert_eq!(by_cause["repair"]["cache_read_input_tokens"], 4);
+    assert_eq!(by_cause["repair"]["known_tokens"], 32);
+    assert!(by_cause["repair"]["wall_time_ms"].is_u64());
+    assert_eq!(telemetry["recovery"]["repair_usage"], by_cause["repair"]);
+    assert_eq!(telemetry["failures"]["by_kind"]["command"], 1);
 }

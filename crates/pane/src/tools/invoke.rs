@@ -658,17 +658,23 @@ enum Checked {
     /// Literal lines normalized to text. A non-empty array is newline
     /// terminated; callers that need byte-exact control keep using a string.
     Lines(String),
+    /// Opaque strings kept as separate items — a multi-hunk edit's hunks.
+    Texts(Vec<String>),
     CommandLine(String),
 }
 
 impl Checked {
     /// The spelling the trajectory records: the resolved path, or the text
-    /// the profile admitted.
+    /// the profile admitted. Items are recorded as one JSON array so their
+    /// boundaries survive.
     fn spelling(&self) -> String {
         match self {
             Checked::Path(path) => path.to_string_lossy().into_owned(),
             Checked::Pattern(text) | Checked::Lines(text) | Checked::CommandLine(text) => {
                 text.clone()
+            }
+            Checked::Texts(items) => {
+                Value::Array(items.iter().cloned().map(Value::String).collect()).to_string()
             }
         }
     }
@@ -857,29 +863,60 @@ fn perform_in_process(
                         .to_string(),
                 ));
             };
-            let expected = exclusive_text(checked, "old", "oldLines").map_err(|message| {
-                refuse(format!(
-                    "edit needs exactly one of old or oldLines; {message}"
-                ))
-            })?;
-            let replacement =
-                exclusive_text(checked, "replacement", "replacementLines").map_err(|message| {
-                    refuse(format!(
-                        "edit needs exactly one of replacement or replacementLines; {message}"
-                    ))
-                })?;
-            let result = crate::tools::exact_edit::apply(
-                profile,
-                path,
-                expected_sha256,
-                expected,
-                replacement,
-            )
-            .map_err(|error| ToolError::Spawn {
+            let failed = |error: crate::tools::exact_edit::EditError| ToolError::Spawn {
                 tool: tool.name().to_string(),
                 program: PathBuf::from("(in-process)"),
                 error: error.to_string(),
-            })?;
+            };
+            let olds = texts(checked, "olds");
+            let replacements = texts(checked, "replacements");
+            // One form per call: the multi-hunk arrays and the single-hunk
+            // strings say different things about what the model meant, and
+            // silently preferring one would apply an edit it did not ask for.
+            let result = if olds.is_some() || replacements.is_some() {
+                let single = ["old", "oldLines", "replacement", "replacementLines"]
+                    .iter()
+                    .any(|name| text(checked, name).is_some());
+                if single {
+                    return Err(refuse(
+                        "edit takes either old/replacement or olds/replacements, not both"
+                            .to_string(),
+                    ));
+                }
+                let (Some(olds), Some(replacements)) = (olds, replacements) else {
+                    return Err(refuse(
+                        "edit needs both olds and replacements for a multi-hunk edit".to_string(),
+                    ));
+                };
+                crate::tools::exact_edit::apply_hunks(
+                    profile,
+                    path,
+                    expected_sha256,
+                    olds,
+                    replacements,
+                )
+                .map_err(failed)?
+            } else {
+                let expected = exclusive_text(checked, "old", "oldLines").map_err(|message| {
+                    refuse(format!(
+                        "edit needs exactly one of old or oldLines; {message}"
+                    ))
+                })?;
+                let replacement = exclusive_text(checked, "replacement", "replacementLines")
+                    .map_err(|message| {
+                        refuse(format!(
+                            "edit needs exactly one of replacement or replacementLines; {message}"
+                        ))
+                    })?;
+                crate::tools::exact_edit::apply(
+                    profile,
+                    path,
+                    expected_sha256,
+                    expected,
+                    replacement,
+                )
+                .map_err(failed)?
+            };
             Ok(ToolResult {
                 modified: None,
                 tool: tool.name().to_string(),
@@ -1232,6 +1269,14 @@ fn check_arguments(
                 }
                 admit(&mut checked, trace, arg.name(), Checked::Lines(value));
             }
+            (ArgKind::Texts, Some(Argument::Lines(items))) => {
+                admit(
+                    &mut checked,
+                    trace,
+                    arg.name(),
+                    Checked::Texts(items.clone()),
+                );
+            }
             (ArgKind::CommandLine, Some(Argument::Text(value))) => {
                 profile.admits_command(value)?;
                 admit(
@@ -1282,6 +1327,13 @@ fn text<'a>(checked: &'a [(&'static str, Checked)], name: &str) -> Option<&'a st
         {
             Some(text.as_str())
         }
+        _ => None,
+    })
+}
+
+fn texts<'a>(checked: &'a [(&'static str, Checked)], name: &str) -> Option<&'a [String]> {
+    checked.iter().find_map(|(declared, value)| match value {
+        Checked::Texts(items) if *declared == name => Some(items.as_slice()),
         _ => None,
     })
 }
@@ -1408,7 +1460,7 @@ pub fn exec_grant(program: &str) -> ExecGrant {
     }
 }
 
-pub(crate) fn resolve_program(program: &str) -> Option<PathBuf> {
+pub fn resolve_program(program: &str) -> Option<PathBuf> {
     resolve_program_from(program, &std::env::current_dir().ok()?)
 }
 

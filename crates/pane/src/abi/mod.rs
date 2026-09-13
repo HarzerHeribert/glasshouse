@@ -11,6 +11,7 @@ pub mod dialect;
 pub mod intent;
 pub mod lift;
 pub mod provenance;
+pub mod telemetry;
 pub mod types;
 
 use serde_json::{Map, Value, json};
@@ -262,7 +263,14 @@ impl Router {
             "stderr".into(),
             json!(&stderr[..floor_char_boundary(stderr, 2048)]),
         );
-        copy_scalars(value, &mut content, &["exit_code"]);
+        // `reduced` and `reduction_error` are the derived view beside the
+        // exact bytes; a bounded presentation keeps them or the reduction
+        // was made for nothing.
+        copy_scalars(
+            value,
+            &mut content,
+            &["exit_code", "reduced", "reduction_error"],
+        );
         content.insert("ok".into(), json!(ok));
         Presentation {
             content: Value::Object(content),
@@ -425,6 +433,21 @@ mod tests {
         let passing = json!({"stdout": "error: none", "stderr": "", "exit_code": 0});
         let encoded = encode_result(&Router::default().present("bash", "bash_1_2", &passing));
         assert_eq!(encoded["ok"], json!(true));
+    }
+
+    #[test]
+    fn a_bounded_process_result_keeps_its_derived_view_beside_the_exact_bytes() {
+        let stdout = "x".repeat(40 * 1024);
+        let value = json!({"stdout": stdout, "stderr": "", "exit_code": 0,
+            "reduced": "21 lines, all passing", "reduction_error": "none"});
+        let presentation = Router::default().present("bash", "bash_1_1", &value);
+        assert_eq!(presentation.provenance.class, EvidenceClass::BoundedExact);
+        let encoded = encode_result(&presentation);
+        assert_eq!(encoded["reduced"], json!("21 lines, all passing"));
+        assert_eq!(encoded["reduction_error"], json!("none"));
+        assert_eq!(encoded["exit_code"], json!(0));
+        assert_eq!(encoded["complete"], json!(false));
+        assert_eq!(encoded["stdout"].as_str().unwrap().len(), 16 * 1024);
     }
 
     #[test]

@@ -24,6 +24,33 @@ pub struct CheckConfig {
     pub checker: Vec<String>,
     #[serde(default)]
     pub checks: BTreeMap<String, CheckSpec>,
+    /// The final-state contract, read by `crate::completion`. Optional so an
+    /// existing `checks.toml` keeps parsing unchanged.
+    #[serde(default)]
+    pub contract: Option<ContractSpec>,
+}
+
+/// The `[contract]` table: what the finished tree must and must not hold.
+/// Every key is optional; `fresh_verification` defaults to true so the gate
+/// fails closed for a task that mutated files and never verified them.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContractSpec {
+    #[serde(default)]
+    pub required: Vec<String>,
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+    /// `[contract.exclusive]` — directory to the only entries it may hold.
+    #[serde(default)]
+    pub exclusive: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub coverage_tree: Option<String>,
+    #[serde(default = "fresh_verification_default")]
+    pub fresh_verification: bool,
+}
+
+fn fresh_verification_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

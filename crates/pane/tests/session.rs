@@ -1488,10 +1488,11 @@ fn the_system_block_is_render_systems_own_bytes() {
     // compiles it, through `session_facts` itself: a second spelling here
     // would be the very drift this test exists to catch.
     let profile = pane::sandbox::profile::Profile::compile(&root, None);
+    let manifest = pane::session::system_manifest(&profile, &pane::config::PaneConfig::default());
     let expected = pane::prompt::render_system(
         &pane::project::instructions::root(&profile),
         &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
-        &pane::session::session_facts(&profile),
+        &pane::session::session_facts_with(&profile, pane::abi::Interface::default(), &manifest),
     );
 
     // Read the task-start snapshot from its audit row: time is sampled by
@@ -4962,7 +4963,7 @@ fn write_helpers_pane_toml(root: &Path, model: &str) {
     fs::create_dir_all(root.join(".pane")).unwrap();
     fs::write(
         root.join(".pane/config.toml"),
-        format!("[helpers]\nmodel = \"{model}\"\npreflight = true\n"),
+        format!("[helpers]\nmodel = \"{model}\"\npreflight = true\npreflight_scope = \"always\"\n"),
     )
     .unwrap();
 }
@@ -5012,10 +5013,11 @@ fn preflight_does_not_fire_with_helpers_unconfigured() {
     );
 
     let profile = pane::sandbox::profile::Profile::compile(&root, None);
+    let manifest = pane::session::system_manifest(&profile, &pane::config::PaneConfig::default());
     let expected = pane::prompt::render_system(
         &pane::project::instructions::root(&profile),
         &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
-        &pane::session::session_facts(&profile),
+        &pane::session::session_facts_with(&profile, pane::abi::Interface::default(), &manifest),
     );
     let saved = pane::rollout::resume(&rollout).unwrap().system;
     let (prefix, orientation) = saved.split_once("\n\n## Environment orientation").unwrap();
@@ -5128,7 +5130,7 @@ fn preflight_serves_the_scouts_files_under_the_verbatim_request() {
         "served means its contents, not its path: {system}"
     );
     assert!(
-        system.contains("## Selection record"),
+        system.contains("## Scouting record"),
         "the record is one line, and it is present: {system}"
     );
     assert!(

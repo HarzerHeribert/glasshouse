@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 
+use super::interface::{CreditRatios, Metrics, RegretRow};
 use super::model::{Attempt, Outcome, Tier};
 use super::score::{AggregateRow, Row, Score, TaskRow, TierRow};
 
@@ -31,7 +32,9 @@ pub const HEADERS: [&str; 7] = [
 /// count, and the test command's exit status. `exit_status` is derived from
 /// [`Outcome`] (0 for a pass, 1 for a fail, absent for `Errored` since that
 /// attempt never reached its test) -- `Attempt` carries no separate exit code.
-pub const JSONL_KEYS: [&str; 11] = [
+/// `interface` and `metrics` are a `pane:<mode>` ablation arm's mode and its
+/// own telemetry figures, `null` on every other row.
+pub const JSONL_KEYS: [&str; 13] = [
     "task",
     "harness",
     "commit",
@@ -43,6 +46,19 @@ pub const JSONL_KEYS: [&str; 11] = [
     "wall_ms",
     "turns",
     "exit_status",
+    "interface",
+    "metrics",
+];
+
+/// The interface-regret table's columns, in order; rendered only when some
+/// attempt is a `pane:<mode>` arm.
+pub const REGRET_HEADERS: [&str; 6] = [
+    "task",
+    "dimension",
+    "hybrid",
+    "best(arm)",
+    "regret",
+    "excluded",
 ];
 
 /// What an unmeasured figure renders as in the table -- never `0`.
@@ -89,7 +105,63 @@ pub fn render_table(score: &Score) -> String {
         }
     }
 
+    if !score.regret.is_empty() {
+        out.push_str(&render_regret_table(&score.regret, &score.ratios));
+    }
+
     out
+}
+
+/// The second table: `pane:hybrid` against the best other pane arm, per
+/// task and dimension. Its header names the credit ratio the weighted
+/// spend used and calls it assumed unless `--credit-ratio` set it -- the
+/// figure is never a billed one.
+fn render_regret_table(rows: &[RegretRow], ratios: &CreditRatios) -> String {
+    let mut out = String::new();
+    let kind = if ratios.is_assumed() {
+        "assumed ratio"
+    } else {
+        "given ratio"
+    };
+    writeln!(
+        out,
+        "-- interface regret (weighted spend = parent + luna x helpers, {kind} luna={} terra={}, not billed) --",
+        ratios.luna, ratios.terra
+    )
+    .expect("String write is infallible");
+    writeln!(out, "{}", REGRET_HEADERS.join("  ")).expect("String write is infallible");
+    for row in rows {
+        let best = match &row.best {
+            Some((arm, value)) => format!("{}({arm})", fmt_measure(*value)),
+            None => UNMEASURED.to_string(),
+        };
+        writeln!(
+            out,
+            "{}  {}  {}  {}  {}  {}",
+            row.task,
+            row.dimension.as_str(),
+            row.hybrid.map_or(UNMEASURED.to_string(), fmt_measure),
+            best,
+            row.regret.map_or("unmeasured".to_string(), fmt_measure),
+            row.excluded,
+        )
+        .expect("String write is infallible");
+    }
+    out
+}
+
+/// A per-attempt mean: whole numbers grouped, fractions to one decimal.
+fn fmt_measure(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        let grouped = group_thousands(value.abs() as u64);
+        if value < 0.0 {
+            format!("-{grouped}")
+        } else {
+            grouped
+        }
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 fn render_row(label: &str, harness: &str, row: &Row) -> String {
@@ -166,7 +238,7 @@ pub fn render_jsonl(attempts: &[Attempt]) -> String {
 
 fn render_jsonl_line(attempt: &Attempt) -> String {
     format!(
-        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"exit_status\":{exit_status}}}",
+        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics}}}",
         task = json_str(attempt.task),
         harness = json_str(attempt.harness.as_str()),
         commit = json_str(&attempt.base_commit),
@@ -178,6 +250,42 @@ fn render_jsonl_line(attempt: &Attempt) -> String {
         wall_ms = attempt.wall_clock.as_millis(),
         turns = json_opt(attempt.turns),
         exit_status = json_opt(exit_status(attempt.outcome)),
+        interface = attempt
+            .interface
+            .as_deref()
+            .map_or("null".to_string(), json_str),
+        metrics = attempt
+            .metrics
+            .as_ref()
+            .map_or("null".to_string(), render_metrics),
+    )
+}
+
+/// The telemetry figures under stable keys; an absent figure is `null`.
+fn render_metrics(metrics: &Metrics) -> String {
+    let by_kind = match &metrics.failures_by_kind {
+        Some(map) => {
+            let entries: Vec<String> = map
+                .iter()
+                .map(|(kind, count)| format!("{}:{count}", json_str(kind)))
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        None => "null".to_string(),
+    };
+    format!(
+        "{{\"parent_requests\":{},\"parent_known_tokens\":{},\"helper_known_tokens\":{},\"execute_cell_calls\":{},\"direct_tool_calls\":{},\"frames_failed\":{},\"failures_by_kind\":{},\"repair_requests\":{},\"observation_bytes_rendered\":{},\"wall_time_ms\":{},\"completion_verified\":{}}}",
+        json_opt(metrics.parent_requests),
+        json_opt(metrics.parent_known_tokens),
+        json_opt(metrics.helper_known_tokens),
+        json_opt(metrics.execute_cell_calls),
+        json_opt(metrics.direct_tool_calls),
+        json_opt(metrics.frames_failed),
+        by_kind,
+        json_opt(metrics.repair_requests),
+        json_opt(metrics.observation_bytes_rendered),
+        json_opt(metrics.wall_time_ms),
+        json_opt(metrics.completion_verified),
     )
 }
 

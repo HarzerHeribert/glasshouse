@@ -1,6 +1,7 @@
 //! Acceptance tests for GH-PANE-61E-PROMPT against
 //! `docs/product/pane/model-contract.md`.
 
+use pane::abi::Interface;
 use pane::contract::{Conversation, Message, Role, SessionId};
 use pane::glasshouse::Glasshouse;
 use pane::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
@@ -142,6 +143,7 @@ fn the_worked_turn_renders_byte_for_byte() {
 /// anchored on that line and ended at the last indented line, and every line
 /// between the two must itself be indented or empty — commentary inside the
 /// block fails here rather than being silently dropped from the comparison.
+/// The region ends at §2.1, whose own indented blocks are the variants'.
 #[test]
 fn the_preamble_is_the_contracts_verbatim() {
     let contract = include_str!("../../../docs/product/pane/model-contract.md");
@@ -149,7 +151,7 @@ fn the_preamble_is_the_contracts_verbatim() {
         .split("## 2. The system preamble, verbatim")
         .nth(1)
         .unwrap()
-        .split("## 3.")
+        .split("### 2.1 Interface variants")
         .next()
         .unwrap();
 
@@ -178,6 +180,75 @@ fn the_preamble_is_the_contracts_verbatim() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(prompt::PREAMBLE, expected);
+}
+
+/// Every four-space-indented block in a §2.1 part, with the indent removed.
+fn indented_blocks(part: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in part.lines() {
+        if let Some(text) = line.strip_prefix("    ") {
+            current.push(text);
+        } else if !current.is_empty() {
+            blocks.push(current.join("\n"));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current.join("\n"));
+    }
+    blocks
+}
+
+/// §2.1 against `preamble_for`, by the same indented-block technique: every
+/// replacement sentence the contract spells out for a variant is a verbatim
+/// slice of that variant's rendered preamble, and the cells variant is §2's
+/// block untouched.
+#[test]
+fn the_interface_variants_are_the_contracts_verbatim() {
+    let contract = include_str!("../../../docs/product/pane/model-contract.md");
+    let section = contract
+        .split("### 2.1 Interface variants")
+        .nth(1)
+        .expect("§2.1 must exist")
+        .split("## 3.")
+        .next()
+        .unwrap();
+    let (hybrid_part, tools_part) = section
+        .split_once("**Tools.**")
+        .expect("§2.1 must hold a **Tools.** part");
+    let hybrid_part = hybrid_part
+        .split("**Hybrid.**")
+        .nth(1)
+        .expect("§2.1 must hold a **Hybrid.** part");
+
+    let hybrid = prompt::preamble_for(Interface::Hybrid);
+    let hybrid_blocks = indented_blocks(hybrid_part);
+    assert!(
+        hybrid_blocks.len() >= 2,
+        "§2.1's hybrid part must spell its replacements as indented blocks"
+    );
+    for block in &hybrid_blocks {
+        assert!(
+            hybrid.contains(block.as_str()),
+            "§2.1's hybrid block is not in the rendered hybrid preamble:\n{block}\n---\n{hybrid}"
+        );
+    }
+
+    let tools = prompt::preamble_for(Interface::Tools);
+    let tools_blocks = indented_blocks(tools_part);
+    assert!(
+        tools_blocks.len() >= 3,
+        "§2.1's tools part must spell its replacements as indented blocks"
+    );
+    for block in &tools_blocks {
+        assert!(
+            tools.contains(block.as_str()),
+            "§2.1's tools block is not in the rendered tools preamble:\n{block}\n---\n{tools}"
+        );
+    }
+
+    assert_eq!(prompt::preamble_for(Interface::Cells), prompt::PREAMBLE);
 }
 
 #[test]
@@ -237,6 +308,8 @@ fn every_registered_tool_has_exactly_one_declaration_and_no_other_does() {
             command_patterns: 0,
             all_commands: false,
             network: false,
+            interface: Interface::Cells,
+            manifest: None,
         },
     );
 
@@ -280,6 +353,8 @@ fn the_prompt_teaches_the_literal_multiline_content_form() {
             command_patterns: 0,
             all_commands: false,
             network: false,
+            interface: Interface::Cells,
+            manifest: None,
         },
     );
 

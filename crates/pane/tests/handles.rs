@@ -1,7 +1,7 @@
 //! Acceptance tests for GH-PANE-61E-HANDLES against
 //! `docs/product/pane/runtime-contract.md` §2 and §3.
 
-use pane::runtime::handles::{HandleTable, render_table};
+use pane::runtime::handles::{HandleTable, render_table, render_table_delta};
 use pane::runtime::preview::{
     ErrorValue, FileValue, PREVIEW_TOKEN_CAP, StackFrame, TABLE_TOKEN_CAP, TestReportValue, Value,
 };
@@ -75,6 +75,15 @@ fn the_handle_table_renders_byte_for_byte() {
     let rendered = render_table(&table, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
     let golden = include_str!("fixtures/handle_table.golden").replace("\r\n", "\n");
     assert_eq!(rendered, golden);
+
+    // Every entry was declared this cell, so the first rendering after a
+    // task starts is the full inventory byte for byte -- the roadmap's
+    // *Observation delta* changes only what a REPEATED rendering shows.
+    let (delta, stats) = render_table_delta(&table, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
+    assert_eq!(delta, golden);
+    assert!(stats.full_inventory, "{stats:?}");
+    assert_eq!(stats.rows_suppressed, 0);
+    assert_eq!(stats.rows_rendered, table.len());
 }
 
 #[test]

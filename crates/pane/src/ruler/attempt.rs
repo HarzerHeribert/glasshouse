@@ -9,12 +9,14 @@
 //! <profile> --` -- and that worktree is always the one that gets removed.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use super::interface::{self, Metrics};
 use super::meter::Meter;
 use super::model::{Attempt, Harness, Outcome, Task, Tokens};
 
@@ -63,6 +65,43 @@ fn next_attempt_dir_ordinal() -> u64 {
 pub struct HarnessCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Set on a `pane:<mode>` ablation arm: the mode its argv already
+    /// carries as `--interface <mode>`. Such a row's stdout is captured to
+    /// [`interface::RESULT_FILE`] in the attempt's worktree and parsed into
+    /// [`Attempt::metrics`]; every other row's stdout is left alone.
+    pub interface: Option<String>,
+}
+
+impl HarnessCommand {
+    /// The `pane` row expanded into one `--interface <mode>` arm, launched
+    /// with `--output-format json` so its stdout is the telemetry document.
+    /// The `pane` row's own template is what gets extended, never
+    /// re-spelled here.
+    pub fn pane_interface_arm(pane: &HarnessCommand, mode: &str) -> HarnessCommand {
+        let mut args = pane.args.clone();
+        args.extend([
+            "--interface".to_string(),
+            mode.to_string(),
+            "--output-format".to_string(),
+            "json".to_string(),
+        ]);
+        HarnessCommand {
+            program: pane.program.clone(),
+            args,
+            interface: Some(mode.to_string()),
+        }
+    }
+}
+
+/// The `--harness` row name of the `pane` row's `<mode>` arm.
+pub fn pane_arm_name(mode: &str) -> String {
+    format!("pane:{mode}")
+}
+
+/// The harness slug Glasshouse knows a row by: a `pane:<mode>` arm is
+/// launched as `pane`.
+fn glasshouse_slug(row: &str) -> &str {
+    row.split_once(':').map_or(row, |(slug, _)| slug)
 }
 
 /// The table's three production rows. Claude Code is run non-interactively
@@ -85,6 +124,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "--dangerously-skip-permissions".to_string(),
                 "{statement}".to_string(),
             ],
+            interface: None,
         },
     );
     table.insert(
@@ -98,6 +138,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "--task".to_string(),
                 "{statement}".to_string(),
             ],
+            interface: None,
         },
     );
     table.insert(
@@ -109,6 +150,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "{statement}".to_string(),
             ],
+            interface: None,
         },
     );
     table
@@ -152,16 +194,19 @@ pub fn run_one(task: &Task, harness: &Harness, attempt_no: u32, opts: &RunOpts) 
         wall_clock: Duration::default(),
         turns: None,
         changed_lines: None,
+        interface: None,
+        metrics: None,
     };
 
     if task.test.is_empty() || scratch_inside_checkout(&opts.scratch) {
         return errored();
     }
 
+    // A `pane:<mode>` arm's colon is not a legal Windows path character.
     let dir = opts.scratch.join(format!(
         "{}-{}-{}-{}-{}",
         task.id,
-        harness.as_str(),
+        harness.as_str().replace(':', "-"),
         attempt_no,
         std::process::id(),
         next_attempt_dir_ordinal(),
@@ -193,7 +238,11 @@ fn run_attempt_in(
 ) -> Attempt {
     let base_commit = git_rev_parse(dir, "HEAD").unwrap_or_default();
 
-    let finish = |outcome, tokens, wall_clock, turns, changed_lines| Attempt {
+    let interface = opts
+        .harnesses
+        .get(harness.as_str())
+        .and_then(|command| command.interface.clone());
+    let finish = |outcome, tokens, wall_clock, turns, changed_lines, metrics| Attempt {
         task: task.id,
         tier: task.tier,
         harness: harness.clone(),
@@ -204,6 +253,8 @@ fn run_attempt_in(
         wall_clock,
         turns,
         changed_lines,
+        interface: interface.clone(),
+        metrics,
     };
 
     let Some(command) = opts.harnesses.get(harness.as_str()) else {
@@ -211,6 +262,7 @@ fn run_attempt_in(
             Outcome::Errored,
             Tokens::default(),
             Duration::default(),
+            None,
             None,
             None,
         );
@@ -239,7 +291,7 @@ fn run_attempt_in(
             // project-memory briefing (lead's addendum, 03:25; the primary
             // may overrule).
             cmd.arg("launch")
-                .arg(harness.as_str())
+                .arg(glasshouse_slug(harness.as_str()))
                 .arg("--profile")
                 .arg(profile)
                 .arg("--headless")
@@ -262,6 +314,27 @@ fn run_attempt_in(
     if let Some(gateway) = &opts.gateway {
         launch.env("ANTHROPIC_BASE_URL", gateway);
     }
+    let result_file = command
+        .interface
+        .as_ref()
+        .map(|_| dir.join(interface::RESULT_FILE));
+    if let Some(path) = &result_file {
+        match fs::File::create(path) {
+            Ok(file) => {
+                launch.stdout(file);
+            }
+            Err(_) => {
+                return finish(
+                    Outcome::Errored,
+                    Tokens::default(),
+                    Duration::default(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
 
     let start_wall = Instant::now();
     let start_time = SystemTime::now();
@@ -273,8 +346,10 @@ fn run_attempt_in(
             start_wall.elapsed(),
             None,
             None,
+            None,
         );
     }
+    let metrics = result_file.as_deref().and_then(read_metrics);
 
     let test_result = run_test_commands(dir, task.test);
 
@@ -300,7 +375,13 @@ fn run_attempt_in(
         TestResult::Errored => Outcome::Errored,
     };
 
-    finish(outcome, tokens, wall_clock, turns, changed_lines)
+    finish(outcome, tokens, wall_clock, turns, changed_lines, metrics)
+}
+
+/// The captured telemetry document, or `None` when the file is unreadable
+/// or carries no `telemetry` -- unmeasured, never an empty measurement.
+fn read_metrics(path: &Path) -> Option<Metrics> {
+    Metrics::from_result_json(&fs::read_to_string(path).ok()?)
 }
 
 enum TestResult {
