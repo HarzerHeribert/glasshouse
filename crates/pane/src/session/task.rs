@@ -446,6 +446,53 @@ impl TaskState {
         (Some(text), checker)
     }
 
+    /// A prose answer is a completion claim, and the evidence gate covers it
+    /// exactly as it covers a terminal `return`: the same candidate rule,
+    /// held once, then recorded unverified. Measured 2026-09-13 (the first
+    /// hybrid Terminal-Bench trial): gpt-5.6-sol ends a task with a
+    /// structured return and then prose, so a gate on returns alone gated
+    /// nothing in the field.
+    pub(super) fn prose_completion(
+        &mut self,
+        candidate: &str,
+        profile: &Profile,
+        session: &Session<'_>,
+    ) -> Step {
+        let now = crate::changes::Snapshot::capture(profile);
+        let cell = self.previous_frame.as_ref().map_or(0, |frame| frame.cell);
+        let (gate, checker) = self.gate(candidate, cell, &now, &now, session);
+        let helpers: Vec<_> = checker.into_iter().collect();
+        if let Some(gate) = gate {
+            return Step {
+                answer: Some(gate.clone()),
+                historical: Some(gate.clone()),
+                native_result: None,
+                response: None,
+                prose: false,
+                record: None,
+                rollback: None,
+                view: CellView {
+                    output: Some(gate),
+                    helpers,
+                    ..CellView::default()
+                },
+            };
+        }
+        Step {
+            answer: None,
+            historical: None,
+            native_result: None,
+            response: None,
+            prose: false,
+            record: None,
+            rollback: None,
+            view: CellView {
+                helpers,
+                ..CellView::default()
+            },
+        }
+    }
+
     /// A task that ended without completing keeps its established facts and
     /// its unfinished work in the capsule, without claiming completion.
     pub(super) fn salvage(&mut self, reason: &str) {

@@ -70,6 +70,11 @@ fn cell(id: &str, code: &str) -> Value {
         "usage": {"input_tokens": 20, "output_tokens": 7}})
 }
 
+fn prose(text: &str) -> Value {
+    json!({"role": "assistant", "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": 20, "output_tokens": 7}})
+}
+
 fn exec_json(root: &std::path::Path, endpoint: &str) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .args([
@@ -257,5 +262,72 @@ fn the_task_capsule_reaches_the_feedback_and_the_result() {
         "{}",
         bodies[1]
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The shape the first hybrid Terminal-Bench trial showed on 2026-09-13: the
+/// model returns a structured value (notebook output, not terminal) and then
+/// finishes in prose. The gate covers that prose completion the same way:
+/// held once with the finding, then recorded unverified.
+#[test]
+fn a_prose_completion_after_a_stray_binary_is_held_once_and_recorded_unverified() {
+    let root = root("prose-stray-binary");
+    let (endpoint, bodies) = providers(vec![
+        cell(
+            "c1",
+            "await write({path: \"polyglot/main.py.c\", content: \"int main(){return 0;}\\n\"});\n\
+             await write({path: \"polyglot/cmain\", content: \"\\u007fELF compiled test binary\"});\n\
+             return {ok: true};",
+        ),
+        prose("Done: the deliverable is written."),
+        prose("Done: the deliverable is written."),
+    ]);
+    let result = exec_json(&root, &endpoint);
+    let completion = &result["telemetry"]["completion"];
+    assert_eq!(completion["claimed"], true, "{completion}");
+    assert_eq!(completion["verified"], false, "{completion}");
+    assert_eq!(completion["deferred"], 1, "{completion}");
+    assert!(
+        completion["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("cmain")),
+        "{completion}"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "the structured return, one held prose completion, then the finish"
+    );
+    assert!(
+        bodies[2].contains("Candidate completion (deferred)") && bodies[2].contains("cmain"),
+        "the held prose completion reaches the model with the finding: {}",
+        bodies[2]
+    );
+    assert_eq!(result["answer"], "Done: the deliverable is written.");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A prose completion with nothing to find completes at once, and the
+/// completion is now recorded (it was absent for prose before 2026-09-13).
+#[test]
+fn a_prose_completion_with_nothing_to_find_completes_verified_in_one_turn() {
+    let root = root("prose-clean");
+    let (endpoint, bodies) = providers(vec![
+        cell(
+            "c1",
+            "await write({path: \"notes.txt\", content: \"hello\\n\"});",
+        ),
+        prose("Done: notes written."),
+    ]);
+    let result = exec_json(&root, &endpoint);
+    let completion = &result["telemetry"]["completion"];
+    assert_eq!(completion["claimed"], true, "{completion}");
+    assert_eq!(completion["verified"], true, "{completion}");
+    assert_eq!(completion["deferred"], 0, "{completion}");
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    assert_eq!(result["answer"], "Done: notes written.");
     let _ = std::fs::remove_dir_all(root);
 }

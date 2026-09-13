@@ -2095,17 +2095,10 @@ fn act_on(
             // isolate holds -- an output region saying `(no outputs)` beside live
             // handles would be the screen disagreeing with the message sent in
             // the same breath.
-            Extracted::Prose if prompt::completion_text(&assistant_text).is_some() => {
-                return Ok(Step {
-                    answer: None,
-                    historical: None,
-                    native_result: None,
-                    response: None,
-                    prose: false,
-                    record: None,
-                    rollback: None,
-                    view: CellView::default(),
-                });
+            // A prose answer is a completion claim; the gate covers it as it
+            // covers a terminal `return` (`TaskState::prose_completion`).
+            Extracted::Prose if let Some(candidate) = prompt::completion_text(&assistant_text) => {
+                return Ok(task_state.prose_completion(&candidate, profile, session));
             }
             Extracted::Invalid(error) => {
                 return Ok(Step {

@@ -2,5 +2,5 @@
 # Regenerate with scripts/check-file-sizes.py --update after a decomposition.
 # ceiling 2500
   3289 crates/pane/src/runtime/bindings.rs
-  2947 crates/pane/src/session.rs
+  2940 crates/pane/src/session.rs
   2581 crates/pane/src/runtime/isolate.rs
