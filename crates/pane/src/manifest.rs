@@ -189,11 +189,17 @@ mod tests {
     fn the_manifest_names_roots_reserved_paths_and_absent_executables() {
         let rendered = sample().render();
         assert!(rendered.starts_with("## Environment"), "{rendered}");
-        assert!(rendered.contains("Readable roots: /app, /build"), "{rendered}");
+        assert!(
+            rendered.contains("Readable roots: /app, /build"),
+            "{rendered}"
+        );
         assert!(rendered.contains("Writable roots: /app"), "{rendered}");
         assert!(rendered.contains("Reserved (never writable"), "{rendered}");
         assert!(rendered.contains("/app/.pane"), "{rendered}");
-        assert!(rendered.contains("Available executables: gdb=/usr/bin/gdb"), "{rendered}");
+        assert!(
+            rendered.contains("Available executables: gdb=/usr/bin/gdb"),
+            "{rendered}"
+        );
         assert!(rendered.contains("Absent executables: rg"), "{rendered}");
         assert!(rendered.contains("Container mode"), "{rendered}");
         assert!(rendered.contains("Unavailable: web.search"), "{rendered}");

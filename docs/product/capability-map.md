@@ -2567,3 +2567,28 @@ external correctness precedes efficiency.
 ☐ Supply deterministic project, platform, source and version context sufficient for representative verification without broad repository dumps.
 ☐ Close every P0 row in the improvement register with independent evidence across providers and scripting styles.
 ☐ Repeat the ruler across several tasks, users, models and trials; label human intervention separately and make no parity claim from an assisted result.
+
+Phase 65 — Pane: smarter-and-cheaper execution
+
+Recorded from the user's ruling of 2026-09-13 (`design-decisions.md`, *Pane wins by
+spending less expensive attention, not by forcing an interface*). The register is
+`docs/product/pane/smarter-cheaper-roadmap.md`; every line below is one of its rows
+and closes only through `docs/product/evidence/phase-65.md`. Models may use
+provider-familiar tools or `execute_cell`; both lower through one kernel; no
+direct-tool quota is ever forced.
+
+☐ Record in machine telemetry the provider-selected interface, the lowered frame origin, primitive operations per frame and per parent request, failures and repair turns by origin, repeated observation bytes and parent usage attributable to recovery.
+☐ Run every advertised erasable TypeScript construct, including `as const`, and refuse unsupported constructs with an accurate diagnostic before execution.
+☐ Show the parent an effective capability and environment manifest — readable and writable roots, reserved paths, available and absent executables, unavailable capabilities — before it acts.
+☐ Under the explicit outer-container bypass, admit task-declared container resources — container-wide reads and debuggers — without changing ordinary host security.
+☐ Give every capability call a typed outcome: a lowered direct-tool frame runs every independent call, and a thrown authored cell reports the exact effects completed before the throw.
+☐ Compile multi-hunk and sequential same-file edits into checked atomic mutations, so only an external change is ever stale.
+☐ Render each turn's observation as a delta — new or changed handles in full, unchanged ones as one line — while `handles()` and the rollout keep the exact inventory.
+☐ Deduplicate repeated pure observations and count recognized versus fallback shell-shaped calls.
+☐ Route large noisy command output through the pushed reducer only when the expected parent saving exceeds the helper cost, measured, with the exact output kept complete.
+☐ Maintain a bounded task capsule: goal, state, verified facts with evidence references, checkpoint identity, unresolved risks, one next action and the latest verification.
+☐ Hold a terminal return once when the deterministic final-state contract finds an unexpected artifact, a misplaced coverage tree or stale verification, and report the completion as unverified when the model finishes anyway.
+☐ Offer a fresh independent checker the original request, the current diff and exact evidence, never the parent's rationale.
+☐ Make preflight a scout that reports constraints, files, tests, capabilities and risks, and run it only on uncertainty signals.
+☐ Detect no-progress repetition, protect the newest verified checkpoint, and salvage a cut-off task into the capsule.
+☐ Run matched tools-only, cells-only and hybrid arms and report interface regret from Pane's own telemetry.

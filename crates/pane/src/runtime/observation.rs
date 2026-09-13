@@ -32,7 +32,8 @@ impl ObservationStats {
     /// Bytes the parent did not receive because rows were suppressed.
     #[must_use]
     pub fn bytes_suppressed(&self) -> usize {
-        self.bytes_full_inventory.saturating_sub(self.bytes_rendered)
+        self.bytes_full_inventory
+            .saturating_sub(self.bytes_rendered)
     }
 }
 

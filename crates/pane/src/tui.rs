@@ -621,6 +621,12 @@ pub struct CellView {
     /// is already on screen as this cell's output, error and return regions,
     /// so drawing it again would put the handle table on the screen twice.
     pub answered: bool,
+    /// The task capsule as it stood when this cell ended — goal, state,
+    /// verified facts, risks and next action (`runtime::capsule`). Display
+    /// and rollout state; the model receives it through the result block,
+    /// never through this field. Absent on rows written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<serde_json::Value>,
 }
 
 /// A throw's class, message and position inside the model's own program --

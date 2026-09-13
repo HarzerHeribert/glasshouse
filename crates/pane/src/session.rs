@@ -2300,6 +2300,55 @@ fn next_batch_with(
 /// from it is a program, and the only thing that ever receives a program is
 /// [`Runtime::run_cell`]; every tool that program calls goes through
 /// `tools::invoke` and the session's sandbox from inside the isolate.
+/// The effectful calls a thrown cell completed before it threw, one line
+/// each, or `None` when nothing with an effect ran.
+///
+/// The invariant: **only calls the trajectory records as `Ok` on a tool
+/// that changes the world appear here.** A read that completed is not an
+/// effect the model must know survived; an `edit` is.
+fn partial_effects(record: &CellRecord, threw: bool) -> Option<String> {
+    if !threw {
+        return None;
+    }
+    let lines: Vec<String> = record
+        .calls
+        .iter()
+        .filter(|call| matches!(call.ended, Ended::Ok))
+        .filter_map(|call| {
+            let head = |text: &str| -> String {
+                let mut head: String = text.chars().take(80).collect();
+                if text.chars().count() > 80 {
+                    head.push('…');
+                }
+                head
+            };
+            match call.tool.as_str() {
+                "edit" | "write" => call
+                    .args
+                    .get("path")
+                    .map(|path| format!("{} {}", call.tool, head(path))),
+                "bash" => call
+                    .args
+                    .get("command")
+                    .map(|command| format!("bash `{}`", head(command))),
+                "checks.run" => call
+                    .args
+                    .get("name")
+                    .map(|name| format!("checks.run {name}")),
+                _ => None,
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Completed before the throw, and their effects persist: {}. Calls after the \
+         throw did not run.",
+        lines.join("; ")
+    ))
+}
+
 fn act_on(
     assistant: &Message,
     runtime: &mut Runtime,
@@ -2716,7 +2765,16 @@ fn act_on(
     // §1: the task ends with a `return` and nothing further is asked of the
     // model; a yield and a throw are answered. The outcome's own predicate
     // decides, so there is no second reading of §1 here to drift from it.
+    // Partial effects stay explicit (`smarter-cheaper-roadmap.md`, *Tool
+    // outcome semantics*): a thrown cell names the effectful calls that
+    // completed before the throw, so one late refusal cannot read as
+    // "nothing happened" and cost a turn redoing work that persisted.
+    let effects = partial_effects(&record, matches!(outcome, CellOutcome::Threw { .. }));
     let feedback = |mut answer: String| {
+        if let Some(effects) = &effects {
+            answer.push_str("\n\n## Effects\n");
+            answer.push_str(effects);
+        }
         if let Some(failed) = runtime.syntax_failure() {
             answer.push_str("\n\n");
             answer.push_str(&failed.hint());
@@ -3845,5 +3903,48 @@ mod tests {
         assert_eq!(tool, "grep");
         assert_eq!(args.get("pattern"), Some("fn"));
         assert_eq!(args.get("path"), Some("/tmp"));
+    }
+
+    #[test]
+    fn partial_effects_name_only_completed_effectful_calls_of_a_thrown_cell() {
+        use crate::runtime::outcome::{CallRecord, CellOutcomeKind};
+        use std::collections::BTreeMap;
+        let call = |tool: &str, key: &str, value: &str, ended: Ended| CallRecord {
+            tool: tool.into(),
+            args: BTreeMap::from([(key.to_string(), value.to_string())]),
+            evidence: None,
+            lifted_from: None,
+            ended,
+        };
+        let record = CellRecord {
+            cell: 3,
+            source: String::new(),
+            outcome: CellOutcomeKind::Threw,
+            handles: Vec::new(),
+            calls: vec![
+                call("read", "path", "/p/a.py", Ended::Ok),
+                call("edit", "path", "/p/a.py", Ended::Ok),
+                call("bash", "command", "make all", Ended::Ok),
+                call(
+                    "rg",
+                    "path",
+                    "/build",
+                    Ended::Denied {
+                        rule: "no grant".into(),
+                    },
+                ),
+            ],
+        };
+        let effects = partial_effects(&record, true).unwrap();
+        assert!(effects.contains("edit /p/a.py"), "{effects}");
+        assert!(effects.contains("bash `make all`"), "{effects}");
+        assert!(!effects.contains("read"), "{effects}");
+        assert!(!effects.contains("rg"), "{effects}");
+        assert!(partial_effects(&record, false).is_none());
+        let reads_only = CellRecord {
+            calls: vec![call("read", "path", "/p/a.py", Ended::Ok)],
+            ..record
+        };
+        assert!(partial_effects(&reads_only, true).is_none());
     }
 }

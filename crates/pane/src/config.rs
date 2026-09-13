@@ -709,9 +709,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             .ok_or_else(|| "pane.toml: `completion_check` must be true or false".to_string())?,
     };
     let reduce_above_tokens = match int_field(table, "reduce_above_tokens")? {
-        Some(v) => {
-            usize::try_from(REDUCE_ABOVE_TOKENS.check(v)?).expect("range is non-negative")
-        }
+        Some(v) => usize::try_from(REDUCE_ABOVE_TOKENS.check(v)?).expect("range is non-negative"),
         None => defaults.reduce_above_tokens,
     };
 
