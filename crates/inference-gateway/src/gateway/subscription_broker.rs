@@ -540,5 +540,7 @@ fn set_owner_only_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub mod login;
+
 #[cfg(test)]
 mod tests;

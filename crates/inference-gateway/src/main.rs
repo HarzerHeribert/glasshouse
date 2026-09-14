@@ -136,6 +136,13 @@ enum SubscriptionsCommand {
         /// Emit each progress step as one JSON object per line.
         #[arg(long)]
         json: bool,
+        /// Sign in with a code entered on any device (OpenAI only); the
+        /// default when this machine has no browser to open.
+        #[arg(long)]
+        device_code: bool,
+        /// Print the sign-in link instead of opening a browser.
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Forget one account's login: its broker auth directory is emptied.
     Logout {
@@ -188,8 +195,8 @@ enum CredentialsCommand {
     },
 }
 
-/// The vendor login flows this binary can drive — the three
-/// `subscription::connect` records an OAuth client for.
+/// The vendor login flows this binary can drive, each through the broker's
+/// own login (`subscription_broker::login::login_flag`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SubscriptionProvider {
     Anthropic,
@@ -198,7 +205,7 @@ enum SubscriptionProvider {
 }
 
 impl SubscriptionProvider {
-    /// The spelling `subscription::connect::client_for` keys on, and the one
+    /// The spelling `subscription_broker::login::login_flag` keys on, and the one
     /// `entitlements --json` reports as `connect_with`. One table, so a row
     /// that command offers to connect is a row this one accepts.
     fn as_str(self) -> &'static str {
@@ -234,10 +241,17 @@ fn run() -> Result<()> {
                     provider,
                     entitlement,
                     json,
+                    device_code,
+                    no_browser,
                 },
         } => {
             let config = load_config(&cli)?;
-            connect(&config, &data_dir(&cli)?, *provider, entitlement, *json)
+            let how = ConnectHow {
+                json: *json,
+                device_code: *device_code,
+                no_browser: *no_browser,
+            };
+            connect(&config, &data_dir(&cli)?, *provider, entitlement, how)
         }
         Command::Subscriptions {
             command:
@@ -641,30 +655,59 @@ fn refresh_catalogues(config: &GatewayConfig, data_dir: &Path, cache: &ModelCach
     }
 }
 
-/// `subscriptions connect <provider> --entitlement <name> [--json]`.
+/// How `subscriptions connect` was asked to run.
+#[derive(Debug, Clone, Copy)]
+struct ConnectHow {
+    json: bool,
+    device_code: bool,
+    no_browser: bool,
+}
+
+/// `subscriptions connect <provider> --entitlement <name> [--json]
+/// [--device-code] [--no-browser]`.
 ///
-/// Every line this writes is safe to show and to forward: an authorization
-/// URL, a countdown, a success or a failure. Nothing else crosses, which is
-/// what lets another program render this without ever holding a credential —
-/// `flow::Progress` has no variant carrying a token, a code or a verifier,
-/// and that is the type's whole job.
+/// The broker's own login does the signing in, so the credential is written
+/// in the format and through the TLS client the broker serves with. Every
+/// line this writes is safe to show and to forward: a sign-in link, a device
+/// code, a success or a failure. A line on this process's stdin is a pasted
+/// callback address and goes to the broker, which is how a machine with no
+/// browser finishes: open the link anywhere, sign in, paste where it landed.
 fn connect(
     config: &GatewayConfig,
     data_dir: &Path,
     provider: SubscriptionProvider,
     entitlement: &str,
-    json: bool,
+    how: ConnectHow,
 ) -> Result<()> {
+    use inference_gateway::gateway::subscription_broker::login::{
+        self, BrokerLogin, LoginOutput, Method,
+    };
+    use std::io::BufRead as _;
+
     broker_account(config, provider, entitlement)?;
 
     let mut out = std::io::stdout();
     let mut emit = |progress: &flow::Progress| {
-        let line = if json {
+        let line = if how.json {
             serde_json::to_string(progress).unwrap_or_else(|_| "{}".to_owned())
         } else {
             match progress {
-                flow::Progress::Opened { authorize_url } => {
-                    format!("open this to continue:\n{authorize_url}")
+                flow::Progress::Opened {
+                    authorize_url,
+                    browser_opened,
+                } => format!(
+                    "{}\n{authorize_url}\nNo browser on this machine? Open the link on any device, sign in, then paste the address the browser ends on here and press Enter.",
+                    if *browser_opened {
+                        "Sign in in the browser that just opened, or open this link:"
+                    } else {
+                        "Open this link to sign in:"
+                    }
+                ),
+                flow::Progress::DeviceCode {
+                    verification_url,
+                    user_code,
+                } => {
+                    format!("On any device, open {verification_url} and enter the code {user_code}")
                 }
                 flow::Progress::Waiting { seconds_remaining } => {
                     format!("waiting for the browser ({seconds_remaining}s left)")
@@ -682,70 +725,87 @@ fn connect(
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
     };
-
-    let Some(client) = flow::client_for(provider.as_str()) else {
-        let reason = format!("no OAuth client is recorded for `{}`", provider.as_str());
-        emit(&flow::Progress::Failed {
-            reason: reason.clone(),
-        });
-        bail!(reason);
-    };
-    // A client id is public — it travels in every authorize URL — so this is
-    // configuration rather than a secret. It is overridable because it is
-    // the field a vendor rotates, and a constant would need a release to fix.
-    let variable = format!(
-        "GLASSHOUSE_OAUTH_CLIENT_ID_{}",
-        provider.as_str().to_ascii_uppercase()
-    );
-    let client_id = std::env::var(&variable)
-        .ok()
-        .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| client.client_id.to_owned());
-
-    let pkce = flow::Pkce::generate()?;
-    let state = flow::random_state()?;
-    emit(&flow::Progress::Opened {
-        authorize_url: flow::authorize_url(client, &client_id, &pkce.challenge, &state),
-    });
-
-    let mut last_reported = u64::MAX;
-    let callback = flow::await_callback(client, &state, flow::AUTHORIZE_TIMEOUT, |progress| {
-        // One line a second at most: a countdown printed twice a second
-        // would be the whole of what a reader saw.
-        if let flow::Progress::Waiting { seconds_remaining } = &progress {
-            if *seconds_remaining == last_reported {
-                return;
-            }
-            last_reported = *seconds_remaining;
-        }
-        emit(&progress);
-    });
-    let callback = match callback {
-        Ok(callback) => callback,
-        Err(error) => {
-            let reason = error.to_string();
-            emit(&flow::Progress::Failed {
-                reason: reason.clone(),
-            });
-            bail!(reason);
-        }
-    };
-
-    let auth_dir = config::broker_auth_dir(data_dir, entitlement);
-    match flow::exchange_and_store(client, &client_id, &pkce, &callback.code, &auth_dir) {
-        Ok(account) => {
-            emit(&flow::Progress::Connected { account });
-            Ok(())
-        }
-        Err(error) => {
-            let reason = error.to_string();
+    macro_rules! fail {
+        ($reason:expr) => {{
+            let reason: String = $reason;
             emit(&flow::Progress::Failed {
                 reason: reason.clone(),
             });
             bail!(reason)
-        }
+        }};
     }
+
+    let browser = !how.no_browser && login::browser_available(|name| std::env::var_os(name));
+    let method = if how.device_code
+        || (!browser && provider == SubscriptionProvider::Openai && !how.no_browser)
+    {
+        Method::DeviceCode
+    } else {
+        Method::Browser
+    };
+    let Some(flag) = login::login_flag(provider.as_str(), method) else {
+        fail!(format!(
+            "`{}` has no device-code sign-in; open the link on any device and paste the address it ends on",
+            provider.as_str()
+        ));
+    };
+    let paths = config::broker_paths(data_dir, entitlement);
+    let mut broker = match BrokerLogin::start(&paths, entitlement, flag) {
+        Ok(broker) => broker,
+        Err(error) => fail!(format!("{error:#}")),
+    };
+    if let Some(mut pasted) = broker.take_stdin() {
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                if writeln!(pasted, "{}", line.trim()).is_err() || pasted.flush().is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let Some(stdout) = broker.take_stdout() else {
+        fail!("the CLIProxyAPI login gave no output to read".to_owned());
+    };
+
+    let mut output = LoginOutput::default();
+    let mut connected = false;
+    for line in std::io::BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+    {
+        let Some(mut progress) = output.read(&line) else {
+            continue;
+        };
+        match &mut progress {
+            flow::Progress::Opened {
+                authorize_url,
+                browser_opened,
+            } => *browser_opened = browser && login::open_in_browser(authorize_url),
+            flow::Progress::DeviceCode {
+                verification_url, ..
+            } => {
+                if browser {
+                    login::open_in_browser(verification_url);
+                }
+            }
+            flow::Progress::Connected { .. } => connected = true,
+            _ => {}
+        }
+        emit(&progress);
+    }
+    let status = broker.wait()?;
+    if connected {
+        return Ok(());
+    }
+    if status.success() && credential_present(&paths.auth_dir).unwrap_or(false) {
+        emit(&flow::Progress::Connected { account: None });
+        return Ok(());
+    }
+    let reason = output
+        .failure()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("the sign-in ended without a credential ({status})"));
+    fail!(reason)
 }
 
 /// `routing-cost --json --since <unix>` — and the standalone reading of it.

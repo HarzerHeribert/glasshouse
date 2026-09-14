@@ -19,6 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+mod links;
 mod terminal_input;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -254,8 +255,16 @@ impl LiveUi {
     /// away. **Nothing typed into it reaches the editor, the transcript or
     /// the input history** -- it comes back here and nowhere else.
     pub(super) fn secret(&self, title: &str) -> Option<String> {
+        // A paste nobody collected (a sign-in that ended first) must never
+        // answer a prompt for a key.
+        while self.secrets.try_recv().is_ok() {}
         self.updates.send(Update::SecretPrompt(title.into())).ok()?;
         self.secrets.recv().ok().flatten()
+    }
+    /// What the person entered in a prompt the terminal opened on its own,
+    /// such as a sign-in panel's paste row, if anything has arrived.
+    pub(super) fn try_secret(&self) -> Option<String> {
+        self.secrets.try_recv().ok().flatten()
     }
     pub(super) fn handler_cancellations(&self) -> Vec<String> {
         std::mem::take(&mut *super::lock(&self.handler_cancellations))
@@ -719,7 +728,9 @@ fn run(
                 Update::Model(model) => state.model = Some(model),
                 Update::Mode(mode) => state.mode = mode,
                 Update::Effort(effort) => state.effort = effort,
-                Update::Panel(panel) => state.panel = Some(*panel),
+                Update::Panel(panel) => {
+                    state.panel = Some(replace_panel(state.panel.as_ref(), *panel))
+                }
                 Update::Notice(message) => state.note(message),
                 Update::SecretPrompt(title) => {
                     state.secret_prompt = Some(tui::SecretPrompt::new(title));
@@ -1130,6 +1141,19 @@ fn run(
                                     state.theme = theme;
                                     state.panel = None;
                                     state.note(format!("Theme: {}", theme.name()));
+                                } else if let Some(link) = command.strip_prefix("/open-link ") {
+                                    state.note(if links::open(link) {
+                                        "Opened the link in your default browser."
+                                    } else {
+                                        "No browser can be opened here: copy the link instead."
+                                    });
+                                } else if let Some(text) = command.strip_prefix("/copy ") {
+                                    links::copy(text);
+                                    state.note("Copied to the clipboard through the terminal.");
+                                } else if command == "/paste-callback" {
+                                    state.secret_prompt = Some(tui::SecretPrompt::new(
+                                        "Paste the address your browser ended on after signing in, then Enter",
+                                    ));
                                 } else if let Some(name) = command.strip_prefix("/handlers off ") {
                                     super::lock(&handler_cancellations).push(name.to_string());
                                     state.panel = None;
@@ -1402,6 +1426,24 @@ fn run(
     Ok(())
 }
 
+/// A panel shown again under the same title keeps the row a person selected:
+/// a sign-in panel redraws while it waits, and a reset would move the cursor
+/// off the row about to be chosen.
+fn replace_panel(current: Option<&tui::Panel>, mut next: tui::Panel) -> tui::Panel {
+    // Only a row that does something is a choice worth keeping: a panel
+    // that first said only "waiting" must not hold its cursor on text.
+    if let Some(current) = current.filter(|current| {
+        current.title == next.title
+            && current
+                .rows
+                .get(current.selected)
+                .is_some_and(|row| row.command.is_some())
+    }) {
+        next.selected = current.selected.min(next.rows.len().saturating_sub(1));
+    }
+    next
+}
+
 /// The panel is an open view of task state, not a copy frozen at `/handlers`.
 fn refresh_handler_panel(
     panel: &mut Option<tui::Panel>,
@@ -1434,6 +1476,48 @@ fn refresh_handler_panel(
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// A panel redrawn under its title keeps the selected row; a different
+    /// panel starts where it chose to.
+    #[test]
+    fn a_redrawn_panel_keeps_the_selected_row() {
+        let rows = |n: usize| {
+            (0..n)
+                .map(|i| tui::PanelRow {
+                    text: format!("row {i}"),
+                    command: Some(format!("/row {i}")),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut shown = tui::Panel::rows("Connecting claude-max", rows(4));
+        shown.selected = 2;
+        let again = replace_panel(
+            Some(&shown),
+            tui::Panel::rows("Connecting claude-max", rows(4)),
+        );
+        assert_eq!(again.selected, 2);
+        let shorter = replace_panel(
+            Some(&shown),
+            tui::Panel::rows("Connecting claude-max", rows(2)),
+        );
+        assert_eq!(shorter.selected, 1);
+        let other = replace_panel(Some(&shown), tui::Panel::rows("Themes", rows(4)));
+        assert_eq!(other.selected, 0);
+        let waiting = tui::Panel::rows(
+            "Connecting claude-max",
+            vec![tui::PanelRow {
+                text: "waiting for the sign-in…".into(),
+                command: None,
+            }],
+        );
+        let mut offered = tui::Panel::rows("Connecting claude-max", rows(4));
+        offered.selected = 3;
+        assert_eq!(
+            replace_panel(Some(&waiting), offered).selected,
+            3,
+            "a cursor on text is not kept over the new panel's choice"
+        );
+    }
 
     /// A call in flight is dated from the frame it first appeared in, so its
     /// lane's seconds keep counting while the cell that made it blocks the

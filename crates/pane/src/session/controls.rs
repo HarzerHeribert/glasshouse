@@ -159,7 +159,11 @@ pub(super) fn assign_model(
 ///
 /// With no account named it lists the ones that could be connected, so
 /// `/login` is discoverable on its own and not only from the model picker.
-pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
+pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
+    // `/login <account> device` asks for a device code instead of a link.
+    let mut words = argument.unwrap_or_default().split_whitespace();
+    let account = words.next();
+    let device_code = words.next() == Some("device");
     let catalogue = session
         .gateway
         .run(&["entitlements", "--json"], None)
@@ -206,7 +210,7 @@ pub(super) fn login(session: &Session<'_>, account: Option<&str>) {
         return;
     };
 
-    stream_connect(session, &provider, account);
+    stream_connect(session, &provider, account, device_code);
 }
 
 /// The gateway's credential table. **Every session asks, hosted or not**: the
@@ -363,114 +367,220 @@ fn entered_secret(session: &Session<'_>, provider: &str) -> Option<String> {
     }
 }
 
-/// Runs the flow, showing each line the gateway reports as it arrives.
+/// Runs the sign-in, showing what the gateway reports as it arrives.
 ///
-/// Streamed rather than awaited because the first line is the URL a person
-/// must open and the last arrives minutes later: a caller that waited for the
-/// exit would have nothing to show in between.
-fn stream_connect(session: &Session<'_>, provider: &str, account: &str) {
-    use std::io::{BufRead, BufReader};
+/// Streamed rather than awaited because the first line is the link a person
+/// must open and the last arrives minutes later. While it runs, an address
+/// pasted into the panel's prompt goes to the gateway's stdin, which is how a
+/// machine with no browser finishes: open the link anywhere, sign in, paste
+/// where the browser landed.
+fn stream_connect(session: &Session<'_>, provider: &str, account: &str, device_code: bool) {
+    use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    use std::sync::mpsc::RecvTimeoutError;
 
-    let Some(mut command) = session.gateway.control_command(&[
+    let mut arguments = vec![
         "subscriptions",
         "connect",
         provider,
         "--entitlement",
         account,
         "--json",
-    ]) else {
-        show(
-            session,
-            Panel::text(
-                "Connect an account",
-                "The inference gateway is not reachable.",
-            ),
-        );
-        return;
+    ];
+    if device_code {
+        arguments.push("--device-code");
+    }
+    let unreachable = |text: &str| show(session, Panel::text("Connect an account", text));
+    let Some(mut command) = session.gateway.control_command(&arguments) else {
+        return unreachable("The inference gateway is not reachable.");
     };
-    let spawned = command
-        .stdin(Stdio::null())
+    let Ok(mut child) = command
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = spawned else {
-        show(
-            session,
-            Panel::text(
-                "Connect an account",
-                "The inference gateway could not be started.",
-            ),
-        );
-        return;
+        .spawn()
+    else {
+        return unreachable("The inference gateway could not be started.");
     };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         return;
     };
-
-    let title = format!("Connecting {account}");
-    let mut rows: Vec<tui::PanelRow> = Vec::new();
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let Some(progress) = describe_progress(&line) else {
-            continue;
-        };
-        match progress {
-            // The countdown replaces itself rather than filling the panel.
-            Describe::Replace(text) => {
-                if matches!(rows.last(), Some(row) if row.command.is_none() && row.text.starts_with("waiting"))
-                {
-                    rows.pop();
-                }
-                rows.push(tui::PanelRow {
-                    text,
-                    command: None,
-                });
+    let mut pasted_to = child.stdin.take();
+    let (lines, arrived) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
             }
-            Describe::Keep(text) => rows.push(tui::PanelRow {
-                text,
-                command: None,
-            }),
         }
-        show(session, Panel::rows(title.clone(), rows.clone()));
+    });
+
+    let mut panel = SignIn::new(account);
+    show(session, panel.render());
+    loop {
+        match arrived.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                if let Some(progress) = SignInProgress::read(&line) {
+                    session_println!("{}", panel.apply(progress));
+                    show(session, panel.render());
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if let (Some(ui), Some(pipe)) = (session.ui, pasted_to.as_mut())
+                    && let Some(pasted) = ui.try_secret()
+                    && writeln!(pipe, "{}", pasted.trim())
+                        .and_then(|()| pipe.flush())
+                        .is_ok()
+                {
+                    panel.pasted = true;
+                    show(session, panel.render());
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
     }
+    drop(pasted_to);
     let _ = child.wait();
 }
 
-enum Describe {
-    Keep(String),
-    Replace(String),
-}
-
-/// One progress line, as a person reads it.
-///
+/// One progress line the gateway's `subscriptions connect --json` writes.
 /// Unknown shapes are dropped rather than printed raw: this is another
 /// program's output and the panel is not a place to echo bytes nobody
 /// recognised.
-fn describe_progress(line: &str) -> Option<Describe> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    match value.get("state")?.as_str()? {
-        "opened" => Some(Describe::Keep(format!(
-            "open this to continue:\n{}",
-            value.get("authorize_url")?.as_str()?
-        ))),
-        "waiting" => Some(Describe::Replace(format!(
-            "waiting for the browser ({}s left)",
-            value.get("seconds_remaining").and_then(|v| v.as_u64())?
-        ))),
-        "connected" => Some(Describe::Keep(format!(
-            "connected{}",
-            value
-                .get("account")
-                .and_then(|v| v.as_str())
-                .map(|a| format!(" as {a}"))
-                .unwrap_or_default()
-        ))),
-        "failed" => Some(Describe::Keep(format!(
-            "failed: {}",
-            value.get("reason").and_then(|v| v.as_str()).unwrap_or("")
-        ))),
-        _ => None,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SignInProgress {
+    Opened { link: String, browser_opened: bool },
+    DeviceCode { link: String, code: String },
+    Connected(Option<String>),
+    Failed(String),
+}
+
+impl SignInProgress {
+    fn read(line: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        Some(match text("state")? {
+            "opened" => Self::Opened {
+                link: text("authorize_url")?.to_owned(),
+                browser_opened: value
+                    .get("browser_opened")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            },
+            "device_code" => Self::DeviceCode {
+                link: text("verification_url")?.to_owned(),
+                code: text("user_code")?.to_owned(),
+            },
+            "connected" => Self::Connected(text("account").map(str::to_owned)),
+            "failed" => Self::Failed(text("reason").unwrap_or("").to_owned()),
+            _ => return None,
+        })
+    }
+}
+
+/// The sign-in panel: what to do next, and every way to do it.
+#[derive(Debug, Default)]
+struct SignIn {
+    account: String,
+    link: Option<(String, bool)>,
+    device: Option<(String, String)>,
+    pasted: bool,
+    outcome: Option<String>,
+}
+
+impl SignIn {
+    fn new(account: &str) -> Self {
+        Self {
+            account: account.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// Records `progress` and returns the line the chat keeps for it: the
+    /// whole link or code, so it can be read and selected after the panel is
+    /// gone.
+    fn apply(&mut self, progress: SignInProgress) -> String {
+        let account = self.account.clone();
+        match progress {
+            SignInProgress::Opened {
+                link,
+                browser_opened,
+            } => {
+                let note = format!("Sign-in link for {account}:\n{link}");
+                self.link = Some((link, browser_opened));
+                note
+            }
+            SignInProgress::DeviceCode { link, code } => {
+                let note = format!("Sign in to {account}: open {link} and enter the code {code}");
+                self.device = Some((link, code));
+                note
+            }
+            SignInProgress::Connected(label) => {
+                let said = match label {
+                    Some(label) => format!("{account} is connected as {label}."),
+                    None => format!("{account} is connected."),
+                };
+                self.outcome = Some(said.clone());
+                said
+            }
+            SignInProgress::Failed(reason) => {
+                self.outcome = Some(format!("failed: {reason}"));
+                format!("ERROR: signing in to {account} failed: {reason}")
+            }
+        }
+    }
+
+    fn render(&self) -> Panel {
+        let row = |text: String, command: Option<String>| tui::PanelRow { text, command };
+        let mut rows = Vec::new();
+        if let Some((link, browser_opened)) = &self.link {
+            rows.push(row(
+                if *browser_opened {
+                    "Sign in in the browser that just opened.".into()
+                } else {
+                    "Open the sign-in link in a browser.".into()
+                },
+                None,
+            ));
+            rows.push(row(
+                "⏎ open the sign-in link in your default browser".into(),
+                Some(format!("/open-link {link}")),
+            ));
+            rows.push(row(
+                "⏎ copy the sign-in link".into(),
+                Some(format!("/copy {link}")),
+            ));
+            rows.push(row(
+                "⏎ no browser here? paste the address the browser ended on".into(),
+                Some("/paste-callback".into()),
+            ));
+        }
+        if let Some((link, code)) = &self.device {
+            rows.push(row(format!("On any device, open {link}"), None));
+            rows.push(row(format!("and enter the code {code}"), None));
+            rows.push(row("⏎ copy the code".into(), Some(format!("/copy {code}"))));
+            rows.push(row(
+                "⏎ open the link in your default browser".into(),
+                Some(format!("/open-link {link}")),
+            ));
+        }
+        if self.pasted && self.outcome.is_none() {
+            rows.push(row("pasted; finishing the sign-in…".into(), None));
+        }
+        rows.push(row(
+            self.outcome
+                .clone()
+                .unwrap_or_else(|| "waiting for the sign-in…".into()),
+            None,
+        ));
+        let mut panel = Panel::rows(format!("Connecting {}", self.account), rows);
+        panel.selected = panel
+            .rows
+            .iter()
+            .position(|row| row.command.is_some())
+            .unwrap_or(0);
+        panel
     }
 }
 
@@ -852,6 +962,76 @@ fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gateway's sign-in lines become progress; the link and code arrive
+    /// whole, and a line of another shape is dropped.
+    #[test]
+    fn sign_in_progress_reads_the_gateway_lines_whole() {
+        let link = "https://claude.ai/oauth/authorize?client_id=x&scope=user%3Aprofile&state=s";
+        assert_eq!(
+            SignInProgress::read(&format!(
+                r#"{{"state":"opened","authorize_url":"{link}","browser_opened":true}}"#
+            )),
+            Some(SignInProgress::Opened {
+                link: link.into(),
+                browser_opened: true
+            })
+        );
+        assert_eq!(
+            SignInProgress::read(
+                r#"{"state":"device_code","verification_url":"https://auth.openai.com/codex/device","user_code":"ABCD-EFGH"}"#
+            ),
+            Some(SignInProgress::DeviceCode {
+                link: "https://auth.openai.com/codex/device".into(),
+                code: "ABCD-EFGH".into()
+            })
+        );
+        assert_eq!(
+            SignInProgress::read(r#"{"state":"connected","account":"me@example.com"}"#),
+            Some(SignInProgress::Connected(Some("me@example.com".into())))
+        );
+        assert_eq!(SignInProgress::read("waiting for the browser"), None);
+    }
+
+    /// The panel offers every way through with the whole link behind each
+    /// row, starts on the first thing to do, and the chat keeps the link.
+    #[test]
+    fn the_sign_in_panel_opens_copies_or_takes_a_pasted_address() {
+        let link = "https://claude.ai/oauth/authorize?client_id=x&scope=user%3Aprofile&state=s";
+        let mut sign_in = SignIn::new("claude-max");
+        let note = sign_in.apply(SignInProgress::Opened {
+            link: link.into(),
+            browser_opened: false,
+        });
+        assert_eq!(note, format!("Sign-in link for claude-max:\n{link}"));
+        let panel = sign_in.render();
+        let commands: Vec<_> = panel
+            .rows
+            .iter()
+            .filter_map(|row| row.command.clone())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                format!("/open-link {link}"),
+                format!("/copy {link}"),
+                "/paste-callback".to_string(),
+            ]
+        );
+        assert_eq!(
+            panel.rows[panel.selected].command.as_deref(),
+            Some(&*format!("/open-link {link}"))
+        );
+        assert_eq!(
+            sign_in.apply(SignInProgress::Failed("status 400".into())),
+            "ERROR: signing in to claude-max failed: status 400"
+        );
+        assert_eq!(
+            sign_in.render().rows.last().unwrap().text,
+            "failed: status 400"
+        );
+    }
+
     #[test]
     fn model_catalogue_groups_by_provider_then_account_and_preserves_model_ids() {
         let catalogue = serde_json::from_value(serde_json::json!({

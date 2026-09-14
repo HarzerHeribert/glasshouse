@@ -941,3 +941,174 @@ fn subscriptions_adopt_binary_pins_by_digest_and_logout_forgets_a_login() {
 fn hex_of(text: &str) -> String {
     text.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
+
+/// A stand-in for the broker's login: it records its arguments, prints the
+/// real login's output shape (an SSH hint naming an address, the link, the
+/// paste prompt), reads one pasted line, saves a credential and says where.
+#[cfg(unix)]
+fn fake_broker_login(scratch: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = scratch.join("fake-cliproxyapi-login");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+auth=$(/usr/bin/sed -n 's/^auth-dir: "\(.*\)"$/\1/p' "$2")
+echo "$@" > "$auth/../args.txt"
+echo "To authenticate from a remote machine, an SSH tunnel may be required."
+echo "  ssh -L 54545:127.0.0.1:54545 root@203.0.113.7 -p 22"
+case "$3" in
+  -codex-device-login)
+    echo "Codex device URL: https://auth.openai.com/codex/device"
+    echo "Codex device code: ABCD-EFGH"
+    file="$auth/codex-me@example.com.json" ;;
+  *)
+    echo "Visit the following URL to continue authentication:"
+    echo "https://claude.ai/oauth/authorize?client_id=x&scope=user%3Aprofile&state=s"
+    printf "Paste the Claude callback URL (or press Enter to keep waiting): "
+    read pasted
+    echo "$pasted" > "$auth/../pasted.txt"
+    file="$auth/claude-me@example.com.json" ;;
+esac
+echo '{}' > "$file"
+echo "authentication successful"
+echo "Authentication saved to $file"
+"#,
+    )
+    .expect("the stand-in is written");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+/// `subscriptions connect` signs in through the broker's own login: the
+/// whole link crosses and nothing else the broker printed does, a pasted
+/// callback address reaches the broker, and success names the saved account.
+#[cfg(unix)]
+#[test]
+fn connect_drives_the_broker_login_and_forwards_a_pasted_address() {
+    use std::io::Write as _;
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        "[accounts.zeta]\nkind = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
+    )
+    .expect("the configuration is written");
+    let mut child = gateway(&config_path, scratch.path())
+        .args([
+            "subscriptions",
+            "connect",
+            "anthropic",
+            "--entitlement",
+            "zeta",
+            "--json",
+            "--no-browser",
+        ])
+        .env(
+            "GLASSHOUSE_CLIPROXYAPI_BIN",
+            fake_broker_login(scratch.path()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(b"http://localhost:54545/callback?code=c&state=s\n")
+        .expect("the paste is written");
+    let status = wait_for_exit(&mut child);
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
+    assert!(status.success(), "{stdout}");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            serde_json::json!({"state": "opened", "authorize_url": "https://claude.ai/oauth/authorize?client_id=x&scope=user%3Aprofile&state=s", "browser_opened": false}),
+            serde_json::json!({"state": "connected", "account": "me@example.com"}),
+        ]
+    );
+    assert!(!stdout.contains("203.0.113.7"), "{stdout}");
+    let entitlement = scratch
+        .path()
+        .join("subscription-brokers")
+        .join(format!("entitlement-{}", hex_of("zeta")));
+    assert_eq!(
+        std::fs::read_to_string(entitlement.join("pasted.txt"))
+            .unwrap()
+            .trim(),
+        "http://localhost:54545/callback?code=c&state=s"
+    );
+    let args = std::fs::read_to_string(entitlement.join("args.txt")).unwrap();
+    assert!(
+        args.contains("-claude-login") && args.contains("-no-browser"),
+        "{args}"
+    );
+    assert!(
+        entitlement
+            .join("auth/claude-me@example.com.json")
+            .is_file()
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(entitlement.join("instances"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the login's private config is removed: {leftovers:?}"
+    );
+}
+
+/// Over SSH there is no browser to open, so an OpenAI account signs in with
+/// a device code without being asked, and the code crosses with its link.
+#[cfg(unix)]
+#[test]
+fn connect_over_ssh_uses_a_device_code_for_openai() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        "[accounts.omega]\nkind = \"chatgpt\"\nvendor = \"openai\"\nsubscription_broker = \"cliproxyapi\"\n",
+    )
+    .expect("the configuration is written");
+    let output = gateway(&config_path, scratch.path())
+        .args([
+            "subscriptions",
+            "connect",
+            "openai",
+            "--entitlement",
+            "omega",
+            "--json",
+        ])
+        .env(
+            "GLASSHOUSE_CLIPROXYAPI_BIN",
+            fake_broker_login(scratch.path()),
+        )
+        .env("SSH_CONNECTION", "203.0.113.9 50000 203.0.113.7 22")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the built binary runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("a first line")).unwrap();
+    assert_eq!(
+        first,
+        serde_json::json!({"state": "device_code", "verification_url": "https://auth.openai.com/codex/device", "user_code": "ABCD-EFGH"})
+    );
+    let entitlement = scratch
+        .path()
+        .join("subscription-brokers")
+        .join(format!("entitlement-{}", hex_of("omega")));
+    let args = std::fs::read_to_string(entitlement.join("args.txt")).unwrap();
+    assert!(args.contains("-codex-device-login"), "{args}");
+}
