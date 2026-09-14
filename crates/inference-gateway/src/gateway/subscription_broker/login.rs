@@ -83,6 +83,13 @@ impl BrokerLogin {
         ] {
             ensure_private_directory(directory)?;
         }
+        // A login the gateway was killed during leaves its private config
+        // behind; an entitlement signs in once at a time, so any is stale.
+        for entry in fs::read_dir(&instances_dir)?.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("login-") {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
         let instance_dir = instances_dir.join(format!("login-{}", random_hex(INSTANCE_ID_BYTES)?));
         ensure_private_directory(&instance_dir)?;
         let config_path = instance_dir.join("config.yaml");

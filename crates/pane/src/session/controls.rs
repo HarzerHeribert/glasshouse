@@ -394,6 +394,10 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str, device_c
     let Some(mut command) = session.gateway.control_command(&arguments) else {
         return unreachable("The inference gateway is not reachable.");
     };
+    // Its own group, so a cancelled sign-in takes the broker's login (which
+    // holds the provider's callback port) down with the gateway.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let Ok(mut child) = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -418,6 +422,9 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str, device_c
 
     let mut panel = SignIn::new(account);
     show(session, panel.render());
+    // Ctrl-C cancels the sign-in, as it cancels a tool call.
+    let token = crate::tools::invoke::CancellationToken::new();
+    session.interrupt.arm(token.clone());
     loop {
         match arrived.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
@@ -425,6 +432,14 @@ fn stream_connect(session: &Session<'_>, provider: &str, account: &str, device_c
                     session_println!("{}", panel.apply(progress));
                     show(session, panel.render());
                 }
+            }
+            Err(RecvTimeoutError::Timeout) if token.is_cancelled() => {
+                #[cfg(unix)]
+                crate::tools::invoke::kill_group(child.id());
+                let _ = child.kill();
+                session.interrupt.consumed();
+                session_println!("Sign-in to {account} cancelled.");
+                break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if let (Some(ui), Some(pipe)) = (session.ui, pasted_to.as_mut())

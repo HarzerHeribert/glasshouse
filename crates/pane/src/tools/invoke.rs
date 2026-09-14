@@ -1830,7 +1830,7 @@ unsafe extern "C" {
 /// `pid` is a child [`spawn_confined`] made a group leader, so the group id
 /// is the pid and its members are exactly what that call started.
 #[cfg(unix)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     // SAFETY: `killpg` is a POSIX libc call taking two integers and
     // returning one. There is no pointer, no allocation and no state; the
     // only failure it can report is `ESRCH` for a group whose members have

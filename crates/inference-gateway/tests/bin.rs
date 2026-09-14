@@ -993,6 +993,13 @@ fn connect_drives_the_broker_login_and_forwards_a_pasted_address() {
         "[accounts.zeta]\nkind = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
     )
     .expect("the configuration is written");
+    // A login the gateway was killed during left its private config.
+    let stale = scratch
+        .path()
+        .join("subscription-brokers")
+        .join(format!("entitlement-{}", hex_of("zeta")))
+        .join("instances/login-stale");
+    std::fs::create_dir_all(&stale).expect("a stale login directory");
     let mut child = gateway(&config_path, scratch.path())
         .args([
             "subscriptions",
