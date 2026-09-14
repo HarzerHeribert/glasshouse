@@ -24,6 +24,7 @@ mod terminal_input;
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DRAWING: Mutex<()> = Mutex::new(());
 thread_local! { static OUTPUT: RefCell<Option<mpsc::Sender<Update>>> = const { RefCell::new(None) }; }
+thread_local! { static STARTUP: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; }
 
 pub(super) fn output(message: String) {
     if super::output::active() {
@@ -33,10 +34,46 @@ pub(super) fn output(message: String) {
     OUTPUT.with(|output| {
         if let Some(sender) = output.borrow().as_ref() {
             let _ = sender.send(Update::Notice(message));
-        } else {
+        } else if let Some(message) = STARTUP.with(|held| match held.borrow_mut().as_mut() {
+            Some(notes) => {
+                notes.push(message);
+                None
+            }
+            None => Some(message),
+        }) {
             println!("{message}");
         }
     });
+}
+
+/// A note a terminal session shows elsewhere (its footer), and so does not
+/// repeat in the conversation; every other session prints it.
+pub(super) fn detail(message: String) {
+    if STARTUP.with(|held| held.borrow().is_none()) {
+        output(message);
+    }
+}
+
+/// Holds the notes a session says before its terminal UI exists, so they
+/// open the conversation instead of flashing on the screen the UI replaces.
+/// [`LiveUi::start`] takes them; a session that ends before it prints them
+/// when this guard drops, so a refusal still arrives under its notes.
+pub(super) struct StartupNotes;
+impl StartupNotes {
+    pub(super) fn hold() -> Self {
+        STARTUP.with(|held| *held.borrow_mut() = Some(Vec::new()));
+        Self
+    }
+}
+impl Drop for StartupNotes {
+    fn drop(&mut self) {
+        for note in STARTUP
+            .with(|held| held.borrow_mut().take())
+            .unwrap_or_default()
+        {
+            println!("{note}");
+        }
+    }
 }
 
 /// **Ask for exactly the mouse reports the UI consumes.** `?1000` is
@@ -166,10 +203,17 @@ impl LiveUi {
         gate
     }
     pub(super) fn start(
-        state: ScreenState,
+        mut state: ScreenState,
         conversation: Conversation,
         notebook: Notebook,
     ) -> Result<Self, String> {
+        state.messages_seen = conversation.messages.len();
+        for note in STARTUP
+            .with(|held| held.borrow_mut().take())
+            .unwrap_or_default()
+        {
+            state.note(note);
+        }
         let (updates, receiver) = mpsc::channel();
         let (input_sender, inputs) = mpsc::channel();
         let (secret_sender, secrets) = mpsc::channel();
@@ -619,6 +663,7 @@ fn run(
                     }
                     refresh_handler_panel(&mut state.panel, &notebook.handlers, &n.handlers);
                     conversation = c;
+                    state.messages_seen = conversation.messages.len();
                     notebook = n;
                     if s.is_known() {
                         served = s;
@@ -675,7 +720,7 @@ fn run(
                 Update::Mode(mode) => state.mode = mode,
                 Update::Effort(effort) => state.effort = effort,
                 Update::Panel(panel) => state.panel = Some(*panel),
-                Update::Notice(message) => state.notice = Some(message),
+                Update::Notice(message) => state.note(message),
                 Update::SecretPrompt(title) => {
                     state.secret_prompt = Some(tui::SecretPrompt::new(title));
                     // A panel over a modal prompt would take the Enter that
@@ -1047,8 +1092,7 @@ fn run(
                             let discarded = panel.staged_commands().len();
                             state.panel = None;
                             if discarded > 0 {
-                                state.notice =
-                                    Some(format!("discarded {discarded} staged change(s)"));
+                                state.note(format!("discarded {discarded} staged change(s)"));
                             }
                         }
                         KeyCode::Up => panel.move_selection(false, 1),
@@ -1085,11 +1129,11 @@ fn run(
                                 {
                                     state.theme = theme;
                                     state.panel = None;
-                                    state.notice = Some(format!("Theme: {}", theme.name()));
+                                    state.note(format!("Theme: {}", theme.name()));
                                 } else if let Some(name) = command.strip_prefix("/handlers off ") {
                                     super::lock(&handler_cancellations).push(name.to_string());
                                     state.panel = None;
-                                    state.notice = Some(format!(
+                                    state.note(format!(
                                         "handler {name}: cancellation queued for the next cell boundary"
                                     ));
                                 } else if !busy {
@@ -1198,11 +1242,9 @@ fn run(
                             state.inspection = tui::Inspection::open(cell, &notebook);
                             state.telemetry_open = false;
                             state.panel = None;
-                            state.notice = if state.inspection.is_none() {
-                                Some("No recorded cell at that number yet. Use /cells after an action.".into())
-                            } else {
-                                None
-                            };
+                            if state.inspection.is_none() {
+                                state.note("No recorded cell at that number yet. Use /cells after an action.");
+                            }
                         }
                         continue;
                     }
@@ -1229,19 +1271,16 @@ fn run(
                             Some("off" | "reduce") => state.reduced_motion = true,
                             Some("on") => state.reduced_motion = false,
                             _ => {
-                                state.notice = Some("Usage: /motion on | off".into());
+                                state.note("Usage: /motion on | off");
                                 continue;
                             }
                         }
                         state.completion_tick = None;
-                        state.notice = Some(
-                            if state.reduced_motion {
-                                "Motion reduced. /motion on restores animation."
-                            } else {
-                                "Motion on. /motion off reduces animation."
-                            }
-                            .into(),
-                        );
+                        state.note(if state.reduced_motion {
+                            "Motion reduced. /motion on restores animation."
+                        } else {
+                            "Motion on. /motion off reduces animation."
+                        });
                         continue;
                     }
                     if !busy && matches!(editor.text.trim(), "/settings" | "/statusline") {
@@ -1249,7 +1288,7 @@ fn run(
                         editor.take();
                         match crate::settings_session::Editor::open(&state, status_only) {
                             Ok(settings) => settings_editor = Some(settings),
-                            Err(error) => state.notice = Some(error),
+                            Err(error) => state.note(error),
                         }
                         continue;
                     }
@@ -1259,13 +1298,12 @@ fn run(
                             Some(name) => {
                                 if let Some(theme) = tui::Theme::parse(name) {
                                     state.theme = theme;
-                                    state.notice = Some(format!(
+                                    state.note(format!(
                                         "Theme: {} · /theme opens the palette",
                                         theme.name()
                                     ));
                                 } else {
-                                    state.notice =
-                                        Some("Unknown theme. /theme opens the palette.".into());
+                                    state.note("Unknown theme. /theme opens the palette.");
                                 }
                             }
                             None => {
@@ -1304,18 +1342,16 @@ fn run(
                                         .any(|h| h.name == *name && h.active)
                                 {
                                     super::lock(&handler_cancellations).push((*name).to_string());
-                                    state.notice = Some(format!(
+                                    state.note(format!(
                                         "handler {name}: cancellation queued for the next cell boundary"
                                     ));
                                 } else {
-                                    state.notice = Some(format!(
+                                    state.note(format!(
                                         "handler {name}: no active handler with that name"
                                     ));
                                 }
                             }
-                            _ => {
-                                state.notice = Some("Use /handlers or /handlers off <name>".into())
-                            }
+                            _ => state.note("Use /handlers or /handlers off <name>"),
                         }
                         continue;
                     }
@@ -1335,10 +1371,11 @@ fn run(
                     }
                     if text.split_whitespace().next() == Some("/statusline") {
                         let word = text.split_whitespace().nth(1).unwrap_or("");
-                        state.notice=Some(match crate::settings_session::save_status(&mut state,word) {
+                        let said = match crate::settings_session::save_status(&mut state,word) {
                             Ok(())=>"Status line saved for this project. Selected profile overrides still apply.".into(),
                             Err(error)=>error,
-                        });
+                        };
+                        state.note(said);
                         continue;
                     }
                     if text.split_whitespace().next() == Some("/sidebar") {
@@ -1347,8 +1384,7 @@ fn run(
                             Some("show") => SidebarVisibility::Shown,
                             _ => SidebarVisibility::Auto,
                         };
-                        state.notice =
-                            Some("Sidebar: /sidebar auto|show|hide · Ctrl-B toggles".into());
+                        state.note("Sidebar: /sidebar auto|show|hide · Ctrl-B toggles");
                         continue;
                     }
                     busy = true;

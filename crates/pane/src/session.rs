@@ -82,6 +82,7 @@ fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
 }
 mod controls;
 mod resume;
+mod startup;
 mod system;
 mod task;
 
@@ -600,7 +601,7 @@ fn render(
     if let Some(ui) = session.ui {
         ui.publish(transcript, served_by, activity);
     } else {
-        render_as_lines(transcript, served_by);
+        startup::render_as_lines(transcript, served_by);
     }
 }
 
@@ -633,62 +634,6 @@ fn helper_lane(
         );
         publisher.publish(&conversation, &notebook, &served, tui::Activity::Executing);
     })
-}
-
-/// Every acceptance test below, and any real pipe, takes this path. Draws
-/// through the identical `tui::render` a live terminal uses, into an
-/// in-memory buffer exactly as `tui.rs`'s own tests do, then prints each
-/// non-blank row as a line of text -- so the conversation column and the
-/// sidebar's content (including its honest "not connected" collapse) reach
-/// stdout rather than a dropped `TestBackend`.
-///
-/// **The buffer is sized to the notebook rather than fixed.** A pipe has no
-/// scrollback, so a height chosen once would silently drop the newest cell
-/// exactly when a task had run long enough to be worth reading; the doubling
-/// is the room a wrapped table line takes.
-fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
-    if output::active() {
-        return;
-    }
-    let handles = empty_handles();
-    let rows = tui::notebook_height(&transcript.conversation, &handles, &transcript.notebook);
-    let height = (rows * 2 + 8).clamp(40, 2_000) as u16;
-    let backend = TestBackend::new(100, height);
-    let mut terminal = Terminal::new(backend).expect("an in-memory backend never fails to init");
-    let _ = terminal.draw(|frame| {
-        tui::render(
-            frame,
-            &transcript.conversation,
-            served_by,
-            &handles,
-            &transcript.notebook,
-        )
-    });
-    let buffer = terminal.backend().buffer();
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        for x in 0..buffer.area.width {
-            if let Some(cell) = buffer.cell((x, y)) {
-                line.push_str(cell.symbol());
-            }
-        }
-        let line = line.trim_end();
-        if !line.is_empty() {
-            println!("{line}");
-        }
-    }
-}
-
-fn startup_model(cli: Option<&str>, config: &PaneConfig) -> Result<String, String> {
-    let model = cli
-        .map(str::to_string)
-        .or_else(|| config.model.parent.clone())
-        .ok_or_else(|| {
-            "pane cannot start: no parent model selected; pass `--model <id>` or set `[model] parent` in .pane/config.toml (or global Pane config)".to_string()
-        })?;
-    crate::config::validate_parent_model(&model)
-        .map_err(|reason| format!("pane cannot start: {reason}"))?;
-    Ok(model)
 }
 
 /// Runs `session`, in the order the packet's OBJECTIVE fixes: load the
@@ -724,7 +669,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // too: a crash or a closed pane never reaches `/exit`.
     let (session_id, rollout_path) = resume::resolve_session(&args)?;
     output::session(session_id.as_str());
-    session_println!("{}", resume::resume_hint(&session_id));
+    let terminal = args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
+    // Notes said before the terminal UI exists open its conversation rather
+    // than flashing on the screen the UI replaces.
+    let _startup_notes = terminal.then(ui::StartupNotes::hold);
     let mut project = project::load(&args.root);
     let settings_store = crate::settings::Store::new(&args.root)?;
     let loaded_settings = settings_store.load(args.profile.as_deref())?;
@@ -757,9 +705,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // An explicit `--model` wins, then the model this project was last left
     // on. There is no compiled-in request-model fallback: starting without a
     // concrete choice would make Pane silently spend against a model the
-    // person did not select.
-    let started_on = startup_model(args.model.as_deref(), &config.borrow())?;
-    if config.borrow().supervisor.model.is_none() {
+    // person did not select, so a terminal opens the picker instead.
+    let requested = startup::requested_model(args.model.as_deref(), &config.borrow(), terminal)?;
+    session_println!("{}", resume::resume_hint(&session_id));
+    if config.borrow().supervisor.model.is_none() && !terminal {
         session_println!("supervisor: off (no model)");
     }
 
@@ -789,6 +738,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         },
     };
     let gateway = gateway::select(args.gateway.as_deref(), &glasshouse, &args.root);
+    let accounts = startup::served_accounts(&gateway);
+    let started_on = requested.map(|model| startup::settle_model(model, &accounts));
     // Held for the whole session: dropping it kills the gateway pane started.
     // `None` means pane attached to one already serving, or runs direct.
     // Before the interrupt thread and the live UI on purpose -- it writes the
@@ -874,20 +825,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
             Some(ui::LiveUi::start(
                 {
                     let mut state = tui::ScreenState {
-                        model: Some(started_on.clone()),
+                        model: started_on.clone(),
                         mode: initial_mode,
                         effort: initial_effort,
                         settings_root: Some(args.root.clone()),
                         settings_profile: args.profile.clone(),
                         compact: true,
                         pretty: true,
-                        project: Some(
-                            args.root
-                                .file_name()
-                                .unwrap_or(args.root.as_os_str())
-                                .to_string_lossy()
-                                .into_owned(),
-                        ),
+                        project: Some(startup::project_name(&args.root)),
                         sandbox: Some(format!(
                             "{}p/{}c{}",
                             profile.rule_count(),
@@ -905,31 +850,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                         ..tui::ScreenState::default()
                     };
                     crate::settings_session::presentation(&mut state, &loaded_settings.values);
-                    state.settings_models = gateway
-                        .run(&["entitlements", "--json"], None)
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .and_then(|v| {
-                            v.get("accounts")
-                                .and_then(serde_json::Value::as_array)
-                                .cloned()
-                        })
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|a| {
-                            a.get("selectable").and_then(serde_json::Value::as_bool) != Some(false)
-                                && a.get("authenticated").and_then(serde_json::Value::as_bool)
-                                    != Some(false)
-                        })
-                        .flat_map(|a| {
-                            a.get("models")
-                                .and_then(serde_json::Value::as_array)
-                                .cloned()
-                                .unwrap_or_default()
-                        })
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect();
-                    state.settings_models.sort();
-                    state.settings_models.dedup();
+                    state.settings_models = startup::served_models(&accounts);
                     state
                 },
                 transcript.conversation.clone(),
@@ -963,10 +884,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         memory: &memory,
         interrupt: &interrupt,
         ui: interactive.as_ref(),
-        model: RefCell::new(started_on.clone()),
-        context_window: args
-            .context_window_tokens
-            .map(|cap| (started_on.clone(), cap)),
+        model: RefCell::new(started_on.clone().unwrap_or_default()),
+        context_window: started_on.clone().zip(args.context_window_tokens),
         mode: Cell::new(initial_mode),
         effort: Cell::new(initial_effort),
         interface: Cell::new(args.interface.unwrap_or_default()),
@@ -976,7 +895,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
     output::interface(session.interface.get(), session.dialect());
     controls::announce_missing_credential(&session, _serving.is_some());
-    let outcome = drive(&args, &session, &mut transcript, &mut rollout);
+    if started_on.is_none() {
+        session_println!("No model selected yet: pick one, or type /model <id>.");
+        controls::models(&session);
+    }
+    let outcome = drive(&args, &session, &mut transcript, &mut rollout)
+        .map_err(|message| startup::explain_failure(&message, &session));
     // §5 again, and this one is the promise `session::run` itself makes: an
     // input that failed mid-task left `run_task` by `?` without reaching its
     // own shutdown, and a job of that task must not outlive the session
@@ -1100,7 +1024,7 @@ fn drive(
         while let Some(input) = ui.next()? {
             let result = process_input(&input, session, transcript, rollout);
             if let Err(message) = &result {
-                session_println!("ERROR: {message}");
+                session_println!("ERROR: {}", startup::explain_failure(message, session));
             }
             ui.publish(
                 transcript,
@@ -1124,7 +1048,7 @@ fn drive(
         // Observed 2026-09-06: one empty message made a gateway answer 400
         // and the session ended mid-task.
         if let Err(message) = process_input(&line, session, transcript, rollout) {
-            session_println!("{message}");
+            session_println!("{}", startup::explain_failure(&message, session));
         }
     }
     Ok(())
@@ -1260,6 +1184,9 @@ fn run_task(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
+    if session.model.borrow().is_empty() {
+        return Err("No model selected yet. Pick one with /model.".into());
+    }
     transcript.notebook.handlers.clear();
     transcript.notebook.preflight = None;
     let result = run_task_inner(task, session, transcript, rollout);
@@ -2674,6 +2601,10 @@ fn answer_command(
             // Validate and persist before changing the live request model.
             // A rejected control word or malformed id therefore leaves both
             // the file and the running session unchanged.
+            let model = &startup::settle_model(
+                model.to_string(),
+                &startup::served_accounts(session.gateway),
+            );
             let remembered = controls::assign_model(session, tier, model);
             if let Err(reason) = remembered {
                 session_println!("model unchanged: {reason}");
@@ -2822,7 +2753,8 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
     } else {
         Profile::from_project(project)
     };
-    session_println!(
+    // A terminal's footer already shows the rule counts and network.
+    ui::detail(format!(
         "sandbox: profile compiled once for this session -- {} path rule(s), {} command \
          pattern(s), network: {}",
         profile.rule_count(),
@@ -2832,7 +2764,7 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
         } else {
             "no"
         },
-    );
+    ));
     for diagnostic in profile.diagnostics() {
         session_println!("sandbox: {diagnostic}");
     }
@@ -2942,25 +2874,154 @@ mod tests {
 
     use super::*;
 
+    /// `pane` started in a project names that project, not `.`.
+    #[test]
+    fn the_project_is_named_by_its_folder_not_by_a_relative_root() {
+        let name = startup::project_name(std::path::Path::new("."));
+        assert_eq!(name, "pane", "run from the crate directory: {name}");
+    }
+
     #[test]
     fn startup_model_requires_a_concrete_cli_or_persisted_choice() {
         let empty = PaneConfig::default();
-        let error = startup_model(None, &empty).unwrap_err();
+        let error = startup::requested_model(None, &empty, false).unwrap_err();
         assert!(error.contains("--model <id>"), "{error}");
+        assert_eq!(
+            startup::requested_model(None, &empty, true),
+            Ok(None),
+            "a terminal session opens the picker instead of refusing"
+        );
 
         for mode in ["auto", "off", "inherit"] {
             assert!(
-                startup_model(Some(mode), &empty).is_err(),
+                startup::requested_model(Some(mode), &empty, true).is_err(),
                 "accepted {mode}"
             );
         }
 
         let persisted = PaneConfig::parse("[model]\nparent = \"persisted-model\"\n").unwrap();
-        assert_eq!(startup_model(None, &persisted).unwrap(), "persisted-model");
         assert_eq!(
-            startup_model(Some("cli-model"), &persisted).unwrap(),
-            "cli-model",
+            startup::requested_model(None, &persisted, false).unwrap(),
+            Some("persisted-model".to_string())
+        );
+        assert_eq!(
+            startup::requested_model(Some("cli-model"), &persisted, false).unwrap(),
+            Some("cli-model".to_string()),
             "the CLI must take precedence"
+        );
+    }
+
+    fn served(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    /// A family word becomes that family's newest served model: `opus` is
+    /// `claude-opus-5`, not the first or the dated `4-5` spelling.
+    #[test]
+    fn a_family_word_resolves_to_its_newest_served_model() {
+        let catalogue = served(&[
+            "claude-opus-4-7",
+            "claude-opus-5",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-3-5-haiku-20241022",
+            "claude-haiku-4-5-20251001",
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+        ]);
+        let resolve = |word| startup::resolve_family(word, &catalogue);
+        assert_eq!(resolve("opus").as_deref(), Some("claude-opus-5"));
+        assert_eq!(resolve("Fable").as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(
+            resolve("haiku").as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(resolve("sol").as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(resolve("claude"), None, "several families share the word");
+        assert_eq!(resolve("gpt"), None, "several families share the word");
+        assert_eq!(resolve("mistral"), None);
+        assert_eq!(
+            startup::resolve_family(
+                "opus",
+                &served(&["anthropic/claude-opus-5", "claude-opus-5"])
+            )
+            .as_deref(),
+            Some("claude-opus-5"),
+            "the account's own spelling wins a tie"
+        );
+    }
+
+    /// A listed id is kept, and a family word is settled among accounts that
+    /// hold a login before accounts that do not.
+    #[test]
+    fn settling_keeps_a_listed_id_and_prefers_logged_in_accounts() {
+        let account = |name: &str, authenticated, models: &[&str]| startup::ServedAccount {
+            account: name.into(),
+            models: served(models),
+            authenticated,
+            ..Default::default()
+        };
+        let accounts = vec![
+            account("router", None, &["vendor/claude-opus-6"]),
+            account(
+                "claude-max",
+                Some(true),
+                &["claude-opus-5", "claude-sonnet-5"],
+            ),
+        ];
+        assert_eq!(
+            startup::settle_model("claude-sonnet-5".into(), &accounts),
+            "claude-sonnet-5"
+        );
+        assert_eq!(
+            startup::settle_model("opus".into(), &accounts),
+            "claude-opus-5"
+        );
+        assert_eq!(startup::settle_model("claude".into(), &accounts), "claude");
+    }
+
+    /// A dead subscription login names the account and the way back in; an
+    /// unknown model points at the list; anything else gets no advice.
+    #[test]
+    fn a_recognised_request_failure_says_what_to_do() {
+        let dead_login = r#"request failed: http status: 503 — {"type":"error","error":{"type":"api_error","message":"auth_unavailable: no auth available (providers=claude, model=claude-opus-5)"}}"#;
+        let accounts = || {
+            vec![startup::ServedAccount {
+                account: "claude-max".into(),
+                models: served(&["claude-opus-5"]),
+                authenticated: Some(true),
+                connect_with: Some("anthropic".into()),
+                ..Default::default()
+            }]
+        };
+        assert_eq!(
+            startup::advice(dead_login, "claude-opus-5", accounts, true).as_deref(),
+            Some(
+                "The `claude-max` login is no longer valid. Type /login claude-max to sign in again."
+            )
+        );
+        let scripted = startup::advice(dead_login, "claude-opus-5", accounts, false).unwrap();
+        assert!(
+            scripted.ends_with(
+                "inference-gateway subscriptions connect --entitlement claude-max anthropic"
+            ),
+            "{scripted}"
+        );
+        let unknown = r#"request failed: http status: 400 — {"error":{"message":"unknown provider for model opus"}}"#;
+        assert_eq!(
+            startup::advice(unknown, "opus", Vec::new, true).as_deref(),
+            Some("`opus` is not a model the gateway serves. /model lists the ones it does.")
+        );
+        assert_eq!(
+            startup::advice(
+                "request failed: http status: 529",
+                "claude-opus-5",
+                Vec::new,
+                true
+            ),
+            None
         );
     }
 

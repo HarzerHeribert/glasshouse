@@ -186,7 +186,7 @@ impl Editor {
                 match result {
                     Ok(loaded) => {
                         presentation(state, &loaded.values);
-                        state.notice=Some("Settings saved. Presentation is active; runtime and permission changes require a new session. CLI/profile overrides still apply.".into());
+                        state.note("Settings saved. Presentation is active; runtime and permission changes require a new session. CLI/profile overrides still apply.");
                         true
                     }
                     Err(error) => {

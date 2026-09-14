@@ -1,0 +1,55 @@
+//! Notices kept in the conversation. A status line a person may want to
+//! scroll back to (a startup note, an error, a changed setting) is part of
+//! the history, drawn where it happened, not a box the next keystroke
+//! replaces.
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+
+use super::{MUTED, ScreenState};
+
+/// One notice and where it belongs: after the first `after` messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryNote {
+    pub after: usize,
+    pub text: String,
+}
+
+impl ScreenState {
+    /// Keeps `text` in the conversation after the messages seen so far.
+    pub fn note(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.trim().is_empty() {
+            self.history.push(HistoryNote {
+                after: self.messages_seen,
+                text,
+            });
+        }
+    }
+}
+
+/// Draws the notes from `next` on that belong at or before message `upto`.
+/// An `ERROR:` note is red; every other note is muted.
+pub(super) fn push_notes(
+    lines: &mut Vec<Line<'static>>,
+    notes: &[HistoryNote],
+    next: &mut usize,
+    upto: usize,
+) {
+    if notes.get(*next).is_some_and(|note| note.after <= upto) && !lines.is_empty() {
+        // Outside the open turn's block, which a closer ends.
+        lines.push(Line::styled("╰─", Style::default().fg(MUTED)));
+        lines.push(Line::from(""));
+    }
+    while let Some(note) = notes.get(*next).filter(|note| note.after <= upto) {
+        let style = Style::default().fg(if note.text.starts_with("ERROR:") {
+            Color::Red
+        } else {
+            MUTED
+        });
+        for (index, line) in note.text.lines().enumerate() {
+            let lead = if index == 0 { "· " } else { "  " };
+            lines.push(Line::styled(format!("{lead}{line}"), style));
+        }
+        *next += 1;
+    }
+}

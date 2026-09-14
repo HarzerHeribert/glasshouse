@@ -1534,3 +1534,52 @@ fn a_failed_recap_prints_nothing() {
         "a failed recap draws exactly the silent screen"
     );
 }
+
+/// Notices are history: a note stays in the conversation after a later one,
+/// is drawn at its turn boundary (before the message sent after it, after
+/// the turn it followed), and an `ERROR:` note is red.
+#[test]
+fn notices_stay_in_the_conversation_where_they_happened() {
+    let mut state = ScreenState::default();
+    state.note("session s-1 — resume it with:  pane --resume s-1");
+    state.messages_seen = 2;
+    state.note("model changed to claude-opus-5");
+    state.note("ERROR: The `claude-max` login is no longer valid. Type /login claude-max to sign in again.");
+    let conversation = conversation(vec![
+        Message::text(Role::User, "first question"),
+        Message::text(Role::Assistant, "first answer"),
+        Message::text(Role::User, "second question"),
+    ]);
+    let backend = TestBackend::new(140, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_screen(
+                frame,
+                &conversation,
+                &known_served_by(),
+                &HandleTable::new(),
+                &Notebook::default(),
+                &state,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text = buffer_text(&buffer);
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{text}"))
+    };
+    assert!(at("resume it with") < at("first question"), "{text}");
+    assert!(at("first answer") < at("model changed to"), "{text}");
+    assert!(
+        at("model changed to") < at("login is no longer valid"),
+        "{text}"
+    );
+    assert!(
+        at("login is no longer valid") < at("second question"),
+        "{text}"
+    );
+    assert!(!text.contains(" notice "), "no transient box:\n{text}");
+    assert_eq!(fg_of_row(&buffer, "login is no longer valid"), Color::Red);
+}

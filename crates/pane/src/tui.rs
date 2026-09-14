@@ -1,6 +1,8 @@
 //! Fullscreen presentation. The caller owns terminal lifecycle, input and ticks.
 
 mod controls;
+mod history;
+pub use history::HistoryNote;
 mod inspection;
 pub use inspection::Inspection;
 mod lane;
@@ -110,7 +112,13 @@ pub struct ScreenState {
     /// UTF-8 byte offset supplied by the live editor; None hides the cursor.
     pub cursor: Option<usize>,
     pub completion_selected: usize,
+    /// A keystroke hint the next keystroke replaces; everything a person may
+    /// want to read again is a [`HistoryNote`] instead.
     pub notice: Option<String>,
+    /// Notices kept in the conversation, in arrival order.
+    pub history: Vec<HistoryNote>,
+    /// Messages in the conversation this state last drew, where a new note goes.
+    pub messages_seen: usize,
     /// A modal masked prompt, open over the composer. While it is set the
     /// composer is not what the keyboard reaches.
     pub secret_prompt: Option<SecretPrompt>,
@@ -1397,7 +1405,7 @@ pub fn notebook_height(
     handles: &HandleTable,
     notebook: &Notebook,
 ) -> usize {
-    notebook_lines(conversation, handles, notebook, false, false, 98, 0).len()
+    notebook_lines(conversation, handles, notebook, &[], false, false, 98, 0).len()
 }
 
 /// One line with nothing to show. Never collapses to no line at all -- the
@@ -1451,6 +1459,7 @@ fn conversation_lines(
         conversation,
         handles,
         notebook,
+        &state.history,
         state.compact,
         state.pretty,
         usize::from(width.saturating_sub(2)),
@@ -1685,10 +1694,12 @@ fn push_recap(lines: &mut Vec<Line<'static>>, recap: Option<&HelperRecord>) {
 /// (the latest cell shows `handles`, an earlier one says `(no outputs)`), so
 /// a caller that holds the live table itself -- every test in `tests/tui.rs`
 /// -- still gets it drawn through the one renderer.
+#[allow(clippy::too_many_arguments)]
 fn notebook_lines(
     conversation: &Conversation,
     handles: &HandleTable,
     notebook: &Notebook,
+    notes: &[HistoryNote],
     compact: bool,
     pretty: bool,
     width: usize,
@@ -1696,7 +1707,9 @@ fn notebook_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut messages = conversation.messages.iter();
+    let mut next_note = 0usize;
 
+    history::push_notes(&mut lines, notes, &mut next_note, 0);
     if let Some(task) = messages.next() {
         turn_header(&mut lines, "USER".into(), ACCENT);
         push_text_region(&mut lines, &message_text(task));
@@ -1706,7 +1719,12 @@ fn notebook_lines(
     let mut cell = 0usize;
     let mut answered = false;
     let mut after_return = false;
-    for message in messages {
+    for (index, message) in messages.enumerate() {
+        // At a turn boundary only: a note drawn between a cell and its
+        // feedback would split the cell's block.
+        if message.role == Role::User && !is_tool_feedback(message) {
+            history::push_notes(&mut lines, notes, &mut next_note, index + 1);
+        }
         match message.role {
             // The assistant message after a cell that returned is the
             // terminal response -- the model's reply, drawn as its turn
@@ -2056,6 +2074,7 @@ fn notebook_lines(
         turn_header(&mut lines, "PREFLIGHT · SCOUT".into(), MUTED);
         lines.push(helper_lane(record, tick, width));
     }
+    history::push_notes(&mut lines, notes, &mut next_note, usize::MAX);
 
     if !lines.is_empty() {
         lines.push(Line::styled("╰─", Style::default().fg(MUTED)));
