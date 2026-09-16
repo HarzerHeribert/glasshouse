@@ -2594,3 +2594,22 @@ direct-tool quota is ever forced.
 ☑ Run matched tools-only, cells-only and hybrid arms and report interface regret from Pane's own telemetry.
 ☑ Derive an acceptance list from the request before the first turn — files, commands, outputs and judged items — show it to the model, and decide every item against the tree or a command run through the one kernel when the model claims completion, holding an unmet item once.
 ☑ Replace the cell cap as a working control with stall detection: a run of cells that changes nothing gets a notice and a count, never a stop; the task wall clock is the boundary and the cap is a backstop.
+
+Phase 66 — Pane: a decision model beside the task model
+
+Recorded from the user's steering of 2026-09-16 (`design-decisions.md`, *Jev is a
+classifier for Pane first; routing stays static*). TypeSafe AI's Jev is a System One
+decision model: it answers typed questions — `noul`, `choice`, `score` — against a
+state with probabilities and a confidence, in well under a second, and writes no
+text, code or tool call. It is a judge beside the task model, never a task or helper
+model. The gateway carries its wire protocol and its account; every decision is
+Pane's and lives inside one turn or session; routing by classification is deferred
+and the 2026-09-10 placement of the classifier stands. Candidates after the hold is
+measured, not boxes yet: the classified intent as a preflight signal, judge items and
+the fresh-checker run decided at decisive confidence, a line beside an exact-call
+approval, the supervisor's look every cell with a fixed nudge vocabulary. Evidence:
+`docs/product/evidence/phase-66.md`.
+
+☐ Carry TypeSafe's System One protocol through the gateway as a relay-only fifth wire protocol with a built-in `typesafe` provider template and a route for its one target, so a `typesafe` account switches on with the key alone, a request reaches it whichever account the session is bound to, and every decision lands in the ledger under its own purpose.
+☐ Ask a configured decision model typed questions from Pane over the gateway — bounded to two seconds, fail-open, never a capability — and record every answer with its confidence and latency in the machine result and the cell inspector.
+☐ Classify the request's intent once per task and, when it reads as read-only above the configured confidence, hold once a cell or direct frame that names an effectful capability with one line to the model; `shadow` records the would-be hold and holds nothing, and no mode changes a grant, a tool's purity or an approval.

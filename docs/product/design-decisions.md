@@ -20903,3 +20903,22 @@ be measured, on the artifact that carries them.
 - **Pane's sign-in panel** offers open in the default browser, copy the link (OSC 52, which works over SSH too) and paste the address (a masked prompt forwarded to the gateway); the whole link or code is kept in the chat. A redrawn panel keeps a cursor that was on an action. Ctrl-C cancels a sign-in as it cancels a tool call, killing the gateway's process group so the broker's login releases the callback port; a login config a killed gateway left behind is swept by the next sign-in. The cancellation is evidenced by a pseudo-terminal run (note shown, no broker or gateway process left), not by a test.
 
 **Evidence.** `gateway::subscription_broker::login::tests::*` (the link and saved account are all that crosses, a stray link is not a sign-in link, a device code carries its link, a failure loses the body, the flag table, no browser over SSH); `tests/bin.rs::{connect_drives_the_broker_login_and_forwards_a_pasted_address, connect_over_ssh_uses_a_device_code_for_openai}` against a stand-in broker; Pane `session::controls::tests::{sign_in_progress_reads_the_gateway_lines_whole, the_sign_in_panel_opens_copies_or_takes_a_pasted_address}`, `session::ui::tests::a_redrawn_panel_keeps_the_selected_row`, `session::ui::links::tests::*`. The broker's real no-browser Claude output was captured and is the parser's fixture. Six mutations KILLED: a stray link read as the sign-in link (it survived the first test, whose stray line did not start with `https://`, and the test was fixed), a paste not forwarded, SSH keeping OpenAI on the browser flow, a failure keeping the provider body, the paste row gone, a cursor kept on text. The hand-written PKCE flow in `subscription/connect.rs`, which wrote the unreadable credential, is deleted; only `Progress` remains. Driven in a pseudo-terminal: `/login` shows the three actions, the chat keeps the whole link, a pasted address reaches the broker and the account connects. Not exercised here: a real provider sign-in, which needs the user; the mutation of the `https`-only guard, which would open a local file on the machine running it.
+
+## Jev is a classifier for Pane first; routing stays static — the user, 2026-09-16
+
+TypeSafe AI's Jev — a System One decision model answering `noul`, `choice` and
+`score` questions with probabilities in 70–500 ms, $0.042 per million input tokens,
+output free, and **no text, code or tool call** — goes into Pane first, as a judge
+beside the task model, never as a task or helper model. First the user's own idea:
+classify the request's intent once and hold once an effectful cell under a read-only
+request; then, each measured in `shadow` before it holds anything, the classified
+intent as a preflight signal, judge items and the fresh-checker run at decisive
+confidence, a line beside an exact-call approval, and the supervisor's look every
+cell with a fixed nudge vocabulary. The gateway only carries the protocol, the
+`typesafe` template and the account. **Routing by classification is deferred** —
+the user: *"keep routing static for the future"* — so the 2026-09-10 ruling stands
+whole: the classifier stays in the host and the gateway changes no model or effort
+on its own. Jev never decides a tool's `Purity`, a grant, an approval or a
+command-lifting equivalence; it classifies natural language and Pane enforces. Map
+Phase 66 (lines 2613–2615); the ranked proposal and the day-one probes are in the
+session's `.agent-runtime/proposal-typesafe-jev.md`.

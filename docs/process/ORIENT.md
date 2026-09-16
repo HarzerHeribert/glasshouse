@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1365 closed · 90 active committed open (94%)** — across 18 phases.
+**1365 closed · 93 active committed open (94%)** — across 19 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -33,6 +33,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
+| Phase 66 | Pane: a decision model beside the task model | **3** | 0 | `2598` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
@@ -96,6 +97,12 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
+
+### Phase 66 — Pane: a decision model beside the task model  (3 open, 0 closed)
+
+- **2613** ☐ Carry TypeSafe's System One protocol through the gateway as a relay-only fifth wire protocol with a built-in `typesafe` provider template and a route for its one target, so a `typesafe` account switches on with the key alone, a request reaches it whichever account the session is bound to, and every decision lands in the ledger under its own purpose.
+- **2614** ☐ Ask a configured decision model typed questions from Pane over the gateway — bounded to two seconds, fail-open, never a capability — and record every answer with its confidence and latency in the machine result and the cell inspector.
+- **2615** ☐ Classify the request's intent once per task and, when it reads as read-only above the configured confidence, hold once a cell or direct frame that names an effectful capability with one line to the model; `shadow` records the would-be hold and holds nothing, and no mode changes a grant, a tool's purity or an approval.
 
 ## Practice sections, by number
 
@@ -187,7 +194,7 @@ the rest are context you probably do not need.
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-66.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 
