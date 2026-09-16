@@ -950,6 +950,44 @@ fn a_file_with_an_unknown_key_is_refused_by_name() {
     assert!(error.contains("nonsense.value"), "{error}");
 }
 
+/// 2637/2639: the mode proposal's threshold and the explore overlay's two
+/// list keys are registered, validate through the same runtime parser as
+/// every other key, and an unrelated key under `[modes.explore]` is refused
+/// exactly as an unknown key anywhere else is (`unknown_key`).
+#[test]
+fn mode_proposal_and_explore_overlay_keys_are_known_and_validated() {
+    assert!(registry::spec("decisions.mode_above").is_some());
+    assert!(registry::spec("modes.explore.writable").is_some());
+    assert!(registry::spec("modes.explore.commands").is_some());
+
+    assert!(registry::validate("decisions.mode_above", "0.3").is_err());
+    assert_eq!(
+        registry::validate("decisions.mode_above", "0.9").expect("in range"),
+        toml::Value::Float(0.9)
+    );
+    assert_eq!(
+        registry::validate("modes.explore.writable", "docs/**, notes/**").expect("list"),
+        toml::Value::Array(vec![
+            toml::Value::String("docs/**".into()),
+            toml::Value::String("notes/**".into()),
+        ])
+    );
+    assert_eq!(
+        registry::validate("modes.explore.commands", "cargo metadata*").expect("list"),
+        toml::Value::Array(vec![toml::Value::String("cargo metadata*".into())])
+    );
+    assert!(registry::validate("modes.explore.foo", "x").is_err());
+
+    let temp = Temp::new("modes-explore-unknown");
+    let store = temp.store();
+    write(
+        &store.path(Scope::Local),
+        "[modes.explore]\nfoo = [\"x\"]\n",
+    );
+    let error = store.load(None).expect_err("unknown key");
+    assert!(error.contains("modes.explore.foo"), "{error}");
+}
+
 #[test]
 fn the_global_file_holds_no_project_only_keys() {
     let temp = Temp::new("globalkeys");

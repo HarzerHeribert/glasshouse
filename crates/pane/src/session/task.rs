@@ -308,6 +308,15 @@ pub(super) struct TaskState {
     pub(super) approval_hints: u32,
     /// This task's approval-hint requests that failed or timed out.
     pub(super) approval_hint_failures: u32,
+    /// The mode proposal's own telemetry (2639, `mode_proposal.rs`): a
+    /// `read_only` intent clearing `mode_above` in `execute`, unpinned. All
+    /// four default false -- no model, `mode = off`, a non-`execute`
+    /// session or a pin all leave this task's proposal unmade, the same
+    /// fail-open shape [`Self::intent`] has.
+    pub(super) mode_proposed: bool,
+    pub(super) mode_applied: bool,
+    pub(super) mode_would_apply: bool,
+    pub(super) mode_pinned: bool,
 }
 
 /// One `gate` call's completion-question telemetry (2616): the cached wire
@@ -373,6 +382,10 @@ impl TaskState {
             completion_decision: None,
             approval_hints: 0,
             approval_hint_failures: 0,
+            mode_proposed: false,
+            mode_applied: false,
+            mode_would_apply: false,
+            mode_pinned: false,
         }
     }
 
@@ -400,6 +413,16 @@ impl TaskState {
         self.decision_failures = decision_failures;
         self.scout_signal = scout_signal;
         self.would_scout = would_scout;
+        self
+    }
+
+    /// This task's mode proposal (2639), computed in `run_task_inner`
+    /// alongside [`Self::with_decision`] and before the profile is narrowed.
+    pub(super) fn with_mode_proposal(mut self, proposal: super::mode_proposal::Proposal) -> Self {
+        self.mode_proposed = proposal.proposed;
+        self.mode_applied = proposal.applied;
+        self.mode_would_apply = proposal.would_apply;
+        self.mode_pinned = proposal.pinned;
         self
     }
 
@@ -439,6 +462,12 @@ impl TaskState {
             },
             "approval_hints": self.approval_hints,
             "approval_hint_failures": self.approval_hint_failures,
+            "mode_proposal": {
+                "proposed": self.mode_proposed,
+                "applied": self.mode_applied,
+                "would_apply": self.mode_would_apply,
+                "pinned": self.mode_pinned,
+            },
             "completion": self.completion_decision.as_ref().map(|decision| serde_json::json!({
                 "noul": decision.noul,
                 "latency_ms": decision.latency_ms,

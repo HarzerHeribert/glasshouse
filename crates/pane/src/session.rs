@@ -82,6 +82,7 @@ fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
     });
 }
 mod controls;
+mod mode_proposal;
 mod resume;
 mod startup;
 mod system;
@@ -707,6 +708,13 @@ fn run(args: SessionArgs) -> Result<(), String> {
                 .unwrap_or_default()
         })
     };
+    // An explicit choice pins; a settings-file default does not, so a
+    // proposal (2639) may still narrow it.
+    let initial_mode_pinned = args.plan || args.mode.is_some();
+    let overlay = {
+        let explore = &config.borrow().modes.explore;
+        ModeOverlay::new(explore.writable.clone(), explore.commands.clone())
+    };
     let initial_effort = crate::settings_session::value(&loaded_settings.values, "session.effort")
         .and_then(toml::Value::as_str)
         .and_then(wire::Effort::parse)
@@ -906,6 +914,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         model: RefCell::new(started_on.clone().unwrap_or_default()),
         context_window: started_on.clone().zip(args.context_window_tokens),
         mode: Cell::new(initial_mode),
+        mode_pinned: Cell::new(initial_mode_pinned),
+        overlay,
         effort: Cell::new(initial_effort),
         interface: Cell::new(args.interface.unwrap_or_default()),
         manifest,
@@ -960,6 +970,13 @@ struct Session<'a> {
     /// switch cannot silently reuse it for a different model.
     context_window: Option<(String, u64)>,
     mode: Cell<tui::Mode>,
+    /// Set by `/mode <m>`, `--mode` or `--plan`; cleared by `/mode auto`. A
+    /// proposal (2639) never narrows a pinned session.
+    mode_pinned: Cell<bool>,
+    /// `[modes.explore]`'s writable globs and command patterns, compiled once
+    /// from the config this session started with (2637): every narrowing
+    /// this session compiles reuses it rather than rebuilding it per request.
+    overlay: ModeOverlay,
     effort: Cell<wire::Effort>,
     /// The entry points this session shows the parent model.
     interface: Cell<crate::abi::Interface>,
@@ -1253,7 +1270,7 @@ fn run_task_inner(
         session.interface.get(),
         &session.manifest,
     );
-    if let Some(line) = prompt::request_mode_line(session.mode.get(), &ModeOverlay::default()) {
+    if let Some(line) = prompt::request_mode_line(session.mode.get(), &session.overlay) {
         transcript.conversation.system.push_str(&line);
     }
     if session.mode.get() != RequestMode::Plan
@@ -1278,6 +1295,7 @@ fn run_task_inner(
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
     let (decision, decision_failures) = task_decision(task, session);
+    let proposal = mode_proposal::propose(session, decision.as_ref());
     let preflight_outcome = preflight_block(task, session, transcript, decision.as_ref());
     if let Some(block) = &preflight_outcome.block {
         transcript.conversation.system.push_str(block);
@@ -1320,11 +1338,13 @@ fn run_task_inner(
 
     // The request mode narrows this task's profile; the prompt line above
     // informs, and this clone is what refuses (ruling *Request modes*).
-    let overlay = ModeOverlay::default();
+    // `proposal.narrow_mode` is `session.mode.get()` unless a read-only
+    // intent proposed `explore` for this one request (2639); the session's
+    // own mode is never written by a proposal.
     let request_profile = session
         .profile
         .clone()
-        .narrowed_to(session.mode.get(), &overlay);
+        .narrowed_to(proposal.narrow_mode, &session.overlay);
     let mut runtime = Runtime::with_limits(
         &request_profile,
         session.glasshouse,
@@ -1367,7 +1387,8 @@ fn run_task_inner(
             decision_failures,
             preflight_outcome.scout_signal,
             preflight_outcome.would_scout,
-        );
+        )
+        .with_mode_proposal(proposal);
     output::decisions(task_state.decisions_telemetry(&session.config().decisions));
 
     loop {
@@ -2884,12 +2905,11 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
         );
         return;
     };
-    let overlay = ModeOverlay::default();
     let ctx = ToolContext {
         profile: &session
             .profile
             .clone()
-            .narrowed_to(session.mode.get(), &overlay),
+            .narrowed_to(session.mode.get(), &session.overlay),
         glasshouse: session.glasshouse,
         session: session.id,
     };
@@ -3123,6 +3143,8 @@ mod tests {
             interface: Cell::new(crate::abi::Interface::default()),
             manifest: crate::manifest::Manifest::default(),
             mode: Cell::new(tui::Mode::Execute),
+            mode_pinned: Cell::new(false),
+            overlay: ModeOverlay::default(),
             effort: Cell::new(wire::Effort::Default),
             project: &project,
             config: &config,

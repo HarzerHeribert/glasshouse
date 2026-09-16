@@ -725,5 +725,9 @@ probe it, and Windows refuses to exec a program the *session* could write.
 - On Windows the command tool is `cmd.exe`, whose line is not parsed here, so
   every `bash` call is refused by name in both modes.
 - A refusal's rule starts `mode explore:` / `mode plan:`; the prompt names the
-  mode, and nothing depends on the model reading it. No settings key feeds
-  `ModeOverlay::new(writable, commands)` yet.
+  mode, and nothing depends on the model reading it. `[modes.explore]
+  writable = [...]` (project-relative globs, appended after the default
+  scratchpad) and `commands = [...]` (extra `bash`-style segment patterns,
+  beside the fixed read-only list) feed `ModeOverlay::new(writable,
+  commands)`, compiled once per session; an absolute or outside-the-root
+  glob makes nothing writable, exactly as an unconfigured glob would.

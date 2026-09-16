@@ -125,6 +125,9 @@ pub struct DecisionsConfig {
     /// once, as not doing what the plan's current step says (2643).
     /// `0.0..=0.5`.
     pub drift_no_below: f64,
+    /// Confidence at or above which a `read_only` intent proposes `explore`
+    /// for one request, in `execute`, unpinned (2639). `0.5..=1.0`.
+    pub mode_above: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -141,8 +144,30 @@ impl Default for DecisionsConfig {
             judge_yes_above: 0.90,
             judge_no_below: 0.10,
             drift_no_below: 0.10,
+            mode_above: 0.85,
         }
     }
+}
+
+/// `[modes]` -- the configurable half of a request narrowing
+/// (`sandbox/modes.rs::ModeOverlay`). Empty by default, so an unconfigured
+/// project's `explore` is exactly `sandbox::modes::DEFAULT_WRITABLE` and
+/// `READ_ONLY_COMMANDS`, unchanged from before this table existed (2637).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModesConfig {
+    pub explore: ModeExploreConfig,
+}
+
+/// `[modes.explore]` -- extra writable globs and read-only command patterns
+/// for the `explore` request mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModeExploreConfig {
+    /// Appended to [`crate::sandbox::modes::DEFAULT_WRITABLE`] by
+    /// `ModeOverlay::new`.
+    pub writable: Vec<String>,
+    /// `Bash`-style segment patterns added to
+    /// [`crate::sandbox::modes::READ_ONLY_COMMANDS`].
+    pub commands: Vec<String>,
 }
 
 /// The whole of `pane.toml`. `project.rs`'s own invariant -- loading edits
@@ -312,6 +337,7 @@ pub struct PaneConfig {
     pub model: ModelConfig,
     pub web: crate::web::WebConfig,
     pub decisions: DecisionsConfig,
+    pub modes: ModesConfig,
 }
 
 /// `[model]` -- the parent tier, the one the person talks to.
@@ -496,12 +522,13 @@ impl PaneConfig {
                 "model",
                 "web",
                 "decisions",
+                "modes",
             ]
             .contains(&key.as_str())
             {
                 return Err(format!(
                     "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
-                     [agents], [model], [web] and [decisions] are recognised"
+                     [agents], [model], [web], [decisions] and [modes] are recognised"
                 ));
             }
         }
@@ -544,6 +571,11 @@ impl PaneConfig {
             None => DecisionsConfig::default(),
         };
 
+        let modes = match table.get("modes") {
+            Some(value) => parse_modes(value)?,
+            None => ModesConfig::default(),
+        };
+
         Ok(Self {
             limits,
             supervisor,
@@ -552,6 +584,7 @@ impl PaneConfig {
             model,
             web,
             decisions,
+            modes,
         })
     }
 }
@@ -771,6 +804,8 @@ const JUDGE_NO_BELOW_MIN: f64 = 0.0;
 const JUDGE_NO_BELOW_MAX: f64 = 0.5;
 const DRIFT_NO_BELOW_MIN: f64 = 0.0;
 const DRIFT_NO_BELOW_MAX: f64 = 0.5;
+const MODE_ABOVE_MIN: f64 = 0.5;
+const MODE_ABOVE_MAX: f64 = 1.0;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -789,6 +824,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "judge_yes_above",
             "judge_no_below",
             "drift_no_below",
+            "mode_above",
         ]
         .contains(&key.as_str())
         {
@@ -952,6 +988,22 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let mode_above = match table.get("mode_above") {
+        None => defaults.mode_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `mode_above` must be a number".to_string())?;
+            if !(MODE_ABOVE_MIN..=MODE_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `mode_above` must be between {MODE_ABOVE_MIN} and {MODE_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -964,7 +1016,56 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         judge_yes_above,
         judge_no_below,
         drift_no_below,
+        mode_above,
     })
+}
+
+fn parse_modes(value: &toml::Value) -> Result<ModesConfig, String> {
+    let table = table_of(value, "modes")?;
+    for key in table.keys() {
+        if key != "explore" {
+            return Err(format!(
+                "pane.toml: unknown key `{key}` in [modes]; only `explore` is recognised"
+            ));
+        }
+    }
+    let explore = match table.get("explore") {
+        Some(value) => parse_mode_explore(value)?,
+        None => ModeExploreConfig::default(),
+    };
+    Ok(ModesConfig { explore })
+}
+
+fn parse_mode_explore(value: &toml::Value) -> Result<ModeExploreConfig, String> {
+    let table = table_of(value, "modes.explore")?;
+    for key in table.keys() {
+        if !["writable", "commands"].contains(&key.as_str()) {
+            return Err(format!(
+                "pane.toml: unknown key `{key}` in [modes.explore]; only `writable` and `commands` are recognised"
+            ));
+        }
+    }
+    Ok(ModeExploreConfig {
+        writable: string_list(table, "writable")?,
+        commands: string_list(table, "commands")?,
+    })
+}
+
+fn string_list(table: &toml::value::Table, key: &str) -> Result<Vec<String>, String> {
+    match table.get(key) {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| format!("pane.toml: `{key}` must be a list of strings"))?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("pane.toml: every entry of `{key}` must be a string"))
+            })
+            .collect(),
+    }
 }
 
 fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {

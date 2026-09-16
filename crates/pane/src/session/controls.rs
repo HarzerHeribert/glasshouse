@@ -690,30 +690,46 @@ pub(super) fn command(
                 );
             }
         }
-        "mode" => {
-            let mode = match argument.map(Mode::parse) {
-                Some(Some(mode)) => mode,
-                None => session.mode.get().next(),
-                Some(None) => {
-                    session_println!("Use /mode execute|explore|plan");
-                    return true;
-                }
-            };
-            session.mode.set(mode);
-            if let Some(ui) = session.ui {
-                ui.mode(mode);
+        "mode" => match argument.map(str::trim) {
+            None => {
+                session_println!(
+                    "Mode: {}{}",
+                    session.mode.get().name(),
+                    if session.mode_pinned.get() {
+                        " · pinned"
+                    } else {
+                        " · not pinned; a confident read-only request may propose explore"
+                    }
+                );
             }
-            session_println!(
-                "Mode: {} · {} · applies from the next request",
-                mode.name(),
-                match mode {
-                    Mode::Execute => "session sandbox applies",
-                    Mode::Explore =>
-                        "reads run; writes only under agent scratch and documentation globs; the shell is read-only",
-                    Mode::Plan => "reads run; no change executes; the shell is read-only",
+            Some("auto") => {
+                session.mode_pinned.set(false);
+                session_println!(
+                    "Mode: {} · unpinned; a confident read-only request may propose explore",
+                    session.mode.get().name()
+                );
+            }
+            Some(word) => match Mode::parse(word) {
+                None => session_println!("Use /mode execute|explore|plan|auto"),
+                Some(mode) => {
+                    session.mode.set(mode);
+                    session.mode_pinned.set(true);
+                    if let Some(ui) = session.ui {
+                        ui.mode(mode);
+                    }
+                    session_println!(
+                        "Mode: {} · pinned · {} · applies from the next request",
+                        mode.name(),
+                        match mode {
+                            Mode::Execute => "session sandbox applies",
+                            Mode::Explore =>
+                                "reads run; writes only under agent scratch and documentation globs; the shell is read-only",
+                            Mode::Plan => "reads run; no change executes; the shell is read-only",
+                        }
+                    );
                 }
-            );
-        }
+            },
+        },
         "handles" => {
             let table = transcript
                 .notebook
@@ -1131,6 +1147,8 @@ mod tests {
             interface: Cell::new(crate::abi::Interface::default()),
             manifest: crate::manifest::Manifest::default(),
             mode: Cell::new(tui::Mode::Execute),
+            mode_pinned: Cell::new(false),
+            overlay: ModeOverlay::default(),
             effort: Cell::new(wire::Effort::Default),
             project: &project,
             config: &RefCell::new(config),
@@ -1200,6 +1218,8 @@ mod tests {
             interface: Cell::new(crate::abi::Interface::default()),
             manifest: crate::manifest::Manifest::default(),
             mode: Cell::new(tui::Mode::Execute),
+            mode_pinned: Cell::new(false),
+            overlay: ModeOverlay::default(),
             effort: Cell::new(wire::Effort::Default),
             project: &project,
             config: &config,

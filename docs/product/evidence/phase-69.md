@@ -23,7 +23,7 @@ Five scripted `pane session --output-format json` runs against the scratch Pytho
 
 ## Line 2637 — `explore` as a request mode
 
-**State: PARTIAL** (2026-09-17, `GH-PANE-EXPLORE-MODE`, Opus high, Red; report `.agent-runtime/report-pane-explore-mode.md`; integrated by the primary with a three-way apply over the approval-hint commit, the worker's `tui_live` patch and the `/mode` help text applied at integration). The enforcement is built; the line stays open on two producers named below.
+**State: COMPLETE** (enforcement 2026-09-17 by `GH-PANE-EXPLORE-MODE`, Opus high, Red, report `.agent-runtime/report-pane-explore-mode.md`, integrated three-way over the approval-hint commit with the worker's `tui_live` patch and the `/mode` help text applied at integration; the scratchpad by `GH-PANE-SCRATCH-AND-PLAN-FILE`; the configured globs and commands by `GH-PANE-MODES-WIRED` — the three parts below).
 
 **Contract (as built).** Given a session in `explore`, when a cell, a direct `/tool` frame or a native tool frame invokes `write`/`edit` outside the writable globs, or `bash` with anything but a read-only command (a fixed list plus configured patterns; redirects, process substitution, `VAR=` prefixes, quoted or pathed names, `sudo`/`sh -c` refused), Pane refuses it with a rule starting `mode explore:` and executes nothing, while reads and read-only commands run exactly as in `execute`; the profile decides first (never-grantable, deny, allow) and the mode only narrows what the profile admitted; a narrowed profile admits no MCP tool; `/mode execute` lifts the narrowing from the next request; the OS layer is rendered from the unnarrowed profile (the appliers probe `check`, the mode lives in `check_request`).
 
@@ -42,7 +42,7 @@ Five scripted `pane session --output-format json` runs against the scratch Pytho
 
 **Gates.** `cargo test -p pane --no-fail-fast` in the worktree: 93 targets, 1465 passed, 1 failed (`tui_live`, the superseded plan contract, patched at integration); targeted blast radius exit 0 in the worktree and on the merged tree (`request_modes` 6, `sandbox_apply` 28, `sandbox_profile` 46, `session` 105).
 
-**Open, and why.** `[modes.explore] writable = […]` / `commands = […]` have no producer: `settings/registry.rs` refuses unknown keys and was another package's file this round — only `ModeOverlay::default()` reaches production. Goes to `GH-PANE-MODES-WIRED` (with 2639).
+**Configured globs and commands** (2026-09-17, `GH-PANE-MODES-WIRED`): `[modes.explore] writable = [...]` and `commands = [...]` in `pane.toml` (`config.rs :: {ModesConfig, ModeExploreConfig}`, registered as `modes.explore.writable`/`commands`, `[modes]` a recognised table) build the session's one `ModeOverlay` at startup (`session.rs :: Session::overlay`, replacing the three `ModeOverlay::default()` sites). Tests: `request_modes::configured_explore_writable_and_commands_reach_the_overlay` (a `docs/**` write admitted in explore, `src/x.rs` refused; a configured `cargo metadata*` runs), `settings_store::mode_proposal_and_explore_overlay_keys_are_known_and_validated`. Mutation: the overlay built from defaults KILLED by `request_modes::configured_explore_writable_and_commands_reach_the_overlay` (`:635`). Limit: the configured command patterns are enforced but not named in the prompt's mode line.
 
 **Scratchpad built** (2026-09-17, `GH-PANE-SCRATCH-AND-PLAN-FILE`, Opus high, Red; report `.agent-runtime/report-pane-scratch-plan.md`). `.pane/scratch/**` is carved out of the `.pane/**` never rule with the profile's existing exception shape (`profile.rs :: never_rules`, `SCRATCH_DIR`); dangling symlinks are now followed before judging (`canonical_prefix`, `DANGLING_LINK_LIMIT`), so a link under the scratchpad to a not-yet-existing host file is refused; every applier renders the carve-out (macOS `(allow file-write* (subpath …/.pane/scratch))` after the deny, Linux `bwrap_argv` bind, Windows a nested read-write DACL). Tests: `sandbox_profile::{the_scratchpad_is_carved_out_of_dot_pane_and_explore_writes_it, the_rest_of_dot_pane_stays_never_writable_in_every_mode, no_spelling_under_the_scratchpad_reaches_outside_it, the_scratchpad_carve_out_holds_in_verbatim_and_plain_spellings}`, `sandbox_apply::{every_applier_carves_the_scratchpad_out_of_dot_pane, a_confined_child_writes_the_scratchpad_and_not_the_host_configuration}`, `request_modes::explore_writes_the_scratchpad_and_is_refused_outside_it`. Mutations: carve-out removed (`except_spelling: None`) KILLED by `request_modes::explore_writes_the_scratchpad_and_is_refused_outside_it`; dangling link not followed KILLED by `sandbox_profile::no_spelling_under_the_scratchpad_reaches_outside_it`; seatbelt allow removed KILLED by `sandbox_apply::a_confined_child_writes_the_scratchpad_and_not_the_host_configuration`. Full `cargo test -p pane --no-fail-fast` in the worktree: 94 targets, 1493 passed, 0 failed.
 
@@ -66,7 +66,22 @@ Five scripted `pane session --output-format json` runs against the scratch Pytho
 
 ## Line 2639 — the mode proposed from the intent
 
-**State: OPEN** — packet after 2637 lands.
+**State: COMPLETE** (2026-09-17, `GH-PANE-MODES-WIRED`, Sonnet high, Amber; report `.agent-runtime/report-pane-modes-wired.md`).
+
+**Contract.** Given `[decisions] model` set and `mode = on`, when a request's intent answers `read_only` at or above `mode_above` (default 0.85) while the session mode is `execute` and unpinned, Pane runs that one request under the `explore` narrowing and prints `decision: explore for this request (read_only 0.97); /mode execute to pin`; between 0.5 and `mode_above` it prints one offer line and runs as today (a blocking question would stall scripted sessions); a pinned mode — `/mode <m>`, Shift-Tab, `--mode`, `--plan` — is never overridden and `/mode auto` unpins; `shadow` counts `would_apply` only; no model, `off`, a non-`read_only` intent or a failed decision leave the request in the session's mode. `session.mode` itself never changes. Bare `/mode` now prints the mode and its pin instead of cycling (Shift-Tab still cycles).
+
+**Production.** `session/mode_proposal.rs :: propose`, `session.rs :: run_task_inner` (`proposal.narrow_mode` at the `narrowed_to` call), `session/controls.rs` (`/mode` pin, unpin, auto), `config.rs :: mode_above`, `settings/registry.rs`, `session/task.rs` (telemetry `decisions.mode_proposal: {proposed, applied, would_apply, pinned}` — not `decisions.mode`, which is the config string).
+
+**Tests.** `tests/request_modes.rs::{a_confident_read_only_intent_proposes_explore_for_one_request, a_read_only_intent_below_mode_above_offers_explore_and_runs_as_today, mode_execute_pins_and_a_confident_intent_never_proposes, mode_auto_unpins_and_a_confident_intent_proposes_again, shadow_mode_runs_as_today_and_counts_would_apply}`.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| The proposal needs confidence | `mode_proposal.rs`: `confidence < mode_above` → `< 0.0` | `request_modes::a_read_only_intent_below_mode_above_offers_explore_and_runs_as_today` | KILLED (`:533`) |
+| A pin is never overridden | `\|\| proposal.pinned` → `\|\| false` | `request_modes::mode_execute_pins_and_a_confident_intent_never_proposes` | KILLED (`:553`, src/new.rs refused instead of written) |
+
+**Gates.** `cargo test -p pane --test request_modes`: 16 passed; `--test settings_store` 30; `--test config` 17; `--test session` 105; targeted blast radius exit 0 in the worktree and on the merged tree.
+
+**Limits.** The offer band (0.5 to `mode_above`) is a printed line, not a counted proposal. The threshold is a default (2646).
 
 ## Line 2640 — remote commands gated in `explore`
 

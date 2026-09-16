@@ -78,7 +78,7 @@ const DECISION_MODES: &[&str] = &["off", "shadow", "on"];
 
 /// The top-level tables `PaneConfig` parses. A key under one of these is
 /// validated by the runtime parser; everything else is owned here.
-pub(crate) const RUNTIME_TABLES: [&str; 7] = [
+pub(crate) const RUNTIME_TABLES: [&str; 8] = [
     "limits",
     "supervisor",
     "helpers",
@@ -86,6 +86,7 @@ pub(crate) const RUNTIME_TABLES: [&str; 7] = [
     "model",
     "web",
     "decisions",
+    "modes",
 ];
 
 /// Whether a key belongs to a runtime table, and so reaches `PaneConfig`.
@@ -410,6 +411,33 @@ static SPECS: &[SettingSpec] = &[
         label: "Drift no threshold",
         description: "The drift question's noul at or below which an effectful cell is held once, as not doing what the plan's current step says.",
         kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "decisions.mode_above",
+        label: "Mode proposal confidence",
+        description: "Confidence at or above which a read-only intent proposes `explore` for one request, in `execute`, unpinned.",
+        kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "modes.explore.writable",
+        label: "Explore writable globs",
+        description: "Project-relative globs, beside the scratchpad, that a write or edit may reach in `explore`.",
+        kind: Kind::List,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "modes.explore.commands",
+        label: "Explore read-only commands",
+        description: "Bash-style segment patterns, beside the fixed read-only list, that run in `explore`.",
+        kind: Kind::List,
         choices: &[],
         basic: false,
         restart: true,

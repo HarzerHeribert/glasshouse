@@ -142,3 +142,18 @@ naming the step and the answer; re-issued, it runs (`drift_holds == 0` spent,
 not asked again). `mode = shadow` runs the cell and counts `would_drift`; a
 failed or slow decision counts `drift_failed` and runs the cell, no second
 timeout. `decisions.drift` carries `{asked, held, would_hold, failed}`.
+
+## 9. The proposed mode (2639)
+
+`[decisions] mode_above` (default `0.85`, `0.5..=1.0`): at or above it, a
+`read_only` intent in `execute`, unpinned, with a model configured and `mode
+!= off`, narrows one request to `explore` (`session.mode` unchanged) and
+prints `decision: explore for this request (read_only 0.97); /mode execute
+to pin`. Between `0.5` and `mode_above` it offers instead: `decision:
+read_only 0.71 below mode_above; /mode explore to pin`, and the request runs
+in the session's mode -- a blocking question would stall a scripted session.
+`mode = shadow` counts `would_apply` and prints neither line. `/mode <m>`,
+`--mode`, `--plan` and Shift-Tab pin the session's mode against a proposal;
+`/mode auto` unpins (default: unpinned). `decisions.mode_proposal` carries
+`{proposed, applied, would_apply, pinned}` -- `decisions.mode` already names
+the off/shadow/on string.
