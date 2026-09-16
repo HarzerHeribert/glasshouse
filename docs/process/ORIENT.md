@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1365 closed · 93 active committed open (94%)** — across 19 phases.
+**1365 closed · 94 active committed open (94%)** — across 19 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -33,8 +33,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
-| Phase 66 | Pane: a decision model beside the task model | **3** | 0 | `2598` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
+| Phase 66 | Pane: a decision model beside the task model | **4** | 0 | `2598` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
@@ -50,7 +50,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~78 open lines are not.
+other ~82 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -97,12 +97,6 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 66 — Pane: a decision model beside the task model  (3 open, 0 closed)
-
-- **2613** ☐ Carry TypeSafe's System One protocol through the gateway as a relay-only fifth wire protocol with a built-in `typesafe` provider template and a route for its one target, so a `typesafe` account switches on with the key alone, a request reaches it whichever account the session is bound to, and every decision lands in the ledger under its own purpose.
-- **2614** ☐ Ask a configured decision model typed questions from Pane over the gateway — bounded to two seconds, fail-open, never a capability — and record every answer with its confidence and latency in the machine result and the cell inspector.
-- **2615** ☐ Classify the request's intent once per task and, when it reads as read-only above the configured confidence, hold once a cell or direct frame that names an effectful capability with one line to the model; `shadow` records the would-be hold and holds nothing, and no mode changes a grant, a tool's purity or an approval.
 
 ## Practice sections, by number
 

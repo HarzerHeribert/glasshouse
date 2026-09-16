@@ -1,6 +1,6 @@
 # Capability evidence — phase 66
 
-Phase 66 — Pane: a decision model beside the task model (map lines 2613–2615),
+Phase 66 — Pane: a decision model beside the task model (map lines 2613–2616),
 recorded 2026-09-16 from the user's steering (`design-decisions.md`, *Jev is a
 classifier for Pane first; routing stays static*). Entries are bounded by the
 *Decompression* ruling: the contract, the tests by name, the decisive mutation where
@@ -36,5 +36,9 @@ body `{state, model, questions{key: {type, instructions, criteria}}}`, answers
 ⟨open⟩
 
 ## Line 2615 — request intent, effect hold
+
+⟨open⟩
+
+## Line 2616 — the diff matches the request, before completion
 
 ⟨open⟩

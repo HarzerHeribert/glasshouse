@@ -20919,6 +20919,8 @@ cell with a fixed nudge vocabulary. The gateway only carries the protocol, the
 the user: *"keep routing static for the future"* — so the 2026-09-10 ruling stands
 whole: the classifier stays in the host and the gateway changes no model or effort
 on its own. Jev never decides a tool's `Purity`, a grant, an approval or a
-command-lifting equivalence; it classifies natural language and Pane enforces. Map
-Phase 66 (lines 2613–2615); the ranked proposal and the day-one probes are in the
+command-lifting equivalence; it classifies natural language and Pane enforces. The user, later the same day: *"could we do something of the sort of a 'diff matches
+instructions' checker before onCompletion"* — recorded as the phase's fourth line,
+at the completion gate beside the existing findings. Map
+Phase 66 (lines 2613–2616); the ranked proposal and the day-one probes are in the
 session's `.agent-runtime/proposal-typesafe-jev.md`.
