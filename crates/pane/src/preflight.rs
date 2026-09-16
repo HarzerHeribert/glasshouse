@@ -228,8 +228,18 @@ pub fn request_in(brief: &str) -> Option<&str> {
 /// A section that reads as an open question renders as `(none found)`: a
 /// question in the prompt gets answered and a list of rejected candidates is
 /// a menu to browse, so neither is carried (`little-helpers.md`).
+///
+/// `ranking` is `helpers::ScoutRanking::note()`'s line when the candidate
+/// files the Scout was served were ranked (2644), or `None` when nothing was
+/// ranked -- no model configured, `mode` not `on`, or the ranking question
+/// itself failed.
 #[must_use]
-pub fn render(task: &str, report: &str, served: &[(String, String)]) -> String {
+pub fn render(
+    task: &str,
+    report: &str,
+    served: &[(String, String)],
+    ranking: Option<&str>,
+) -> String {
     let sections = sections_of(report);
     let mut block = String::from("\n\n");
     block.push_str(RENDER_REQUEST_HEADING);
@@ -274,10 +284,13 @@ pub fn render(task: &str, report: &str, served: &[(String, String)]) -> String {
         block.push_str(&format!("### {path}\n```\n{}\n```\n\n", text.trim_end()));
     }
     block.push_str(&format!(
-        "## Scouting record\nscout · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full\n",
+        "## Scouting record\nscout · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full{}\n",
         SECTIONS.len(),
         spans(report).len(),
         served.len(),
+        ranking
+            .map(|note| format!(" · {note}"))
+            .unwrap_or_default(),
     ));
     block
 }

@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::contract::{Conversation, Message, Role};
+use crate::decide::{self, Answer, Question};
 use crate::tools::registry;
 use crate::wire;
 
@@ -985,6 +986,422 @@ fn bounded_ask(input: &str) -> String {
     } else {
         format!("{}…", line.chars().take(59).collect::<String>())
     }
+}
+
+// ---------------------------------------------------------------------
+// Ranking a Scout's candidates and judging a helper's own result
+// (map 2644, 2645; `docs/product/pane/decision-model.md`).
+//
+// Both ask the decision model one bounded question and never withhold or
+// rerun a helper's own call: ranking orders and floors what the Scout is
+// served before it starts, and judging appends one line to a returned
+// record after it finishes. A failed, slow or absent decision leaves
+// either exactly as it is today.
+// ---------------------------------------------------------------------
+
+/// The floor a scout candidate's own relevance noul must clear to be kept
+/// (2644), and the mirror floor for [`HelperJudge`] (2645). Both keys
+/// belong under `[decisions]`, which only `config.rs` parses this round and
+/// rejects an unknown key -- this package could not add them there without
+/// editing a file another package owns this round, so these are the
+/// shipped defaults until that lands (see this task's own report).
+pub const DEFAULT_SCOUT_RELEVANCE_BELOW: f64 = 0.10;
+pub const DEFAULT_HELPER_NO_BELOW: f64 = 0.10;
+
+/// How many lines of a candidate's head the ranking question sees.
+const RANK_HEAD_LINES: usize = 40;
+
+/// The most one ranking request's `state` may hold. Heads are dropped from
+/// the end first, then whole candidates, until the state fits -- never a
+/// question sent about a file `state` does not carry.
+const RANK_STATE_BYTES: usize = 64 * 1024;
+
+/// How many of a scout's ranked, floor-passing candidates the brief names.
+const MAX_RANKED_SCOUT_FILES: usize = 24;
+
+/// One file offered to the ranking question before the Scout's own request
+/// is built. `head` is what the question sees -- never the whole file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoutCandidate {
+    pub path: String,
+    pub head: String,
+}
+
+/// The decision model and floor for one ranking request.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoutRankRoute<'a> {
+    pub model: &'a str,
+    pub floor: f64,
+    /// `mode = on`: the ranking changes what the Scout is served.
+    /// `mode = shadow`: it is only asked and counted -- today's order runs.
+    pub apply: bool,
+}
+
+/// What ranking one Scout call's candidates produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoutRanking {
+    /// Every candidate the ranking question actually answered.
+    pub ranked: u32,
+    /// The paths that cleared the floor, in descending relevance, capped at
+    /// [`MAX_RANKED_SCOUT_FILES`].
+    pub kept: Vec<(String, f64)>,
+    /// Candidates the floor excluded.
+    pub skipped: u32,
+    /// Candidates dropped before the request was even sent, to keep `state`
+    /// under [`RANK_STATE_BYTES`].
+    pub dropped: u32,
+    pub latency_ms: u64,
+}
+
+impl ScoutRanking {
+    /// The Scouting record's own line: `ranked N, skipped M, top: a.rs 0.94,
+    /// b.rs 0.81` (`little-helpers.md`).
+    pub fn note(&self) -> String {
+        let mut line = format!("ranked {}, skipped {}", self.ranked, self.skipped);
+        if !self.kept.is_empty() {
+            let top: Vec<String> = self
+                .kept
+                .iter()
+                .take(3)
+                .map(|(path, score)| format!("{path} {score:.2}"))
+                .collect();
+            line.push_str(&format!(", top: {}", top.join(", ")));
+        }
+        line
+    }
+}
+
+/// The first [`RANK_HEAD_LINES`] lines of `text`.
+fn bounded_head(text: &str) -> String {
+    text.lines()
+        .take(RANK_HEAD_LINES)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Builds the ranking request's `state`, dropping heads and then whole
+/// candidates from the end until it fits [`RANK_STATE_BYTES`]. Returns the
+/// state, the original indices it still names, and how many candidates were
+/// dropped entirely.
+fn bounded_candidate_state(
+    request: &str,
+    candidates: &[ScoutCandidate],
+) -> (serde_json::Value, Vec<usize>, u32) {
+    let mut heads: Vec<String> = candidates
+        .iter()
+        .map(|candidate| bounded_head(&candidate.head))
+        .collect();
+    let mut included = vec![true; candidates.len()];
+    let mut dropped = 0u32;
+
+    let build = |heads: &[String], included: &[bool]| -> serde_json::Value {
+        let files: Vec<serde_json::Value> = candidates
+            .iter()
+            .zip(heads)
+            .zip(included)
+            .filter(|&(_, &keep)| keep)
+            .map(|((candidate, head), _)| serde_json::json!({"path": candidate.path, "head": head}))
+            .collect();
+        serde_json::json!({"request": request, "files": files})
+    };
+    let size = |value: &serde_json::Value| {
+        serde_json::to_vec(value)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
+    };
+
+    let mut index = candidates.len();
+    while size(&build(&heads, &included)) > RANK_STATE_BYTES && index > 0 {
+        index -= 1;
+        heads[index].clear();
+    }
+    let mut index = candidates.len();
+    while size(&build(&heads, &included)) > RANK_STATE_BYTES && index > 0 {
+        index -= 1;
+        if included[index] {
+            included[index] = false;
+            dropped += 1;
+        }
+    }
+    let value = build(&heads, &included);
+    let kept_indices: Vec<usize> = included
+        .iter()
+        .enumerate()
+        .filter(|&(_, &keep)| keep)
+        .map(|(i, _)| i)
+        .collect();
+    (value, kept_indices, dropped)
+}
+
+/// Asks one `noul` per candidate in one request, keyed by its index in
+/// `candidates`, and answers with the ranking -- or `None` on any transport,
+/// status, timeout or parse failure, in which case the caller keeps its
+/// candidates in whatever order it already had them (fail-open, same as
+/// every other decision in this package).
+pub fn rank_scout_candidates(
+    request: &str,
+    candidates: &[ScoutCandidate],
+    route: ScoutRankRoute<'_>,
+) -> Option<ScoutRanking> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let (state, kept_indices, dropped) = bounded_candidate_state(request, candidates);
+    if kept_indices.is_empty() {
+        return None;
+    }
+    let questions: Vec<(String, Question)> = kept_indices
+        .iter()
+        .map(|&index| {
+            (
+                index.to_string(),
+                Question::Noul {
+                    instructions: format!("file {index} is relevant to the request"),
+                },
+            )
+        })
+        .collect();
+    let answers = decide::decide(route.model, state, &questions).ok()?;
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    let mut latency_ms = 0u64;
+    for decision in answers.decisions {
+        latency_ms = decision.latency_ms;
+        let Answer::Noul(score) = decision.answer else {
+            continue;
+        };
+        let Ok(index) = decision.key.parse::<usize>() else {
+            continue;
+        };
+        let Some(candidate) = candidates.get(index) else {
+            continue;
+        };
+        scored.push((candidate.path.clone(), score));
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let ranked = scored.len() as u32;
+    let skipped = scored
+        .iter()
+        .filter(|(_, score)| *score < route.floor)
+        .count() as u32;
+    let kept = scored
+        .into_iter()
+        .filter(|(_, score)| *score >= route.floor)
+        .take(MAX_RANKED_SCOUT_FILES)
+        .collect();
+    Some(ScoutRanking {
+        ranked,
+        kept,
+        skipped,
+        dropped,
+        latency_ms,
+    })
+}
+
+/// The section appended to the Scout's brief so it reads the ranked
+/// candidates before it looks for anything itself. Only used when
+/// [`ScoutRankRoute::apply`] is set -- see [`preflight_judged`].
+fn scout_ranking_section(ranking: &ScoutRanking) -> String {
+    let mut section = String::from("\n\n## Candidate files, ranked by relevance\n");
+    for (path, score) in &ranking.kept {
+        section.push_str(&format!("{path} ({score:.2})\n"));
+    }
+    if ranking.skipped > 0 {
+        section.push_str(&format!(
+            "({} candidate file(s) skipped below the relevance floor)\n",
+            ranking.skipped
+        ));
+    }
+    section.push_str("Read these first, in this order, before searching further.\n");
+    section
+}
+
+/// A small, bounded, best-effort pool of files under `profile`'s root for
+/// [`rank_scout_candidates`] to rank -- an unreadable file or directory is
+/// skipped rather than failing the caller. Deliberately independent of
+/// `helper_context.rs`'s own project walk, which does no model work by
+/// design and is not this package's to extend with one.
+pub fn discover_scout_candidates(
+    profile: &crate::sandbox::profile::Profile,
+    max_files: usize,
+) -> Vec<ScoutCandidate> {
+    const SKIP_DIRS: [&str; 6] = [
+        ".git",
+        "target",
+        "node_modules",
+        ".worktrees",
+        "dist",
+        "build",
+    ];
+    const MAX_NODES: usize = 512;
+    let mut candidates = Vec::new();
+    let mut stack = vec![profile.root().to_path_buf()];
+    let mut visited = 0usize;
+    'walk: while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited >= MAX_NODES {
+                break 'walk;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if candidates.len() >= max_files {
+                break 'walk;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let relative = path
+                .strip_prefix(profile.root())
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            candidates.push(ScoutCandidate {
+                path: relative,
+                head: bounded_head(&text),
+            });
+        }
+    }
+    candidates
+}
+
+/// The immutable per-call context every helper entry point needs, bundled
+/// so [`run_judged`] and [`preflight_judged`] stay under clippy's argument
+/// ceiling without changing [`run`]'s own signature -- `runtime/bindings.rs`
+/// and existing tests call `run` exactly as it is today.
+#[derive(Clone, Copy)]
+pub struct HelperContext<'a> {
+    pub profile: &'a crate::sandbox::profile::Profile,
+    pub glasshouse: &'a crate::glasshouse::Glasshouse,
+    pub session: &'a crate::contract::SessionId,
+    pub token: &'a crate::tools::invoke::CancellationToken,
+}
+
+/// The decision model and floor for one helper-result judge question.
+#[derive(Debug, Clone, Copy)]
+pub struct HelperJudge<'a> {
+    pub model: &'a str,
+    pub floor: f64,
+    /// `mode = on`: a confident no is written into the outcome's text.
+    /// `mode = shadow`: the question is still asked, never written.
+    pub apply: bool,
+}
+
+/// Asks whether `outcome`'s text answers `asked`, and on a confident no
+/// under `judge.apply`, appends one line to `outcome.text` -- never
+/// replacing, truncating or rerunning it. Returns the noul answer, or
+/// `None` when there was nothing to judge (the call already failed or was
+/// cancelled) or the question itself failed, timed out or came back
+/// unparseable.
+fn judge_outcome(asked: &str, outcome: &mut HelperOutcome, judge: HelperJudge<'_>) -> Option<f64> {
+    if !outcome.ok {
+        return None;
+    }
+    let state = serde_json::json!({"asked": asked, "result": outcome.text});
+    let questions = [(
+        "judge".to_string(),
+        Question::Noul {
+            instructions: "the result answers what was asked".to_string(),
+        },
+    )];
+    let answers = decide::decide(judge.model, state, &questions).ok()?;
+    let decision = answers.decisions.into_iter().find(|d| d.key == "judge")?;
+    let Answer::Noul(noul) = decision.answer else {
+        return None;
+    };
+    if judge.apply && noul <= judge.floor {
+        outcome.text.push_str(&format!(
+            "\n\ndecision: this result may not answer what was asked ({noul:.2})"
+        ));
+    }
+    Some(noul)
+}
+
+/// [`run`] plus one judge question on what it returned (2645). `judge:
+/// None` is byte-identical to [`run`] -- no model configured, `mode = off`,
+/// or the caller chooses not to ask. Never withholds or reruns the call:
+/// the judge only reads `call.outcome` after it is already decided.
+pub fn run_judged(
+    spec: &HelperSpec,
+    route: HelperRoute<'_>,
+    input: &str,
+    context: HelperContext<'_>,
+    judge: Option<HelperJudge<'_>>,
+) -> HelperCall {
+    let mut call = run(
+        spec,
+        route,
+        input,
+        context.profile,
+        context.glasshouse,
+        context.session,
+        context.token,
+    );
+    if let Some(judge) = judge {
+        judge_outcome(input, &mut call.outcome, judge);
+    }
+    call
+}
+
+/// What [`preflight_judged`] answers with: the same record [`preflight`]
+/// returns, plus the ranking that shaped what the Scout was served (`None`
+/// when nothing was ranked).
+pub struct PreflightJudged {
+    pub record: HelperRecord,
+    pub ranking: Option<ScoutRanking>,
+}
+
+/// [`preflight`] plus the candidate ranking (2644) and the result judge
+/// (2645) on the same call. `rank: None` or `judge: None` leaves that half
+/// exactly as [`preflight`] behaves.
+pub fn preflight_judged(
+    input: &str,
+    route: HelperRoute<'_>,
+    context: HelperContext<'_>,
+    rank: Option<(&[ScoutCandidate], ScoutRankRoute<'_>)>,
+    judge: Option<HelperJudge<'_>>,
+    mut progress: impl FnMut(&HelperRecord),
+) -> Option<PreflightJudged> {
+    let spec = HELPERS
+        .iter()
+        .find(|spec| spec.call_sites.contains(&CallSite::Preflight))?;
+    let request = crate::preflight::request_in(input).unwrap_or(input);
+
+    let ranking = rank.and_then(|(candidates, rank_route)| {
+        rank_scout_candidates(request, candidates, rank_route)
+    });
+    let effective_input = match (&ranking, rank) {
+        (Some(ranking), Some((_, rank_route))) if rank_route.apply => {
+            format!("{input}{}", scout_ranking_section(ranking))
+        }
+        _ => input.to_string(),
+    };
+
+    let mut record = HelperRecord {
+        helper: spec.name.to_string(),
+        verb: spec.verb.to_string(),
+        asked: bounded_ask(request),
+        ..HelperRecord::default()
+    };
+    progress(&record);
+    let call = run_judged(spec, route, &effective_input, context, judge);
+    record.outcome = call.outcome;
+    record.turns = call.turns;
+    record.looked = call.looked;
+    record.usage = call.usage;
+    progress(&record);
+    Some(PreflightJudged { record, ranking })
 }
 
 #[cfg(test)]

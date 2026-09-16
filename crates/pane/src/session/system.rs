@@ -349,13 +349,50 @@ pub(super) fn preflight_block(
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
     let brief = crate::preflight::scouting_brief(task, &session.manifest);
-    let Some(record) = crate::helpers::preflight(
+    // Ranking and judging (2644, 2645): `decisions.model` set and `mode`
+    // not `off` is the same gate the intent/complexity question already
+    // uses above. `apply` carries `mode = on` versus `shadow` -- shadow
+    // still asks and counts, it just never reorders what the Scout is
+    // served or writes a line into what it returned.
+    let decisions_active = decisions.mode != crate::config::DecisionMode::Off;
+    let decisions_apply = decisions.mode == crate::config::DecisionMode::On;
+    let decision_model = decisions.model.clone();
+    let rank_candidates = (decisions_active && decision_model.is_some())
+        .then(|| crate::helpers::discover_scout_candidates(session.profile, 40));
+    let rank = match (&rank_candidates, decision_model.as_deref()) {
+        (Some(candidates), Some(decision_model)) => Some((
+            candidates.as_slice(),
+            crate::helpers::ScoutRankRoute {
+                model: decision_model,
+                floor: crate::helpers::DEFAULT_SCOUT_RELEVANCE_BELOW,
+                apply: decisions_apply,
+            },
+        )),
+        _ => None,
+    };
+    let judge = if decisions_active {
+        decision_model
+            .as_deref()
+            .map(|decision_model| crate::helpers::HelperJudge {
+                model: decision_model,
+                floor: crate::helpers::DEFAULT_HELPER_NO_BELOW,
+                apply: decisions_apply,
+            })
+    } else {
+        None
+    };
+    let helper_context = crate::helpers::HelperContext {
+        profile: session.profile,
+        glasshouse: session.glasshouse,
+        session: session.id,
+        token: &token,
+    };
+    let Some(judged) = crate::helpers::preflight_judged(
         &brief,
         crate::helpers::HelperRoute { model, effort },
-        session.profile,
-        session.glasshouse,
-        session.id,
-        &token,
+        helper_context,
+        rank,
+        judge,
         |record| {
             let Some(ui) = session.ui else {
                 return;
@@ -374,6 +411,11 @@ pub(super) fn preflight_block(
     ) else {
         return none;
     };
+    let record = judged.record;
+    let ranking_note = judged
+        .ranking
+        .as_ref()
+        .map(crate::helpers::ScoutRanking::note);
     if record.outcome.cancelled {
         session.interrupt.consumed();
     }
@@ -387,7 +429,7 @@ pub(super) fn preflight_block(
             .into_iter()
             .map(|(path, _why, text)| (path, text))
             .collect();
-        crate::preflight::render(task, &record.outcome.text, &served)
+        crate::preflight::render(task, &record.outcome.text, &served, ranking_note.as_deref())
     });
     PreflightOutcome {
         block,

@@ -255,7 +255,7 @@ fn render_leads_with_the_request_and_stays_under_the_line_bound() {
     }
     report.push_str("## Capabilities\nrg is available\n## Risks\nnone read\n");
     let served = vec![("src/f0.rs".to_string(), "pub fn f0() {}\n".to_string())];
-    let block = preflight::render("Do the thing", &report, &served);
+    let block = preflight::render("Do the thing", &report, &served, None);
 
     assert!(
         block
@@ -297,7 +297,7 @@ fn an_open_question_renders_as_none_found_not_a_menu() {
     let report = "## Constraints\nnone read\n## Files\nsrc/lib.rs:1 — entry\n\
                   ## Tests\nCould not determine; candidates: tests/a.rs, tests/b.rs\n\
                   ## Capabilities\nIs valgrind available?\n## Risks\n";
-    let block = preflight::render("Do the thing", report, &[]);
+    let block = preflight::render("Do the thing", report, &[], None);
     let tests = section(&block, "## Tests");
     assert_eq!(tests, "(none found)", "{block}");
     assert!(!block.contains("candidates"), "{block}");
@@ -306,6 +306,31 @@ fn an_open_question_renders_as_none_found_not_a_menu() {
     // An absent section is (none found) too, and the record counts answers.
     assert_eq!(section(&block, "## Risks"), "(none found)", "{block}");
     assert!(block.contains("2 of 5 sections answered"), "{block}");
+}
+
+/// The Scouting record names the ranking (2644) when the caller passes one,
+/// and stays exactly as it was today when it does not.
+#[test]
+fn the_scouting_record_carries_the_ranking_note_when_one_is_given() {
+    let report = "## Constraints\nnone read\n## Files\nsrc/lib.rs:1 — entry\n\
+                  ## Tests\nnone\n## Capabilities\nrg\n## Risks\nnone\n";
+    let ranked = preflight::render(
+        "Do the thing",
+        report,
+        &[],
+        Some("ranked 2, skipped 1, top: a.rs 0.94"),
+    );
+    let record_at = ranked.find("## Scouting record").unwrap();
+    let record = ranked[record_at..].lines().nth(1).unwrap();
+    assert!(
+        record.contains("ranked 2, skipped 1, top: a.rs 0.94"),
+        "{record}"
+    );
+
+    let unranked = preflight::render("Do the thing", report, &[], None);
+    let record_at = unranked.find("## Scouting record").unwrap();
+    let record = unranked[record_at..].lines().nth(1).unwrap();
+    assert!(!record.contains("ranked"), "{record}");
 }
 
 fn section(block: &str, heading: &str) -> String {
