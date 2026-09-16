@@ -50,8 +50,8 @@ use crate::secret::{SecretRef, SecretStore};
 // `TypesafeSystemOne` at the ingress (Phase 66), so the divergence is gone
 // and both are imported from the gateway crate.
 use inference_gateway::pool::{
-    GATEWAY_INGRESS_PROTOCOLS, declared_base_url, describe_provider_protocols, gateway_routes,
-    ingress_targets, protocol_list,
+    BROKER_PROTOCOLS, GATEWAY_INGRESS_PROTOCOLS, declared_base_url, describe_provider_protocols,
+    gateway_routes, ingress_targets, protocol_list,
 };
 
 /// The name the gateway presents itself to an adapter under.
@@ -1363,7 +1363,7 @@ pub fn subscription_pool(
     let mut backends = Vec::with_capacity(brokers.len());
     for broker in brokers {
         let base = broker.base_url().to_owned();
-        let routes = GATEWAY_INGRESS_PROTOCOLS
+        let routes = BROKER_PROTOCOLS
             .iter()
             .map(|protocol| {
                 Route::new(

@@ -62,6 +62,21 @@ pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
     WireProtocol::TypesafeSystemOne,
 ];
 
+/// The protocols a subscription broker (CLIProxyAPI) is given routes for.
+///
+/// **The invariant: a broker claims only the wires it translates; a
+/// relay-only protocol is claimed by its own provider's account.** Give the
+/// broker `TypesafeSystemOne` too and every `/v1/systemone` request has two
+/// claimants, [`crate::gateway::Upstream::serving_for_target`] falls back to
+/// the bound account, and the decision request ends at CLIProxyAPI's 404 —
+/// measured 2026-09-16 through a fresh standalone gateway.
+pub const BROKER_PROTOCOLS: &[WireProtocol] = &[
+    WireProtocol::AnthropicMessages,
+    WireProtocol::OpenAiResponses,
+    WireProtocol::OpenAiChat,
+    WireProtocol::GeminiGenerateContent,
+];
+
 /// The request-target path prefixes that belong to each ingress protocol.
 ///
 /// Each entry is a prefix matched at a path-segment boundary, so one entry
@@ -341,7 +356,7 @@ fn subscription_backend(
     broker: RunningSubscriptionBroker,
 ) -> Result<UpstreamBackend, UpstreamError> {
     let base = broker.base_url().to_owned();
-    let routes = GATEWAY_INGRESS_PROTOCOLS
+    let routes = BROKER_PROTOCOLS
         .iter()
         .map(|protocol| {
             Route::new(
@@ -526,6 +541,21 @@ pub fn describe_provider_protocols(providers: &[Provider]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_broker_claims_every_translated_wire_and_no_relay_only_one() {
+        // A subscription broker translates the four chat wires; a decision
+        // request must find its provider's own account as the unique claimant.
+        assert!(!BROKER_PROTOCOLS.contains(&WireProtocol::TypesafeSystemOne));
+        for protocol in GATEWAY_INGRESS_PROTOCOLS {
+            assert_eq!(
+                BROKER_PROTOCOLS.contains(protocol),
+                *protocol != WireProtocol::TypesafeSystemOne,
+                "{}",
+                protocol.slug()
+            );
+        }
+    }
+
     use super::*;
     use crate::provider::unverified_provider;
     use crate::secret::EnvironmentSecretStore;
