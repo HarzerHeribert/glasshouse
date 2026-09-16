@@ -91,11 +91,25 @@ Five real tasks over Claude Max (`claude-sonnet-4-6`): intents `read_only` 1.00/
 
 ## Line 2644 — the Scout's files ranked by relevance
 
-**State: OPEN** — `GH-PANE-HELPERS-JUDGED` (packet written 00:15).
+**State: PARTIAL** (2026-09-17, `GH-PANE-HELPERS-JUDGED`, Sonnet high, Amber; report `.agent-runtime/report-pane-helpers-judged.md`). The ranking is built, wired at the Scout's production call site and mutation-proven; open on the three things named below.
+
+**Contract (as built).** Given `[decisions] model` set and `mode = on`, when the preflight Scout is about to run, Pane asks one `noul` per candidate file (`{path, head}`, the head bounded to 40 lines, the whole state to 64 KiB by dropping heads then candidates from the end) in one request, hands the Scout its brief with a `## Candidate files, ranked by relevance` section highest first, and drops candidates at or below `scout_relevance_below` (0.10); the Scouting record says `ranked N, skipped M, top: a.rs 0.94, b.rs 0.81`; `shadow` asks and counts only; no model, `off`, an error or a timeout leave today's brief byte-identical.
+
+**Production.** `helpers.rs :: {rank_scout_candidates, discover_scout_candidates, preflight_judged}`, `session/system.rs :: preflight_block` (the call site), `preflight.rs :: render` (the record's ranking note).
+
+**Tests.** `tests/helpers_judged.rs::{the_scout_reads_the_higher_ranked_file_first_and_skips_the_one_below_the_floor, a_timeout_leaves_todays_order, one_request_per_ranking_however_many_files, shadow_asks_and_records_but_shows_nothing}`, `tests/preflight_scout.rs` (the record's shape).
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| Descending by relevance | `helpers.rs`: `b.1.total_cmp(&a.1)` → `a.1.total_cmp(&b.1)` | `helpers_judged::the_scout_reads_the_higher_ranked_file_first_and_skips_the_one_below_the_floor` | KILLED (b.rs 0.94 read after a.rs 0.20) |
+
+**Gates.** `cargo test -p pane --test helpers_judged`: 6 passed; `--test preflight_scout`: 13; `--test helpers`: 26; targeted blast radius exit 0 in the worktree.
+
+**Open, and why.** (1) `scout_relevance_below` is a constant (`helpers::DEFAULT_SCOUT_RELEVANCE_BELOW`), not a `[decisions]` key — `config.rs` was another package's this round. (2) The candidate pool is a new bounded walk (512 nodes / 40 files, directory order), not `helper_context.rs :: prepare_scout`'s term-matched selection — that module does no model work by its own invariant, so the ranking could not be hooked into it; the successor ranks `prepare_scout`'s pool instead. (3) `decisions.helpers` telemetry is unwired (`session/output.rs` was another package's). All three go to `GH-PANE-HELPERS-WIRED`.
 
 ## Line 2645 — a helper's result checked
 
-**State: OPEN** — same package.
+**State: PARTIAL** — same package. **Contract (as built).** When the preflight Scout returns, Pane asks one `noul` over `{asked, result}` ("the result answers what was asked") and, at or below `helper_no_below` (0.10) with `mode = on`, appends one line to the helper's record — `decision: this result may not answer what was asked (0.06)` — never withholding, truncating or rerunning it; `shadow` asks and records; `judge: None` is byte-identical to today. Production: `helpers.rs :: {judge_outcome, run_judged, HelperJudge}`. Tests: `helpers_judged::{a_confident_no_carries_the_line_and_still_delivers, a_confident_yes_carries_nothing, judge_none_never_asks}`. Mutation: `noul <= judge.floor` → `<= 1.0` KILLED by `helpers_judged::a_confident_yes_carries_nothing`. **Open:** only the preflight Scout's call site is judged — the checker (`session/task.rs`) and cell-called helpers (`runtime/bindings.rs`) are not; `helper_no_below` is a constant. Successor: `GH-PANE-HELPERS-WIRED`.
 
 ## Line 2646 — off / shadow / on measured
 

@@ -5510,3 +5510,11 @@ tests, signatures), judge items decided by the decision model when confident, a 
 effectful cells, the Scout's files ranked by relevance, a check of each helper's result, and an
 off/shadow/on measurement over one request set before any threshold becomes a default. Recorded as
 **Phase 69**. "Bau das über Nacht fertig wenn du kannst."
+
+## Night-shift rulings on the request modes — the orchestrator, 2026-09-17 (from the user's 2026-09-16 wording)
+
+Three rulings the explore-mode package surfaced, made by the orchestrator under the user's instruction to finish the Phase 69 lines overnight; the user may overrule any of them in the morning.
+
+1. **`.pane/scratch/**` is the agent's scratchpad.** It is carved out of the `.pane/**` never rule with the profile's existing exception shape, so it is writable in every mode subject to the normal rules; everything else under `.pane/` stays host-owned and never writable, and the OS appliers render the same carve-out. Reason: the user's "außer auf Agent scratchpads oder documentation files" needs one place that exists by default, and the never rule's own text already told the agent to "write scratch files elsewhere" without saying where.
+2. **The plan file is `.pane/scratch/plan.md`, plan mode's one permitted write.** A plan request that wrote it carries the file once into the next request's system block (bounded to 16 KiB), then forgets it. Reason: a plan nobody reads is half a plan mode; one file and one carry-over is the smallest shape that makes `/mode plan` then `/mode execute` a workflow.
+3. **`glasshouse analysis` stays.** The Artificial Analysis measurement cache prints published figures and decides nothing, so the routing deletion (the user's 2026-09-16 ruling) does not reach it; the 2026-09-10 plan reserved the catalogue for a possible later gateway feature.
