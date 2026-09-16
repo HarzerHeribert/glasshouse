@@ -714,8 +714,12 @@ fn each_harness_is_given_the_protocol_it_speaks_not_the_first_one_served() {
             "openai-responses",
             "openai-chat",
             "gemini-generate-content",
+            "typesafe-systemone",
         ],
-        "this test proves nothing unless the gateway really serves all four"
+        "this test proves nothing unless the gateway really serves all five \
+         (`GH-GATEWAY-INGRESS-ONCE`: the embedded gateway's ingress is the \
+         gateway crate's own five-protocol list now, typesafe-systemone \
+         included)"
     );
 
     for (harness, expected) in [
@@ -778,7 +782,10 @@ fn the_ingress_target_table_covers_every_protocol_the_gateway_serves() {
             seen.push(target);
         }
     }
-    assert_eq!(GATEWAY_INGRESS_PROTOCOLS.len(), 4);
+    // Five since `GH-GATEWAY-INGRESS-ONCE`: the host imports the gateway
+    // crate's own `GATEWAY_INGRESS_PROTOCOLS`, which includes
+    // `TypesafeSystemOne` — Pane speaks it at the ingress now (Phase 66).
+    assert_eq!(GATEWAY_INGRESS_PROTOCOLS.len(), 5);
 }
 
 /// Phase 9G's line 1 for Claude Code, end to end at the resolution

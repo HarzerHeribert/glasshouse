@@ -13,10 +13,10 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1369 closed · 95 active committed open (94%)** — across 20 phases.
+**1370 closed · 94 active committed open (94%)** — across 20 phases.
 
 boundary 100 closed · 0 open
-gateway 389 closed · 13 open
+gateway 390 closed · 12 open
 glasshouse 757 closed · 46 open
 pane 41 closed · 36 open
 process 82 closed · 0 open
@@ -38,8 +38,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
+| Phase 68 | Gateway: successors named by the 2026-09-16 cleanup | **1** | 1 | `2627` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 68 | Gateway: successors named by the 2026-09-16 cleanup | **2** | 0 | `2627` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 
 **glasshouse**
@@ -110,15 +110,14 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
+### Phase 68 — Gateway: successors named by the 2026-09-16 cleanup  (1 open, 1 closed)
+
+- **2629** ☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
+
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
-
-### Phase 68 — Gateway: successors named by the 2026-09-16 cleanup  (2 open, 0 closed)
-
-- **2629** ☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
-- **2630** ☐ Serve the same ingress targets from Glasshouse's embedded gateway as from the standalone binary — one `GATEWAY_INGRESS_PROTOCOLS` in the gateway crate, `typesafe-systemone` included, so a Pane launched by Glasshouse can reach the decision model exactly as a standalone Pane can.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
@@ -222,7 +221,7 @@ the rest are context you probably do not need.
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-66.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-66.md  phase-68.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 

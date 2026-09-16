@@ -138,7 +138,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1369 closed** · **95 active committed open** (93%)
+`█████████████████████████████████████░░░` **1370 closed** · **94 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -214,7 +214,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 60 — Parallel-session file coordination | 16/16 ✅ |
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 
-**gateway** `██████████████████████████████████████░░` 389/402
+**gateway** `██████████████████████████████████████░░` 390/402
 
 | Phase | Done |
 |---|---|
@@ -249,7 +249,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
-| Phase 68 — Gateway: successors named by the 2026-09-16 cleanup | 0/2 |
+| Phase 68 — Gateway: successors named by the 2026-09-16 cleanup | 1/2 |
 
 **boundary** `████████████████████████████████████████` 100/100
 

@@ -47,9 +47,10 @@ use std::time::{Duration, Instant};
 
 use glasshouse::gateway::translate::TOOL_ERROR_MARKER;
 use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
+use glasshouse::harness::{Declared, WireProtocol};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::provider::Provider;
+use glasshouse::provider::{ProtocolSupport, Provider};
 use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
@@ -1232,6 +1233,93 @@ fn a_target_the_provider_serves_natively_is_relayed_byte_for_byte_even_though_a_
         String::from_utf8_lossy(answer).contains("\"planted_marker_the_codecs_refuse\":true"),
         "the provider's document reached the client verbatim: {}",
         String::from_utf8_lossy(answer)
+    );
+}
+
+// --- (f): the embedded gateway serves the ingress the standalone binary does -----
+
+/// `POST /v1/systemone` to the *embedded* gateway.
+fn systemone_request(token: &str, body: &str) -> Vec<u8> {
+    format!(
+        "POST /v1/systemone HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// A provider declaring only `TypesafeSystemOne`, at the fixture's root URL —
+/// the shape `chat_only_provider` uses for `openai-chat`, built directly
+/// rather than from a template because no `typesafe` provider template
+/// exists in this crate yet.
+fn typesafe_provider(fixture: &ChatOnlyUpstream) -> Provider {
+    Provider {
+        name: "typesafe".to_owned(),
+        protocols: vec![ProtocolSupport {
+            protocol: WireProtocol::TypesafeSystemOne,
+            base_url: fixture.root_url(),
+            streaming: Declared::Unverified,
+            tool_calls: Declared::Unverified,
+            reasoning: Declared::Unverified,
+        }],
+        model_list_endpoint: Declared::Unverified,
+        usage_telemetry: Declared::Unverified,
+        credential_env: vec![CREDENTIAL_VAR.to_owned()],
+        headers: Vec::new(),
+    }
+}
+
+/// `GH-GATEWAY-INGRESS-ONCE`, map line 2630: `profile::gateway_upstream` —
+/// the production builder every Glasshouse-started gateway is built with —
+/// now imports the gateway crate's own `GATEWAY_INGRESS_PROTOCOLS` and
+/// `gateway_routes`, so a catalogue with a `typesafe` provider gets a route
+/// for `TypesafeSystemOne` exactly as the standalone binary's own
+/// `pool::gateway_upstream` would. The fixture shape mirrors the gateway
+/// crate's own conformance test,
+/// `a_systemone_request_reaches_the_typesafe_account_while_messages_stay_with_the_bound_one`:
+/// a provider serving only `TypesafeSystemOne`, reached with its own
+/// credential, the request relayed byte-for-byte because no codec exists for
+/// this protocol.
+#[test]
+fn a_typesafe_provider_built_through_profile_gateway_upstream_serves_systemone() {
+    let fixture = ChatOnlyUpstream::start(Answer::Completion);
+    let gateway = start_gateway(upstream_from(&typesafe_provider(&fixture)), None);
+    assert_eq!(
+        gateway.served_protocols(),
+        vec!["typesafe-systemone"],
+        "this test proves nothing unless the embedded gateway really serves it"
+    );
+
+    let decision_body = "{\"state\":{},\"model\":\"jev-latest\",\"questions\":{}}";
+    let response = send_and_read(
+        gateway.address(),
+        &systemone_request(gateway.token().expose(), decision_body),
+    );
+    let (head, _body) = head_and_body(&response);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    let received = fixture.only_request();
+    assert_eq!(
+        received.target, "/v1/systemone",
+        "a served target is relayed under its own path, not rewritten"
+    );
+    assert_eq!(received.body, decision_body.as_bytes());
+    assert_eq!(
+        received.header("authorization"),
+        Some(format!("Bearer {PLANTED_KEY}").as_str()),
+        "the typesafe provider's own credential attaches"
+    );
+    assert!(
+        !received
+            .headers
+            .iter()
+            .any(|(_, value)| value.contains(gateway.token().expose())),
+        "the gateway's own token never leaves the process"
     );
 }
 

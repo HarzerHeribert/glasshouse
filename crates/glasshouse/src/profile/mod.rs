@@ -41,43 +41,18 @@ use crate::routing::pairing::PairingAffinities;
 use crate::routing::{AssignedModel, Cost, CredentialId, ToolSemantics};
 use crate::secret::{SecretRef, SecretStore};
 // Verbatim twins of what this module used to define locally
-// (`GH-CLEANUP-POOL-DUPLICATE`); `gateway_upstream` and `gateway_routes`
-// below still differ from their gateway counterparts (a different
-// `GATEWAY_INGRESS_PROTOCOLS`, a different error type) and stay here.
+// (`GH-CLEANUP-POOL-DUPLICATE`); `gateway_upstream` still differs from its
+// gateway counterpart (a different error type) and stays here.
+// `GATEWAY_INGRESS_PROTOCOLS` and `gateway_routes` were the one pair that
+// stayed host-owned even after that cleanup, because this crate's list was
+// four protocols and the gateway's was five (`TypesafeSystemOne` excluded);
+// `GH-GATEWAY-INGRESS-ONCE` closed that gap — Pane now speaks
+// `TypesafeSystemOne` at the ingress (Phase 66), so the divergence is gone
+// and both are imported from the gateway crate.
 use inference_gateway::pool::{
-    declared_base_url, describe_provider_protocols, ingress_targets, protocol_list, tool_semantics,
+    GATEWAY_INGRESS_PROTOCOLS, declared_base_url, describe_provider_protocols, gateway_routes,
+    ingress_targets, protocol_list,
 };
-
-/// The protocols the local gateway's ingress knows how to serve.
-///
-/// All four, and the list is here rather than in [`mod@crate::gateway`]
-/// because that module is structurally forbidden from naming
-/// [`crate::harness`] — see its own header — and a protocol enum lives
-/// there.
-///
-/// **This is a capability, not a promise.** It says what the ingress can
-/// carry; what a *running* gateway actually carries is narrower, because a
-/// route exists only for a protocol the one configured provider declared a
-/// base URL for. [`Gateway::served_protocols`] is that narrower answer, and
-/// it — never this constant — is what `apply_gateway` refuses against. A
-/// profile checked against this list alone would launch a harness at an
-/// ingress that would answer its first request with a `404`.
-///
-/// The order matters in one place only: [`gateway_upstream`] builds routes
-/// in it, so it is the order a diagnostic lists protocols in.
-pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
-    WireProtocol::AnthropicMessages,
-    WireProtocol::OpenAiResponses,
-    WireProtocol::OpenAiChat,
-    // Phase 56 T3. Present for the *destination* half of this list's two
-    // jobs: a protocol here is one `gateway_routes` will build a route for,
-    // and without a route the pair table could name a Gemini provider that
-    // nothing could ever forward to. No installed harness speaks it at the
-    // ingress — every `gemini-generate-content -> …` row in the gateway's
-    // pair table is refused by name — so its *ingress* half is a `404` that
-    // names the missing adapter rather than a `404` that says nothing.
-    WireProtocol::GeminiGenerateContent,
-];
 
 /// The name the gateway presents itself to an adapter under.
 ///
@@ -1452,28 +1427,6 @@ pub fn subscription_broker_upstream(
     broker: crate::gateway::subscription_broker::RunningSubscriptionBroker,
 ) -> Result<Upstream, crate::gateway::UpstreamError> {
     subscription_pool(vec![broker])
-}
-
-/// One [`Route`] per ingress protocol `provider` actually serves, in the
-/// ingress's own order.
-///
-/// A protocol it does not serve gets no route, which is what makes a request
-/// for it a refusal rather than a request sent to some other protocol's base
-/// URL.
-fn gateway_routes(provider: &Provider) -> Vec<Route> {
-    GATEWAY_INGRESS_PROTOCOLS
-        .iter()
-        .filter_map(|protocol| {
-            declared_base_url(provider, *protocol).map(|base_url| {
-                Route::new(
-                    protocol.slug().to_owned(),
-                    ingress_targets(*protocol),
-                    base_url,
-                )
-                .with_tools(tool_semantics(provider, *protocol))
-            })
-        })
-        .collect()
 }
 
 /// Why the local gateway could not be given an upstream to forward to.

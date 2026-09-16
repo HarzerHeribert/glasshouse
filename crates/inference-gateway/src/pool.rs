@@ -12,17 +12,22 @@
 //! as copies of the host's own `profile::gateway_upstream`,
 //! `subscription_pool` and `subscription_models`: where the host reads a
 //! `ProviderConfig`, these read [`AccountEntry`] and [`crate::provider::Provider`],
-//! and the host's own `GATEWAY_INGRESS_PROTOCOLS` and error types differ from
-//! this crate's, so the three functions themselves were **not** unifiable —
-//! `GH-CLEANUP-POOL-DUPLICATE` found the divergence and left them as they
-//! were. Their leaf helpers — each a pure function of its arguments, none
-//! reading `GATEWAY_INGRESS_PROTOCOLS` — were not: `ingress_targets`,
+//! and the host's own error types differ from this crate's, so the three
+//! functions themselves were **not** unifiable — `GH-CLEANUP-POOL-DUPLICATE`
+//! found the divergence and left them as they were. Their leaf helpers — each
+//! a pure function of its arguments — were not: `ingress_targets`,
 //! `declared_base_url`, `tool_semantics`, `protocol_list` and
 //! `describe_provider_protocols` are `pub` because `glasshouse::profile`
 //! imports them rather than keeping its own verbatim copies, still calling
-//! them from its own `gateway_routes` and `gateway_upstream`, which stayed
-//! host-owned. `valid_cliproxyapi_version` in [`crate::config`] is `pub` for
-//! the same reason, called from
+//! them from its own `gateway_upstream`, which stayed host-owned.
+//! `GATEWAY_INGRESS_PROTOCOLS` and `gateway_routes` were the one exception
+//! `GH-CLEANUP-POOL-DUPLICATE` found and left alone (its list was four
+//! protocols, this one five) — `GH-GATEWAY-INGRESS-ONCE` closed that gap:
+//! `glasshouse::profile` now imports this crate's `GATEWAY_INGRESS_PROTOCOLS`
+//! and `gateway_routes` directly, so the host's embedded gateway serves the
+//! same five ingress targets, `typesafe-systemone` included, as the
+//! standalone binary. `valid_cliproxyapi_version` in [`crate::config`] is
+//! `pub` for the same reason, called from
 //! `glasshouse::paths::RuntimePaths::cliproxyapi_executable`.
 
 use std::collections::BTreeMap;
@@ -45,6 +50,10 @@ use crate::secret::{SecretRef, SecretStore};
 ///
 /// The order matters in one place only: [`gateway_upstream`] builds routes
 /// in it, so it is the order a diagnostic lists protocols in.
+///
+/// `glasshouse::profile::gateway_upstream` builds its embedded gateway's
+/// ingress from this same list, so a Pane launched by Glasshouse serves
+/// exactly the protocols the standalone binary does.
 pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
     WireProtocol::AnthropicMessages,
     WireProtocol::OpenAiResponses,
@@ -386,8 +395,10 @@ pub fn parse_model_catalogue(document: &[u8]) -> Vec<String> {
 ///
 /// A protocol it does not serve gets no route, which is what makes a request
 /// for it a refusal rather than a request sent to some other protocol's base
-/// URL.
-fn gateway_routes(provider: &Provider) -> Vec<Route> {
+/// URL. `pub` because `glasshouse::profile::gateway_upstream` calls this
+/// directly now (`GH-GATEWAY-INGRESS-ONCE`) rather than keeping its own copy
+/// over a narrower `GATEWAY_INGRESS_PROTOCOLS`.
+pub fn gateway_routes(provider: &Provider) -> Vec<Route> {
     GATEWAY_INGRESS_PROTOCOLS
         .iter()
         .filter_map(|protocol| {
