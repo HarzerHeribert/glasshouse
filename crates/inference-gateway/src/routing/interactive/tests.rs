@@ -976,10 +976,7 @@ fn on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none(
     let (
         FailureResponse::FailOver { to: none_to, .. },
         FailureResponse::FailOver {
-            to,
-            explanation,
-            domain_effect,
-            ..
+            to, explanation, ..
         },
     ) = (with_none, with_short)
     else {
@@ -987,7 +984,6 @@ fn on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none(
     };
     assert_eq!(to.provider(), "nous", "configuration order still decides");
     assert_eq!(none_to.provider(), to.provider());
-    assert!(!domain_effect.correlation_steered());
     let rendered = explanation.render();
     assert!(
         rendered.contains("+0.000  route correlation")

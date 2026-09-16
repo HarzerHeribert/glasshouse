@@ -366,12 +366,6 @@ impl UpstreamBackend {
         self.models.contains(&wanted)
     }
 
-    /// The models this backend declares.
-    #[must_use]
-    pub fn declared_models(&self) -> &[String] {
-        &self.models
-    }
-
     /// Whether this backend may be a candidate for `model`: a backend that
     /// declares a catalogue is a candidate only for what it lists, and one
     /// that declares nothing is a candidate for everything, as it always was.
@@ -942,7 +936,6 @@ mod per_model_tests {
     fn an_empty_catalogue_claims_no_model() {
         let empty = backend("a", &[]);
         assert!(!empty.serves_model("claude-opus-5"));
-        assert!(empty.declared_models().is_empty());
     }
 }
 

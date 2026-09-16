@@ -1107,11 +1107,6 @@ impl RateCeilings {
         self
     }
 
-    pub fn with_max_concurrent_requests(mut self, value: Capacity<NativeAmount>) -> Self {
-        self.max_concurrent_requests = value;
-        self
-    }
-
     /// Capability map line 1214.
     pub fn requests_per_minute(&self) -> &Capacity<NativeAmount> {
         &self.requests_per_minute

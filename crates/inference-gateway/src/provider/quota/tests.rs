@@ -381,23 +381,25 @@ fn a_rolling_window_and_a_calendar_window_are_tracked_at_the_same_time() {
 
 #[test]
 fn every_rate_ceiling_is_its_own_field_and_a_long_window_names_its_own_period() {
-    let rates = RateCeilings::uniform(Capacity::Unmeasured, Capacity::Unmeasured)
-        .with_requests_per_minute(measured(
-            60,
-            "requests",
-            header("x-ratelimit-limit-requests"),
-        ))
-        .with_tokens_per_minute(measured(
-            40_000,
-            "tokens",
-            header("x-ratelimit-limit-tokens"),
-        ))
-        .with_max_concurrent_requests(measured(4, "requests", header("x-concurrency-limit")))
-        .with_long_window_requests(Capacity::Measured(Reading::new(
-            LongWindowRequests::new(NativeAmount::whole(1_000, "requests"), 86_400),
-            OBSERVED,
-            header("x-ratelimit-limit-requests-day"),
-        )));
+    let rates = RateCeilings {
+        max_concurrent_requests: measured(4, "requests", header("x-concurrency-limit")),
+        ..RateCeilings::uniform(Capacity::Unmeasured, Capacity::Unmeasured)
+            .with_requests_per_minute(measured(
+                60,
+                "requests",
+                header("x-ratelimit-limit-requests"),
+            ))
+            .with_tokens_per_minute(measured(
+                40_000,
+                "tokens",
+                header("x-ratelimit-limit-tokens"),
+            ))
+            .with_long_window_requests(Capacity::Measured(Reading::new(
+                LongWindowRequests::new(NativeAmount::whole(1_000, "requests"), 86_400),
+                OBSERVED,
+                header("x-ratelimit-limit-requests-day"),
+            )))
+    };
     assert_eq!(rates.requests_per_minute().value().unwrap().value(), 60);
     assert_eq!(rates.tokens_per_minute().value().unwrap().value(), 40_000);
     assert_eq!(rates.max_concurrent_requests().value().unwrap().value(), 4);

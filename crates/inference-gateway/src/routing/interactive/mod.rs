@@ -1003,11 +1003,6 @@ impl FailureDomainEffect {
         self.displaced.as_deref()
     }
 
-    /// Line 1852: the correlation term changed which candidate won.
-    pub fn correlation_steered(&self) -> bool {
-        self.correlation_displaced.is_some()
-    }
-
     /// The route the correlation term steered this failover off — a route
     /// on a different provider whose observed failures overlap the failed
     /// backend's — or [`None`] when that term changed nothing.
