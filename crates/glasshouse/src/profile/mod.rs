@@ -32,7 +32,7 @@ use crate::gateway::{Gateway, Route, Upstream};
 use crate::harness::pairing::{PairingOverrides, candidate_affinities};
 use crate::harness::{
     ApprovalKind, ApprovalMode, ConfigFileNameProblem, CredentialPlacement, CredentialVarProblem,
-    Declared, DirectProviderRequest, GeneratedConfigSite, HarnessAdapter, WireProtocol,
+    DirectProviderRequest, GeneratedConfigSite, HarnessAdapter, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
@@ -40,6 +40,13 @@ use crate::provider::{ProtocolCompatibleProviders, Provider};
 use crate::routing::pairing::PairingAffinities;
 use crate::routing::{AssignedModel, Cost, CredentialId, ToolSemantics};
 use crate::secret::{SecretRef, SecretStore};
+// Verbatim twins of what this module used to define locally
+// (`GH-CLEANUP-POOL-DUPLICATE`); `gateway_upstream` and `gateway_routes`
+// below still differ from their gateway counterparts (a different
+// `GATEWAY_INGRESS_PROTOCOLS`, a different error type) and stay here.
+use inference_gateway::pool::{
+    declared_base_url, describe_provider_protocols, ingress_targets, protocol_list, tool_semantics,
+};
 
 /// The protocols the local gateway's ingress knows how to serve.
 ///
@@ -71,43 +78,6 @@ pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
     // names the missing adapter rather than a `404` that says nothing.
     WireProtocol::GeminiGenerateContent,
 ];
-
-/// The request-target path prefixes that belong to each ingress protocol.
-///
-/// This is the whole of "the request target decides the protocol", and it
-/// lives here for the same reason [`GATEWAY_INGRESS_PROTOCOLS`] does: the
-/// gateway cannot name a [`WireProtocol`], so the module that can composes
-/// the table and hands it over as [`Route`]s. The gateway owns the
-/// *matching* — including the fact that a leading `/v1` is not part of the
-/// answer, see `crate::gateway::upstream`'s `VERSION_SEGMENT`.
-///
-/// Each entry is a prefix matched at a path-segment boundary, so one entry
-/// covers a protocol's whole surface: `/messages` places
-/// `/v1/messages?beta=true` and `/v1/messages/count_tokens` alike.
-///
-/// **Every prefix here was read off a real request line**, from a harness
-/// run against a listener that recorded it — Claude Code 2.1.245 sends
-/// `POST /v1/messages?beta=true`, Codex 0.149.1 sends `POST /responses` —
-/// or, for OpenAI Chat, off the endpoint the provider templates in
-/// [`mod@crate::provider`] already document. Nothing here is a guess at a
-/// path nobody has seen, which is the same rule that module applies to base
-/// URLs.
-const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
-    match protocol {
-        WireProtocol::AnthropicMessages => &["/messages"],
-        WireProtocol::OpenAiResponses => &["/responses"],
-        WireProtocol::OpenAiChat => &["/chat/completions"],
-        // Two spellings, because Google's version segment is `v1beta` and
-        // `VERSION_SEGMENT` — the `/v1` the gateway strips before matching —
-        // does not cover it. `/models` catches the un-versioned and `/v1`
-        // forms; the explicit `/v1beta/models` catches what every current
-        // Gemini client actually sends. Read off Google's published
-        // `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`,
-        // the same standing as the OpenAI-Chat entry above.
-        WireProtocol::GeminiGenerateContent => &["/models", "/v1beta/models"],
-        WireProtocol::TypesafeSystemOne => &["/systemone"],
-    }
-}
 
 /// The name the gateway presents itself to an adapter under.
 ///
@@ -1506,37 +1476,6 @@ fn gateway_routes(provider: &Provider) -> Vec<Route> {
         .collect()
 }
 
-/// What a provider declares about tool calls on one protocol, as the three
-/// states a routing policy needs.
-///
-/// [`Declared`] carries an evidence string that routing has no use for, and
-/// [`Declared::is_known_present`] collapses "verified absent" into "nobody
-/// checked" — which is exactly the distinction Phase 9H line 517 turns on. So
-/// the translation is explicit here rather than done with an existing helper
-/// that answers a different question.
-fn tool_semantics(provider: &Provider, protocol: WireProtocol) -> ToolSemantics {
-    match provider.serves(protocol).map(|support| &support.tool_calls) {
-        Some(Declared::Verified { value: true, .. }) => ToolSemantics::Verified,
-        Some(Declared::Verified { value: false, .. }) => ToolSemantics::KnownAbsent,
-        Some(Declared::Unverified) | None => ToolSemantics::Unverified,
-    }
-}
-
-/// The base URL `provider` declares for `protocol`, or `None` when it
-/// declares none — or declares an empty one.
-///
-/// An empty base URL is not a base URL: the generic templates in
-/// [`mod@crate::provider`] ship one so the user can supply their own, and
-/// launching against `""` must never happen. The same rule
-/// `apply_direct_provider` already applies, in one place both can be read
-/// from.
-fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str> {
-    provider
-        .serves(protocol)
-        .map(|support| support.base_url.as_str())
-        .filter(|base_url| !base_url.is_empty())
-}
-
 /// Why the local gateway could not be given an upstream to forward to.
 ///
 /// Separate from [`Refusal`] because it is answered before any profile is
@@ -1577,53 +1516,6 @@ pub enum GatewayUpstreamRefusal {
 
     #[error(transparent)]
     Unusable(#[from] crate::gateway::UpstreamError),
-}
-
-/// `a`, `b` and `c` — a list of protocols for a message a user reads.
-///
-/// Names only, and every one of them is a [`WireProtocol::slug`], so nothing
-/// user-written reaches a diagnostic through here.
-fn protocol_list(protocols: &[WireProtocol]) -> String {
-    protocols
-        .iter()
-        .map(|protocol| protocol.slug())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// The configured protocol declarations for a refusal after compatibility
-/// filtering left no candidates.
-///
-/// An empty base URL is named rather than elided: it is a declaration with no
-/// destination, which is precisely why it could not pass the filter.
-fn describe_provider_protocols(providers: &[Provider]) -> String {
-    if providers.is_empty() {
-        return "no configured providers".to_owned();
-    }
-
-    providers
-        .iter()
-        .map(|provider| {
-            let protocols = if provider.protocols.is_empty() {
-                "no protocol at all".to_owned()
-            } else {
-                provider
-                    .protocols
-                    .iter()
-                    .map(|support| {
-                        if support.base_url.is_empty() {
-                            format!("`{}` (no base URL)", support.protocol)
-                        } else {
-                            format!("`{}`", support.protocol)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            format!("`{}` declares {protocols}", provider.name)
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// Point one child process at `provider_name`, or refuse.

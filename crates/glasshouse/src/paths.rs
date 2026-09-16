@@ -248,7 +248,7 @@ impl RuntimePaths {
         let root = self.managed_tools_dir().join("cliproxyapi");
         let marker = root.join("current");
         if let Ok(version) = std::fs::read_to_string(&marker) {
-            if valid_cliproxyapi_version(&version) {
+            if inference_gateway::config::valid_cliproxyapi_version(&version) {
                 return root.join(version).join(if cfg!(windows) {
                     "cliproxyapi.exe"
                 } else {
@@ -305,12 +305,6 @@ impl RuntimePaths {
             executable: self.cliproxyapi_executable(),
         }
     }
-}
-
-fn valid_cliproxyapi_version(version: &str) -> bool {
-    version.strip_prefix("sha256-").is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
 }
 
 /// Refuse a path whose first component is a literal `~`, rather than

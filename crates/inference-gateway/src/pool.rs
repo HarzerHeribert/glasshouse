@@ -8,11 +8,22 @@
 //! hands `gateway::upstream` a list of backends in a fixed order; every
 //! per-request decision after that is `routing::interactive`'s, unchanged.
 //!
-//! It is a copy of the host's own `profile::gateway_upstream`,
-//! `subscription_pool` and their helpers, with one substitution: where the
-//! host reads a `ProviderConfig`, this reads [`AccountEntry`] and
-//! [`crate::provider::Provider`]. The duplication is deliberate and
-//! temporary — the host repoints at this file once the binary lands.
+//! `gateway_upstream`, `subscription_pool` and `subscription_models` started
+//! as copies of the host's own `profile::gateway_upstream`,
+//! `subscription_pool` and `subscription_models`: where the host reads a
+//! `ProviderConfig`, these read [`AccountEntry`] and [`crate::provider::Provider`],
+//! and the host's own `GATEWAY_INGRESS_PROTOCOLS` and error types differ from
+//! this crate's, so the three functions themselves were **not** unifiable —
+//! `GH-CLEANUP-POOL-DUPLICATE` found the divergence and left them as they
+//! were. Their leaf helpers — each a pure function of its arguments, none
+//! reading `GATEWAY_INGRESS_PROTOCOLS` — were not: `ingress_targets`,
+//! `declared_base_url`, `tool_semantics`, `protocol_list` and
+//! `describe_provider_protocols` are `pub` because `glasshouse::profile`
+//! imports them rather than keeping its own verbatim copies, still calling
+//! them from its own `gateway_routes` and `gateway_upstream`, which stayed
+//! host-owned. `valid_cliproxyapi_version` in [`crate::config`] is `pub` for
+//! the same reason, called from
+//! `glasshouse::paths::RuntimePaths::cliproxyapi_executable`.
 
 use std::collections::BTreeMap;
 
@@ -48,7 +59,7 @@ pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
 /// covers a protocol's whole surface. Every prefix was read off a real
 /// request line — Claude Code sends `POST /v1/messages?beta=true`, Codex
 /// sends `POST /responses` — never guessed.
-const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
+pub const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
     match protocol {
         WireProtocol::AnthropicMessages => &["/messages"],
         WireProtocol::OpenAiResponses => &["/responses"],
@@ -398,7 +409,7 @@ fn gateway_routes(provider: &Provider) -> Vec<Route> {
 /// [`Declared::is_known_present`] collapses "verified absent" into "nobody
 /// checked", which is exactly the distinction routing turns on, so the
 /// translation is explicit here rather than done with that helper.
-fn tool_semantics(provider: &Provider, protocol: WireProtocol) -> ToolSemantics {
+pub fn tool_semantics(provider: &Provider, protocol: WireProtocol) -> ToolSemantics {
     match provider.serves(protocol).map(|support| &support.tool_calls) {
         Some(Declared::Verified { value: true, .. }) => ToolSemantics::Verified,
         Some(Declared::Verified { value: false, .. }) => ToolSemantics::KnownAbsent,
@@ -411,7 +422,7 @@ fn tool_semantics(provider: &Provider, protocol: WireProtocol) -> ToolSemantics 
 ///
 /// An empty base URL is not a base URL: the generic templates ship one so a
 /// user can supply their own, and forwarding to `""` must never happen.
-fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str> {
+pub fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str> {
     provider
         .serves(protocol)
         .map(|support| support.base_url.as_str())
@@ -452,7 +463,7 @@ fn no_credential_message(candidates: &[(String, Vec<String>)]) -> String {
 }
 
 /// `a`, `b` and `c` — a list of protocols for a message a user reads.
-fn protocol_list(protocols: &[WireProtocol]) -> String {
+pub fn protocol_list(protocols: &[WireProtocol]) -> String {
     protocols
         .iter()
         .map(|protocol| protocol.slug())
@@ -465,7 +476,7 @@ fn protocol_list(protocols: &[WireProtocol]) -> String {
 ///
 /// An empty base URL is named rather than elided: it is a declaration with
 /// no destination, which is precisely why it could not pass the filter.
-fn describe_provider_protocols(providers: &[Provider]) -> String {
+pub fn describe_provider_protocols(providers: &[Provider]) -> String {
     if providers.is_empty() {
         return "no configured providers".to_owned();
     }

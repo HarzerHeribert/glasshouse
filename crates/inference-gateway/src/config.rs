@@ -261,7 +261,12 @@ fn cliproxyapi_executable(data_dir: &Path) -> PathBuf {
 /// A release marker is `sha256-` and sixty-four hex digits — the digest of
 /// the archive the directory was extracted from — and nothing else, so a
 /// marker can never name a path outside `tools/cliproxyapi`.
-fn valid_cliproxyapi_version(version: &str) -> bool {
+///
+/// `pub` for `glasshouse::paths::RuntimePaths::cliproxyapi_executable`, whose
+/// own marker-validation logic was a verbatim twin of this one; its
+/// surrounding fallback logic differs (a `.trim()`, and two extra marker
+/// states) and stays there.
+pub fn valid_cliproxyapi_version(version: &str) -> bool {
     version.strip_prefix("sha256-").is_some_and(|digest| {
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
