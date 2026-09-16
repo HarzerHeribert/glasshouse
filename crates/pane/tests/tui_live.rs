@@ -1180,7 +1180,21 @@ fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
         }
         let marker = format!("filler {line:02}");
         app.send(format!("{marker}\r").as_bytes());
-        app.contains(&marker);
+        // **The submitted turn, and then the end of it.** Typing while a
+        // turn runs is a feature — it fills the draft — and Enter is ignored
+        // there, so an Enter that lands mid-turn is dropped and its text
+        // stays in the composer. Waiting for the marker *anywhere* on screen
+        // is satisfied by that draft, which is how this loop used to
+        // "succeed" twelve times over a transcript that was still two turns
+        // tall. Measured on the Windows ARM64 VM, 2026-09-11: the composer
+        // held `filler 01filler 02…filler 08` and the loop timed out on
+        // `filler 09` only because the draft line had passed 80 columns.
+        // Unix never showed it because a refused loopback connection there
+        // ends before the next key is sent.
+        app.contains(&format!("you: {marker}"));
+        app.wait("the turn ends before the next Enter", |screen| {
+            !screen.contents().contains("thinking")
+        });
         app.settle(40);
     }
     app.wait("the first line leaves the viewport", |screen| {

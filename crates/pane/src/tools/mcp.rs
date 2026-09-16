@@ -380,6 +380,7 @@ impl Client {
                 stdout: true,
                 stderr: false,
             },
+            invoke::LineShape::Argv,
         )
         .map_err(|refusal| match refusal {
             invoke::SpawnRefusal::Denied(_) => denied(),

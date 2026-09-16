@@ -35,6 +35,11 @@
 //! which assistant text selects or becomes a program.
 
 mod process;
+/// `read` and `grep` performed inside this process. Used where the registry
+/// declares both in-process — Windows — and compiled under `test` on every
+/// host so the ordinary gate asserts the matcher and the walker.
+#[cfg(any(windows, test))]
+mod search;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -732,25 +737,25 @@ fn checked_call(
             .into());
         }
     }
+    let broad_search = resolved_path(&checked, "path")
+        .is_some_and(|path| is_broad_search(ctx.profile.root(), path));
     // Branching here and not inside `spawn_confined` is what makes
     // `Argv::InProcess`'s claim structural: an in-process tool never reaches
     // a `Command`, an `exec_grant` or a sandbox applier, because the only
     // call site of all three is the other arm.
-    if tool.argv() == Argv::InProcess {
-        return perform_in_process(ctx.profile, &stop, tool, &checked);
-    }
-    let mut argv = build_argv(tool, &checked)?;
-    let broad_search = resolved_path(&checked, "path").is_some_and(|path| {
-        !explicitly_roots_component(ctx.profile.root(), path, ".pane")
-            && !explicitly_roots_component(ctx.profile.root(), path, ".git")
-    });
-    if tool.name() == "grep" && broad_search {
-        // Git internals are an entire generated tree and grep can avoid
-        // traversing them. The rollout is one exact path rather than a
-        // basename-wide exclusion, so it is removed from output below.
-        argv.insert(1, "--exclude-dir=.git".into());
-    }
-    let mut result = spawn_confined(ctx.profile, &stop, tool, &argv)?;
+    let mut result = if tool.argv() == Argv::InProcess {
+        perform_in_process(ctx.profile, &stop, tool, &checked)?
+    } else {
+        let mut argv = build_argv(tool, &checked)?;
+        if tool.name() == "grep" && broad_search {
+            // Git internals are an entire generated tree and grep can avoid
+            // traversing them. The rollout is one exact path rather than a
+            // basename-wide exclusion, so it is removed from output below.
+            // The in-process `grep` prunes the same directories itself.
+            argv.insert(1, "--exclude-dir=.git".into());
+        }
+        spawn_confined(ctx.profile, &stop, tool, &argv)?
+    };
     if tool.name() == "grep" && broad_search {
         result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
     }
@@ -786,6 +791,25 @@ fn perform_in_process(
         })
     };
     match tool.name() {
+        // The two the registry declares in-process on Windows only, for
+        // `registry::READ`'s reason: the cage cannot start the MSYS2 images
+        // that would otherwise perform them.
+        #[cfg(windows)]
+        "read" => {
+            let Some(path) = resolved_path(checked, "path") else {
+                return Err(refuse("read needs a checked path".to_string()));
+            };
+            Ok(search::read_file(tool.name(), path))
+        }
+        #[cfg(windows)]
+        "grep" => {
+            let (Some(root), Some(pattern)) =
+                (resolved_path(checked, "path"), text(checked, "pattern"))
+            else {
+                return Err(refuse("grep needs a checked path and pattern".to_string()));
+            };
+            search::grep_tree(profile, stopped, tool.name(), root, pattern)
+        }
         "glob" => {
             let (Some(root), Some(pattern)) =
                 (resolved_path(checked, "path"), text(checked, "pattern"))
@@ -1065,6 +1089,14 @@ fn glob_paths(
         .into_iter()
         .map(|path| format!("{}\n", path.display()))
         .collect())
+}
+
+/// Whether a search rooted at `search_root` is a broad one — not deliberately
+/// aimed inside `.pane` or `.git` — and so omits the generated trees: `.git`
+/// is pruned from the walk and the rollout is filtered from the output.
+fn is_broad_search(project: &Path, search_root: &Path) -> bool {
+    !explicitly_roots_component(project, search_root, ".pane")
+        && !explicitly_roots_component(project, search_root, ".git")
 }
 
 /// Whether a caller deliberately rooted search inside a generated hidden
@@ -1427,7 +1459,14 @@ fn build_argv(
         }
         Argv::ShellCommand => {
             let command = text(checked, "command").ok_or_else(|| missing("command"))?;
+            #[cfg(not(windows))]
             argv.push("-c".into());
+            // `cmd.exe`'s spelling of `-c`: `/d` skips AutoRun, `/s` makes
+            // cmd strip exactly the outer quotes `windows::shell_command_line`
+            // puts round the command, and `/c` runs it. On every platform the
+            // command is the last element, which `spawn_confined` relies on.
+            #[cfg(windows)]
+            argv.extend(["/d", "/s", "/c"].map(std::ffi::OsString::from));
             argv.push(command.into());
         }
     }
@@ -1583,7 +1622,7 @@ fn spawn_confined(
     };
     let grant = exec_grant(executable);
     let mut descendant_binaries = if tool.argv() == Argv::ShellCommand {
-        argv.get(1)
+        argv.last()
             .and_then(|value| value.to_str())
             .and_then(|line| profile.admits_command(line).ok())
             .map(|command| {
@@ -1683,6 +1722,15 @@ fn spawn_confined(
         return Err(cancelled());
     }
 
+    // The command tool's line is built the way its interpreter reads it,
+    // which on Windows is not `CommandLineToArgvW`'s way — see
+    // `windows::shell_command_line`. Every other tool's argv is quoted
+    // argument by argument.
+    let line = if tool.argv() == Argv::ShellCommand {
+        LineShape::CmdTail
+    } else {
+        LineShape::Argv
+    };
     let (mut child, confinement) = spawn_with_confinement_policy(
         profile,
         &grant.binary,
@@ -1694,6 +1742,7 @@ fn spawn_confined(
             stdout: true,
             stderr: true,
         },
+        line,
     )
     .map_err(|refusal| match refusal {
         SpawnRefusal::Denied(denied) => ToolError::Denied(denied),
@@ -1848,6 +1897,11 @@ pub(crate) fn kill_group(pid: u32) {
 /// process.
 pub(crate) use crate::sandbox::windows::Pipes;
 
+/// How a confined child's command line is assembled — one string on Windows,
+/// where `cmd.exe` reads it by its own rules and every other program by
+/// `CommandLineToArgvW`'s. The Unix appliers take an argv and ignore it.
+pub(crate) use crate::sandbox::windows::LineShape;
+
 /// A child that exists **only** because a confinement was applied first.
 ///
 /// The type has no constructor other than [`confined_spawn`], and
@@ -1957,8 +2011,9 @@ pub(crate) fn confined_spawn(
     tool: &str,
     command: Command,
     pipes: Pipes,
+    line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
-    spawn_with_confinement_policy(profile, binary, &[], tool, command, pipes)
+    spawn_with_confinement_policy(profile, binary, &[], tool, command, pipes, line)
 }
 
 /// Applies the explicit host-selected bypass or delegates to the platform
@@ -1971,6 +2026,7 @@ fn spawn_with_confinement_policy(
     tool: &str,
     mut command: Command,
     pipes: Pipes,
+    line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     if profile.os_sandbox_bypassed() {
         apply_pipes(&mut command, pipes);
@@ -1980,7 +2036,7 @@ fn spawn_with_confinement_policy(
             Confinement::DangerouslyUnconfined,
         ));
     }
-    confined_spawn_with_descendants(profile, binary, descendants, tool, command, pipes)
+    confined_spawn_with_descendants(profile, binary, descendants, tool, command, pipes, line)
 }
 
 #[cfg(target_os = "macos")]
@@ -1991,6 +2047,7 @@ fn confined_spawn_with_descendants(
     tool: &str,
     mut command: Command,
     pipes: Pipes,
+    _line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     apply_pipes(&mut command, pipes);
     crate::sandbox::macos::confine_with_descendants(profile, binary, descendants, &mut command)
@@ -2015,6 +2072,7 @@ fn confined_spawn_with_descendants(
     tool: &str,
     mut command: Command,
     pipes: Pipes,
+    _line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     let refused = |rule: String| {
         SpawnRefusal::Denied(PermissionDenied {
@@ -2066,10 +2124,11 @@ fn confined_spawn_with_descendants(
     tool: &str,
     command: Command,
     pipes: Pipes,
+    line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     use crate::sandbox::windows::SpawnError;
     let _ = descendants;
-    match crate::sandbox::windows::spawn(profile, binary, &command, pipes) {
+    match crate::sandbox::windows::spawn(profile, binary, &command, pipes, line) {
         Ok(child) => Ok((ConfinedChild { inner: child }, Confinement::AppContainer)),
         Err(refusal @ SpawnError::NotConfinable(_)) => {
             Err(SpawnRefusal::Denied(PermissionDenied {
@@ -2090,8 +2149,9 @@ fn confined_spawn_with_descendants(
     tool: &str,
     command: Command,
     pipes: Pipes,
+    line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
-    let _ = (profile, binary, descendants, command, pipes);
+    let _ = (profile, binary, descendants, command, pipes, line);
     Err(SpawnRefusal::Denied(PermissionDenied {
         tool: tool.to_string(),
         path: String::new(),
@@ -2272,9 +2332,19 @@ mod tests {
         let checked = check_arguments(&profile, tool, &args, &mut trace).unwrap();
         // The trajectory records the pattern as admitted, and only that.
         assert_eq!(trace.get("pattern").map(String::as_str), Some("-rf"));
-        let argv = build_argv(tool, &checked).unwrap();
-        let position = argv.iter().position(|a| a == "-rf").unwrap();
-        assert_eq!(argv[position - 1], "-e", "{argv:?}");
+        #[cfg(not(windows))]
+        {
+            let argv = build_argv(tool, &checked).unwrap();
+            let position = argv.iter().position(|a| a == "-rf").unwrap();
+            assert_eq!(argv[position - 1], "-e", "{argv:?}");
+        }
+        // On Windows `grep` builds no argv at all: the pattern is data to
+        // the in-process matcher, and there is no option for it to become.
+        #[cfg(windows)]
+        {
+            assert_eq!(tool.argv(), Argv::InProcess);
+            assert!(build_argv(tool, &checked).unwrap().is_empty());
+        }
     }
 
     #[test]

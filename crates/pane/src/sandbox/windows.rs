@@ -464,6 +464,48 @@ pub fn command_line(program: &[u16], arguments: &[Vec<u16>]) -> Vec<u16> {
     line
 }
 
+/// How a child's `lpCommandLine` is assembled from its arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineShape {
+    /// Every argument quoted by `CommandLineToArgvW`'s rules — what every
+    /// C-runtime program reads back: [`command_line`].
+    Argv,
+    /// `cmd.exe /d /s /c "<command>"`: the switches as arguments and the
+    /// **last** argument verbatim between one pair of quotes:
+    /// [`shell_command_line`], and the reason it exists.
+    CmdTail,
+}
+
+/// The whole `lpCommandLine` for `cmd.exe`, NUL-terminated: the program
+/// quoted, `switches` as they are, and `command` verbatim between one pair
+/// of quotes.
+///
+/// **`cmd.exe` does not read its line by `CommandLineToArgvW`'s rules, and
+/// that is why this is not [`command_line`].** With `/s`, cmd strips exactly
+/// the first and the last quote after `/c` and hands everything between them
+/// to its own parser, so the model's command reaches cmd byte for byte.
+/// [`quote_argument`] would instead escape every `"` in it as `\"` and
+/// double the backslashes before them — escapes cmd never removes, which
+/// turns `findstr /c:"value = 10"` into a search for `\value`. A quote
+/// inside the command is therefore *not* escaped here, and it cannot break
+/// out of anything: cmd pairs the first quote with the last, wherever the
+/// ones between fall, and there is no argv for a stray one to extend.
+pub fn shell_command_line(program: &[u16], switches: &[Vec<u16>], command: &[u16]) -> Vec<u16> {
+    const QUOTE: u16 = b'"' as u16;
+    let mut line = Vec::new();
+    quote_argument(program, &mut line, true);
+    for switch in switches {
+        line.push(b' ' as u16);
+        quote_argument(switch, &mut line, false);
+    }
+    line.push(b' ' as u16);
+    line.push(QUOTE);
+    line.extend_from_slice(command);
+    line.push(QUOTE);
+    line.push(0);
+    line
+}
+
 /// Uppercases the ASCII range of a UTF-16 environment variable name.
 ///
 /// Windows compares variable names case-insensitively and sorts the
@@ -572,8 +614,8 @@ pub use platform::{
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{
-        AclGrants, Pipes, READ_RIGHTS, READ_WRITE_RIGHTS, Regime, SpawnError, acl_grants,
-        command_line, container_name, environment_block,
+        AclGrants, LineShape, Pipes, READ_RIGHTS, READ_WRITE_RIGHTS, Regime, SpawnError,
+        acl_grants, command_line, container_name, environment_block, shell_command_line,
     };
     use crate::sandbox::profile::{Access, Profile};
     use std::ffi::c_void;
@@ -1774,12 +1816,16 @@ mod platform {
     ///
     /// `command` is read for its program, arguments, environment changes and
     /// current directory — the stdio it may carry is ignored, because the
-    /// handles are created here and `pipes` says which.
+    /// handles are created here and `pipes` says which. `shape` says how the
+    /// arguments become the one string `CreateProcessW` takes: quoted for a
+    /// program that reads it back by `CommandLineToArgvW`'s rules, or
+    /// [`shell_command_line`]'s way for `cmd.exe`, which reads its own.
     pub fn spawn(
         profile: &Profile,
         binary: &Path,
         command: &Command,
         pipes: Pipes,
+        shape: LineShape,
     ) -> Result<ContainedChild, SpawnError> {
         // Everything down to `CreateProcessW` is the confinement, so every
         // failure above that line is `NotConfinable` and leaves no process
@@ -1896,7 +1942,13 @@ mod platform {
             .get_args()
             .map(|argument| argument.encode_wide().collect())
             .collect();
-        let mut line = command_line(&application[..application.len() - 1], &arguments);
+        let program = &application[..application.len() - 1];
+        let mut line = match (shape, arguments.split_last()) {
+            (LineShape::CmdTail, Some((tail, switches))) => {
+                shell_command_line(program, switches, tail)
+            }
+            (LineShape::Argv, _) | (LineShape::CmdTail, None) => command_line(program, &arguments),
+        };
         let block = environment_block(
             std::env::vars_os().map(|(name, value)| {
                 (

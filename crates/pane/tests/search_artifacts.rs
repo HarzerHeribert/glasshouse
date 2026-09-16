@@ -80,6 +80,17 @@ impl Drop for Fixture {
     }
 }
 
+/// `relative` beneath `root` in the host's own separators — the spelling a
+/// walker prints. `Path::join("src/lib.rs")` is not it on Windows: the `/`
+/// is kept verbatim there, and no tool output ever contains that mix.
+fn native(root: &Path, relative: &str) -> String {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+        .display()
+        .to_string()
+}
+
 #[test]
 fn broad_search_omits_generated_feedback_but_keeps_normal_hidden_files() {
     let fixture = Fixture::new();
@@ -91,7 +102,7 @@ fn broad_search_omits_generated_feedback_but_keeps_normal_hidden_files() {
         ".settings/local.txt",
     ] {
         assert!(
-            glob.contains(&fixture.root.join(retained).display().to_string()),
+            glob.contains(&native(&fixture.root, retained)),
             "{retained}: {glob}"
         );
     }
@@ -106,7 +117,7 @@ fn broad_search_omits_generated_feedback_but_keeps_normal_hidden_files() {
         ".settings/local.txt",
     ] {
         assert!(
-            grep.contains(&fixture.root.join(retained).display().to_string()),
+            grep.contains(&native(&fixture.root, retained)),
             "{retained}: {grep}"
         );
     }
@@ -122,7 +133,7 @@ fn a_large_self_matching_rollout_cannot_starve_the_real_source_match() {
 
     let grep = fixture.grep("needle", None);
     assert!(
-        grep.contains(&fixture.root.join("src/lib.rs").display().to_string()),
+        grep.contains(&native(&fixture.root, "src/lib.rs")),
         "real source match was lost: {grep}"
     );
     assert!(grep.contains("needle source"), "{grep}");
@@ -142,7 +153,7 @@ fn a_colon_in_the_project_path_cannot_hide_the_rollout_prefix() {
     let fixture = Fixture::new();
     let grep = fixture.grep("needle", None);
     assert!(
-        grep.contains(&fixture.root.join("src/lib.rs").display().to_string()),
+        grep.contains(&native(&fixture.root, "src/lib.rs")),
         "{grep}"
     );
     assert!(!grep.contains("rollout.jsonl"), "{grep}");
@@ -160,10 +171,7 @@ fn explicit_hidden_targets_opt_back_in_without_changing_read_authority() {
         "a .pane opt-in also exposed Git: {pane}"
     );
     let git = fixture.glob(".git/*", None);
-    assert!(
-        git.contains(&fixture.root.join(".git/config").display().to_string()),
-        "{git}"
-    );
+    assert!(git.contains(&native(&fixture.root, ".git/config")), "{git}");
 
     let rollout = fixture.root.join(".pane/rollout.jsonl");
     let explicit = fixture.grep("model feedback", Some(&rollout));

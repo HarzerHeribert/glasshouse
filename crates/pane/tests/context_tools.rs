@@ -136,6 +136,7 @@ fn broad_read_of_one_large_stub_is_promoted_to_visible_context() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
 #[test]
 fn related_sources_can_be_inspected_together_then_edited_and_verified_together() {
     let root = fixture("batch");
@@ -157,6 +158,69 @@ fn related_sources_can_be_inspected_together_then_edited_and_verified_together()
         write({path:'check.sh', lines:['test "$(< src/a.py)" = "value = 10" && test "$(< src/b.py)" = "value = 20"']});
         const verified = bash({command:'source check.sh'});
         if (verified.exit_code !== 0) throw new Error("verification failed");
+        return verified.exit_code;
+    "#);
+    assert!(
+        matches!(changed, CellOutcome::Returned { .. }),
+        "{changed:?}"
+    );
+    assert_eq!(changed.turn().record.calls.len(), 4, "{changed:?}");
+    assert!(
+        changed
+            .turn()
+            .record
+            .calls
+            .iter()
+            .all(|c| c.ended == Ended::Ok),
+        "{changed:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/a.py")).unwrap(),
+        "value = 10\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/b.py")).unwrap(),
+        "value = 20\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same contract where the command tool is `cmd.exe`: two edits, one
+/// verification command, and the verification's own exit code returned.
+/// `check.cmd` stands where `check.sh` stood, and its `for /f` loop is the
+/// exact-line test that `test "$(< f)" = …` is on Unix.
+///
+/// **Not `findstr /x`, and that is measured rather than taste.** On the
+/// Windows ARM64 VM, 2026-09-11, inside the cage:
+/// `echo value = 10| findstr /x /c:"value = 10"` matched, and
+/// `findstr /x /c:"value = 10" src\a.py` did not, against a file whose
+/// contents `type` printed as exactly `value = 10`. `findstr` ends a line at
+/// `\r\n`, and Pane writes `\n`, so the whole file is one line ending in a
+/// byte the exact-match test then fails on. The `echo` half is what says the
+/// argument arrived intact — the quoting `windows::shell_command_line`
+/// performs is not what fails here.
+#[cfg(windows)]
+#[test]
+fn related_sources_can_be_inspected_together_then_edited_and_verified_together() {
+    let root = fixture("batch");
+    std::fs::write(root.join("src/a.py"), "value = 1\n").unwrap();
+    std::fs::write(root.join("src/b.py"), "value = 2\n").unwrap();
+    let profile = Profile::compile(
+        &root,
+        Some(r#"{"permissions":{"allow":["Read(**)","Write(**)","Bash"]}}"#),
+    );
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("batch"));
+    let inspected = runtime
+        .run_cell("const a = context({path:'src/a.py'}); const b = context({path:'src/b.py'});");
+    assert_eq!(inspected.turn().record.calls.len(), 2, "{inspected:?}");
+    assert!(inspected.turn().stdout_tail.contains("value = 1"));
+    assert!(inspected.turn().stdout_tail.contains("value = 2"));
+    let changed = runtime.run_cell(r#"
+        edit({path:'src/a.py', old:'value = 1', replacement:'value = 10'});
+        edit({path:'src/b.py', old:'value = 2', replacement:'value = 20'});
+        write({path:'check.cmd', lines:['@echo off', 'for /f "usebackq delims=" %%L in ("src\\a.py") do if not "%%L"=="value = 10" exit /b 1', 'for /f "usebackq delims=" %%L in ("src\\b.py") do if not "%%L"=="value = 20" exit /b 1', 'exit /b 0']});
+        const verified = bash({command:'check.cmd'});
+        if (verified.exit_code !== 0) throw new Error("verification failed: " + JSON.stringify(verified));
         return verified.exit_code;
     "#);
     assert!(

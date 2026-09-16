@@ -309,11 +309,27 @@ impl Tool {
 /// `read({ path })` — `runtime-contract.md` §6's own spelling.
 ///
 /// Pure: `cat` of a path reads bytes and writes nothing.
+#[cfg(not(windows))]
 const READ: Tool = Tool::declare(
     "read",
     "cat",
     &[Arg::required("path", ArgKind::Path)],
     Argv::ReadPath,
+    Purity::Pure,
+);
+
+/// `read({ path })` on Windows: the same call, performed by pane itself.
+///
+/// **In-process here because no program can do it inside the cage.** Windows
+/// ships no `cat`; the one a machine is likely to have is Git for Windows'
+/// MSYS2 image, and an AppContainer cannot start an MSYS2 image at all
+/// (`sandbox-grants.md` §3, measured 2026-09-09, and §7 names this arm as
+/// the successor). The path went through `Profile::check` exactly as the
+/// spawning declaration's does; `tools::invoke::search` reads it.
+#[cfg(windows)]
+const READ: Tool = Tool::declare_in_process(
+    "read",
+    &[Arg::required("path", ArgKind::Path)],
     Purity::Pure,
 );
 
@@ -337,6 +353,7 @@ const GLOB: Tool = Tool::declare_in_process(
 /// `sandbox-grants.md` §2's pattern question.
 ///
 /// Pure: `grep -r` reads and writes nothing.
+#[cfg(not(windows))]
 const GREP: Tool = Tool::declare(
     "grep",
     "grep",
@@ -345,6 +362,21 @@ const GREP: Tool = Tool::declare(
         Arg::rooted("path"),
     ],
     Argv::GrepIn,
+    Purity::Pure,
+);
+
+/// `grep({ pattern, path? })` on Windows: the same call, performed by pane
+/// itself, for [`READ`]'s reason — Git for Windows' `grep.exe` is an MSYS2
+/// image the cage cannot start. `tools::invoke::search` walks the checked
+/// root, asks `Profile::check` about every entry as `glob` does, and prints
+/// `grep -r -n`'s own `path:line:text` lines.
+#[cfg(windows)]
+const GREP: Tool = Tool::declare_in_process(
+    "grep",
+    &[
+        Arg::required("pattern", ArgKind::Pattern),
+        Arg::rooted("path"),
+    ],
     Purity::Pure,
 );
 
@@ -423,9 +455,30 @@ const JQ: Tool = Tool::declare(
 /// binary.** On macOS `/bin/sh` is a shim that re-execs `/bin/bash`, and a
 /// grant on `/bin/sh` alone refuses that second exec (`sandbox_apply.rs`'s
 /// sibling test is the rule working). `/bin/bash` is the binary itself.
+#[cfg(not(windows))]
 const BASH: Tool = Tool::declare(
     "bash",
     "bash",
+    &[Arg::required("command", ArgKind::CommandLine)],
+    Argv::ShellCommand,
+    Purity::Effectful,
+);
+
+/// `bash({ command })` on Windows runs `cmd.exe`, the one command
+/// interpreter the cage can start.
+///
+/// Git for Windows' `bash.exe` is an MSYS2 image and exits `0xC0000142`
+/// inside every AppContainer (`sandbox-grants.md` §3, measured 2026-09-09),
+/// so declaring `bash` here would declare a tool that can never answer.
+/// `cmd` is `%ComSpec%`, a native image every AppContainer can load, and
+/// `tools::invoke::build_argv` gives it `/d /s /c <command>` so the model's
+/// line reaches it verbatim. The name stays `bash` because it is the runtime
+/// contract's and the dialects' spelling of "the command tool"; the prompt
+/// says which interpreter answers it on this host.
+#[cfg(windows)]
+const BASH: Tool = Tool::declare(
+    "bash",
+    "cmd",
     &[Arg::required("command", ArgKind::CommandLine)],
     Argv::ShellCommand,
     Purity::Effectful,
@@ -588,7 +641,9 @@ mod tests {
 
     /// The companion claim, and the one that matters for the sandbox: a tool
     /// either names a binary to exec or is performed in this process, and
-    /// four filesystem-object tools are the second.
+    /// four filesystem-object tools are the second — six on Windows, where
+    /// `read` and `grep` join them because the cage cannot start the MSYS2
+    /// images that would otherwise perform them.
     #[test]
     fn in_process_tools_are_named() {
         let in_process: Vec<_> = ALL
@@ -596,7 +651,13 @@ mod tests {
             .filter(|tool| tool.executable().is_none())
             .map(Tool::name)
             .collect();
+        #[cfg(not(windows))]
         assert_eq!(in_process, vec!["glob", "write", "context", "edit"]);
+        #[cfg(windows)]
+        assert_eq!(
+            in_process,
+            vec!["read", "glob", "grep", "write", "context", "edit"]
+        );
         for tool in ALL.iter().filter(|tool| tool.executable().is_none()) {
             assert_eq!(
                 tool.argv(),

@@ -40,6 +40,19 @@ pub struct Entry {
     pub summary: &'static str,
 }
 
+/// `bash`'s one-line summary, which names the interpreter where it is not
+/// the obvious one: on Windows the command line runs under `cmd.exe`, because
+/// the cage cannot start an MSYS2 `bash.exe` (`tools::registry::BASH`).
+///
+/// Both spellings carry the phrase *"inspect `exit_code`"* verbatim, which
+/// `tests/prompt_guidance.rs` is what holds: the decision a model has to be
+/// told about this tool is that its exit code is part of its result, and a
+/// platform note may be added to that sentence but never at its expense.
+#[cfg(not(windows))]
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful.";
+#[cfg(windows)]
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; on this host it runs under `cmd.exe`, so write cmd syntax (`findstr`, `dir`, `&&`) rather than POSIX shell, and inspect `exit_code` before treating it as successful.";
+
 pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "read",
@@ -79,7 +92,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "bash",
         return_type: "{stdout: string; stderr: string; exit_code: number | null}",
-        summary: "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful.",
+        summary: BASH_SUMMARY,
     },
     Entry {
         name: "context",

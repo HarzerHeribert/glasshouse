@@ -155,6 +155,38 @@ fn an_argument_cannot_break_out_of_the_quoting_that_carries_it() {
     );
 }
 
+/// `cmd.exe` reads its own line, and the command tool's line is built the
+/// way cmd reads it.
+///
+/// The injection question is asked of the shape that actually runs. With
+/// `/s`, cmd pairs the first quote after `/c` with the last quote on the
+/// line, so a `"` inside the command — the `findstr /c:"…"` every real
+/// verification writes — reaches cmd unescaped, and a command that itself
+/// ends in a quote still closes where the builder closed it. The second half
+/// is the defect the shape exists to avoid: `command_line` would hand cmd
+/// `\"`, an escape cmd never removes.
+#[test]
+fn the_shell_line_carries_the_command_verbatim_between_one_pair_of_quotes() {
+    let units = |text: &str| -> Vec<u16> { text.encode_utf16().collect() };
+    let cmd = units(r"C:\Windows\System32\cmd.exe");
+    let switches: Vec<Vec<u16>> = ["/d", "/s", "/c"].iter().map(|s| units(s)).collect();
+    let command = r#"findstr /x /c:"value = 10" src\a.py >nul && echo "done""#;
+    let line = windows::shell_command_line(&cmd, &switches, &units(command));
+    assert_eq!(line.last(), Some(&0), "the command line must be terminated");
+    assert_eq!(
+        String::from_utf16(&line[..line.len() - 1]).unwrap(),
+        format!(r#""C:\Windows\System32\cmd.exe" /d /s /c "{command}""#)
+    );
+
+    let quoted = windows::command_line(&cmd, &[units("/c"), units(r#"findstr /c:"x""#)]);
+    assert!(
+        String::from_utf16(&quoted[..quoted.len() - 1])
+            .unwrap()
+            .contains(r#"\""#),
+        "the argv quoting escapes a quote cmd would have read verbatim"
+    );
+}
+
 /// The credential scrub, and the case-folding that makes it a scrub rather
 /// than a hope.
 ///
@@ -292,6 +324,7 @@ fn caged_program(
             stdout: true,
             stderr: true,
         },
+        windows::LineShape::Argv,
     )
     .map_err(|error| error.to_string())?;
     // The outputs here are a line each, so a sequential read cannot fill the
@@ -571,10 +604,16 @@ fn a_binary_the_container_cannot_load_is_refused_and_the_report_names_it() {
         // executables this machine's container can load. It is printed rather
         // than asserted -- which tools are installed is a property of the
         // machine, and a test that asserted it would be asserting the runner.
-        for name in ["cat", "grep", "rg", "fd", "jq", "bash"] {
-            let grant = pane::tools::invoke::exec_grant(name);
+        for tool in pane::tools::registry::ALL.iter() {
+            let name = tool.name();
+            // A tool pane performs itself names no binary, so there is no
+            // image for a container to load and nothing here to report.
+            let Some(program) = tool.executable() else {
+                continue;
+            };
+            let grant = pane::tools::invoke::exec_grant(program);
             if grant.fell_back_to_roots {
-                eprintln!("tool {name}: not on PATH");
+                eprintln!("tool {name} (`{program}`): not on PATH");
                 continue;
             }
             match windows::image_admits_app_containers(&grant.binary) {
@@ -624,6 +663,7 @@ fn a_binary_the_container_cannot_load_is_refused_and_the_report_names_it() {
                 stdout: true,
                 stderr: true,
             },
+            windows::LineShape::Argv,
         )
         .err()
         .expect("a binary the container cannot load must not be spawned");
@@ -646,12 +686,18 @@ fn a_binary_the_container_cannot_load_is_refused_and_the_report_names_it() {
 /// Whether the tools the registry actually names run inside the cage on this
 /// machine, and what they say when they do not.
 ///
-/// A report rather than a fixed expectation: which of `cat`, `grep`, `rg`,
-/// `fd`, `jq` and `bash` a given Windows machine has is a property of the
-/// machine. What is asserted is the part that is pane's — a tool that
-/// resolves and whose image the container can load must not be refused by
-/// the cage, because a refusal there would be the cage failing rather than
-/// the machine lacking a binary.
+/// A report rather than a fixed expectation: which binaries a given Windows
+/// machine has is a property of the machine. What is asserted is the part
+/// that is pane's — a tool that resolves and whose image the container can
+/// load must not be refused by the cage, because a refusal there would be
+/// the cage failing rather than the machine lacking a binary.
+///
+/// **The list is the registry's own, never a second copy of it.** A tool
+/// pane performs in-process names no binary, enters no container and cannot
+/// be "not installed": on Windows `read` and `grep` are exactly that
+/// (`tools::registry`), and a hard-coded `["cat", "grep", …]` here went on
+/// asking the cage about programs the registry had stopped naming — and
+/// then asserted a missing-tool refusal against a `read` that had answered.
 ///
 /// **What this reported on the Windows ARM64 host, 2026-09-09, and why it is
 /// worth keeping:** Git for Windows' `cat.exe` and `grep.exe` were loadable
@@ -677,8 +723,13 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
         let inside = root.join("inside.txt");
         std::fs::write(&inside, "inside-secret\n").unwrap();
 
-        for name in ["cat", "grep", "rg", "fd", "jq", "bash"] {
-            let grant = pane::tools::invoke::exec_grant(name);
+        for tool in pane::tools::registry::ALL.iter() {
+            let name = tool.name();
+            let Some(program) = tool.executable() else {
+                eprintln!("tool {name}: in-process, no image to load");
+                continue;
+            };
+            let grant = pane::tools::invoke::exec_grant(program);
             if grant.fell_back_to_roots {
                 // **A tool that is not installed is refused, and the refusal
                 // says why in terms of the missing tool.** This used to
@@ -704,6 +755,7 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
                         stdout: true,
                         stderr: true,
                     },
+                    windows::LineShape::Argv,
                 )
                 .err()
                 .expect("a name that resolves to nothing cannot start");
@@ -716,11 +768,11 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
                 // and the machine, not a path it never chose.
                 let path = inside.to_string_lossy().into_owned();
                 let args = pane::tools::invoke::Args::new();
-                let (tool, args) = match name {
-                    "cat" => ("read", args.with("path", path)),
-                    "jq" => ("jq", args.with("filter", ".").with("path", path)),
-                    "bash" => ("bash", args.with("command", "echo x")),
-                    other => (other, args.with("pattern", "inside").with("path", path)),
+                let args = match name {
+                    "read" => args.with("path", path),
+                    "jq" => args.with("filter", ".").with("path", path),
+                    "bash" => args.with("command", "echo x"),
+                    _ => args.with("pattern", "inside").with("path", path),
                 };
                 let denial = pane::tools::invoke::run(
                     &pane::tools::invoke::ToolContext {
@@ -728,7 +780,7 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
                         glasshouse: &pane::glasshouse::Glasshouse::None,
                         session: &pane::contract::SessionId::new("windows-missing-tool"),
                     },
-                    tool,
+                    name,
                     &args,
                 );
                 match &denial {
@@ -738,7 +790,7 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
                     ),
                     other => panic!("a tool that is not installed was not refused: {other:?}"),
                 }
-                eprintln!("tool {name}: not on PATH, and refused as {refusal}");
+                eprintln!("tool {name} (`{program}`): not on PATH, and refused as {refusal}");
                 continue;
             }
             match windows::image_admits_app_containers(&grant.binary) {
@@ -755,12 +807,13 @@ fn every_installed_tool_that_the_container_can_load_actually_runs_in_it() {
                 }
                 Ok(true) => {}
             }
-            // `cat` is the one whose argv this can drive without knowing the
-            // tool: everything else takes a pattern or a subcommand.
-            let arguments: Vec<&OsStr> = if name == "cat" {
-                vec![inside.as_ref()]
-            } else {
-                vec![OsStr::new("--version")]
+            // `cat` is the one whose argv this can drive without knowing
+            // the tool: everything else takes a pattern or a subcommand, and
+            // `cmd` takes a command line whose one statement does nothing.
+            let arguments: Vec<&OsStr> = match program {
+                "cat" => vec![inside.as_ref()],
+                "cmd" => vec![OsStr::new("/d"), OsStr::new("/c"), OsStr::new("rem")],
+                _ => vec![OsStr::new("--version")],
             };
             let ran = caged_program(&profile, &grant.binary, &arguments);
             match ran {
@@ -1167,20 +1220,72 @@ fn a_confined_child_cannot_move_the_carve_out_out_of_its_own_way() {
              {moved:?}"
         );
         std::fs::rename(&renamed, &file).unwrap();
-        let truncated = run(&[
-            OsStr::new("/c"),
-            OsStr::new("copy"),
-            OsStr::new("/y"),
-            OsStr::new("nul"),
-            file.as_ref(),
-        ]);
+        // **The truncation is asserted through a redirect, and that is a
+        // measurement rather than a preference.** `copy /y nul <file>` is
+        // what stood here, and on the GitHub `windows-latest` runner it
+        // answered `exit 1`, *"0 file(s) copied."*, *"Access is denied."*,
+        // leaving the file at its original 10 bytes — while in the same
+        // container, on the same run, `mkdir`, `move`, `rmdir` and a file
+        // rename all succeeded, and the root's ACE read `0x0013019F` exactly
+        // as it does here. The one thing `copy` does that none of those do
+        // is open the `NUL` **device**, whose name resolves through a DOS
+        // device map an AppContainer in a service logon need not have. So
+        // the contract — a confined child can truncate an ordinary project
+        // file — is asserted through `break`, a cmd builtin that writes
+        // nothing, and cmd's own `>` redirection: the same claim about the
+        // same file, reached without a device.
+        //
+        // The `copy` probe stays, printed. It is the evidence that says
+        // whether the runner's refusal was ever about the project ACL, and
+        // dropping it would throw that away to make a red go quiet.
+        eprintln!("file acl {}", icacls(&[file.as_ref()]));
+        eprintln!(
+            "list the project inside the cage {:?}",
+            run(&[
+                OsStr::new("/c"),
+                OsStr::new("dir"),
+                OsStr::new("/b"),
+                root.as_ref()
+            ])
+        );
+        eprintln!(
+            "read the NUL device inside the cage {:?}",
+            run(&[OsStr::new("/c"), OsStr::new("type"), OsStr::new("nul")])
+        );
+        let created = root.join("created-by-redirect.txt");
+        eprintln!(
+            "create by redirect {:?} exists={}",
+            run(&[
+                OsStr::new("/c"),
+                OsStr::new("echo"),
+                OsStr::new("x>"),
+                created.as_ref(),
+            ]),
+            created.exists()
+        );
+        eprintln!(
+            "copy /y nul {:?} len={:?}",
+            run(&[
+                OsStr::new("/c"),
+                OsStr::new("copy"),
+                OsStr::new("/y"),
+                OsStr::new("nul"),
+                file.as_ref(),
+            ]),
+            std::fs::metadata(&file).map(|meta| meta.len())
+        );
+
+        // And the assertion: whatever the probe above did, the file starts
+        // at its ten bytes and the cage has to take them away.
+        std::fs::write(&file, "gone soon\n").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 10);
+        let truncated = run(&[OsStr::new("/c"), OsStr::new("break>"), file.as_ref()]);
         assert_eq!(
             std::fs::metadata(&file).unwrap().len(),
             0,
             "the cage cannot write a project file: {truncated:?}"
         );
 
-        // **`cmd`'s own `del` is refused inside the cage, and it is not this
         // package's doing.** Measured on the Windows ARM64 VM, 2026-09-09,
         // with `FILE_DELETE_CHILD` *restored* into the mask and the file
         // carrying an inherited allow of `0x0013_01DF` — which contains
