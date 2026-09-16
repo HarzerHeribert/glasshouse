@@ -1771,6 +1771,8 @@ fn a_never_rule_that_contains_the_root_carries_its_exemption() {
         .rules()
         .filter(|rule| rule.effect() == Effect::Never)
         .filter(|rule| rule.exempt_subtree().is_some())
+        // `.pane/**` is inside the root and exempts its scratchpad instead.
+        .filter(|rule| !rule.written().starts_with("`.pane/**`"))
         .collect();
     assert!(
         !containing.is_empty(),
@@ -2179,18 +2181,141 @@ fn explore_admits_a_write_under_a_configured_documentation_glob() {
         .expect("edit asks the same question");
 }
 
-/// A mode never widens: `.pane/**` is never writable (§1.5), so the default
-/// scratch glob under it is still refused, and by the never-grantable rule.
+/// §1.5's one exemption: `.pane/scratch/**` is the agent's scratchpad, a
+/// property of the profile, so it is writable in `execute` and in `explore`
+/// (whose default writable glob it is) and named by the never rule itself.
 #[test]
-fn explore_scratch_under_dot_pane_stays_refused_by_the_profile() {
+fn the_scratchpad_is_carved_out_of_dot_pane_and_explore_writes_it() {
     let fixture = Fixture::new("explore-scratch");
-    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &ModeOverlay::default());
-    let denied = refusal(explore.check_request(
-        "write",
-        Access::Write,
-        &fixture.root.join(".pane/scratch/notes.md"),
-    ));
-    assert!(denied.rule.contains("`.pane/**`"), "{denied}");
+    let execute = open_profile(&fixture);
+    let notes = fixture.root.join(".pane/scratch/notes.md");
+    execute
+        .check_request("write", Access::Write, &notes)
+        .expect("execute writes the scratchpad");
+    let explore = execute
+        .clone()
+        .narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    explore
+        .check_request("write", Access::Write, &notes)
+        .expect("explore writes its default writable glob");
+    let never = execute
+        .rules()
+        .find(|rule| rule.effect() == Effect::Never && rule.written().starts_with("`.pane/**`"))
+        .expect("the `.pane/**` never rule");
+    assert!(
+        never.written().contains("except `.pane/scratch/**`"),
+        "{}",
+        never.written()
+    );
+    assert_eq!(
+        never.exempt_subtree(),
+        Some(execute.root().join(".pane/scratch").as_path())
+    );
+}
+
+/// Everything else under `.pane/` stays never-writable, in every mode and by
+/// the never rule: a name that merely starts like the scratchpad is not it.
+#[test]
+fn the_rest_of_dot_pane_stays_never_writable_in_every_mode() {
+    let fixture = Fixture::new("dot-pane-rest");
+    let execute = open_profile(&fixture);
+    for mode in [
+        RequestMode::Execute,
+        RequestMode::Explore,
+        RequestMode::Plan,
+    ] {
+        let narrowed = execute.clone().narrowed_to(mode, &ModeOverlay::default());
+        for path in [
+            ".pane/config.toml",
+            ".pane/settings.json",
+            ".pane/settings.local.json",
+            ".pane/scratch.txt",
+            ".pane/scratchpad/x",
+            ".pane",
+        ] {
+            let denied =
+                refusal(narrowed.check_request("write", Access::Write, &fixture.root.join(path)));
+            assert!(
+                denied.rule.starts_with("`.pane/**`"),
+                "{mode:?} {path}: {denied}"
+            );
+        }
+    }
+}
+
+/// No escape through the carve-out: a `..`, a link to the host's
+/// configuration (present or not yet created), a linked directory, and a link
+/// out of the project are each judged where they land.
+#[test]
+fn no_spelling_under_the_scratchpad_reaches_outside_it() {
+    let fixture = Fixture::new("scratch-escape");
+    let root = &fixture.root;
+    std::fs::create_dir_all(root.join(".pane/scratch")).unwrap();
+    let profile = open_profile(&fixture);
+    let explore = profile
+        .clone()
+        .narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    let pane_rule = |path: PathBuf| {
+        for narrowed in [&profile, &explore] {
+            let denied = refusal(narrowed.check_request("write", Access::Write, &path));
+            assert!(
+                denied.rule.starts_with("`.pane/**`"),
+                "{}: {denied}",
+                path.display()
+            );
+        }
+    };
+    pane_rule(root.join(".pane/scratch/../config.toml"));
+    pane_rule(root.join(".pane/scratch/./../settings.json"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let scratch = root.join(".pane/scratch");
+        // Dangling: `config.toml` does not exist, and a write through the
+        // link would create it.
+        symlink("../config.toml", scratch.join("dangling")).unwrap();
+        pane_rule(scratch.join("dangling"));
+        symlink("missing/../../config.toml", scratch.join("dangling-deeper")).unwrap();
+        pane_rule(scratch.join("dangling-deeper"));
+        std::fs::write(root.join(".pane/config.toml"), "host").unwrap();
+        symlink("../config.toml", scratch.join("present")).unwrap();
+        pane_rule(scratch.join("present"));
+        symlink("..", scratch.join("up")).unwrap();
+        pane_rule(scratch.join("up/config.toml"));
+        let elsewhere = Elsewhere::new("scratch-escape").root.join("x.txt");
+        symlink(&elsewhere, scratch.join("out")).unwrap();
+        let denied = refusal(explore.check_request("write", Access::Write, &scratch.join("out")));
+        assert!(!denied.rule.starts_with("mode explore"), "{denied}");
+    }
+}
+
+/// The same carve-out in the Windows spellings: verbatim and plain decide
+/// alike, and only the scratchpad is exempt.
+#[test]
+fn the_scratchpad_carve_out_holds_in_verbatim_and_plain_spellings() {
+    let profile = Profile::compile(
+        Path::new("C:/pane-fixture/proj"),
+        Some(r#"{"permissions":{"allow":["Bash"]}}"#),
+    );
+    for base in [
+        r"\\?\C:\pane-fixture\proj",
+        r"C:\pane-fixture\proj",
+        "c:/pane-fixture/proj",
+    ] {
+        profile
+            .check(
+                "write",
+                Access::Write,
+                Path::new(&format!(r"{base}\.pane\scratch\x.md")),
+            )
+            .unwrap_or_else(|d| panic!("{base}: {d:?}"));
+        let denied = refusal(profile.check(
+            "write",
+            Access::Write,
+            Path::new(&format!(r"{base}\.pane\config.toml")),
+        ));
+        assert!(denied.rule.starts_with("`.pane/**`"), "{base}: {denied}");
+    }
 }
 
 #[test]
@@ -2236,6 +2361,46 @@ fn plan_reads_and_refuses_every_write_even_under_a_documentation_glob() {
             denied.rule.starts_with("mode plan: no change executes"),
             "{denied}"
         );
+    }
+}
+
+/// `plan` writes its plan file and nothing else: not a sibling in the
+/// scratchpad, not a `PLAN.md` at the root, not a path beneath the file, and
+/// not a link in its place.
+#[test]
+fn plan_writes_only_its_plan_file() {
+    let fixture = Fixture::new("plan-file");
+    let plan = open_profile(&fixture).narrowed_to(RequestMode::Plan, &docs_overlay());
+    plan.check_request(
+        "write",
+        Access::Write,
+        &fixture.root.join(".pane/scratch/plan.md"),
+    )
+    .expect("plan writes .pane/scratch/plan.md");
+    for path in [
+        ".pane/scratch/notes.md",
+        "PLAN.md",
+        ".pane/scratch/plan.md/x",
+        "docs/plan.md",
+    ] {
+        let denied = refusal(plan.check_request("write", Access::Write, &fixture.root.join(path)));
+        assert!(denied.rule.starts_with("mode plan:"), "{path}: {denied}");
+    }
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(fixture.root.join(".pane/scratch")).unwrap();
+        std::fs::create_dir_all(fixture.root.join("src")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../src/lib.rs",
+            fixture.root.join(".pane/scratch/plan.md"),
+        )
+        .unwrap();
+        let denied = refusal(plan.check_request(
+            "write",
+            Access::Write,
+            &fixture.root.join(".pane/scratch/plan.md"),
+        ));
+        assert!(denied.rule.starts_with("mode plan:"), "{denied}");
     }
 }
 

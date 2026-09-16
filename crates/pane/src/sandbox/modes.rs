@@ -22,7 +22,7 @@ pub enum RequestMode {
     /// Reading tools and read-only shell commands; writes only under
     /// [`ModeOverlay::writable`].
     Explore,
-    /// What `Explore` reads, and no write at all: no change executes.
+    /// What `Explore` reads, and one write: [`PLAN_FILE`]. No change executes.
     Plan,
 }
 
@@ -56,6 +56,29 @@ impl RequestMode {
 
 /// Where `explore` may write before configuration adds to it.
 pub const DEFAULT_WRITABLE: [&str; 1] = [".pane/scratch/**"];
+
+/// The one file `plan` may write, and the one the next request is handed.
+pub const PLAN_FILE: &str = ".pane/scratch/plan.md";
+
+/// The plan a `plan` request left: [`PLAN_FILE`] as a regular file at exactly
+/// `<root>/.pane/scratch/plan.md`, never reached through a link, modified at or
+/// after `since`. `None` when the request wrote nothing, so a plan request
+/// that wrote no plan hands nothing on and a file a link points at is never
+/// read. `since` is taken one second early: a file clock can trail the wall
+/// clock, and a plan that old is still this request's.
+pub fn written_plan(root: &Path, since: std::time::SystemTime) -> Option<String> {
+    let path = root.join(PLAN_FILE);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    let since = since - std::time::Duration::from_secs(1);
+    if !metadata.is_file() || metadata.modified().ok()? < since {
+        return None;
+    }
+    if std::fs::canonicalize(&path).ok()? != std::fs::canonicalize(root).ok()?.join(PLAN_FILE) {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 /// Commands whose every admitted spelling reads. Arguments that turn one of
 /// them into a writer or a launcher are refused by [`refused_argument`].
@@ -120,7 +143,11 @@ impl Narrowing {
         let mut diagnostics = Vec::new();
         let writable = match mode {
             RequestMode::Execute => return (None, diagnostics),
-            RequestMode::Plan => Vec::new(),
+            // The file, not the subtree: `plan` writes its plan and nothing else.
+            RequestMode::Plan => vec![(
+                PLAN_FILE.to_string(),
+                resolve_pattern(root, home, PLAN_FILE),
+            )],
             RequestMode::Explore => overlay
                 .writable
                 .iter()
@@ -154,16 +181,17 @@ impl Narrowing {
     /// The refusal for a write the profile already admitted, if this mode
     /// refuses it.
     pub(super) fn write_refusal(&self, candidate: &[String]) -> Option<String> {
-        if self
-            .writable
-            .iter()
-            .any(|(_, glob)| covers(glob, candidate, false))
-        {
+        // `plan`'s one entry is a file: equal, never an ancestor of the
+        // candidate, so `plan.md/x` is not the plan.
+        if self.writable.iter().any(|(_, glob)| match self.mode {
+            RequestMode::Plan => glob.as_slice() == candidate,
+            _ => covers(glob, candidate, false),
+        }) {
             return None;
         }
         Some(match self.mode {
             RequestMode::Plan => {
-                "mode plan: no change executes, so every write is refused; `/mode execute` lifts it from the next request".to_string()
+                "mode plan: no change executes, so every write but the plan to `.pane/scratch/plan.md` is refused; `/mode execute` lifts it from the next request".to_string()
             }
             _ => {
                 let under: Vec<String> = self

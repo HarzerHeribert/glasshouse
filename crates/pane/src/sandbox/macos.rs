@@ -24,7 +24,7 @@
 //! documentation for the reason, which is a missing accessor on `Profile`
 //! and not a property of seatbelt.
 
-use super::profile::{Access, Profile};
+use super::profile::{Access, Profile, SCRATCH_DIR};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -475,6 +475,19 @@ pub fn profile_text_with_descendants(
         "(deny file-write* (subpath {}))\n",
         quote(&display(&profile.root().join(".pane")))
     ));
+    // The scratchpad the `.pane/**` never rule exempts, after the deny because
+    // seatbelt takes the last matching term. Seatbelt matches the resolved
+    // path, so a link under it is judged where it points, as the profile is.
+    let scratch = profile.root().join(SCRATCH_DIR);
+    if profile
+        .check("write", Access::Write, &scratch.join(WRITE_PROBE))
+        .is_ok_and(|resolved| resolved.starts_with(&scratch))
+    {
+        out.push_str(&format!(
+            "(allow file-write* (subpath {}))\n",
+            quote(&display(&scratch))
+        ));
+    }
     if profile
         .check("write", Access::Write, &dot_claude.join(WRITE_PROBE))
         .is_err()

@@ -51,7 +51,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::profile::{Access, Profile};
+use super::profile::{Access, Profile, SCRATCH_DIR};
 
 /// Which enforcement this applier achieved.
 ///
@@ -338,6 +338,15 @@ pub fn acl_grants(profile: &Profile, binary: &Path) -> AclGrants {
             if !grants(profile, Access::Write, &protected) {
                 read_only.push(protected);
             }
+        }
+        // The scratchpad `.pane/**`'s never rule exempts: its own protected
+        // read-write grant inside the read-only `.pane` carve-out.
+        let scratch = root.join(SCRATCH_DIR);
+        // A link or junction in its place is not the scratchpad; granting it
+        // would rewrite the DACL of whatever it points at.
+        let linked = std::fs::symlink_metadata(&scratch).is_ok_and(|m| m.file_type().is_symlink());
+        if !linked && grants(profile, Access::Write, &scratch) {
+            read_write.push(scratch);
         }
     } else if grants(profile, Access::Read, &root) {
         read_only.push(root);

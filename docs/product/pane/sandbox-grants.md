@@ -79,7 +79,9 @@ These are numbered because 61D's acceptance quotes them.
    lives *inside* the project root, which invariant 3 makes writable, so a
    profile recomputed from disk mid-session would let a program widen its own
    sandbox by editing the file it was derived from. `.pane/**` and the legacy
-   `.claude/**` are in the profile's deny-write set. macOS enforces the native
+   `.claude/**` are in the profile's deny-write set, except `.pane/scratch/**`,
+   the agent's scratchpad, which every mode and applier grants like the root
+   (a link or `..` under it is judged where it lands). macOS enforces the native
    exclusion for subprocesses too; active Linux Landlock cannot carve it out
    of a writable project and explicitly warns about future-session mutation.
 
@@ -698,14 +700,17 @@ probe it, and Windows refuses to exec a program the *session* could write.
 
 - **`explore`**: reading tools run; `write`/`edit` go through
   `Profile::check_request` and are refused outside the writable globs
-  (default `.pane/scratch/**`, which `.pane/**` in §4.5's set still refuses);
+  (default `.pane/scratch/**`, the scratchpad §1.5 carves out of `.pane/**`);
   `bash` runs only a read-only command (`ls cat head tail wc grep rg find stat
   file git du df ps env which pwd echo date uname`, `git` limited to
   `status log diff show blame ls-files`), per segment, with no file redirect,
   process substitution, variable prefix, path-qualified or quoted command
   name, and none of the writing flags (`find -delete/-exec…`, `rg --pre`,
   `git --output`, `date -s`, `env <anything>`, `file -C`).
-- **`plan`**: the same, and every write refused.
+- **`plan`**: the same, and one write: the file `.pane/scratch/plan.md`. When a
+  plan request wrote it, the next request not in `plan` carries it once as a
+  `## Plan (.pane/scratch/plan.md)` system section, cut at a line within
+  16 KiB; the TUI says `plan written: … (<n> lines)`.
 - On Windows the command tool is `cmd.exe`, whose line is not parsed here, so
   every `bash` call is refused by name in both modes.
 - A refusal's rule starts `mode explore:` / `mode plan:`; the prompt names the

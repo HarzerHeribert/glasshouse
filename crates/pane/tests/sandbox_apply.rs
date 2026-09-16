@@ -338,6 +338,7 @@ fn the_allow_set_is_exactly_the_declared_terms() {
     expected.push(root.to_string_lossy().into_owned());
     expected.push(root.join(".claude").to_string_lossy().into_owned());
     expected.push(root.join(".pane").to_string_lossy().into_owned());
+    expected.push(root.join(".pane/scratch").to_string_lossy().into_owned());
     assert_eq!(
         sorted(filters.iter().map(|f| f.value.clone()).collect()),
         sorted(expected),
@@ -552,6 +553,108 @@ fn the_macos_profile_denies_writing_dot_claude_inside_the_project() {
             .check("read", Access::Read, &root.join(".claude/settings.json"))
             .is_ok()
     );
+}
+
+/// §1.5's one exemption, rendered the way the profile decides it: the
+/// scratchpad's write allow follows the `.pane` deny (seatbelt takes the last
+/// matching term), and `.pane` itself is still denied.
+#[test]
+fn every_applier_carves_the_scratchpad_out_of_dot_pane() {
+    let fixture = Fixture::new("scratch-text");
+    std::fs::create_dir_all(fixture.root.join(".pane/scratch")).unwrap();
+    let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+    let root = fixture.resolved(&profile);
+    let text = macos::profile_text(&profile, Path::new(RESOLVED));
+    let deny = format!(
+        "(deny file-write* (subpath {}))",
+        quoted(&root.join(".pane"))
+    );
+    let allow = format!(
+        "(allow file-write* (subpath {}))",
+        quoted(&root.join(".pane/scratch"))
+    );
+    let deny_at = text.find(&deny).unwrap_or_else(|| panic!("{text}"));
+    let allow_at = text.find(&allow).unwrap_or_else(|| panic!("{text}"));
+    assert!(deny_at < allow_at, "{text}");
+
+    let argv: Vec<String> = linux::bwrap_argv(&profile, "/bin/cat".as_ref(), &[])
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let at = |flag: &str, path: &Path| {
+        let path = path.to_string_lossy();
+        argv.windows(3)
+            .position(|w| w[0] == flag && w[1] == path && w[2] == path)
+            .unwrap_or_else(|| panic!("{flag} {path}: {argv:?}"))
+    };
+    assert!(at("--ro-bind", &root.join(".pane")) < at("--bind", &root.join(".pane/scratch")));
+
+    // A link in the scratchpad's place is not the scratchpad: no applier
+    // grants it, and `.pane` stays denied.
+    #[cfg(unix)]
+    {
+        std::fs::remove_dir(fixture.root.join(".pane/scratch")).unwrap();
+        std::os::unix::fs::symlink("..", fixture.root.join(".pane/scratch")).unwrap();
+        let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+        let text = macos::profile_text(&profile, Path::new(RESOLVED));
+        assert!(text.contains(&deny) && !text.contains(&allow), "{text}");
+        let grants = windows::acl_grants(&profile, Path::new(RESOLVED));
+        assert_eq!(grants.read_write, vec![root.clone()], "{grants:?}");
+    }
+}
+
+/// The seatbelt the carve-out renders, applied: a confined child writes the
+/// scratchpad and cannot write `.pane/config.toml` directly or through a link
+/// planted in the scratchpad.
+#[test]
+fn a_confined_child_writes_the_scratchpad_and_not_the_host_configuration() {
+    #[cfg(not(target_os = "macos"))]
+    eprintln!(
+        "skipped: seatbelt is macOS-only; Linux's Landlock cannot carve `.pane` at all (see landlock_alone_does_not_enforce_the_dot_claude_carve_out_and_the_mount_view_does), and Windows is the pane (windows-latest) cell"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+
+        let fixture = Fixture::new("scratch-exec");
+        std::fs::create_dir_all(fixture.root.join(".pane/scratch")).unwrap();
+        let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+        let root = fixture.resolved(&profile);
+        let config = fixture.write(&root.join(".pane/config.toml"), "host\n");
+        std::os::unix::fs::symlink("../config.toml", root.join(".pane/scratch/link")).unwrap();
+        let sh = |script: &str| {
+            let mut command = Command::new("/bin/bash");
+            command
+                .arg("-c")
+                .arg(script)
+                .current_dir(&root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            macos::confine(&profile, Path::new("/bin/bash"), &mut command).unwrap();
+            command.output().unwrap()
+        };
+
+        let scratch = sh("echo note > .pane/scratch/x");
+        assert!(scratch.status.success(), "{scratch:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".pane/scratch/x")).unwrap(),
+            "note\n"
+        );
+        for script in [
+            "echo changed > .pane/config.toml",
+            "echo changed > .pane/scratch/../config.toml",
+            "echo changed > .pane/scratch/link",
+        ] {
+            let refused = sh(script);
+            assert!(!refused.status.success(), "{script}: {refused:?}");
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                "host\n",
+                "{script}"
+            );
+        }
+    }
 }
 
 /// A request mode is an in-process narrowing only: the OS layer a narrowed
@@ -868,7 +971,9 @@ fn no_runtime_input_can_widen_a_grant() {
         text.lines()
             .filter(|line| line.starts_with("(allow file-write* (subpath"))
             .count(),
-        1,
+        // The root's and its `.pane/scratch` carve-out's; an injected term
+        // would be a third.
+        2,
         "the directory name opened a second write grant: {text}"
     );
     assert!(text.contains(r#"a\"b\\c"#), "not escaped: {text}");
@@ -1123,7 +1228,13 @@ fn the_windows_acl_admits_the_capability_sid_to_the_project_and_nothing_else() {
     let root = fixture.resolved(&profile);
     let grants = windows::acl_grants(&profile, Path::new(RESOLVED));
 
-    assert_eq!(grants.read_write, vec![root.clone()], "{grants:?}");
+    // The scratchpad `.pane/**`'s never rule exempts is its own read-write
+    // carve-out inside the read-only `.pane`.
+    assert_eq!(
+        grants.read_write,
+        vec![root.clone(), root.join(".pane/scratch")],
+        "{grants:?}"
+    );
     assert_eq!(
         grants.read_only,
         vec![root.join(".claude"), root.join(".pane")],

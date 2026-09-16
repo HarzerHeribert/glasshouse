@@ -115,9 +115,9 @@ struct NeverRule {
     /// test exactly: `**` matches the empty tail, so the subtree's own root
     /// is covered.
     glob: Vec<String>,
-    /// The project root, when this rule's subtree contains it, and nothing
-    /// otherwise. It is the only exemption there is: a project checked out
-    /// under `~/.config` must be able to read itself, and nothing else in
+    /// The project root, when this rule's subtree contains it; for `.pane/**`,
+    /// [`SCRATCH_DIR`]; nothing otherwise. A project checked out under
+    /// `~/.config` must be able to read itself, and nothing else in
     /// `~/.config`. Dropping the rule instead handed the whole directory to
     /// any pattern that named it.
     ///
@@ -402,7 +402,8 @@ impl<'a> Rule<'a> {
     }
 
     /// The one subtree this rule does not apply to: the project root, when a
-    /// never-grantable directory contains it. `None` everywhere else.
+    /// never-grantable directory contains it, and `.pane/scratch` for
+    /// `.pane/**`. `None` everywhere else.
     pub fn exempt_subtree(&self) -> Option<&'a Path> {
         self.except
     }
@@ -1058,6 +1059,10 @@ impl Profile {
     }
 }
 
+/// The agent's scratchpad, relative to the project root: the one subtree of
+/// `.pane/**` the never rule exempts (sandbox-grants.md §1.5).
+pub const SCRATCH_DIR: &str = ".pane/scratch";
+
 /// Builds §4's never-grantable set for one project root.
 ///
 /// **No entry is ever dropped for where the project root sits.** A rule whose
@@ -1084,13 +1089,14 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
         rule: "`.claude/**` is never writable: a program that could edit it could widen the profile it was derived from (sandbox-grants.md §1.5)".to_string(),
     }];
     let dot_pane = spelling(&root.join(".pane"));
+    let scratch = root.join(SCRATCH_DIR);
     rules.push(NeverRule {
         glob: subtree_glob(&dot_pane),
         prefix: dot_pane,
-        except: None,
-        except_spelling: None,
+        except_spelling: Some(spelling(&scratch)),
+        except: Some(scratch),
         write_only: true,
-        rule: "`.pane/**` is host-owned configuration and never writable by agent tools; write scratch files elsewhere under the project root".into(),
+        rule: "`.pane/**` is host-owned configuration and never writable by agent tools, except `.pane/scratch/**`, the agent's scratchpad; write scratch files elsewhere under the project root".into(),
     });
     // `Some(root)`, and it is what makes §4.2 hold on Windows: `/etc/sudoers`
     // has a root and no drive there, so a candidate spelled that way acquires
@@ -1297,9 +1303,11 @@ fn home_dir() -> Option<PathBuf> {
 /// `<root>/link/../.ssh/id_ed25519` came to be `<root>/.ssh/id_ed25519` here
 /// — a path inside the project — while every real call landed in `$HOME`.
 ///
-/// The tail that does not exist yet — a file about to be created, which can
-/// therefore be no symlink — is appended to the resolved prefix, so a write
-/// check decides on the same spelling a later read of that file would.
+/// The tail that does not exist yet — a file about to be created — is
+/// appended to the resolved prefix, so a write check decides on the same
+/// spelling a later read of that file would. A *dangling* symlink does not
+/// exist either and yet a write through it creates its target, so
+/// [`canonical_prefix`] follows it and the call is judged where it would land.
 ///
 /// **[`Profile::check`] never returns a non-absolute path on a host whose
 /// root is absolute**, and the anchoring condition is the whole of why. A
@@ -1318,26 +1326,50 @@ fn resolve(path: &Path, root: Option<&Path>, home: Option<&Path>) -> PathBuf {
     {
         expanded = root.join(expanded);
     }
+    resolve_components(&expanded, 0)
+}
+
+/// [`resolve`]'s component walk over an anchored path; `links` counts the
+/// dangling links followed so far.
+fn resolve_components(expanded: &Path, links: usize) -> PathBuf {
     let mut out = PathBuf::new();
     for component in expanded.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                out = canonical_prefix(&out);
+                out = canonical_prefix(&out, links);
                 out.pop();
             }
             other => out.push(other.as_os_str()),
         }
     }
-    canonical_prefix(&out)
+    canonical_prefix(&out, links)
 }
 
+/// How many dangling links one resolution follows: the kernel's own `ELOOP`
+/// bound, past which the write fails there too.
+const DANGLING_LINK_LIMIT: usize = 40;
+
 /// `path` with the longest prefix of it that exists replaced by its canonical
-/// form, and the components that do not exist appended as written.
-fn canonical_prefix(path: &Path) -> PathBuf {
+/// form, and the components that do not exist appended as written — unless
+/// one of them is a dangling symlink, which is followed: `.pane/scratch/link
+/// -> ../config.toml` with no `config.toml` yet would otherwise be judged as
+/// a scratch file and create the host's configuration.
+fn canonical_prefix(path: &Path, links: usize) -> PathBuf {
     let mut tail = Vec::new();
     let mut prefix = path.to_path_buf();
     while !prefix.exists() {
+        if links < DANGLING_LINK_LIMIT
+            && let Ok(target) = std::fs::read_link(&prefix)
+        {
+            let mut followed = prefix
+                .parent()
+                .map_or_else(|| target.clone(), |parent| parent.join(&target));
+            for name in tail.iter().rev() {
+                followed.push(name);
+            }
+            return resolve_components(&followed, links + 1);
+        }
         let Some(name) = prefix.file_name().map(|name| name.to_os_string()) else {
             break;
         };

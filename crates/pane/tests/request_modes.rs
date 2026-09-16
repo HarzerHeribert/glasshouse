@@ -271,3 +271,119 @@ fn a_direct_tool_frame_is_refused_by_the_same_rule() {
         "{stdout}"
     );
 }
+
+/// `explore` writes its scratchpad — the default writable glob, carved out of
+/// `.pane/**` — and is refused one directory over.
+#[test]
+fn explore_writes_the_scratchpad_and_is_refused_outside_it() {
+    let root = project("explore-scratch");
+    let code = format!(
+        "{}\n{}",
+        attempt_write(".pane/scratch/notes.md").replace("return out;", "let first = out;"),
+        attempt_write("src/x.rs").replace("return out;", "return first + \"|\" + out;")
+    );
+    let (base_url, _) = start_provider(1, move |_| cell_reply(&code));
+    let output = run(&root, &["--mode", "explore"], &["take notes"], &base_url);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        fs::read_to_string(root.join(".pane/scratch/notes.md"))
+            .ok()
+            .as_deref(),
+        Some("changed"),
+        "explore could not write its scratchpad: {stdout}"
+    );
+    assert!(!root.join("src/x.rs").exists(), "{stdout}");
+    assert!(
+        stdout.contains("mode explore: writes only under"),
+        "{stdout}"
+    );
+}
+
+fn write_all(files: &[&str]) -> String {
+    let mut code = String::from("let out = \"\";\n");
+    for file in files {
+        code.push_str(&format!(
+            "try {{ await write({{ path: \"{file}\", content: \"step one\\nstep two\\n\" }}); out += \"|wrote {file}\"; }} catch (e) {{ out += \"|refused {file}: \" + e.message; }}\n"
+        ));
+    }
+    code.push_str("return out;");
+    code
+}
+
+/// `plan` writes `.pane/scratch/plan.md` and nothing else, and says so.
+#[test]
+fn plan_writes_its_plan_file_and_is_refused_every_other_write() {
+    let root = project("plan-file");
+    let code = write_all(&[".pane/scratch/plan.md", ".pane/scratch/notes.md", "PLAN.md"]);
+    let (base_url, bodies) = start_provider(1, move |_| cell_reply(&code));
+    let output = run(&root, &["--plan"], &["plan the change"], &base_url);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(root.join(".pane/scratch/plan.md").exists(), "{stdout}");
+    assert!(!root.join(".pane/scratch/notes.md").exists(), "{stdout}");
+    assert!(!root.join("PLAN.md").exists(), "{stdout}");
+    assert!(stdout.contains("mode plan: no change executes"), "{stdout}");
+    assert!(
+        stdout.contains("plan written: .pane/scratch/plan.md (2 lines)"),
+        "{stdout}"
+    );
+    assert!(bodies.lock().unwrap()[0].contains("write the plan to .pane/scratch/plan.md"));
+}
+
+const PLAN_SECTION: &str = "## Plan (.pane/scratch/plan.md)";
+
+/// The plan a `plan` request wrote is carried by the next request once, and
+/// not by the one after it.
+#[test]
+fn a_written_plan_reaches_the_next_request_once() {
+    let root = project("plan-carry");
+    let (base_url, bodies) = start_provider(3, |body| {
+        if body.contains("plan the change") && !body.contains("carry it out") {
+            cell_reply(&write_all(&[".pane/scratch/plan.md"]))
+        } else {
+            cell_reply("return \"done\";")
+        }
+    });
+    let output = run(
+        &root,
+        &["--plan"],
+        &[
+            "plan the change",
+            "/mode execute",
+            "carry it out",
+            "and again",
+        ],
+        &base_url,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3, "{stdout}");
+    assert!(!bodies[0].contains(PLAN_SECTION));
+    assert_eq!(
+        bodies[1].matches(PLAN_SECTION).count(),
+        1,
+        "the next request did not carry the plan once: {stdout}"
+    );
+    assert!(bodies[1].contains("step one"));
+    assert!(
+        !bodies[2].contains(PLAN_SECTION),
+        "the plan was carried past the next request"
+    );
+}
+
+/// A plan request that writes no plan hands nothing on.
+#[test]
+fn a_plan_request_that_writes_nothing_carries_nothing() {
+    let root = project("plan-nothing");
+    let (base_url, bodies) = start_provider(2, |_| cell_reply("return \"no plan\";"));
+    let output = run(
+        &root,
+        &["--plan"],
+        &["plan the change", "/mode execute", "carry it out"],
+        &base_url,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "{stdout}");
+    assert!(!bodies[1].contains(PLAN_SECTION), "{stdout}");
+    assert!(!stdout.contains("plan written"), "{stdout}");
+}

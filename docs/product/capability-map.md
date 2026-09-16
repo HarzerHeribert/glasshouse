@@ -2635,7 +2635,7 @@ The user's rulings of 2026-09-16 (design-decisions.md, *Request modes*). The dec
 the sandbox profile and the person decide. Nothing here is a capability the model grants itself.
 
 ☐ Offer `explore` as a request mode: reading tools and read-only shell patterns only, `write` and `edit` refused outside `.pane/scratch/**` and the configured documentation globs, network only by grant — enforced by the sandbox profile, never by the prompt.
-☐ Let `plan` read: the plan mode keeps its promise to execute no change, but may read files, run read-only shell patterns, and write the plan file.
+☑ Let `plan` read: the plan mode keeps its promise to execute no change, but may read files, run read-only shell patterns, and write the plan file.
 ☐ Propose the mode from the request's intent: a `read_only` intent at or above the configured confidence enters `explore` for that request, below it Pane asks with one line, `/mode` pins it, and `shadow` only counts what would have applied.
 ☐ Gate remote commands in `explore`: every `ssh` and `scp` cell is parsed, mutating verbs, redirections and remote scripts are refused statically, the rest is judged by the decision model ("this remote command only reads") above a threshold or refused with the reason, and every remote command is logged in the rollout.
 ☑ Ask diff-hygiene questions with the completion question in one request — tests for the changed behaviour, files outside the request, debugging leftovers, deleted tests, changed public signatures — each decisive answer one finding held once, in between the checker as today.

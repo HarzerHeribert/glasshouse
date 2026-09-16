@@ -282,7 +282,10 @@ pub fn request_mode_line(
     use crate::sandbox::modes::{READ_ONLY_COMMANDS, RequestMode};
     let writes = match mode {
         RequestMode::Execute => return None,
-        RequestMode::Plan => "every write is refused; answer with the plan itself".to_string(),
+        RequestMode::Plan => format!(
+            "write the plan to {} and answer with a short summary; every other write is refused",
+            crate::sandbox::modes::PLAN_FILE
+        ),
         RequestMode::Explore => format!(
             "write and edit are refused outside {}",
             overlay.writable().join(", ")
@@ -293,6 +296,28 @@ pub fn request_mode_line(
         mode.name(),
         READ_ONLY_COMMANDS.join(", ")
     ))
+}
+
+/// How much of a plan file one request carries.
+pub const PLAN_SECTION_BYTES: usize = 16 * 1024;
+
+/// The system-block section handing a `plan` request's file to the next
+/// request: at most [`PLAN_SECTION_BYTES`] of it, cut at a line boundary.
+pub fn plan_section(plan: &str) -> String {
+    let file = crate::sandbox::modes::PLAN_FILE;
+    let body = if plan.len() <= PLAN_SECTION_BYTES {
+        plan.trim_end().to_string()
+    } else {
+        let mut cut = PLAN_SECTION_BYTES;
+        while !plan.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let kept = plan[..cut]
+            .rfind('\n')
+            .map_or(&plan[..cut], |end| &plan[..end]);
+        format!("{kept}\n… [truncated]")
+    };
+    format!("\n## Plan ({file})\n{body}\n")
 }
 
 pub fn render_session_facts(facts: &SessionFacts) -> String {
@@ -821,5 +846,24 @@ mod tests {
         assert_eq!(preamble_for(abi::Interface::Cells), PREAMBLE);
         assert_ne!(preamble_for(abi::Interface::Hybrid), PREAMBLE);
         assert_ne!(preamble_for(abi::Interface::Tools), PREAMBLE);
+    }
+
+    #[test]
+    fn a_long_plan_is_cut_at_a_line_boundary_within_the_bound() {
+        let short = plan_section("step one\nstep two\n");
+        assert_eq!(
+            short,
+            "\n## Plan (.pane/scratch/plan.md)\nstep one\nstep two\n"
+        );
+        let line = "é".repeat(99) + "\n";
+        let long = line.repeat(PLAN_SECTION_BYTES / line.len() + 10);
+        let section = plan_section(&long);
+        let body = section
+            .strip_prefix("\n## Plan (.pane/scratch/plan.md)\n")
+            .unwrap()
+            .strip_suffix("\n… [truncated]\n")
+            .expect("a cut plan says so");
+        assert!(body.len() <= PLAN_SECTION_BYTES);
+        assert!(body.lines().all(|kept| kept == line.trim_end()));
     }
 }

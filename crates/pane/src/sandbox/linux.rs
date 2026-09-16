@@ -29,7 +29,7 @@
 //! exception the kernel forces and says why, and [`ExecScope`] is how the
 //! ruleset states which grant it made.
 
-use super::profile::{Access, Profile};
+use super::profile::{Access, Profile, SCRATCH_DIR};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -419,6 +419,14 @@ pub fn bwrap_argv(profile: &Profile, program: &OsStr, args: &[OsString]) -> Vec<
             if !grants(profile, Access::Write, &protected) {
                 bind(&mut argv, "--ro-bind", &protected);
             }
+        }
+        // The scratchpad `.pane/**`'s never rule exempts, read-write over the
+        // read-only `.pane` bind. bwrap cannot bind a missing source, so an
+        // absent scratch directory stays read-only in this view.
+        let scratch = root.join(SCRATCH_DIR);
+        let linked = std::fs::symlink_metadata(&scratch).is_ok_and(|m| m.file_type().is_symlink());
+        if scratch.is_dir() && !linked && grants(profile, Access::Write, &scratch) {
+            bind(&mut argv, "--bind", &scratch);
         }
     }
     argv.push(OsString::from("--"));

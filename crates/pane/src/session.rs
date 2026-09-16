@@ -34,7 +34,7 @@ use crate::runtime::handles::HandleTable;
 use crate::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
 use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
-use crate::sandbox::modes::ModeOverlay;
+use crate::sandbox::modes::{self, ModeOverlay, RequestMode};
 use crate::sandbox::profile::Profile;
 use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
@@ -911,6 +911,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         manifest,
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
+        plan: RefCell::new(None),
     };
     output::interface(session.interface.get(), session.dialect());
     controls::announce_missing_credential(&session, _serving.is_some());
@@ -986,6 +987,9 @@ struct Session<'a> {
     rollbacks: RefCell<Vec<RollbackCheckpoint>>,
     /// Stack length previewed by the last bare `/rollback`.
     rollback_pending: Cell<Option<usize>>,
+    /// The plan the last `plan` request wrote, handed to the next request
+    /// that is not `plan` and forgotten there.
+    plan: RefCell<Option<String>>,
 }
 
 impl Session<'_> {
@@ -1208,7 +1212,18 @@ fn run_task(
     }
     transcript.notebook.handlers.clear();
     transcript.notebook.preflight = None;
+    let (mode, started) = (session.mode.get(), std::time::SystemTime::now());
     let result = run_task_inner(task, session, transcript, rollout);
+    if mode == RequestMode::Plan
+        && let Some(plan) = modes::written_plan(session.profile.root(), started)
+    {
+        session_println!(
+            "plan written: {} ({} lines)",
+            modes::PLAN_FILE,
+            plan.lines().count()
+        );
+        session.plan.replace(Some(plan));
+    }
     transcript.notebook.handlers.clear();
     if let Some(ui) = session.ui {
         ui.handler_cancellations();
@@ -1240,6 +1255,12 @@ fn run_task_inner(
     );
     if let Some(line) = prompt::request_mode_line(session.mode.get(), &ModeOverlay::default()) {
         transcript.conversation.system.push_str(&line);
+    }
+    if session.mode.get() != RequestMode::Plan
+        && let Some(plan) = session.plan.take()
+    {
+        let section = prompt::plan_section(&plan);
+        transcript.conversation.system.push_str(&section);
     }
     if session.config().web.enabled {
         transcript.conversation.system.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
@@ -3113,6 +3134,7 @@ mod tests {
             memory: &memory,
             rollbacks: RefCell::new(Vec::new()),
             rollback_pending: Cell::new(None),
+            plan: RefCell::new(None),
         };
         let mut task_state = TaskState::new("admit", profile, &config.borrow());
         act_on(
