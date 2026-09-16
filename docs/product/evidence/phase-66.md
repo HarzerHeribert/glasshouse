@@ -31,8 +31,14 @@ diff). Latency measured from macOS: 540–730 ms for small states, 1,029 ms for 
 Headers: `x-typesafe-request-id`; no rate-limit headers; the docs say 429/529 want exponential
 backoff. Intent probe: "read the config file and tell me what the timeout is" → `read_only` 1.0,
 "needs a write" 0.04. Pane's `decide.rs` already sends the choice map and the bare noul, so
-its wire shape is correct as landed. The gateway's `typesafe` template stays `Declared`
-`Unverified` in code until a probe through the gateway (not direct) is recorded.
+its wire shape is correct as landed. **Through the gateway (2026-09-16 23:50, `scratchpad/gw-systemone-probe.sh`):** a fresh standalone
+`inference-gateway serve` with `[accounts.typesafe] provider = "typesafe"` and the stored
+credential relays `POST /v1/systemone` to TypeSafe and answers 200 with the same body, with or
+without `x-glasshouse-model` — after `fa68f5ef` (a subscription broker no longer claims the
+relay-only protocol; before it, the request reached CLIProxyAPI and got its 404). A Pane
+session over the user's Claude Max subscription then recorded `decision: intent read_only
+(1.00, 791 ms)` and a completion noul of 0.22 in 258 ms. The template's `Declared` facts may now
+be flipped to `verified` with this paragraph as the evidence.
 
 ---
 
