@@ -40,6 +40,19 @@ session over the user's Claude Max subscription then recorded `decision: intent 
 (1.00, 791 ms)` and a completion noul of 0.22 in 258 ms. The template's `Declared` facts may now
 be flipped to `verified` with this paragraph as the evidence.
 
+**Shadow calibration, five real tasks over Claude Max (`claude-sonnet-4-6`), 2026-09-16 23:50–00:05,
+`scratchpad/jev-explore`:** intent `read_only` 1.00 / 1.00, `modify` 1.00 / 0.98 — every intent
+matched the request, 575–791 ms. Completion noul: a modify task fully done 0.94 (607 ms); an
+ambiguous "make sure the loader handles a missing file" that wrote a test and a change 0.65; two
+answer-only (read-only) tasks 0.22 and **0.10 with an empty diff** — at the default
+`completion_no_below = 0.10` that last one would have raised `RequestNotSatisfied` in `mode = on`.
+**Finding (Defect, one successor packet):** the completion question is ill-posed when the task
+produced no diff; it must be skipped, or asked over `{request, answer}` instead, whenever the diff
+is empty or the intent was `read_only`. `would_hold` stayed 0 in all five (no read-only request
+touched an effectful cell). Threshold guidance from this sample: `hold_above` 0.85 is safe (intents
+came back at 0.98–1.00); `completion_yes_above` 0.90 would have spared the checker once (0.94) and
+`completion_no_below` 0.10 must not apply to empty diffs.
+
 ---
 
 ## Line 2613 — the gateway carries the protocol
