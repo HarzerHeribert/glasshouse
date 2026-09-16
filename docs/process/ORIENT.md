@@ -13,10 +13,10 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1369 closed · 94 active committed open (94%)** — across 20 phases.
+**1369 closed · 95 active committed open (94%)** — across 20 phases.
 
 boundary 100 closed · 0 open
-gateway 389 closed · 12 open
+gateway 389 closed · 13 open
 glasshouse 757 closed · 46 open
 pane 41 closed · 36 open
 process 82 closed · 0 open
@@ -38,8 +38,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
-| Phase 68 | Gateway: successors named by the 2026-09-16 cleanup | **1** | 0 | `2627` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
+| Phase 68 | Gateway: successors named by the 2026-09-16 cleanup | **2** | 0 | `2627` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 
 **glasshouse**
@@ -110,14 +110,15 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
-### Phase 68 — Gateway: successors named by the 2026-09-16 cleanup  (1 open, 0 closed)
-
-- **2629** ☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
-
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
+
+### Phase 68 — Gateway: successors named by the 2026-09-16 cleanup  (2 open, 0 closed)
+
+- **2629** ☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
+- **2630** ☐ Serve the same ingress targets from Glasshouse's embedded gateway as from the standalone binary — one `GATEWAY_INGRESS_PROTOCOLS` in the gateway crate, `typesafe-systemone` included, so a Pane launched by Glasshouse can reach the decision model exactly as a standalone Pane can.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
