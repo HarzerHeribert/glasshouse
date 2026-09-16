@@ -262,7 +262,7 @@ fn cliproxyapi_executable(data_dir: &Path) -> PathBuf {
 /// the archive the directory was extracted from — and nothing else, so a
 /// marker can never name a path outside `tools/cliproxyapi`.
 ///
-/// `pub` for `glasshouse::paths::RuntimePaths::cliproxyapi_executable`, whose
+/// `pub` for the host's `paths::RuntimePaths::cliproxyapi_executable`, whose
 /// own marker-validation logic was a verbatim twin of this one; its
 /// surrounding fallback logic differs (a `.trim()`, and two extra marker
 /// states) and stays there.
