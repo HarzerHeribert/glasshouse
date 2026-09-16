@@ -2492,7 +2492,7 @@ already say this and apply unchanged.
 
 ## Phase 51's event log: `evaluation_observations`, migration 15
 
-**Decided 2026-08-29. The full design is `docs/product/design-phase51-event-log.md`;
+**Decided 2026-08-29. The full design is `docs/product/glasshouse/design-phase51-event-log.md`;
 this is the summary and the corrections it forced to *this* file.**
 
 A **new table**, not a widening of `lifecycle_events` and not a view: `CREATE
@@ -4652,7 +4652,7 @@ The same ruling exposes the supervisor's current limit. Its request path and loo
 
 ## The fullscreen escape chord is chrome, not a note — the user's report, 2026-09-09
 
-_Overrides `docs/product/fullscreen-mode.md:376-379`, which accepted the
+_Overrides `docs/product/glasshouse/fullscreen-mode.md:376-379`, which accepted the
 opposite as a known wart._
 
 The user entered a fullscreen session, typed, and could not find the way out.
@@ -4683,7 +4683,7 @@ constant (`state::ESCAPE_CHORD`) that a test feeds straight to
 
 ## Actionables are buttons, and the footer wraps rather than clipping — 2026-09-09
 
-_Implements `docs/product/tui-actionables.md`, with two deviations recorded
+_Implements `docs/product/glasshouse/tui-actionables.md`, with two deviations recorded
 below._
 
 Control mode's footer listed fifteen actions in one 168-column `Paragraph`

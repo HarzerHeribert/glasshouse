@@ -29,6 +29,10 @@ sign something is wired to the wrong layer.
   decisions and their reasoning.
 - [`evidence/`](product/evidence/README.md) — the capability evidence ledger,
   split by phase; start at its `README.md`.
+- [`glasshouse/`](product/glasshouse/README.md) — Glasshouse's own product
+  docs; start at its `README.md`.
+- [`gateway/`](product/gateway/README.md) — the inference gateway's product
+  docs; start at its `README.md`.
 
 ## `docs/history/` — archived, not current
 

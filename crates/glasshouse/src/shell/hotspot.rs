@@ -14,7 +14,7 @@
 //! door to the same behaviour rather than a parallel path that can disagree
 //! with it. See `super::run`'s pending queue, which is where they are replayed.
 //!
-//! Design: `docs/product/tui-actionables.md`.
+//! Design: `docs/product/glasshouse/tui-actionables.md`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;

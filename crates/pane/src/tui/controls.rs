@@ -753,7 +753,7 @@ impl Panel {
 /// than half blocks because both half blocks are East Asian *Ambiguous* and a
 /// CJK terminal may draw them two cells wide.
 ///
-/// Design: `docs/product/tui-actionables.md`.
+/// Design: `docs/product/glasshouse/tui-actionables.md`.
 const CAP_LEFT: &str = "[";
 const CAP_RIGHT: &str = "]";
 const MARK_FOCUSED: &str = "▸";

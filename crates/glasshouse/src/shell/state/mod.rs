@@ -525,7 +525,7 @@ pub(super) fn escape_chord_key() -> KeyEvent {
 /// stranded a user on a German Mac, where `]` is Right-Option-6; a
 /// `Ctrl`+letter chord would have been layout-safe too, but every letter this
 /// could have used is already spoken for inside the harnesses Glasshouse
-/// embeds — `docs/product/tui-actionables.md` measured pane's own inventory
+/// embeds — `docs/product/glasshouse/tui-actionables.md` measured pane's own inventory
 /// as `Ctrl-B`, `Ctrl-O`, `Ctrl-T`, `Ctrl-F`, `Ctrl-U`, `Ctrl-C` and
 /// `Ctrl-D`. `0x1E` is claimed by no harness and by no terminal special
 /// character (`stty` claims `C-c C-\ C-z C-q C-s C-v C-w`), and `ctrl-q`

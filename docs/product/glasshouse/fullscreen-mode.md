@@ -98,7 +98,7 @@ returns band 4 and is the **single source of truth** for the size handed to a se
 pseudo-terminal and `vt100` emulator — its consumers are `shell/mod.rs:413` (resize) and
 `shell/mod.rs:804 fn viewport_terminal_size`.
 
-`docs/product/shell-chrome.md` (plan only, written 2026-09-08) makes `regions()` mode-aware:
+`docs/product/glasshouse/shell-chrome.md` (plan only, written 2026-09-08) makes `regions()` mode-aware:
 control mode keeps five bands, session mode becomes `[header 1, viewport Min(0)]`. Its own
 honest number is 36 → 39 rows on a 40-row terminal.
 
@@ -206,7 +206,7 @@ than a new risk.
 
 `crates/pane/src/config.rs:104` states it and the code holds: nothing in that module opens a
 path for writing, and `PaneConfig::load` (`config.rs:163`) is the only filesystem touch.
-`docs/product/shared-appearance.md:58-61` separately **retracts** putting presentation in
+`docs/product/glasshouse/shared-appearance.md:58-61` separately **retracts** putting presentation in
 `pane.toml`, and lists "No per-user or per-project theme file" as a non-goal (`:134`). So a
 pane-side fullscreen preference is either session-lifetime or a startup flag — never a file.
 
@@ -365,7 +365,7 @@ alongside the existing `fragmented_mouse_reports_do_not_become_prompt_text` at `
 
 ### Step 2 — Glasshouse fullscreen
 
-**Prerequisite:** the header-collapse package (`docs/product/shell-chrome.md`) lands first,
+**Prerequisite:** the header-collapse package (`docs/product/glasshouse/shell-chrome.md`) lands first,
 because it is what makes `regions()` mode-aware. Fullscreen is a third arm of that same
 function, not a second layout mechanism.
 
