@@ -130,7 +130,9 @@ pub(super) fn apply_decision_hold(
         effect.as_ref().map(|(name, line)| (name.as_str(), *line)),
         task_state.effect_holds > 0,
     ) {
-        crate::decide::Hold::Run => None,
+        crate::decide::Hold::Run => {
+            apply_drift_hold(session, task_state, runtime, effect.as_ref(), source, calls)
+        }
         crate::decide::Hold::Overridden => {
             task_state.effect_overrides += 1;
             output::decisions(task_state.decisions_telemetry(&session.config().decisions));
@@ -150,6 +152,88 @@ pub(super) fn apply_decision_hold(
             // assistant message either way, so this covers a native
             // `execute_cell` call and a lowered direct frame alike; a bare
             // markdown program made no call and gets none.
+            let native_result = (!calls.is_empty()).then(|| Message {
+                role: Role::User,
+                content: calls
+                    .iter()
+                    .map(|(id, _, _)| Block::ToolResult {
+                        tool_use_id: (*id).clone(),
+                        content: block.clone(),
+                        is_error: false,
+                    })
+                    .collect(),
+                historical: None,
+            });
+            Some(Step {
+                answer: Some(block.clone()),
+                historical: Some(block),
+                native_result,
+                response: None,
+                prose: false,
+                record: None,
+                rollback: None,
+                view: CellView::default(),
+            })
+        }
+    }
+}
+
+/// The drift question (2643), asked only after the intent hold above has
+/// itself returned `Run` for this cell -- an effectful cell running while a
+/// read-only intent is not confident enough to hold, or while the intent is
+/// not read-only at all, still gets one chance to be checked against the
+/// plan's own current step. `effect` is `None` for a pure cell, in which case
+/// nothing is ever asked.
+///
+/// Unlike the intent question (asked once, before the first turn, and cached
+/// on [`TaskState::intent`]), this question is asked fresh before every
+/// candidate effectful cell, including the one re-issued after a hold --
+/// [`crate::decide::drift_for`]'s own once rule (`already_held`) is what
+/// keeps that second ask from holding the cell again, exactly as
+/// [`crate::decide::hold_for`]'s `already_held` does for the intent hold.
+fn apply_drift_hold(
+    session: &Session<'_>,
+    task_state: &mut TaskState,
+    runtime: &Runtime,
+    effect: Option<&(String, Option<u32>)>,
+    source: &str,
+    calls: &[(&String, &String, &serde_json::Value)],
+) -> Option<Step> {
+    effect?;
+    let decisions = &session.config().decisions;
+    let model = decisions.model.as_deref()?;
+    if decisions.mode == crate::config::DecisionMode::Off {
+        return None;
+    }
+    let plan = runtime.plan();
+    let step = plan
+        .iter()
+        .find(|item| item.status == crate::runtime::outcome::PlanStatus::Active)?;
+    let already_held = task_state.drift_holds > 0;
+    task_state.drift_asked += 1;
+    let answer = match crate::decide::drift_satisfied(model, &task_state.task, &step.text, source) {
+        Ok(noul) => Some(noul),
+        Err(_) => {
+            task_state.drift_failed += 1;
+            None
+        }
+    };
+    match crate::decide::drift_for(
+        decisions.mode,
+        answer,
+        decisions.drift_no_below,
+        &step.text,
+        already_held,
+    ) {
+        crate::decide::Drift::Run => None,
+        crate::decide::Drift::Shadow(_) => {
+            task_state.would_drift += 1;
+            output::decisions(task_state.decisions_telemetry(&session.config().decisions));
+            None
+        }
+        crate::decide::Drift::Held(block) => {
+            task_state.drift_holds += 1;
+            output::decisions(task_state.decisions_telemetry(&session.config().decisions));
             let native_result = (!calls.is_empty()).then(|| Message {
                 role: Role::User,
                 content: calls

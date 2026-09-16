@@ -130,3 +130,15 @@ shadow` asks and counts it (telemetry's `approval_hints`,
 immediately and never waits for the answer; a failed, slow, or absent
 decision leaves it exactly as it renders today. The hint is a line of text
 and a counter — it never changes `Decision`.
+
+## 8. The drift question (2643)
+
+Once the intent hold above returns `Run` for an effectful cell or frame, and
+the plan has an `Active` step (the first, if several), Pane asks one `noul`,
+`drift`, over `{request, step, cell}` (`cell` bounded to 8 KiB, cut at a
+line): does the cell do what the step says and nothing else. A confident no
+(`noul <= drift_no_below`, default `0.10`, `0.0..=0.5`) holds the cell once,
+naming the step and the answer; re-issued, it runs (`drift_holds == 0` spent,
+not asked again). `mode = shadow` runs the cell and counts `would_drift`; a
+failed or slow decision counts `drift_failed` and runs the cell, no second
+timeout. `decisions.drift` carries `{asked, held, would_hold, failed}`.

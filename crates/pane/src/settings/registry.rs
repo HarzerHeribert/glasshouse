@@ -406,6 +406,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "decisions.drift_no_below",
+        label: "Drift no threshold",
+        description: "The drift question's noul at or below which an effectful cell is held once, as not doing what the plan's current step says.",
+        kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "limits.cell_wall_clock_s",
         label: "Cell time limit",
         description: "Seconds one cell may run.",

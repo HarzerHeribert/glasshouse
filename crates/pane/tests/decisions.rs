@@ -52,16 +52,19 @@ enum Decision {
 /// header block), shared with the fake server's own thread.
 type Recorded = Arc<Mutex<Vec<String>>>;
 
-/// Which of the two requests this package ever sends to `/v1/systemone`:
+/// Which of the three requests this package ever sends to `/v1/systemone`:
 /// `"intent"` for the task-start request (which now also carries the
 /// `complexity` question in the same `questions` map -- F2 -- so a plain
-/// "first key" read would see `complexity` first once `BTreeMap` sorts them)
-/// or `"satisfied"` for the completion question (2616).
+/// "first key" read would see `complexity` first once `BTreeMap` sorts them),
+/// `"satisfied"` for the completion question (2616), or `"drift"` for the
+/// per-cell question asked before an effectful cell runs (2643).
 fn question_key(body_text: &str) -> String {
     let value: Value = serde_json::from_str(body_text).unwrap();
     let questions = value["questions"].as_object().cloned().unwrap_or_default();
     if questions.contains_key("satisfied") {
         "satisfied".to_string()
+    } else if questions.contains_key("drift") {
+        "drift".to_string()
     } else {
         "intent".to_string()
     }
@@ -83,6 +86,18 @@ fn providers(
     intent: Vec<Decision>,
     completion: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
+    providers_with_drift(cells, intent, completion, vec![])
+}
+
+/// [`providers`] plus a fourth scripted queue for the drift question's own
+/// key (2643) -- most tests never ask it, so [`providers`] stays the
+/// three-argument call every existing test already uses.
+fn providers_with_drift(
+    cells: Vec<Value>,
+    intent: Vec<Decision>,
+    completion: Vec<Decision>,
+    drift: Vec<Decision>,
+) -> (String, Recorded, Recorded, Recorded) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let message_bodies = Arc::new(Mutex::new(Vec::new()));
@@ -95,6 +110,7 @@ fn providers(
         let mut cells = cells.into_iter();
         let mut intent: std::collections::VecDeque<Decision> = intent.into_iter().collect();
         let mut completion: std::collections::VecDeque<Decision> = completion.into_iter().collect();
+        let mut drift: std::collections::VecDeque<Decision> = drift.into_iter().collect();
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -142,6 +158,9 @@ fn providers(
                     "satisfied" => completion
                         .pop_front()
                         .unwrap_or_else(|| Decision::Answer(completion_answer(0.50))),
+                    "drift" => drift
+                        .pop_front()
+                        .unwrap_or_else(|| Decision::Answer(drift_answer(0.50))),
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
@@ -264,6 +283,21 @@ fn completion_answer(noul: f64) -> Value {
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// The drift question's answer alone (2643) -- always a single-key request,
+/// unlike `satisfied`'s hygiene and judge additions.
+fn drift_answer(noul: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "drift": {
+                "type": "noul",
+                "noul": noul,
+            }
+        },
+        "usage": {"input_tokens": 30, "output_tokens": 8},
     })
 }
 
@@ -475,6 +509,159 @@ fn shadow_records_the_would_be_hold_and_writes_the_file() {
     let telemetry = &result["telemetry"]["decisions"];
     assert_eq!(telemetry["would_hold"], 1, "{telemetry}");
     assert_eq!(telemetry["holds"], 0, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- the drift question (2643) -------------------------------------------
+
+const DRIFT_PLAN_CELL: &str = "todo.write([{text: \"write a.txt\", status: \"active\"}]);";
+const DRIFT_EFFECT_CELL: &str = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
+
+#[test]
+fn a_confident_drift_no_holds_the_cell_once_then_lets_it_run() {
+    let root = root("drift-hold");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers_with_drift(
+        vec![
+            cell("c1", DRIFT_PLAN_CELL),
+            cell("c2", DRIFT_EFFECT_CELL),
+            cell("c3", DRIFT_EFFECT_CELL),
+        ],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
+        // Two confident nos: the second is what a broken once rule would act
+        // on (holding the re-issued cell again, forever) -- `exec_bounded`'s
+        // own bound turns that into a fast, clean failure rather than a hang.
+        vec![
+            Decision::Answer(drift_answer(0.05)),
+            Decision::Answer(drift_answer(0.05)),
+        ],
+    );
+    let result = exec_bounded(&root, &endpoint, "write the file", None)
+        .expect("the once rule keeps the task moving");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        3,
+        "the plan cell, the held effect cell, then the re-issue that runs"
+    );
+    assert!(
+        messages[2].contains("this cell may not do what the plan's current step says")
+            && messages[2].contains("write a.txt"),
+        "the drift block reaches the model's next turn, naming the step: {}",
+        messages[2]
+    );
+    assert!(root.join("a.txt").exists(), "the re-issued cell ran");
+    assert_eq!(result["answer"], "done");
+    let telemetry = &result["telemetry"]["decisions"]["drift"];
+    assert_eq!(
+        telemetry["asked"], 2,
+        "asked again on the re-issue, but the once rule still wins: {telemetry}"
+    );
+    assert_eq!(telemetry["held"], 1, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_in_between_drift_answer_runs_the_cell() {
+    let root = root("drift-in-between");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers_with_drift(
+        vec![cell("c1", DRIFT_PLAN_CELL), cell("c2", DRIFT_EFFECT_CELL)],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
+        vec![Decision::Answer(drift_answer(0.50))],
+    );
+    let result = exec_bounded(&root, &endpoint, "write the file", None).expect("no hold, no hang");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the plan cell, then the effect cell running unheld"
+    );
+    assert!(
+        !messages[1].contains("this cell may not do what the plan's current step says"),
+        "{}",
+        messages[1]
+    );
+    assert!(root.join("a.txt").exists());
+    let telemetry = &result["telemetry"]["decisions"]["drift"];
+    assert_eq!(telemetry["asked"], 1, "{telemetry}");
+    assert_eq!(telemetry["held"], 0, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_plan_with_no_active_step_asks_nothing() {
+    let root = root("drift-no-plan");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, decisions, _headers) = providers_with_drift(
+        vec![cell("c1", DRIFT_EFFECT_CELL)],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, "write the file", None).expect("no hold, no hang");
+    assert_eq!(messages.lock().unwrap().len(), 1, "nothing is ever held");
+    assert!(root.join("a.txt").exists());
+    let bodies = decisions.lock().unwrap();
+    assert!(
+        bodies.iter().all(|body| !body.contains("\"drift\"")),
+        "no active plan step means the drift question is never asked: {bodies:?}"
+    );
+    let telemetry = &result["telemetry"]["decisions"]["drift"];
+    assert_eq!(telemetry["asked"], 0, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shadow_counts_would_drift_and_runs_the_cell() {
+    let root = root("drift-shadow");
+    write_config(&root, DECISIONS_SHADOW);
+    let (endpoint, messages, _decisions, _headers) = providers_with_drift(
+        vec![cell("c1", DRIFT_PLAN_CELL), cell("c2", DRIFT_EFFECT_CELL)],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
+        vec![Decision::Answer(drift_answer(0.05))],
+    );
+    let result =
+        exec_bounded(&root, &endpoint, "write the file", None).expect("shadow never holds");
+    let messages = messages.lock().unwrap();
+    assert_eq!(messages.len(), 2, "shadow runs the cell as today");
+    assert!(
+        !messages[1].contains("this cell may not do what the plan's current step says"),
+        "shadow never reaches the model: {}",
+        messages[1]
+    );
+    assert!(root.join("a.txt").exists(), "shadow still writes the file");
+    let telemetry = &result["telemetry"]["decisions"]["drift"];
+    assert_eq!(telemetry["would_hold"], 1, "{telemetry}");
+    assert_eq!(telemetry["held"], 0, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_slow_drift_decision_runs_the_cell_and_counts_drift_failed() {
+    let root = root("drift-timeout");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers_with_drift(
+        vec![cell("c1", DRIFT_PLAN_CELL), cell("c2", DRIFT_EFFECT_CELL)],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
+        vec![Decision::Sleep(Duration::from_secs(3))],
+    );
+    let result = exec_bounded(&root, &endpoint, "write the file", None)
+        .expect("a failed decision runs the cell, not a hang");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the cell runs unheld once the request times out"
+    );
+    assert!(root.join("a.txt").exists());
+    let telemetry = &result["telemetry"]["decisions"]["drift"];
+    assert_eq!(telemetry["failed"], 1, "{telemetry}");
+    assert_eq!(telemetry["held"], 0, "{telemetry}");
     let _ = std::fs::remove_dir_all(root);
 }
 

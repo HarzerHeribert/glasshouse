@@ -101,7 +101,22 @@ Five real tasks over Claude Max (`claude-sonnet-4-6`): intents `read_only` 1.00/
 
 ## Line 2643 — a drift question before an effectful cell
 
-**State: OPEN** — packet after 2641/2642 land (shares `decide.rs`).
+**State: COMPLETE** (2026-09-17, `GH-PANE-CELL-DRIFT`, Sonnet high, Amber; report `.agent-runtime/report-pane-cell-drift.md`; integrated by the primary, clean apply).
+
+**Contract.** Given `[decisions] model` set and `mode = on`, when an effectful cell or direct frame is about to run and the intent hold has returned `Run`, if the runtime's plan has an `Active` step (the first, if several) Pane asks one `noul` — "the cell does what the plan's current step says and nothing else" — over `{request, step, cell}` (the cell bounded to 8 KiB at a line) and, at or below `drift_no_below` (default 0.10), returns the cell unrun once per task with a block naming the step and the answer; the re-issued cell is asked again but always runs (the once rule lives in `drift_for`, as in `hold_for`); an in-between answer, no plan, no active step, no effectful name, `mode = off`, a failed or slow decision all run the cell as today; `shadow` counts `would_drift` and never holds.
+
+**Production.** `session/system.rs :: apply_decision_hold` → `apply_drift_hold`, `decide.rs :: {drift_for, Drift, bound_cell}`, `session/task.rs` (`drift_asked`, `drift_holds`, `would_drift`, `drift_failed`; telemetry `decisions.drift`), `config.rs :: drift_no_below` (0.0..=0.5), `settings/registry.rs`.
+
+**Tests.** `tests/decisions.rs::{a_confident_drift_no_holds_the_cell_once_then_lets_it_run, an_in_between_drift_answer_runs_the_cell, a_plan_with_no_active_step_asks_nothing, shadow_counts_would_drift_and_runs_the_cell, a_slow_drift_decision_runs_the_cell_and_counts_drift_failed}`, `decide::tests::{drift_for_applies_the_threshold_and_the_once_rule, drift_block_names_the_step_and_the_confidence}`, `config::tests::the_drift_threshold_defaults_and_is_refused_out_of_range`.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| A no must be confident | `decide.rs`: `noul <= drift_no_below` → `<= drift_no_below.max(1.0)` | `decisions::an_in_between_drift_answer_runs_the_cell` | KILLED (`:573`) |
+| Held once, then it runs | `decide.rs`: `already_held` → `already_held && false` | `decisions::a_confident_drift_no_holds_the_cell_once_then_lets_it_run` | KILLED (`:544`) |
+
+**Gates.** `cargo test -p pane --test decisions`: 35 passed; `--test settings_store` 29; `--test config` 17; `--lib decide` 19; targeted blast radius exit 0 in the worktree and on the merged tree.
+
+**Limits.** Loopback fake only; the threshold is a default (2646). The step text is not byte-bounded (plan items are short). A first design that skipped the question after a hold let mutation (b) survive — the worker moved the once rule into `drift_for` and re-ran; recorded here as the reason the re-issued cell is asked at all.
 
 ## Line 2644 — the Scout's files ranked by relevance
 

@@ -121,6 +121,10 @@ pub struct DecisionsConfig {
     /// A `judge` acceptance item's noul at or below which the item becomes a
     /// finding held once (2642). `0.0..=0.5`.
     pub judge_no_below: f64,
+    /// The drift question's noul at or below which an effectful cell is held
+    /// once, as not doing what the plan's current step says (2643).
+    /// `0.0..=0.5`.
+    pub drift_no_below: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -136,6 +140,7 @@ impl Default for DecisionsConfig {
             hygiene_yes_above: 0.90,
             judge_yes_above: 0.90,
             judge_no_below: 0.10,
+            drift_no_below: 0.10,
         }
     }
 }
@@ -764,6 +769,8 @@ const JUDGE_YES_ABOVE_MIN: f64 = 0.5;
 const JUDGE_YES_ABOVE_MAX: f64 = 1.0;
 const JUDGE_NO_BELOW_MIN: f64 = 0.0;
 const JUDGE_NO_BELOW_MAX: f64 = 0.5;
+const DRIFT_NO_BELOW_MIN: f64 = 0.0;
+const DRIFT_NO_BELOW_MAX: f64 = 0.5;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -781,6 +788,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "hygiene_yes_above",
             "judge_yes_above",
             "judge_no_below",
+            "drift_no_below",
         ]
         .contains(&key.as_str())
         {
@@ -928,6 +936,22 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let drift_no_below = match table.get("drift_no_below") {
+        None => defaults.drift_no_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `drift_no_below` must be a number".to_string())?;
+            if !(DRIFT_NO_BELOW_MIN..=DRIFT_NO_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `drift_no_below` must be between {DRIFT_NO_BELOW_MIN} and {DRIFT_NO_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -939,6 +963,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         hygiene_yes_above,
         judge_yes_above,
         judge_no_below,
+        drift_no_below,
     })
 }
 
@@ -1192,5 +1217,22 @@ mod completion_threshold_tests {
         let error =
             PaneConfig::parse_profile("[decisions]\njudge_no_below = 0.6\n", None).unwrap_err();
         assert!(error.contains("judge_no_below"), "{error}");
+    }
+
+    #[test]
+    fn the_drift_threshold_defaults_and_is_refused_out_of_range() {
+        let defaults = DecisionsConfig::default();
+        assert_eq!(defaults.drift_no_below, 0.10);
+
+        let config = PaneConfig::parse_profile(
+            "[decisions]\nmodel = \"jev-latest\"\ndrift_no_below = 0.2\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.decisions.drift_no_below, 0.2);
+
+        let error =
+            PaneConfig::parse_profile("[decisions]\ndrift_no_below = 0.6\n", None).unwrap_err();
+        assert!(error.contains("drift_no_below"), "{error}");
     }
 }

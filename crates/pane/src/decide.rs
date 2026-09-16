@@ -769,6 +769,121 @@ fn held_block(confidence: f64, name: &str, line: Option<u32>) -> String {
     )
 }
 
+/// The drift question's key (2643), mirroring [`SATISFIED_KEY`]'s shape for
+/// the other single-question request this package asks mid-task.
+const DRIFT_KEY: &str = "drift";
+
+/// The most of a cell's source the drift question's `state.cell` carries
+/// (2643). Cut at the last newline at or before the bound (never
+/// [`bound_diff`]'s hunk boundary -- a cell is plain source, not a diff), so
+/// a kept prefix never splits a line mid-way.
+pub const DRIFT_CELL_BYTES: usize = 8 * 1024;
+
+fn bound_cell(cell: &str) -> String {
+    if cell.len() <= DRIFT_CELL_BYTES {
+        return cell.to_string();
+    }
+    let mut cut = DRIFT_CELL_BYTES;
+    while cut > 0 && !cell.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &cell[..cut];
+    match head.rfind('\n') {
+        Some(newline) => cell[..=newline].to_string(),
+        None => head.to_string(),
+    }
+}
+
+fn drift_question() -> Question {
+    Question::Noul {
+        instructions: "The cell does what the plan's current step says and nothing else. \
+                        Answer near 1.0 when it does; answer near 0.0 when it clearly does not."
+            .to_string(),
+    }
+}
+
+/// Asks whether `cell` does what `step` (the plan's current `Active` item)
+/// says, given `request` -- one question, synchronous, bounded to
+/// [`DECISION_TIMEOUT`] exactly as every other call into [`decide`]. Never
+/// surfaced as a task failure -- the caller (`session/system.rs::
+/// apply_decision_hold`) counts the error and runs the cell exactly as it
+/// would with no decision model.
+pub fn drift_satisfied(
+    model: &str,
+    request: &str,
+    step: &str,
+    cell: &str,
+) -> Result<f64, DecideError> {
+    let state = serde_json::json!({
+        "request": request,
+        "step": step,
+        "cell": bound_cell(cell),
+    });
+    let questions = [(DRIFT_KEY.to_string(), drift_question())];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{DRIFT_KEY}`")))?;
+    match decision.answer {
+        Answer::Noul(value) => Ok(value),
+        Answer::Choice { .. } => Err(DecideError::Parse(format!(
+            "the `{DRIFT_KEY}` question was answered as a choice, not a noul"
+        ))),
+    }
+}
+
+/// What one effectful cell or frame does about the plan's current step,
+/// given the task's drift state (2643).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Drift {
+    /// Nothing about this cell is held.
+    Run,
+    /// `mode = shadow`: the caller runs the cell as it would have anyway and
+    /// counts a would-be hold; the noul that would have held it.
+    Shadow(f64),
+    /// `mode = on`, held for the first time this task: the caller does not
+    /// run the cell and answers with this block instead.
+    Held(String),
+}
+
+/// Decides what happens to one effectful cell or frame, mirroring
+/// [`hold_for`]'s once rule: `already_held` (`Held` already returned once
+/// this task) always runs the cell, exactly as `Hold::Overridden` does for
+/// the intent hold, even if `answer` is a fresh confident no -- the once
+/// rule wins over the answer, not the other way round. `answer` is `None`
+/// when the request failed, which also leaves the cell running. `step` is
+/// the active plan item's own text, carried through only to build the held
+/// block.
+pub fn drift_for(
+    mode: DecisionMode,
+    answer: Option<f64>,
+    drift_no_below: f64,
+    step: &str,
+    already_held: bool,
+) -> Drift {
+    if mode == DecisionMode::Off || already_held {
+        return Drift::Run;
+    }
+    let Some(noul) = answer else {
+        return Drift::Run;
+    };
+    match mode {
+        DecisionMode::Off => Drift::Run,
+        DecisionMode::Shadow => Drift::Shadow(noul),
+        DecisionMode::On if noul <= drift_no_below => Drift::Held(drift_block(noul, step)),
+        DecisionMode::On => Drift::Run,
+    }
+}
+
+fn drift_block(confidence: f64, step: &str) -> String {
+    format!(
+        "decision: this cell may not do what the plan's current step says ({confidence:.2}) — \
+         step: {step}. Held once; run it again if it does, or update the plan first.\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,6 +1105,72 @@ mod tests {
         assert_eq!(
             hold_for(DecisionMode::On, Some(&intent), 0.85, None, false),
             Hold::Run
+        );
+    }
+
+    #[test]
+    fn drift_for_applies_the_threshold_and_the_once_rule() {
+        assert!(matches!(
+            drift_for(
+                DecisionMode::On,
+                Some(0.06),
+                0.10,
+                "write the README",
+                false
+            ),
+            Drift::Held(_)
+        ));
+        assert_eq!(
+            drift_for(DecisionMode::On, Some(0.06), 0.10, "write the README", true),
+            Drift::Run,
+            "the once rule wins even if a caller mistakenly asks again"
+        );
+        assert_eq!(
+            drift_for(
+                DecisionMode::On,
+                Some(0.50),
+                0.10,
+                "write the README",
+                false
+            ),
+            Drift::Run,
+            "an in-between answer is not confident enough to hold"
+        );
+        assert_eq!(
+            drift_for(
+                DecisionMode::Shadow,
+                Some(0.06),
+                0.10,
+                "write the README",
+                false
+            ),
+            Drift::Shadow(0.06)
+        );
+        assert_eq!(
+            drift_for(DecisionMode::On, None, 0.10, "write the README", false),
+            Drift::Run,
+            "no answer (skipped or failed) leaves the cell running"
+        );
+        assert_eq!(
+            drift_for(
+                DecisionMode::Off,
+                Some(0.06),
+                0.10,
+                "write the README",
+                false
+            ),
+            Drift::Run
+        );
+    }
+
+    #[test]
+    fn drift_block_names_the_step_and_the_confidence() {
+        let block = drift_block(0.06, "write the README");
+        assert!(block.contains("write the README"), "{block}");
+        assert!(block.contains("0.06"), "{block}");
+        assert!(
+            block.contains("this cell may not do what the plan's current step says"),
+            "{block}"
         );
     }
 

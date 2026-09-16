@@ -279,6 +279,17 @@ pub(super) struct TaskState {
     pub(super) effect_overrides: u32,
     /// Effectful cells or frames `mode = shadow` would have held.
     pub(super) would_hold: u32,
+    /// Effectful cells or frames held by the drift question this task
+    /// (2643, `mode = on`); the once rule is `drift_holds == 0`.
+    pub(super) drift_holds: u32,
+    /// Effectful cells or frames `mode = shadow` would have held by drift.
+    pub(super) would_drift: u32,
+    /// Drift questions this task actually asked, including the re-ask of the
+    /// cell issued again after a hold -- [`crate::decide::drift_for`]'s own
+    /// once rule is what stops that second answer from holding again.
+    pub(super) drift_asked: u32,
+    /// Drift questions this task attempted and did not answer.
+    pub(super) drift_failed: u32,
     /// The completion question's raw answer, keyed by the exact diff text it
     /// was asked about (2616): `None` when no model is configured, mode is
     /// off, or no request has answered yet. Re-asked whenever the diff at a
@@ -354,6 +365,10 @@ impl TaskState {
             effect_holds: 0,
             effect_overrides: 0,
             would_hold: 0,
+            drift_holds: 0,
+            would_drift: 0,
+            drift_asked: 0,
+            drift_failed: 0,
             completion_answer: None,
             completion_decision: None,
             approval_hints: 0,
@@ -416,6 +431,12 @@ impl TaskState {
             "would_hold": self.would_hold,
             "holds": self.effect_holds,
             "overrides": self.effect_overrides,
+            "drift": {
+                "asked": self.drift_asked,
+                "held": self.drift_holds,
+                "would_hold": self.would_drift,
+                "failed": self.drift_failed,
+            },
             "approval_hints": self.approval_hints,
             "approval_hint_failures": self.approval_hint_failures,
             "completion": self.completion_decision.as_ref().map(|decision| serde_json::json!({
