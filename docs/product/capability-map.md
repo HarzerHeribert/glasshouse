@@ -2628,3 +2628,19 @@ Phase 68 — Gateway: successors named by the 2026-09-16 cleanup
 
 ☑ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
 ☑ Serve the same ingress targets from Glasshouse's embedded gateway as from the standalone binary — one `GATEWAY_INGRESS_PROTOCOLS` in the gateway crate, `typesafe-systemone` included, so a Pane launched by Glasshouse can reach the decision model exactly as a standalone Pane can.
+
+Phase 69 — Pane: request modes and the decision model's helpers
+
+The user's rulings of 2026-09-16 (design-decisions.md, *Request modes*). The decision model proposes;
+the sandbox profile and the person decide. Nothing here is a capability the model grants itself.
+
+☐ Offer `explore` as a request mode: reading tools and read-only shell patterns only, `write` and `edit` refused outside `.pane/scratch/**` and the configured documentation globs, network only by grant — enforced by the sandbox profile, never by the prompt.
+☐ Let `plan` read: the plan mode keeps its promise to execute no change, but may read files, run read-only shell patterns, and write the plan file.
+☐ Propose the mode from the request's intent: a `read_only` intent at or above the configured confidence enters `explore` for that request, below it Pane asks with one line, `/mode` pins it, and `shadow` only counts what would have applied.
+☐ Gate remote commands in `explore`: every `ssh` and `scp` cell is parsed, mutating verbs, redirections and remote scripts are refused statically, the rest is judged by the decision model ("this remote command only reads") above a threshold or refused with the reason, and every remote command is logged in the rollout.
+☐ Ask diff-hygiene questions with the completion question in one request — tests for the changed behaviour, files outside the request, debugging leftovers, deleted tests, changed public signatures — each decisive answer one finding held once, in between the checker as today.
+☐ Decide the acceptance list's judge items with the decision model when it is confident, and send only the undecided ones to the fresh checker.
+☐ Ask, before an effectful cell runs, whether it does what the plan's current step says, and hold once on a confident no.
+☐ Rank the Scout's candidate files by one relevance question per file and read the relevant ones first.
+☐ Check a helper's result against what was asked before it reaches the main model, and say so in one line when it does not.
+☐ Measure the decision model's effect: one request set run with decisions off, shadow and on, compared on checker findings, verified claims, spared checker runs, holds and false holds, tokens and time — recorded before any threshold becomes a default.

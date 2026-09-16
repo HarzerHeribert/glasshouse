@@ -5493,3 +5493,20 @@ Four rulings, given on the cleanup report (`.agent-runtime/report-repo-cleanup-2
 4. **The three keep the Glasshouse brand** (`x-glasshouse-*`, `GLASSHOUSE_*`, the keychain
    service), with a clear separation between them: one architecture document, one place
    per component in `docs/product/`, and the boundary scans as the enforcement.
+
+## Request modes, and what the decision model may help with — the user, 2026-09-16 (night)
+
+Asked whether the decision model could choose a turn's toolset from the request's intent, the user
+ruled the shape: **not per cell but per request; the model proposes, Pane enforces.** `explore` is a
+request mode that refuses writes outside agent scratch and documentation files and keeps the shell
+read-only; `plan` must be able to read (today it executes nothing at all); the mode comes from the
+intent question above a confidence, the person can pin it, and remote commands over `ssh` are judged
+per cell on top of a read-only account on the far side — the motivation was a Claude Code agent
+exploring a production Nutanix cluster over SSH, where the user wants "certainty of rule
+compliance" before sending Pane at other environments. The certainty comes from the sandbox profile
+and the far side's account, never from the model. Also approved, from the same conversation: diff-
+hygiene questions at the completion gate (tests for the change, scope, debugging leftovers, deleted
+tests, signatures), judge items decided by the decision model when confident, a drift question before
+effectful cells, the Scout's files ranked by relevance, a check of each helper's result, and an
+off/shadow/on measurement over one request set before any threshold becomes a default. Recorded as
+**Phase 69**. "Bau das über Nacht fertig wenn du kannst."
