@@ -43,11 +43,6 @@ impl Item {
             Self::Judge { text } => format!("judge: {text}"),
         }
     }
-
-    #[must_use]
-    pub fn is_judge(&self) -> bool {
-        matches!(self, Self::Judge { .. })
-    }
 }
 
 /// The lister helper's whole instruction: the five line forms and nothing
@@ -359,7 +354,12 @@ mod tests {
                 text: "1.2".into()
             }
         );
-        assert!(items[4].is_judge());
+        assert_eq!(
+            items[4],
+            Item::Judge {
+                text: "the parser rejects a malformed header".into()
+            }
+        );
     }
 
     #[test]

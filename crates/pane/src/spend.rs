@@ -164,20 +164,6 @@ impl Ledger {
             .collect()
     }
 
-    /// One tier's total across every model it used.
-    #[must_use]
-    pub fn tier_tokens(&self, tier: Tier) -> Option<u64> {
-        let mut total = None;
-        for ((entry, _), used) in &self.tiers {
-            if *entry == tier
-                && let Some(tokens) = used.tokens
-            {
-                *total.get_or_insert(0) += tokens;
-            }
-        }
-        total
-    }
-
     /// The whole session's tokens.
     ///
     /// Deliberately last and deliberately awkward to reach: a total across
@@ -327,15 +313,6 @@ mod tests {
         assert!(rendered.contains("calls: 1"));
     }
 
-    #[test]
-    fn a_tier_totals_across_every_model_it_used() {
-        let mut ledger = Ledger::new();
-        ledger.record(Tier::Helpers, "luna", Some(100), None, None);
-        ledger.record(Tier::Helpers, "haiku", Some(50), None, None);
-        assert_eq!(ledger.tier_tokens(Tier::Helpers), Some(150));
-        assert_eq!(ledger.tier_tokens(Tier::Parent), None);
-    }
-
     /// Absent is never zero: a request nobody metered must not render as a
     /// free one, and the reader must be able to see that the figure is short.
     #[test]
@@ -367,7 +344,6 @@ mod tests {
         ledger.record(Tier::Parent, "astra", Some(10), None, None);
         let rendered = ledger.render();
         assert!(rendered.contains("cost: $0.2500"), "{rendered}");
-        assert_eq!(ledger.tier_tokens(Tier::Parent), Some(20));
     }
 
     /// The route is what makes two identical token counts different work.

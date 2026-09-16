@@ -179,16 +179,6 @@ impl WebBroker {
             }
         }
     }
-    /// Host-only MCP transport. No redirects/retries: authenticated POSTs must
-    /// never leak credentials to another destination or replay tool actions.
-    pub fn post_json(
-        &self,
-        url: &str,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Result<WebPostResponse, String> {
-        self.post_json_cancellable(url, headers, body, &CancellationToken::new())
-    }
 
     /// Called on the MCP worker. Cancellation cannot roll back an in-flight action.
     pub fn post_json_cancellable(
