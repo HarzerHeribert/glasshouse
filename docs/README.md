@@ -30,6 +30,12 @@ sign something is wired to the wrong layer.
 - [`evidence/`](product/evidence/README.md) — the capability evidence ledger,
   split by phase; start at its `README.md`.
 
+## `docs/history/` — archived, not current
+
+- [`history/README.md`](history/README.md) — superseded process prose moved
+  out of the files below, kept only so nothing is lost; every ruling stayed
+  in `design-decisions.md`.
+
 ## `docs/process/` — how we build it
 
 - [`handoff.md`](process/handoff.md) — current phase, verified work, next
@@ -49,3 +55,5 @@ sign something is wired to the wrong layer.
   cycles.
 - [`orchestration-measurements.md`](process/orchestration-measurements.md) —
   the standing inherited experiment on model-tier cost/quality.
+- [`dogfooding-index.md`](process/dogfooding-index.md) — the dogfooding
+  protocol and dated session files, indexed with the current log named.
