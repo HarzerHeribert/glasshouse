@@ -1,21 +1,28 @@
-//! **GH-ROUTED-EXTRACTION-CLIENT** — the disposable router's choice performs
-//! the extraction.
+//! **GH-ROUTED-EXTRACTION-CLIENT**, superseded by
+//! **GH-GLASSHOUSE-CONFIGURED-MODELS** (design-decisions.md, 2026-09-16):
+//! `[memory] extraction_model` performs the extraction — never
+//! `DisposableRouting`'s choice, which is consulted nowhere on this path any
+//! more.
 //!
-//! # What was missing, in the recon's words
+//! GH-GLASSHOUSE-CONFIGURED-MODELS removed two tests that proved the
+//! superseded behaviour and could not be adapted, since they asserted the
+//! opposite of the current contract:
+//! `the_routed_free_model_receives_the_request_and_the_named_one_does_not`
+//! (a free candidate beside the configured model must win — there is no
+//! longer a candidate list to rank) and
+//! `health_learned_in_two_processes_moves_the_third_to_the_configured_model`
+//! (two real `429`s teach the next process to skip the free resource — there
+//! is no longer a pool to learn from). `no_adequate_resource_fails_in_words_and_dials_nothing`
+//! and `the_credential_value_reaches_the_request_and_neither_the_ledger_nor_the_output`
+//! stay: both already exercised one configured candidate, which is now the
+//! only kind there is.
 //!
-//! `docs/product/evidence/phase-33c.md`'s *1367 and 1369 censused* entry:
-//! *"`RoutedModel` chooses and then calls no model at all … and
-//! `disposable_extraction_model` returns a configured extraction model
-//! before consulting the router at all. So today the free-pool policy
-//! chooses only when nothing will be called, and the model that was called
-//! was never routed."*
-//!
-//! Both halves are closed here, and both are proved through the **shipped
-//! binary** against canned OpenAI chat-completions endpoints on loopback —
-//! practice §35, in the phase where the caller is what is being built. A test
-//! that handed an `Extractor` a fake `ExtractionModel` would pass on every
-//! build in this repository's history, including the ones where nothing on
-//! this path could call anything.
+//! Proved through the **shipped binary** against canned OpenAI
+//! chat-completions endpoints on loopback — practice §35, in the phase where
+//! the caller is what is being built. A test that handed an `Extractor` a
+//! fake `ExtractionModel` would pass on every build in this repository's
+//! history, including the ones where nothing on this path could call
+//! anything.
 //!
 //! Each endpoint parses the request itself rather than reusing anything in
 //! this crate, so *"the request arrived, naming this model"* is a claim about
@@ -68,8 +75,6 @@ const ONE_FINDING: &str = r#"{"memories":[{"kind":"finding","authority":"constra
 /// One request as it actually arrived on the wire.
 #[derive(Debug, Clone)]
 struct Seen {
-    method: String,
-    target: String,
     headers: Vec<(String, String)>,
     body: String,
 }
@@ -85,9 +90,6 @@ impl Seen {
 
 enum Answer {
     Content(String),
-    /// `429` with no `retry-after` — the shape a shared free tier refuses
-    /// with, and the one `routing::free` has to invent its own cooldown for.
-    RateLimited,
 }
 
 struct FakeModel {
@@ -100,10 +102,6 @@ impl FakeModel {
     fn answering(content: &str) -> Self {
         let content = content.to_owned();
         Self::start(move |_| Answer::Content(content.clone()))
-    }
-
-    fn rate_limiting() -> Self {
-        Self::start(|_| Answer::RateLimited)
     }
 
     fn start(responder: impl Fn(usize) -> Answer + Send + Sync + 'static) -> Self {
@@ -167,10 +165,6 @@ fn serve(
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
         return;
     }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let target = parts.next().unwrap_or_default().to_owned();
-
     let mut headers = Vec::new();
     let mut length = 0usize;
     loop {
@@ -197,12 +191,7 @@ fn serve(
         return;
     }
     let body = String::from_utf8_lossy(&body).into_owned();
-    seen.lock().unwrap().push(Seen {
-        method,
-        target,
-        headers,
-        body,
-    });
+    seen.lock().unwrap().push(Seen { headers, body });
 
     let response = match responder(nth) {
         Answer::Content(content) => {
@@ -216,10 +205,6 @@ fn serve(
                  connection: close\r\n\r\n{document}",
                 document.len()
             )
-        }
-        Answer::RateLimited => {
-            "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                .to_owned()
         }
     };
     let _ = stream.write_all(response.as_bytes());
@@ -424,28 +409,18 @@ fn running_session(fixture: &Fixture) -> SessionId {
 }
 
 // ---------------------------------------------------------------------------
-// (a) The chosen resource is the one that is called.
+// (a) The configured model is the one that is called, however many free
+// models are also configured.
 // ---------------------------------------------------------------------------
 
-/// **The joined link, and the disclosed precedence.**
-///
-/// A user with a configured free model *and* a configured extraction model
-/// gets the **free** one dialled: `[memory] extraction_model` is the consent
-/// that a model may be called at all, and `DisposableRouting::choose` decides
-/// which — map line 530's *prefer free models for Glasshouse's own bounded
-/// support work when quality is sufficient*, on the path that actually spends
-/// something.
-///
-/// Before this batch the configured model bypassed the router entirely, so
-/// this test's free endpoint would have seen nothing and the named one would
-/// have seen the call. That is the precedence change, and this is the test
-/// that pins it.
-///
-/// Three claims, and the third is the one the recon says was missing: the
-/// request arrived on the wire naming the routed model; the ledger says what
-/// it cost, under the extraction purpose; and the memory landed in the store.
+/// **Acceptance, configured.** A free provider is configured beside the
+/// named extraction model — reachable, and exactly the resource
+/// `DisposableRouting::choose` used to prefer (map line 530) before this
+/// package. It is never dialled: `[memory] extraction_model` names the one
+/// model that is ever called, and nothing ranks it against anything else
+/// (design-decisions.md, 2026-09-16).
 #[test]
-fn the_routed_free_model_receives_the_request_and_the_named_one_does_not() {
+fn the_configured_model_receives_the_request_and_the_free_one_does_not() {
     let free = FakeModel::answering(ONE_FINDING);
     let named = FakeModel::answering(ONE_FINDING);
     let fixture = Fixture::new();
@@ -463,143 +438,42 @@ fn the_routed_free_model_receives_the_request_and_the_named_one_does_not() {
     fixture.one_recorded_turn(&session);
     let ran = fixture.commit(&session);
 
-    let asked = free.requests();
+    let asked = named.requests();
     assert_eq!(
         asked.len(),
         1,
         "one extraction is one model call, no more and no fewer: {}",
         ran.stdout
     );
-    assert_eq!(asked[0].method, "POST");
-    assert_eq!(asked[0].target, "/v1/chat/completions");
     assert!(
-        asked[0].body.contains(FREE_MODEL),
-        "the request must name the model routing chose: {}",
+        asked[0].body.contains(NAMED_MODEL),
+        "the request must name the configured model: {}",
         asked[0].body
     );
     assert_eq!(
         asked[0].header("authorization"),
         Some(format!("Bearer {CREDENTIAL}").as_str()),
-        "the credential the chosen candidate named must be what authenticates the call"
+        "the credential the configured provider names must be what authenticates the call"
     );
     assert!(
-        named.requests().is_empty(),
-        "the configured extraction model is a candidate, not a bypass: it must not be \
-         dialled while a free resource can serve"
+        free.requests().is_empty(),
+        "a free resource nobody named must never be dialled, however available it is"
     );
 
-    let rows = fixture.observations(FREE_PROVIDER, FREE_MODEL);
-    assert_eq!(
-        rows.len(),
-        1,
-        "the exchange must be recorded against the resource that made it: {}",
-        ran.stdout
-    );
+    let rows = fixture.observations(NAMED_PROVIDER, NAMED_MODEL);
+    assert_eq!(rows.len(), 1, "{}", ran.stdout);
     assert_eq!(
         rows[0].purpose.as_deref(),
         Some("memory-extraction"),
         "map line 1832: the row must say what the call was for"
     );
-    assert_eq!(
-        rows[0].input_tokens,
-        Some(271),
-        "the row must carry what the provider reported spending"
-    );
     assert!(
-        fixture.observations(NAMED_PROVIDER, NAMED_MODEL).is_empty(),
+        fixture.observations(FREE_PROVIDER, FREE_MODEL).is_empty(),
         "a resource that was not called must not have a row"
     );
 
     assert!(ran.stdout.contains("stored 1"), "{}", ran.stdout);
     assert_eq!(fixture.memory_count(), 1);
-    assert!(
-        ran.stdout.contains(FREE_MODEL),
-        "the report must name the resource that answered: {}",
-        ran.stdout
-    );
-}
-
-// ---------------------------------------------------------------------------
-// (b) Pool health crosses the process boundary.
-// ---------------------------------------------------------------------------
-
-/// **What one process learned, the next one acts on.**
-///
-/// `glasshouse hook` and `glasshouse memory commit` are separate short-lived
-/// processes that never see each other's `FreePool` (`docs/product/evidence/
-/// phase-33c.md`: *"`RoutedModel::new` builds `FreePool::new()` — two empty
-/// `Vec`s — and drops it"*). Two real `429`s from the free resource are two
-/// separate processes' observations, and `FAILURES_BEFORE_COOLDOWN` is two —
-/// so the third dispatch can only avoid the free resource if the first two
-/// wrote what they learned somewhere the third read.
-///
-/// The fallback is the configured extraction model, chosen with
-/// `UseReason::Fallback`: it is a candidate the whole time, and it wins
-/// exactly when free capacity cannot serve.
-#[test]
-fn health_learned_in_two_processes_moves_the_third_to_the_configured_model() {
-    let free = FakeModel::rate_limiting();
-    let named = FakeModel::answering(ONE_FINDING);
-    let fixture = Fixture::new();
-    fixture.add_provider(FREE_PROVIDER, FREE_VAR, FREE_MODEL, &free.base_url(), true);
-    fixture.add_provider(
-        NAMED_PROVIDER,
-        NAMED_VAR,
-        NAMED_MODEL,
-        &named.base_url(),
-        false,
-    );
-    fixture.choose_extraction_model(NAMED_PROVIDER, NAMED_MODEL);
-
-    let session = running_session(&fixture);
-    fixture.one_recorded_turn(&session);
-
-    let first = fixture.commit(&session);
-    let second = fixture.commit(&session);
-    assert_eq!(
-        free.requests().len(),
-        2,
-        "the first two dispatches must both try the free resource: {} / {}",
-        first.stdout,
-        second.stdout
-    );
-    assert!(
-        named.requests().is_empty(),
-        "a rate limit is not a reason to spend the metered fallback until the pool says the \
-         free resource cannot serve"
-    );
-    assert_eq!(
-        fixture.memory_count(),
-        0,
-        "a rate-limited call stores nothing: {}",
-        second.stdout
-    );
-
-    let third = fixture.commit(&session);
-    assert_eq!(
-        free.requests().len(),
-        2,
-        "the third dispatch must not try a resource two earlier processes found cooling \
-         down: {}",
-        third.stdout
-    );
-    assert_eq!(
-        named.requests().len(),
-        1,
-        "the configured extraction model is what serves when free capacity cannot: {}",
-        third.stdout
-    );
-    assert!(
-        third.stdout.contains(NAMED_MODEL),
-        "the report must name the resource that answered: {}",
-        third.stdout
-    );
-    assert!(third.stdout.contains("stored 1"), "{}", third.stdout);
-    assert_eq!(fixture.memory_count(), 1);
-
-    let rows = fixture.observations(NAMED_PROVIDER, NAMED_MODEL);
-    assert_eq!(rows.len(), 1, "{}", third.stdout);
-    assert_eq!(rows[0].purpose.as_deref(), Some("memory-extraction"));
 }
 
 // ---------------------------------------------------------------------------
@@ -610,13 +484,9 @@ fn health_learned_in_two_processes_moves_the_third_to_the_configured_model() {
 ///
 /// The user named an extraction model on a provider they then disabled, and
 /// configured nothing else. The endpoint is real and reachable — that is the
-/// point — and nothing reaches it: the policy has no candidate, the command
-/// says so in the words it said before this batch, and the store is untouched.
-///
-/// This is what stops the new client from becoming a second path around the
-/// router: the client is only ever built for a resource
-/// `DisposableRouting::choose` returned, so a configuration the policy
-/// refuses is a configuration nothing dials.
+/// point — and nothing reaches it: `[memory] extraction_model` names a
+/// provider Glasshouse cannot use, the command says so in words naming the
+/// provider, and the store is untouched.
 #[test]
 fn no_adequate_resource_fails_in_words_and_dials_nothing() {
     let endpoint = FakeModel::answering(ONE_FINDING);
@@ -630,7 +500,7 @@ fn no_adequate_resource_fails_in_words_and_dials_nothing() {
 
     assert!(
         endpoint.requests().is_empty(),
-        "a resource the policy refused must not be dialled anyway"
+        "a resource that cannot be used must not be dialled anyway"
     );
     assert!(
         ran.stdout.contains("no model was called"),
@@ -638,9 +508,11 @@ fn no_adequate_resource_fails_in_words_and_dials_nothing() {
         ran.stdout
     );
     assert!(
-        ran.stdout
-            .contains("no configured provider names a model for Glasshouse's own support work"),
-        "the refusal must say why, not merely that: {}",
+        ran.stdout.contains(&format!(
+            "the configured memory-extraction model names `{NAMED_PROVIDER}`, which this \
+             project cannot use"
+        )),
+        "the refusal must name the key and the provider, not merely that it failed: {}",
         ran.stdout
     );
     assert_eq!(fixture.memory_count(), 0);
@@ -648,6 +520,38 @@ fn no_adequate_resource_fails_in_words_and_dials_nothing() {
         fixture.observations(NAMED_PROVIDER, NAMED_MODEL).is_empty(),
         "nothing was spent, so there is nothing to record"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (e) GH-GLASSHOUSE-CONFIGURED-MODELS: unset key, no call.
+// ---------------------------------------------------------------------------
+
+/// **Acceptance, unset.** A free provider is configured — reachable, and
+/// able to serve — but `[memory] extraction_model` never names it:
+/// extraction must not dial it, and the notice names the key.
+#[test]
+fn no_extraction_model_configured_dials_nothing_and_the_notice_names_the_key() {
+    let free = FakeModel::answering(ONE_FINDING);
+    let fixture = Fixture::new();
+    fixture.add_provider(FREE_PROVIDER, FREE_VAR, FREE_MODEL, &free.base_url(), true);
+
+    let session = running_session(&fixture);
+    fixture.one_recorded_turn(&session);
+    let ran = fixture.commit(&session);
+
+    assert!(
+        free.requests().is_empty(),
+        "an unconfigured extraction model must dial nothing, however reachable a free \
+         resource is"
+    );
+    assert!(ran.stdout.contains("no model was called"), "{}", ran.stdout);
+    assert!(
+        ran.stdout.contains("[memory] extraction_model"),
+        "the notice must name the key that is unset: {}",
+        ran.stdout
+    );
+    assert_eq!(fixture.memory_count(), 0);
+    assert!(fixture.observations(FREE_PROVIDER, FREE_MODEL).is_empty());
 }
 
 // ---------------------------------------------------------------------------

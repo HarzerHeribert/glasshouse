@@ -5,26 +5,30 @@ use glasshouse::checkpoint::WorkingTreeStatus;
 use glasshouse::events::EventLog;
 use glasshouse::session::SessionId;
 
-/// The extraction model Glasshouse has in production, which is none.
+/// The extraction model Glasshouse has when `[memory] extraction_model`
+/// names nothing — which is none.
 ///
 /// Phase 21 has two separate lines here and they are separate on purpose:
 /// *"allow memory extraction to run after task completion"* is about the
 /// **trigger**, and *"allow a configurable cheap or local model to perform
 /// memory extraction"* is about the **model**. The trigger is built; the
-/// model is Phase 39's disposable-job provider and does not exist.
+/// model is configuration's alone (design-decisions.md, 2026-09-16 —
+/// Glasshouse never decides which model runs it), so an unconfigured project
+/// has this and nothing else.
 ///
 /// So extraction really does run after every completed turn, and it really
-/// does report `no extraction model is available` every time — which is
-/// exactly the shape [`glasshouse::memory::ExtractionOutcome`] exists to
-/// carry, and exactly the failure Phase 21's *"keep memory-extraction failure
-/// non-fatal to the coding session"* is about. Naming itself plainly matters
-/// as much as it does for `glasshouse memory extract`: a log line saying a
-/// model ran when none did would be worse than no line.
+/// does report itself as `none configured` every time until a model is
+/// configured — which is exactly the shape
+/// [`glasshouse::memory::ExtractionOutcome`] exists to carry, and exactly the
+/// failure Phase 21's *"keep memory-extraction failure non-fatal to the
+/// coding session"* is about. Naming itself plainly matters as much as it
+/// does for `glasshouse memory extract`: a log line saying a model ran when
+/// none did would be worse than no line.
 pub(crate) struct NoExtractionModel;
 
 impl glasshouse::memory::ExtractionModel for NoExtractionModel {
     fn describe(&self) -> String {
-        "none configured (Phase 39 supplies the provider)".to_owned()
+        "none configured, no model was called".to_owned()
     }
 
     fn complete(

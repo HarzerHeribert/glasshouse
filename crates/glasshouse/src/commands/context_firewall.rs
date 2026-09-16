@@ -747,19 +747,15 @@ fn disposable_reducer(
     session_id: &str,
 ) -> Option<Box<dyn glasshouse::firewall::reducer::Reducer>> {
     use glasshouse::provider::registry::Locality;
-    use glasshouse::routing::disposable::{DisposableRouting, JobKind};
-    use glasshouse::routing::free::{FreePool, FreePreferences};
 
     let effective = EffectiveConfig::with_gateway(user, project, gateway);
     let reducer_ref = effective.context_firewall_reducer().value?;
 
     // Phase 58, map lines 2028-2030: `local:<name>` selects an installed
     // out-of-process tool from `[context_firewall.local_reducers.<name>]`
-    // instead of routing through `DisposableRouting` at all — a local tool
-    // is local by construction, so `reducer_local_only` is satisfied without
-    // being consulted here, and nothing below this branch (provider/model
-    // candidates, free-resource routing, entitlement job-kind gating) applies
-    // to it. design-decisions.md's *The local reducer seat*.
+    // instead of a hosted provider at all — a local tool is local by
+    // construction, so `reducer_local_only` is satisfied without being
+    // consulted here. design-decisions.md's *The local reducer seat*.
     if let Some(name) = reducer_ref.strip_prefix("local:") {
         return local_disposable_reducer(runtime, user, project, &effective, session_id, name);
     }
@@ -776,7 +772,7 @@ fn disposable_reducer(
     );
     // Map line 1519: priced spend against every provider's own configured
     // money budget, for `disposable_candidates`' own exclusion — the same
-    // fail-soft gather `disposable_extraction_model` makes (8320).
+    // fail-soft gather `disposable_extraction_model` used to make.
     let telemetry = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         Ok(ledger) => {
             let prices = glasshouse::provider::pricing::PriceTable::load_from_dir(
@@ -793,6 +789,12 @@ fn disposable_reducer(
             telemetry
         }
     };
+    // `disposable_candidates` stays: it is still the shared reader of what
+    // this project's providers name as free/metered models, tagged with
+    // locality and entitlement — used here only to filter to what `reducer`
+    // and `reducer_model` name, never to rank. Ranking among what is left is
+    // exactly the decision design-decisions.md's 2026-09-16 ruling (Glasshouse
+    // never decides which model is used) takes away from this job.
     let candidates = crate::commands::routing_classification::disposable_candidates(
         user, project, &effective, &secrets, &telemetry, now_unix,
     );
@@ -814,77 +816,30 @@ fn disposable_reducer(
     if local_only {
         filtered.retain(|candidate| candidate.locality() == Some(Locality::Local));
     }
-    if filtered.is_empty() {
-        return None;
-    }
 
-    let free_preferences = FreePreferences::new()
-        .with_order(
-            effective
-                .free_resource_order()
-                .value
-                .iter()
-                .map(|order| order.to_key())
-                .collect(),
-        )
-        .with_disabled(
-            effective
-                .free_resource_disabled()
-                .value
-                .iter()
-                .map(|disabled| disabled.to_key())
-                .collect(),
-        )
-        .with_pin(
-            effective
-                .free_resource_pin()
-                .value
-                .as_ref()
-                .map(|pin| pin.to_key()),
-        );
-    let reserve_override = glasshouse::routing::disposable::ReserveOverride::for_sessions(
-        effective.reserve_override_sessions().value,
-    )
-    .deciding_for(session_id.to_string());
-    // Map lines 1294 and 1610's production wiring, scoped exactly as the
-    // override above: the sessions that declared, paired with the session
-    // this decision is actually for. `DeclaredTaskProgress::applies` is what
-    // makes those two facts one input, and it is false for every session
-    // nobody declared — including when the set is empty, which is every user
-    // who has never run `glasshouse task-progress`.
-    let task_progress = glasshouse::routing::disposable::DeclaredTaskProgress::for_sessions(
-        crate::commands::sessions::declared_task_progress_sessions(runtime),
-    )
-    .deciding_for(session_id.to_string());
-    let routing = DisposableRouting::for_support_work(
-        effective.prefer_free_routing().value,
-        free_preferences,
-    )
-    .with_reserve_override(reserve_override)
-    .with_task_progress(task_progress)
-    .with_reserve_policy(
-        effective
-            .reserve_policies()
-            .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
-    );
+    // Exactly one candidate is used without deciding anything; more than one
+    // is ambiguous now that nothing ranks them, and stays unused until
+    // `[context_firewall] reducer_model` says which.
+    let chosen = match filtered.len() {
+        0 => return None,
+        1 => filtered.remove(0),
+        matched => {
+            tracing::warn!(
+                reducer = reducer_ref,
+                matched,
+                "the context-firewall reducer matches more than one configured model; set \
+                 `[context_firewall] reducer_model` to say which"
+            );
+            return None;
+        }
+    };
 
-    let pool = FreePool::new();
-    let choice = routing
-        .choose(
-            JobKind::ContextReduction,
-            &filtered,
-            &pool,
-            std::time::Instant::now(),
-            None,
-        )
-        .ok()?;
-
-    match context_firewall_reducer_model(
+    match glasshouse::memory::extract::model::reducer_model(
         runtime.paths(),
         user,
         project,
-        choice.provider(),
-        choice.model(),
+        chosen.provider(),
+        chosen.model(),
     ) {
         Ok(reducer) => Some(Box::new(reducer)),
         Err(err) => {
@@ -939,54 +894,6 @@ fn local_disposable_reducer(
             None
         }
     }
-}
-
-/// Build the [`glasshouse::firewall::reducer::ConfiguredReducer`]
-/// `DisposableRouting` chose — [`classification_model`]'s exact shape,
-/// restated for the reducer's own type, since both build a real client from
-/// a provider name and a model name after routing has already decided them.
-fn context_firewall_reducer_model(
-    paths: &glasshouse::paths::RuntimePaths,
-    user: &UserConfig,
-    project: Option<&ProjectConfig>,
-    provider_name: &str,
-    model_name: &str,
-) -> Result<glasshouse::firewall::reducer::ConfiguredReducer, String> {
-    use glasshouse::firewall::reducer::{ConfiguredReducer, ConfiguredReducerError};
-    use glasshouse::secret::{SecretRef, SecretStore as _};
-
-    let Some(provider_config) = project
-        .and_then(|p| p.providers().get(provider_name))
-        .or_else(|| user.providers().get(provider_name))
-    else {
-        return Err(format!(
-            "the context-firewall reducer names `{provider_name}`, which this project has not \
-             configured"
-        ));
-    };
-    if !provider_config.enabled() {
-        return Err(format!(
-            "the context-firewall reducer names `{provider_name}`, which is disabled"
-        ));
-    }
-    let provider = provider_config.to_provider(provider_name).map_err(|err| {
-        format!("the context-firewall reducer's provider does not resolve: {err}")
-    })?;
-
-    let secrets = paths.secret_store();
-    let credential = provider
-        .credential_env
-        .iter()
-        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }));
-
-    ConfiguredReducer::new(&provider, model_name, credential).map_err(|err| match err {
-        ConfiguredReducerError::UnsupportedProtocol { protocol, .. } => format!(
-            "the context-firewall reducer speaks OpenAI chat completions, and \
-             `{provider_name}` serves `{protocol}`; configure a provider that serves \
-             openai-chat"
-        ),
-        other => format!("the context-firewall reducer cannot be used: {other}"),
-    })
 }
 
 #[cfg(test)]

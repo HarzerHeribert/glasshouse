@@ -389,36 +389,30 @@ impl ExtractionModel for BudgetExhaustedModel {
 }
 
 // ---------------------------------------------------------------------------
-// The reranking seat — the extraction seat's four steps, for `[memory]
-// rerank_model`.
+// The reranking seat, for `[memory] rerank_model`.
 // ---------------------------------------------------------------------------
 
 /// Resolve `[memory] rerank_model` into a callable model, or say `None`.
-/// The extraction seat's four steps (`docs/product/evidence/phase-9i.md`'s
-/// `GH-ROUTED-EXTRACTION-CLIENT`) — consent, the local bypass, the choice,
-/// the client — for `JobKind::Reranking`. Lives here, in the library, rather
-/// than beside `main.rs::disposable_extraction_model`, because
-/// [`super::inject::briefing`] is reached from **two** doors and only the
-/// library crate is common to both.
-/// Returns `None` immediately when unconsented, before any candidate,
-/// health read, or routing decision is built — unlike
-/// [`super::extract::disposable::RoutedModel`]'s "route, explain, record,
-/// call nothing" posture, reranking has no evidence requirement for a knob
-/// nobody set (map line 1090). `None` is also the answer when a candidate
-/// could not be built, the router found none, or the resolved client could
-/// not be built — every one of these is `RerankOutcome::Bypassed` at
-/// [`rerank`]'s own call site.
+/// Consent, the local bypass, then the client — never a candidate list, a
+/// health read or a routing decision: Glasshouse never decides which model
+/// reranks (design-decisions.md, 2026-09-16). Lives here, in the library,
+/// rather than beside `commands::routing_classification::disposable_extraction_model`,
+/// because [`super::inject::briefing`] is reached from **two** doors and only
+/// the library crate is common to both.
+/// Returns `None` immediately when unconsented, before any client is built.
+/// `None` is also the answer when the provider is misconfigured, its
+/// credential does not resolve, or the resolved client could not be built —
+/// every one of these is `RerankOutcome::Bypassed` at [`rerank`]'s own call
+/// site.
 /// No persisted cross-process health, no paced-request reservation claim,
 /// and no `session` parameter: at most one rerank call happens per
 /// briefing and this function records nothing, so it needs neither.
 /// History: design-decisions.md, "Trims: memory and session module docs", memory/rerank.rs resolve_rerank_model.
 pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn ExtractionModel>> {
     use super::ConfiguredModel;
+    use super::extract::model::ConfiguredCall;
     use crate::config::{EffectiveConfig, UserConfig, load_project_config};
     use crate::routing::CredentialId;
-    use crate::routing::disposable::{DisposableCandidate, DisposableRouting, JobKind};
-    use crate::routing::free::{FreePool, FreePreferences};
-    use crate::routing::pressure::ReserveScope;
     use crate::secret::{SecretRef, SecretStore as _};
 
     let user = UserConfig::load(runtime.paths()).ok()?;
@@ -477,10 +471,8 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
 
     let secrets = runtime.paths().secret_store();
 
-    // Step 2: the local bypass. A provider naming no credential variable is
-    // not expressible as a `DisposableCandidate` — see
-    // `main.rs::configured_extraction_candidate`'s own reasoning, which this
-    // mirrors — so it is built and used directly.
+    // Step 2: the local bypass. A provider naming no credential variable has
+    // nothing to label, so it is built and used directly, with no stamp.
     if provider_config.credential_env().is_empty() {
         let client = ConfiguredModel::new(&provider, chosen.model(), None)
             .ok()?
@@ -495,49 +487,20 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
         .find(|reference| secrets.resolve(reference).is_some())?;
     let credential_value = secrets.resolve(&reference)?;
 
-    // Step 3: the choice. One candidate — the user's own named model — ranked
-    // against `[memory] rerank_model` alone: there is nothing else configured
-    // for this job kind to choose *among*, but `DisposableRouting::choose`
-    // still applies every hard constraint (entitlement, the metered gate,
-    // the protected reserve) a second, unconfigured candidate would also
-    // have to clear.
-    let candidate = DisposableCandidate::new(
-        chosen.provider().to_owned(),
-        chosen.model().to_owned(),
-        CredentialId::new(chosen.provider().to_owned(), reference),
-        provider_config.cost_of(chosen.model()),
-    );
-    let routing = DisposableRouting::for_support_work(
-        effective.prefer_free_routing().value,
-        FreePreferences::new(),
-    )
-    .with_reserve_policy(
-        effective
-            .reserve_policies()
-            .for_scope(ReserveScope::Background),
-    );
-    let pool = FreePool::new();
-    let routed = super::RoutedModel::new(
-        JobKind::Reranking,
-        std::slice::from_ref(&candidate),
-        &routing,
-        &pool,
-    );
-    let Ok(choice) = routed.choice() else {
-        return None;
-    };
+    // Step 3/4: the client, for exactly the model `[memory] rerank_model`
+    // named — never ranked against anything else. Glasshouse never decides
+    // which model reranks (design-decisions.md, 2026-09-16): the hard
+    // constraints `DisposableRouting::choose` used to apply here (entitlement,
+    // the metered gate, the protected reserve) went with it, and this is the
+    // one candidate there ever was.
+    let credential_label = CredentialId::new(chosen.provider().to_owned(), reference).label();
+    let client = ConfiguredModel::new(&provider, chosen.model(), Some(credential_value))
+        .map(|client| client.with_timeouts(rerank_timeouts()))
+        .map_err(|err| format!("the rerank model cannot be used: {err}"));
+    let wrapped = ConfiguredCall::new(client, Some(credential_label));
 
-    // Step 4: the client, for exactly the resource the policy chose.
-    let client = ConfiguredModel::new(&provider, choice.model(), Some(credential_value))
-        .map(|client| client.with_timeouts(rerank_timeouts()));
-    let credential_label = choice.credential().label();
-    let routed = routed.with_client(
-        client.map_err(|err| format!("the rerank model cannot be used: {err}")),
-        credential_label,
-    );
-
-    if routed.can_call() {
-        Some(Box::new(routed))
+    if wrapped.can_call() {
+        Some(Box::new(wrapped))
     } else {
         None
     }
@@ -698,8 +661,8 @@ fn diagnostics_candidate(
 /// from interleaving mid-line, which a multi-write sequence could not
 /// promise. A failure here is one debug line — this runs inside a hook or
 /// launch process, and Glasshouse's own bookkeeping is never more important
-/// than the session it keeps books about, matching
-/// `main.rs::persist_support_work_health`'s own posture.
+/// than the session it keeps books about, matching every other diagnostics
+/// writer's own fail-soft posture on this path.
 pub fn append_diagnostics(runtime: &crate::Runtime, trace: &RetrievalTrace) {
     let path = runtime.state_dir().join("memory-retrieval.jsonl");
     let line = match serde_json::to_string(trace) {

@@ -554,6 +554,226 @@ fn is_timeout_kind(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Configuration-resolved models — GH-GLASSHOUSE-CONFIGURED-MODELS.
+//
+// Glasshouse never decides which model runs memory extraction, reranking or
+// the context-firewall reducer (design-decisions.md, 2026-09-16): each names
+// its own model in configuration, or it does not run. Nothing below reads
+// `crate::routing::disposable` — no candidate list, no health, no reserve, no
+// pool. `extraction_client_for` is the one place a provider name and a model
+// name become a real client; `configured_extraction_model` (extraction),
+// `memory::rerank::resolve_rerank_model` (reranking, which calls
+// `ConfiguredCall` directly for the same stamp) and `reducer_model` (the
+// context-firewall reducer) are its three callers, one per job.
+// ---------------------------------------------------------------------------
+
+/// A [`ConfiguredModel`] called because configuration named it, never because
+/// [`crate::routing::disposable::DisposableRouting`] chose it. Stamps the two
+/// facts [`ConfiguredModel::complete_observed`] cannot know about itself —
+/// which credential *name* paid, and when the call happened — the same stamp
+/// [`super::disposable::RoutedModel::complete_observed`] applies for a routed
+/// call. There is no [`crate::routing::disposable::DisposableChoice`] to
+/// carry that through on this path, so this carries it directly instead.
+pub struct ConfiguredCall {
+    client: Result<ConfiguredModel, String>,
+    credential_label: Option<String>,
+}
+
+impl ConfiguredCall {
+    pub fn new(client: Result<ConfiguredModel, String>, credential_label: Option<String>) -> Self {
+        Self {
+            client,
+            credential_label,
+        }
+    }
+
+    /// Whether this call has a client it can actually reach — the direct
+    /// analogue of [`super::disposable::RoutedModel::can_call`], for a caller
+    /// that only wants to offer a model it can use.
+    pub fn can_call(&self) -> bool {
+        self.client.is_ok()
+    }
+}
+
+impl ExtractionModel for ConfiguredCall {
+    fn describe(&self) -> String {
+        match &self.client {
+            Ok(client) => client.describe(),
+            Err(reason) => format!("configured, but not usable: {reason}"),
+        }
+    }
+
+    fn complete(&self, prompt: &Prompt) -> Result<String, ModelError> {
+        self.complete_observed(prompt).map(|reply| reply.reply)
+    }
+
+    fn complete_observed(&self, prompt: &Prompt) -> Result<ModelReply, ModelError> {
+        let client = self.client.as_ref().map_err(|_| ModelError::Unavailable)?;
+        let dispatched_at_unix = crate::provider::cache::now_unix_seconds();
+        let mut result = client.complete_observed(prompt);
+        let completed_at_unix = crate::provider::cache::now_unix_seconds();
+        if let Ok(reply) = &mut result
+            && let Some(call) = &mut reply.call
+        {
+            call.credential_label = self.credential_label.clone();
+            call.dispatched_at_unix = Some(dispatched_at_unix);
+            call.completed_at_unix = Some(completed_at_unix);
+        }
+        result
+    }
+}
+
+/// The provider behind a name the user's own configuration holds, resolved
+/// through the layering rule every other reader applies — project winning
+/// over user. Moved from
+/// `commands::routing_classification::configured_provider`
+/// (GH-GLASSHOUSE-CONFIGURED-MODELS): the only caller left,
+/// [`extraction_client_for`], lives here now.
+///
+/// Every failure is `None` after one log line: an unreadable provider, one
+/// that is not in the table, a disabled one, or a template that does not
+/// resolve is a choice that cannot produce a call, and never a guess at a
+/// correction.
+fn configured_provider(
+    user: &crate::config::UserConfig,
+    project: Option<&crate::config::ProjectConfig>,
+    provider_name: &str,
+    subject: &str,
+) -> Option<crate::provider::Provider> {
+    let Some(provider_config) = project
+        .and_then(|p| p.providers().get(provider_name))
+        .or_else(|| user.providers().get(provider_name))
+    else {
+        tracing::warn!(
+            provider = provider_name,
+            subject,
+            "names a provider this project has not configured"
+        );
+        return None;
+    };
+    if !provider_config.enabled() {
+        tracing::warn!(
+            provider = provider_name,
+            subject,
+            "names a disabled provider"
+        );
+        return None;
+    }
+    match provider_config.to_provider(provider_name) {
+        Ok(provider) => Some(provider),
+        Err(err) => {
+            tracing::warn!(error = %err, subject, "the provider does not resolve");
+            None
+        }
+    }
+}
+
+/// Build the client for `provider_name`/`model_name`, plus the credential
+/// *label* that paid for it (`None` for a provider naming no credential
+/// variable — the local case) — or the one sentence saying why not.
+///
+/// The first credential variable that resolves wins, the same order every
+/// other reader of a provider's `credential_env` walks. Moved from
+/// `commands::routing_classification::extraction_client_for`
+/// (GH-GLASSHOUSE-CONFIGURED-MODELS) and widened to hand back the label too,
+/// since there is no more routed [`crate::routing::disposable::DisposableChoice`]
+/// to carry it for [`ConfiguredCall`].
+pub fn extraction_client_for(
+    user: &crate::config::UserConfig,
+    project: Option<&crate::config::ProjectConfig>,
+    provider_name: &str,
+    model_name: &str,
+) -> Result<(ConfiguredModel, Option<String>), String> {
+    use crate::routing::CredentialId;
+    use crate::secret::{SecretRef, SecretStore as _};
+
+    let provider = configured_provider(user, project, provider_name, "the configured model")
+        .ok_or_else(|| format!("names `{provider_name}`, which this project cannot use"))?;
+
+    let secrets = crate::secret::native::PreferNativeSecretStore::detect();
+    let resolved = provider.credential_env.iter().find_map(|var| {
+        let reference = SecretRef::Environment { var: var.clone() };
+        secrets
+            .resolve(&reference)
+            .map(|value| (value, CredentialId::new(provider_name, reference).label()))
+    });
+    let (credential, credential_label) = match resolved {
+        Some((value, label)) => (Some(value), Some(label)),
+        None => (None, None),
+    };
+
+    let model = ConfiguredModel::new(&provider, model_name, credential)
+        .map_err(|err| format!("cannot be used: {err}"))?;
+    Ok((model, credential_label))
+}
+
+/// `[memory] extraction_model` resolved into a callable model, or the one
+/// sentence saying why not — the caller's to turn into a notice, since this
+/// module does not know the config key's own name.
+pub fn configured_extraction_model(
+    user: &crate::config::UserConfig,
+    project: Option<&crate::config::ProjectConfig>,
+    chosen: &crate::config::ExtractionModelRef,
+) -> Result<Box<dyn ExtractionModel>, String> {
+    let (model, credential_label) =
+        extraction_client_for(user, project, chosen.provider(), chosen.model())?;
+    Ok(Box::new(ConfiguredCall::new(Ok(model), credential_label)))
+}
+
+/// Build the [`crate::firewall::reducer::ConfiguredReducer`] the
+/// context-firewall reducer calls, for exactly the `provider_name`/
+/// `model_name` the caller has already resolved from `[context_firewall]
+/// reducer` (and `reducer_model` when it disambiguates more than one
+/// configured candidate) — never from routing. Moved from
+/// `commands::context_firewall::context_firewall_reducer_model`
+/// (GH-GLASSHOUSE-CONFIGURED-MODELS): the filtering that turns `reducer` into
+/// a provider name stays in `commands::context_firewall`, the only caller and
+/// the only place the binary-crate-only `disposable_candidates` is reachable
+/// from.
+pub fn reducer_model(
+    paths: &crate::paths::RuntimePaths,
+    user: &crate::config::UserConfig,
+    project: Option<&crate::config::ProjectConfig>,
+    provider_name: &str,
+    model_name: &str,
+) -> Result<crate::firewall::reducer::ConfiguredReducer, String> {
+    use crate::firewall::reducer::{ConfiguredReducer, ConfiguredReducerError};
+    use crate::secret::{SecretRef, SecretStore as _};
+
+    let Some(provider_config) = project
+        .and_then(|p| p.providers().get(provider_name))
+        .or_else(|| user.providers().get(provider_name))
+    else {
+        return Err(format!(
+            "the context-firewall reducer names `{provider_name}`, which this project has not \
+             configured"
+        ));
+    };
+    if !provider_config.enabled() {
+        return Err(format!(
+            "the context-firewall reducer names `{provider_name}`, which is disabled"
+        ));
+    }
+    let provider = provider_config.to_provider(provider_name).map_err(|err| {
+        format!("the context-firewall reducer's provider does not resolve: {err}")
+    })?;
+
+    let secrets = paths.secret_store();
+    let credential = provider
+        .credential_env
+        .iter()
+        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }));
+
+    ConfiguredReducer::new(&provider, model_name, credential).map_err(|err| match err {
+        ConfiguredReducerError::UnsupportedProtocol { protocol, .. } => format!(
+            "the context-firewall reducer speaks OpenAI chat completions, and `{provider_name}` \
+             serves `{protocol}`; configure a provider that serves openai-chat"
+        ),
+        other => format!("the context-firewall reducer cannot be used: {other}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

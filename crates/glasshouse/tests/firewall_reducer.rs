@@ -1,9 +1,15 @@
 //! Phase 57B — map lines 1997-2003: the semantic reducer, through the
 //! shipped binary against a canned OpenAI chat-completions endpoint on
 //! loopback, exactly `tests/classification_call.rs`'s pattern for the same
-//! reason: `DisposableRouting::choose` and the entitlement job-kind gate are
-//! the production callers under test, and a fake `Reducer` built by hand
-//! would not exercise either.
+//! reason: `[context_firewall] reducer` resolved straight into a client is
+//! the production path under test, and a fake `Reducer` built by hand would
+//! not exercise it.
+//!
+//! GH-GLASSHOUSE-CONFIGURED-MODELS (design-decisions.md, 2026-09-16) removed
+//! `an_entitlement_that_denies_context_reduction_is_never_asked`: it proved
+//! `DisposableRouting::choose`'s per-entitlement job-kind gate, which no
+//! longer runs on this path — the reducer now resolves straight from
+//! `[context_firewall] reducer`/`reducer_model`, never through routing.
 //!
 //! The two flagship recall fixtures — the one relevant line the reducer
 //! marks `uncertain` (safe mode must forward it) and the one it discards
@@ -18,8 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use glasshouse::config::{EntitlementConfig, ProviderConfig, UserConfig};
-use glasshouse::routing::disposable::JobKind;
+use glasshouse::config::{ProviderConfig, UserConfig};
 use glasshouse::{Cli, Runtime};
 
 const CREDENTIAL_VAR: &str = "GLASSHOUSE_TEST_ONLY_FIREWALL_REDUCER_KEY";
@@ -222,33 +227,6 @@ impl Fixture {
         let mut user = self.config();
         user.context_firewall_mut()
             .set_aggressive_drops_uncertain(Some(value));
-        self.save(user);
-    }
-
-    /// An entitlement naming `provider` that refuses
-    /// [`JobKind::ContextReduction`] — the shipped-binary proof that map
-    /// line 1947's per-entitlement job-kind rule applies to this job kind
-    /// unchanged.
-    fn deny_context_reduction_for(&self, entitlement_name: &str, provider: &str) {
-        // The account — its provider and its credential reference — is the
-        // gateway's since the 2026-09-11 ruling; the job-kind rule is
-        // Glasshouse's. Both halves are written here, which is what makes
-        // this the shipped-binary proof it claims to be.
-        let path = self.runtime.paths().gateway_config_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            path,
-            format!(
-                "[accounts.{entitlement_name}]\nprovider = \"{provider}\"\n\
-                 credential = {{ env = \"{CREDENTIAL_VAR}\" }}\n"
-            ),
-        )
-        .unwrap();
-
-        let mut user = self.config();
-        let mut entitlement = EntitlementConfig::default();
-        entitlement.set_deny_job_kinds([JobKind::ContextReduction]);
-        user.entitlements_mut().set(entitlement_name, entitlement);
         self.save(user);
     }
 
@@ -579,46 +557,6 @@ fn a_malformed_reducer_reply_fails_open() {
 }
 
 // ===========================================================================
-// Map line 1997: per-entitlement job-kind rules apply unchanged.
-// ===========================================================================
-
-#[test]
-fn an_entitlement_that_denies_context_reduction_is_never_asked() {
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path());
-    let (text, needle) = needle_text();
-
-    let model = FakeModel::answering(
-        r#"{"selections":[{"id":0,"relevance":"discard","reason":"should never be asked"}]}"#,
-    );
-    fixture.add_provider("fixture-provider", "fixture-model", &model.base_url());
-    fixture.set_reducer("fixture-provider", None);
-    fixture.deny_context_reduction_for("no-reduce", "fixture-provider");
-
-    let event = post_tool_use(
-        "Grep",
-        text_response(&text),
-        serde_json::json!({}),
-        "s-denied",
-        "tu-1",
-    );
-    let response = fixture.hook(
-        &event,
-        &["--passthrough-tokens", "10", "--min-semantic-tokens", "10"],
-    );
-    let forwarded = updated_output(&response).expect("must still reduce and emit");
-
-    assert!(
-        model.requests().is_empty(),
-        "an entitlement that denies the job kind must mean no call is ever made"
-    );
-    assert!(
-        forwarded.contains(needle),
-        "with no reducer selectable, the deterministic result stands: {forwarded}"
-    );
-}
-
-// ===========================================================================
 // Map line 2002: a pinned model is used.
 // ===========================================================================
 
@@ -740,6 +678,50 @@ fn the_reducer_request_carries_only_task_tool_and_candidates() {
     assert!(
         !body.contains("s-shape"),
         "the session id is not part of the request the model sees: {body}"
+    );
+}
+
+// ===========================================================================
+// GH-GLASSHOUSE-CONFIGURED-MODELS: `[context_firewall] reducer` unset.
+// ===========================================================================
+
+/// **Acceptance, unset.** A provider that could serve the reducer is
+/// configured, but `[context_firewall] reducer` never names it: the semantic
+/// stage must not dial anything, and the deterministic result stands — map
+/// line 1992's guarantee, restated for the configured-model path (an absent
+/// key is the reducer never being reached, not a candidate list with nothing
+/// in it).
+#[test]
+fn no_reducer_configured_dials_nothing_and_the_deterministic_result_stands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let (text, needle) = needle_text();
+
+    let model = FakeModel::answering(
+        r#"{"selections":[{"id":0,"relevance":"discard","reason":"should never be asked"}]}"#,
+    );
+    fixture.add_provider("fixture-provider", "fixture-model", &model.base_url());
+
+    let event = post_tool_use(
+        "Grep",
+        text_response(&text),
+        serde_json::json!({}),
+        "s-unset",
+        "tu-1",
+    );
+    let response = fixture.hook(
+        &event,
+        &["--passthrough-tokens", "10", "--min-semantic-tokens", "10"],
+    );
+    let forwarded = updated_output(&response).expect("must still reduce and emit");
+
+    assert!(
+        model.requests().is_empty(),
+        "an unconfigured reducer must dial nothing"
+    );
+    assert!(
+        forwarded.contains(needle),
+        "with no reducer configured, the deterministic result stands: {forwarded}"
     );
 }
 
