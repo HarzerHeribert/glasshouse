@@ -1223,6 +1223,14 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
             "decisions.hold_above",
             toml::Value::Float(decisions.hold_above),
         ),
+        (
+            "decisions.completion_no_below",
+            toml::Value::Float(decisions.completion_no_below),
+        ),
+        (
+            "decisions.completion_yes_above",
+            toml::Value::Float(decisions.completion_yes_above),
+        ),
     ]
 }
 

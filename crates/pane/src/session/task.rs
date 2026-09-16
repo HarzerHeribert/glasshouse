@@ -256,8 +256,10 @@ pub(super) struct TaskState {
     /// once before the first turn -- `None` when no model is configured, the
     /// mode is off, or the request failed (`decide-model.md`).
     pub(super) intent: Option<crate::decide::Intent>,
-    /// `1` when the intent request was attempted and did not answer; `0`
-    /// otherwise. Never more than one decision is asked per task.
+    /// How many decision requests this task attempted and did not answer --
+    /// the intent question (at most one, before the first turn) and the
+    /// completion question (once per distinct diff claimed at the gate;
+    /// 2616).
     pub(super) decision_failures: u32,
     /// Effectful cells or frames held this task (`mode = on`); the once rule
     /// is `effect_holds == 0`.
@@ -266,6 +268,31 @@ pub(super) struct TaskState {
     pub(super) effect_overrides: u32,
     /// Effectful cells or frames `mode = shadow` would have held.
     pub(super) would_hold: u32,
+    /// The completion question's raw answer, keyed by the exact diff text it
+    /// was asked about (2616): `None` when no model is configured, mode is
+    /// off, or no request has answered yet. Re-asked whenever the diff at a
+    /// later `gate` call differs from the cached key -- an identical second
+    /// claim (nothing ran between the hold and the re-claim) reuses the
+    /// answer and asks nothing; a changed diff (the model fixed something
+    /// and claimed again) is a new question, never the stale answer to a
+    /// tree that no longer exists.
+    pub(super) completion_answer: Option<(String, crate::decide::CompletionAnswer)>,
+    /// What the last `gate` call did with [`Self::completion_answer`] --
+    /// `None` until the completion question has been asked.
+    pub(super) completion_decision: Option<CompletionTelemetry>,
+}
+
+/// One `gate` call's completion-question telemetry (2616): the cached wire
+/// answer plus what that call did with it. Rebuilt on every call from
+/// [`TaskState::completion_answer`] and that call's own other findings, so a
+/// held candidate's second, identical claim reports the same outcome.
+#[derive(Debug, Clone)]
+pub(super) struct CompletionTelemetry {
+    pub(super) noul: f64,
+    pub(super) latency_ms: u64,
+    pub(super) truncated: bool,
+    pub(super) finding_added: bool,
+    pub(super) checker_skipped: Option<String>,
 }
 
 impl TaskState {
@@ -296,6 +323,8 @@ impl TaskState {
             effect_holds: 0,
             effect_overrides: 0,
             would_hold: 0,
+            completion_answer: None,
+            completion_decision: None,
         }
     }
 
@@ -340,6 +369,13 @@ impl TaskState {
             "would_hold": self.would_hold,
             "holds": self.effect_holds,
             "overrides": self.effect_overrides,
+            "completion": self.completion_decision.as_ref().map(|decision| serde_json::json!({
+                "noul": decision.noul,
+                "latency_ms": decision.latency_ms,
+                "truncated": decision.truncated,
+                "finding_added": decision.finding_added,
+                "checker_skipped": decision.checker_skipped,
+            })),
         }))
     }
 
@@ -504,6 +540,77 @@ impl TaskState {
                 &self.acceptance_verdicts,
             ));
         }
+
+        // The completion question (2616): does the diff satisfy the
+        // request? `completion_answer` caches the wire answer keyed by the
+        // exact diff text it was asked about, so an identical second claim
+        // (the hold-once case) asks nothing -- but a diff that changed since
+        // the cached answer (the model fixed something and claimed again)
+        // is a new question, never the stale answer to a tree that no
+        // longer exists. Only in `mode != off` with a model configured;
+        // `mode = off` or no model stays byte-identical to before this
+        // question existed.
+        let diff = self.task_start.diff(after);
+        let decisions_config = session.config().decisions.clone();
+        if let Some(model) = decisions_config.model.clone()
+            && decisions_config.mode != crate::config::DecisionMode::Off
+        {
+            let diff_text = diff
+                .clone()
+                .unwrap_or_else(|| "(no observed changes)".to_string());
+            let stale = self
+                .completion_answer
+                .as_ref()
+                .is_none_or(|(asked_about, _)| asked_about != &diff_text);
+            if stale {
+                let finding_sentences: Vec<String> = findings
+                    .iter()
+                    .map(|finding| finding.sentence.clone())
+                    .collect();
+                match crate::decide::completion_satisfied(
+                    &model,
+                    &self.task,
+                    &diff_text,
+                    &finding_sentences,
+                ) {
+                    Ok(answer) => self.completion_answer = Some((diff_text, answer)),
+                    Err(_) => self.decision_failures += 1,
+                }
+            }
+            if let Some((_, answer)) = self.completion_answer.clone() {
+                let mut finding_added = false;
+                let mut checker_skipped = None;
+                if decisions_config.mode == crate::config::DecisionMode::On {
+                    if answer.noul <= decisions_config.completion_no_below {
+                        findings.push(crate::completion::Finding {
+                            kind: crate::completion::FindingKind::RequestNotSatisfied,
+                            path: None,
+                            sentence: format!(
+                                "the decision model reads the diff as not satisfying the request ({:.2})",
+                                answer.noul
+                            ),
+                        });
+                        finding_added = true;
+                    } else if answer.noul >= decisions_config.completion_yes_above
+                        && findings.is_empty()
+                        && self.completion_check
+                        && !self.checker_ran
+                    {
+                        checker_skipped = Some(format!("decision {:.2}", answer.noul));
+                        self.checker_ran = true;
+                    }
+                }
+                self.completion_decision = Some(CompletionTelemetry {
+                    noul: answer.noul,
+                    latency_ms: answer.latency_ms,
+                    truncated: answer.truncated,
+                    finding_added,
+                    checker_skipped,
+                });
+            }
+            output::decisions(self.decisions_telemetry(&decisions_config));
+        }
+
         let mut sentences: Vec<String> = findings
             .iter()
             .map(|finding| finding.sentence.clone())
@@ -516,9 +623,8 @@ impl TaskState {
                 && let Some(effort) = helpers.effort.for_helper("check")
             {
                 self.checker_ran = true;
-                let diff = self
-                    .task_start
-                    .diff(after)
+                let diff = diff
+                    .clone()
                     .unwrap_or_else(|| "(no observed changes)".to_string());
                 let evidence = crate::completion::fresh_checker_evidence(
                     &self.task,

@@ -901,6 +901,12 @@ fn typed_values_are_parsed_without_toml_quoting() {
         toml::Value::Array(vec![toml::Value::String("example.org".into())])
     );
     // The runtime parser owns the ranges, the model rules and the domains.
+    assert!(registry::validate("decisions.completion_no_below", "0.6").is_err());
+    assert!(registry::validate("decisions.completion_yes_above", "0.4").is_err());
+    assert_eq!(
+        registry::validate("decisions.completion_no_below", "0.2").expect("in range"),
+        toml::Value::Float(0.2)
+    );
     assert!(registry::validate("limits.cells", "0").is_err());
     assert!(registry::validate("limits.cells", "many").is_err());
     assert!(registry::validate("web.allow_domains", "not a domain").is_err());

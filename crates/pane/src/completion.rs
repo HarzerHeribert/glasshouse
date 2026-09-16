@@ -112,6 +112,9 @@ pub enum FindingKind {
     NoVerification,
     /// An item of the request-derived acceptance list was not met.
     AcceptanceUnmet,
+    /// The decision model reads the task's diff as not satisfying the
+    /// request, at or below `[decisions] completion_no_below` (2616).
+    RequestNotSatisfied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

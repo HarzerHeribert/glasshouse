@@ -47,7 +47,46 @@ none`. No new `RolloutKind` — the task-start notice
 (`decision: intent read_only (0.94, 180 ms)` or `decision: no answer
 (timeout after 2000 ms)`) is the durable record in the conversation.
 
-## 5. Not decided here
+## 5. The completion question
+
+Map line 2616. Before a claimed completion is accepted, Pane asks the
+decision model one `noul` question -- does the task's diff satisfy the
+request, with nothing asked for missing and nothing unasked changed -- and
+uses the answer in two places only:
+
+    [decisions]
+    completion_no_below  = 0.10   # 0.0..=0.5; noul at or below this is a finding
+    completion_yes_above = 0.90   # 0.5..=1.0; noul at or above this spares the checker
+
+A confident no (`noul <= completion_no_below`, `mode = on`) adds a
+`RequestNotSatisfied` finding beside the mechanical ones: the candidate is
+held once, and the same claim again finishes with the completion recorded
+unverified -- never a refusal. A confident yes (`noul >=
+completion_yes_above`, `mode = on`, no other finding present) skips the
+fresh checker for this claim when one is configured, recorded as
+`checker_skipped` in telemetry; it never removes a finding the mechanical
+checks or the acceptance list already made. Between the two thresholds, or
+with any other finding present, the fresh checker runs exactly as it does
+today. `mode = shadow` asks and records the answer; it never adds a finding
+and never skips the checker. `mode = off` or no model configured is
+byte-identical to today. The question is asked once per distinct diff
+claimed at the gate -- an identical second claim of the same candidate (the
+hold-once case above) reuses the cached answer and asks nothing, but a diff
+that changed since the cached answer (the model fixed something and claimed
+again) is asked fresh, never judged against the stale answer to a tree that
+no longer exists. The diff sent with it is bounded to 64 KiB, cut at a hunk
+boundary.
+
+**What a confident yes does not prove.** It is one more signal, not a
+verdict: the acceptance list and the final-state contract still decide their
+own items mechanically, from the tree and the trajectory, exactly as they do
+when no decision model is configured.
+
+`--output-format json` and `stream-json`'s `decisions.completion` carries
+`{noul, latency_ms, truncated, finding_added, checker_skipped}`, `null` when
+the question was never asked (no model, or `mode = off`).
+
+## 6. Not decided here
 
 A preflight signal, judge items, an approval line, or supervisor
 vocabulary — the candidates the map's Phase 66 paragraph names — are not

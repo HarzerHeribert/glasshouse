@@ -918,7 +918,8 @@ pub(super) fn no_progress_notice() {
 
 /// Stores this task's decision summary (`decide-model.md`): `None` only when
 /// no decision model is configured. A later call replaces the stored one, so
-/// the result always carries the latest hold/override counts.
+/// the result always carries the latest hold/override counts and, once the
+/// completion question has been asked (2616), the `completion` sub-object.
 pub(super) fn decisions(value: Option<Value>) {
     let Some(value) = value else {
         return;
@@ -1249,6 +1250,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "capsule");
         assert_eq!(events[0]["data"]["summary"], "did the thing");
+    }
+
+    #[test]
+    fn decisions_carries_the_completion_sub_object_and_a_later_call_replaces_it() {
+        let _output = Output::start(Format::Json);
+        decisions(Some(json!({"model": "jev-latest", "completion": null})));
+        assert!(current_telemetry()["decisions"]["completion"].is_null());
+        decisions(Some(json!({
+            "model": "jev-latest",
+            "completion": {
+                "noul": 0.06,
+                "latency_ms": 12,
+                "truncated": false,
+                "finding_added": true,
+                "checker_skipped": null,
+            },
+        })));
+        let value = current_telemetry();
+        assert_eq!(value["decisions"]["completion"]["noul"], 0.06);
+        assert_eq!(value["decisions"]["completion"]["finding_added"], true);
+        assert!(value["decisions"]["completion"]["checker_skipped"].is_null());
     }
 
     #[test]

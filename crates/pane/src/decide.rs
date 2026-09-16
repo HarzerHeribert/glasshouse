@@ -40,6 +40,12 @@ const DECISION_TIMEOUT: Duration = Duration::from_secs(2);
 /// The most of a request or response body an error or notice carries.
 const ERROR_BODY_LIMIT: usize = 200;
 
+/// The most of the task diff the completion question's `state.diff` carries
+/// (2616). Cut at a hunk boundary (`bound_diff`) rather than a raw byte
+/// count, so a kept hunk is never split mid-way; a cut diff still gets a
+/// question, with `state.diff_truncated = true`.
+pub const DIFF_STATE_BYTES: usize = 64 * 1024;
+
 /// One question sent to the decision model. `Noul` is a numeric confidence
 /// question the wire protocol supports; this package asks only `Choice`
 /// questions, and `Noul` stays here as the wire's other documented shape.
@@ -314,6 +320,87 @@ pub fn intent_of(model: &str, request: &str) -> Result<Intent, DecideError> {
     }
 }
 
+/// The completion question's key, mirroring [`INTENT_KEY`]'s shape for the
+/// other question this package asks.
+const SATISFIED_KEY: &str = "satisfied";
+
+fn satisfied_question() -> Question {
+    Question::Noul {
+        instructions: "Does the diff satisfy what the request asked for? Answer near 1.0 when \
+                        nothing the request asked for is missing and nothing unasked was \
+                        changed; answer near 0.0 when the diff clearly does not satisfy the \
+                        request."
+            .to_string(),
+    }
+}
+
+/// What the completion question answered (2616): a probability that the
+/// task's diff satisfies the request, and whether the diff sent had to be
+/// cut down to [`DIFF_STATE_BYTES`] to ask it. `session/task.rs::gate`
+/// decides what to do with the number -- this module only asks and parses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionAnswer {
+    pub noul: f64,
+    pub latency_ms: u64,
+    pub truncated: bool,
+}
+
+/// Cuts `diff` to at most [`DIFF_STATE_BYTES`], at the last hunk header
+/// (`"\n@@ "`) at or before the bound, so a kept hunk is never split
+/// mid-way. Returns the (possibly unchanged) text and whether it was cut.
+fn bound_diff(diff: &str) -> (String, bool) {
+    if diff.len() <= DIFF_STATE_BYTES {
+        return (diff.to_string(), false);
+    }
+    let mut cut = DIFF_STATE_BYTES;
+    while cut > 0 && !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &diff[..cut];
+    match head.rfind("\n@@ ") {
+        Some(newline) => (diff[..=newline].to_string(), true),
+        None => (head.to_string(), true),
+    }
+}
+
+/// Asks whether `diff` satisfies `request`, given the mechanical findings
+/// already found about the tree. Never surfaced as a task failure -- the
+/// caller (`session/task.rs::gate`) records the error and proceeds exactly
+/// as it would with no decision model.
+pub fn completion_satisfied(
+    model: &str,
+    request: &str,
+    diff: &str,
+    findings: &[String],
+) -> Result<CompletionAnswer, DecideError> {
+    let (bounded, truncated) = bound_diff(diff);
+    let mut state = serde_json::json!({
+        "request": request,
+        "diff": bounded,
+        "findings": findings,
+    });
+    if truncated {
+        state["diff_truncated"] = Value::Bool(true);
+    }
+    let questions = [(SATISFIED_KEY.to_string(), satisfied_question())];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .find(|decision| decision.key == SATISFIED_KEY)
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{SATISFIED_KEY}`")))?;
+    match decision.answer {
+        Answer::Noul(noul) => Ok(CompletionAnswer {
+            noul,
+            latency_ms: decision.latency_ms,
+            truncated,
+        }),
+        Answer::Choice { .. } => Err(DecideError::Parse(
+            "the completion question was answered as a choice, not a noul".to_string(),
+        )),
+    }
+}
+
 /// Every tool `registry::ALL` declares [`crate::tools::registry::Purity::Effectful`],
 /// plus the non-tool doors whose own effect is not a registry fact:
 /// `checks` runs a verification command, `agent` spawns a subagent, and
@@ -574,5 +661,74 @@ mod tests {
             hold_for(DecisionMode::On, Some(&intent), 0.85, None, false),
             Hold::Run
         );
+    }
+
+    #[test]
+    fn the_satisfied_body_serializes_to_the_documented_shape() {
+        let (bounded, truncated) = bound_diff("+one line\n");
+        assert!(!truncated);
+        let questions: BTreeMap<String, Question> =
+            [(SATISFIED_KEY.to_string(), satisfied_question())]
+                .into_iter()
+                .collect();
+        let body = RequestBody {
+            state: &serde_json::json!({"request": "fix the bug", "diff": bounded, "findings": Vec::<String>::new()}),
+            model: "jev-latest",
+            questions,
+        };
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["questions"]["satisfied"]["type"], "noul");
+        assert!(
+            value["questions"]["satisfied"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("satisfy")
+        );
+        assert_eq!(value["state"]["request"], "fix the bug");
+        assert_eq!(value["state"]["diff"], "+one line\n");
+    }
+
+    #[test]
+    fn bound_diff_cuts_at_a_hunk_boundary_and_sets_the_flag() {
+        let hunk = format!("@@ -1,1 +1,1 @@\n-{}\n+after\n", "x".repeat(2_000));
+        let mut diff = String::new();
+        while diff.len() <= DIFF_STATE_BYTES {
+            diff.push_str(&hunk);
+        }
+        let (bounded, truncated) = bound_diff(&diff);
+        assert!(truncated);
+        assert!(bounded.len() <= DIFF_STATE_BYTES);
+        assert!(diff.starts_with(&bounded), "a prefix of the original diff");
+        assert_eq!(
+            bounded.len() % hunk.len(),
+            0,
+            "kept only whole hunks, none split mid-way: {} of {}",
+            bounded.len(),
+            hunk.len()
+        );
+
+        let (short, truncated) = bound_diff("@@ -1,1 +1,1 @@\n-a\n+b\n");
+        assert!(!truncated);
+        assert_eq!(short, "@@ -1,1 +1,1 @@\n-a\n+b\n");
+    }
+
+    #[test]
+    fn a_completion_answer_missing_a_noul_is_a_parse_error() {
+        let text = serde_json::json!({
+            "model": "jev-latest",
+            "answers": {
+                "satisfied": {
+                    "type": "choice",
+                    "choice": "yes",
+                    "probabilities": {"yes": 0.9},
+                    "confidence": 0.9,
+                }
+            },
+            "usage": {"input_tokens": 10, "output_tokens": 4},
+        })
+        .to_string();
+        let parsed: ResponseBody = serde_json::from_str(&text).unwrap();
+        let answer = Answer::from(parsed.answers.get("satisfied").cloned().unwrap());
+        assert!(matches!(answer, Answer::Choice { .. }));
     }
 }

@@ -1,10 +1,13 @@
-//! Binary-level canaries for the decision model's hold
-//! (`docs/product/pane/decision-model.md`): the built `pane` binary against a
-//! loopback fake that dispatches on the request path -- `/v1/messages`
-//! answers scripted cells in order (the `providers` fake from
-//! `tests/evidence_gate.rs`, path-aware here since one task now makes two
-//! kinds of request), `/v1/systemone` answers one scripted decision, a
-//! non-2xx status, or sleeps past the 2 s bound.
+//! Binary-level canaries for the decision model's hold and its completion
+//! question (`docs/product/pane/decision-model.md`): the built `pane` binary
+//! against a loopback fake that dispatches on the request path --
+//! `/v1/messages` answers scripted cells in order (the `providers` fake from
+//! `tests/evidence_gate.rs`, path-aware here since one task now makes up to
+//! three kinds of request), `/v1/systemone` answers by the request's own
+//! question key -- `"intent"` (asked once per task, before the first turn)
+//! or `"satisfied"` (asked once per task, at the completion gate; 2616) --
+//! each with a scripted answer, a non-2xx status, a sleep past the 2 s
+//! bound, or (unscripted) a harmless default.
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -32,7 +35,7 @@ fn write_config(root: &Path, text: &str) {
     std::fs::write(dir.join("config.toml"), text).unwrap();
 }
 
-/// What the decision endpoint does with the one request each test sends it.
+/// What the decision endpoint does with one scripted question.
 enum Decision {
     Answer(Value),
     Status(u16),
@@ -43,14 +46,32 @@ enum Decision {
 /// header block), shared with the fake server's own thread.
 type Recorded = Arc<Mutex<Vec<String>>>;
 
+/// The single key of a decision request's `questions` object -- `"intent"`
+/// or `"satisfied"`, the only two this package ever asks in one request.
+fn question_key(body_text: &str) -> String {
+    let value: Value = serde_json::from_str(body_text).unwrap();
+    value["questions"]
+        .as_object()
+        .and_then(|questions| questions.keys().next())
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// A fake provider dispatching on the request's own path: `/v1/messages`
-/// answers `cells` in order, `/v1/systemone` answers `decision` once (never,
-/// when `decision` is `None` -- the no-model tests prove no connection ever
-/// arrives there). Every request's body is kept, and the decision request's
-/// header block is kept alongside its body.
+/// answers `cells` in order. `/v1/systemone` answers by the request's own
+/// question key: `intent`'s scripted answers in order (or a harmless
+/// `read_only 0.94` default once the queue is empty), and `satisfied`'s
+/// scripted answers in order (or a harmless `noul 0.50` default once its
+/// queue is empty) -- most tests script at most one of each, since this
+/// package asks the intent question once and the completion question once
+/// per distinct diff claimed; a test that claims two different diffs (2616's
+/// re-ask fix) scripts two `satisfied` answers. Every request's body is
+/// kept, and the decision endpoint's own header blocks are kept alongside
+/// its bodies.
 fn providers(
     cells: Vec<Value>,
-    decision: Option<Decision>,
+    intent: Vec<Decision>,
+    completion: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -62,7 +83,8 @@ fn providers(
     let seen_decision_headers = Arc::clone(&decision_headers);
     std::thread::spawn(move || {
         let mut cells = cells.into_iter();
-        let mut decision = decision;
+        let mut intent: std::collections::VecDeque<Decision> = intent.into_iter().collect();
+        let mut completion: std::collections::VecDeque<Decision> = completion.into_iter().collect();
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -100,12 +122,19 @@ fn providers(
             let body_text = String::from_utf8_lossy(&body).into_owned();
 
             if path == "/v1/systemone" {
+                let key = question_key(&body_text);
                 seen_decision_bodies.lock().unwrap().push(body_text);
                 seen_decision_headers.lock().unwrap().push(header_block);
-                match decision
-                    .take()
-                    .expect("only one decision request is scripted")
-                {
+                let decision = match key.as_str() {
+                    "intent" => intent
+                        .pop_front()
+                        .unwrap_or_else(|| Decision::Answer(decision_answer("read_only", 0.94))),
+                    "satisfied" => completion
+                        .pop_front()
+                        .unwrap_or_else(|| Decision::Answer(completion_answer(0.50))),
+                    other => panic!("unexpected decision question key `{other}`"),
+                };
+                match decision {
                     Decision::Answer(value) => {
                         let response = value.to_string();
                         let _ = write!(
@@ -190,10 +219,30 @@ fn decision_answer(choice: &str, confidence: f64) -> Value {
     })
 }
 
+fn completion_answer(noul: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "satisfied": {
+                "type": "noul",
+                "noul": noul,
+            }
+        },
+        "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
 const DECISIONS_ON: &str =
     "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\nhold_above = 0.85\n";
 const DECISIONS_SHADOW: &str =
     "[decisions]\nmodel = \"jev-latest\"\nmode = \"shadow\"\nhold_above = 0.85\n";
+const DECISIONS_ON_WITH_CHECKER: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\nhold_above = 0.85\n[helpers]\nmodel = \"helper-tier\"\ncompletion_check = true\n";
+
+fn write_checks_toml(root: &Path, text: &str) {
+    let dir = root.join(".glasshouse");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("checks.toml"), text).unwrap();
+}
 
 /// Runs `pane exec` against `endpoint`, killing it and answering `None` if it
 /// has not exited within `timeout` -- the once rule's own mutation (dropping
@@ -250,7 +299,8 @@ fn a_read_only_request_holds_the_first_effectful_cell_once_then_lets_it_run() {
     let held = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell("c1", held), cell("c2", held)],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     let result = exec_bounded(&root, &endpoint, "read the file for me", None)
         .expect("the once rule keeps the task moving");
@@ -261,7 +311,11 @@ fn a_read_only_request_holds_the_first_effectful_cell_once_then_lets_it_run() {
         "the held block reaches the model's next turn: {}",
         messages[1]
     );
-    assert_eq!(decisions.lock().unwrap().len(), 1, "asked once per task");
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        2,
+        "the intent question once, and the completion question once when the task finishes"
+    );
     assert!(root.join("a.txt").exists(), "the re-issued cell ran");
     assert_eq!(result["answer"], "done");
     let telemetry = &result["telemetry"]["decisions"];
@@ -280,7 +334,8 @@ fn a_confidence_below_hold_above_never_holds() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Answer(decision_answer("read_only", 0.80))),
+        vec![Decision::Answer(decision_answer("read_only", 0.80))],
+        vec![],
     );
     let result =
         exec_bounded(&root, &endpoint, "read the file for me", None).expect("no hold, no hang");
@@ -301,7 +356,8 @@ fn shadow_records_the_would_be_hold_and_writes_the_file() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     let result =
         exec_bounded(&root, &endpoint, "read the file for me", None).expect("shadow never holds");
@@ -328,7 +384,8 @@ fn a_modify_intent_or_a_pure_cell_is_never_held() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Answer(decision_answer("modify", 0.99))),
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![],
     );
     exec_bounded(&modify, &endpoint, "edit the file for me", None).expect("modify never holds");
     assert_eq!(messages.lock().unwrap().len(), 1);
@@ -343,7 +400,8 @@ fn a_modify_intent_or_a_pure_cell_is_never_held() {
             "c1",
             "const seen = await read({path: \"notes.txt\"});\nreturn seen.text;",
         )],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     let result = exec_bounded(&pure, &endpoint, "read notes.txt for me", None)
         .expect("a pure cell never holds");
@@ -363,7 +421,8 @@ fn a_direct_tool_frame_is_held_by_the_same_rule() {
             direct_write("t2", target.to_str().unwrap(), "1"),
             prose("Done: a.txt is written."),
         ],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     let result = exec_bounded(&root, &endpoint, "write a.txt for me", Some("tools"))
         .expect("the once rule keeps a direct frame moving too");
@@ -401,7 +460,8 @@ fn a_direct_tool_frame_is_held_by_the_same_rule() {
             direct_read("t1", read_root.join("notes.txt").to_str().unwrap()),
             prose("Done: notes.txt says hi."),
         ],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     let result = exec_bounded(
         &read_root,
@@ -430,7 +490,8 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Status(500)),
+        vec![Decision::Status(500)],
+        vec![],
     );
     let result = exec_bounded(&failed, &endpoint, "read the file for me", None)
         .expect("a failed decision leaves the task alone");
@@ -452,7 +513,8 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Sleep(Duration::from_secs(3))),
+        vec![Decision::Sleep(Duration::from_secs(3))],
+        vec![],
     );
     let result = exec_bounded(&slow, &endpoint, "read the file for me", None)
         .expect("a slow decision times out rather than hanging the task");
@@ -470,7 +532,8 @@ fn no_model_means_no_request_and_no_thread() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        None,
+        vec![],
+        vec![],
     );
     let result =
         exec_bounded(&root, &endpoint, "read the file for me", None).expect("nothing to hang on");
@@ -493,11 +556,16 @@ fn the_decision_request_carries_purpose_model_and_the_intent_question() {
             "c1",
             "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
         )],
-        Some(Decision::Answer(decision_answer("read_only", 0.94))),
+        vec![Decision::Answer(decision_answer("read_only", 0.94))],
+        vec![],
     );
     exec_bounded(&root, &endpoint, "read the file for me", None).expect("nothing to hang on");
     let headers = headers.lock().unwrap();
-    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers.len(),
+        1,
+        "the effectful cell is held, so the completion question is never reached"
+    );
     let header_text = headers[0].to_lowercase();
     assert!(
         header_text.contains("x-glasshouse-purpose: decision"),
@@ -512,5 +580,289 @@ fn the_decision_request_carries_purpose_model_and_the_intent_question() {
     assert_eq!(body["model"], "jev-latest");
     assert_eq!(body["questions"]["intent"]["type"], "choice");
     assert!(body["questions"]["intent"]["criteria"]["read_only"].is_string());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- the completion question (2616) --------------------------------------
+
+#[test]
+fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
+    let root = root("completion-no");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![
+            cell("c1", "return \"done\";"),
+            cell("c2", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.06))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a held completion is recorded unverified, not a refusal");
+    let messages = messages.lock().unwrap();
+    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert!(
+        messages[1].contains("the decision model reads the diff as not satisfying the request"),
+        "{}",
+        messages[1]
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], false);
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 1);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.06, "{telemetry}");
+    assert_eq!(telemetry["finding_added"], true, "{telemetry}");
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        2,
+        "the intent question once, and the completion question once for the unchanged diff -- not twice"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_changed_diff_is_asked_again_and_a_fixed_task_verifies() {
+    let root = root("completion-changed-diff");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![
+            cell(
+                "c1",
+                "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            ),
+            cell(
+                "c2",
+                "await write({path: \"b.txt\", content: \"1\"});\nreturn \"done\";",
+            ),
+        ],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![
+            Decision::Answer(completion_answer(0.05)),
+            Decision::Answer(completion_answer(0.95)),
+        ],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a fixed task verifies once the diff changes");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "held on the first diff, then a second cell whose diff has changed"
+    );
+    assert!(
+        messages[1].contains("the decision model reads the diff as not satisfying the request"),
+        "{}",
+        messages[1]
+    );
+    assert_eq!(
+        result["telemetry"]["completion"]["verified"], true,
+        "the fixed diff is judged fresh, not against the stale no: {result}"
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.95, "{telemetry}");
+    assert_eq!(telemetry["finding_added"], false, "{telemetry}");
+    let bodies = decisions.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "the intent question once, and the completion question twice -- once per distinct diff"
+    );
+    let satisfied: Vec<Value> = bodies
+        .iter()
+        .filter(|body| body.contains("\"satisfied\""))
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    assert_eq!(satisfied.len(), 2, "{bodies:?}");
+    assert_ne!(
+        satisfied[0]["state"]["diff"], satisfied[1]["state"]["diff"],
+        "the second question is asked about the changed diff, not the cached one: {satisfied:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_confident_yes_spares_the_fresh_checker_when_nothing_else_is_found() {
+    let root = root("completion-yes");
+    write_config(&root, DECISIONS_ON_WITH_CHECKER);
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.94))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a spared checker still finishes the task");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "no second request reaches /v1/messages for the checker"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.94, "{telemetry}");
+    assert_eq!(telemetry["checker_skipped"], "decision 0.94", "{telemetry}");
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        2,
+        "the intent question, and the completion question"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_undecided_answer_runs_the_checker_as_today() {
+    let root = root("completion-undecided");
+    write_config(&root, DECISIONS_ON_WITH_CHECKER);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            cell("c1", "return \"done\";"),
+            prose("The change holds; nothing more is needed."),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.55))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("the checker runs and the task still finishes");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        2,
+        "the task turn, then the checker's own request"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.55, "{telemetry}");
+    assert!(telemetry["checker_skipped"].is_null(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_yes_never_removes_a_mechanical_finding() {
+    let root = root("completion-yes-with-finding");
+    write_config(&root, DECISIONS_ON_WITH_CHECKER);
+    write_checks_toml(&root, "[contract]\nrequired = [\"missing.txt\"]\n");
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            cell("c1", "return \"done\";"),
+            prose("The change holds; nothing more is needed."),
+            cell("c2", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.94))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a confident yes does not remove the required-path finding");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        3,
+        "the checker still runs, then the same claim finishes unverified"
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.94, "{telemetry}");
+    assert!(telemetry["checker_skipped"].is_null(), "{telemetry}");
+    assert_eq!(telemetry["finding_added"], false, "{telemetry}");
+    let completion = &result["telemetry"]["completion"];
+    assert_eq!(completion["verified"], false, "{completion}");
+    assert!(
+        completion["findings"][0]
+            .as_str()
+            .unwrap()
+            .contains("missing.txt"),
+        "{completion}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shadow_records_the_completion_answer_and_changes_nothing() {
+    let root = root("completion-shadow");
+    write_config(&root, DECISIONS_SHADOW);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.06))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("shadow never holds the completion");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "shadow finishes on the first claim"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["noul"], 0.06, "{telemetry}");
+    assert_eq!(telemetry["finding_added"], false, "{telemetry}");
+    assert!(telemetry["checker_skipped"].is_null(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_failed_or_slow_completion_decision_leaves_the_gate_as_it_is() {
+    let failed = root("completion-500");
+    write_config(&failed, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![],
+        vec![Decision::Status(500)],
+    );
+    let result = exec_bounded(&failed, &endpoint, "fix the bug", None)
+        .expect("a failed completion decision leaves the gate alone");
+    assert_eq!(messages.lock().unwrap().len(), 1);
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(telemetry["failed"], 1, "{telemetry}");
+    assert!(telemetry["completion"].is_null(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(failed);
+
+    let slow = root("completion-slow");
+    write_config(&slow, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![],
+        vec![Decision::Sleep(Duration::from_secs(3))],
+    );
+    let result = exec_bounded(&slow, &endpoint, "fix the bug", None)
+        .expect("a slow completion decision times out rather than hanging the task");
+    assert_eq!(messages.lock().unwrap().len(), 1);
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    assert_eq!(result["telemetry"]["decisions"]["failed"], 1);
+    let _ = std::fs::remove_dir_all(slow);
+}
+
+#[test]
+fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
+    let root = root("completion-large-diff");
+    write_config(&root, DECISIONS_SHADOW);
+    let mut code = String::new();
+    for i in 0..40 {
+        code.push_str(&format!(
+            "await write({{path: \"f{i}.txt\", content: \"{}\"}});\n",
+            "x".repeat(2_000)
+        ));
+    }
+    code.push_str("return \"done\";");
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![cell("c1", &code)],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.50))],
+    );
+    let result = exec_bounded(&root, &endpoint, "write many files", None)
+        .expect("a large diff still gets a completion question");
+    assert_eq!(messages.lock().unwrap().len(), 1, "shadow never holds");
+    let bodies = decisions.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "the intent question, then the completion question"
+    );
+    let satisfied: Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(satisfied["state"]["diff_truncated"], true, "{satisfied}");
+    let diff = satisfied["state"]["diff"].as_str().unwrap();
+    assert!(
+        diff.len() <= pane::decide::DIFF_STATE_BYTES,
+        "bounded to {}: got {}",
+        pane::decide::DIFF_STATE_BYTES,
+        diff.len()
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["truncated"], true, "{telemetry}");
     let _ = std::fs::remove_dir_all(root);
 }

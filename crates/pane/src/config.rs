@@ -98,6 +98,12 @@ pub struct DecisionsConfig {
     /// Confidence at or above which a read-only intent holds an effectful
     /// cell or frame. `0.5..=1.0`.
     pub hold_above: f64,
+    /// The completion question's noul at or below which a claimed completion
+    /// gets a `RequestNotSatisfied` finding (2616). `0.0..=0.5`.
+    pub completion_no_below: f64,
+    /// The completion question's noul at or above which the fresh checker is
+    /// spared, when nothing else was found. `0.5..=1.0`.
+    pub completion_yes_above: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -106,6 +112,8 @@ impl Default for DecisionsConfig {
             model: None,
             mode: DecisionMode::default(),
             hold_above: 0.85,
+            completion_no_below: 0.10,
+            completion_yes_above: 0.90,
         }
     }
 }
@@ -720,13 +728,25 @@ fn parse_supervisor(value: &toml::Value) -> Result<SupervisorConfig, String> {
 
 const HOLD_ABOVE_MIN: f64 = 0.5;
 const HOLD_ABOVE_MAX: f64 = 1.0;
+const COMPLETION_NO_BELOW_MIN: f64 = 0.0;
+const COMPLETION_NO_BELOW_MAX: f64 = 0.5;
+const COMPLETION_YES_ABOVE_MIN: f64 = 0.5;
+const COMPLETION_YES_ABOVE_MAX: f64 = 1.0;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
     let defaults = DecisionsConfig::default();
 
     for key in table.keys() {
-        if !["model", "mode", "hold_above"].contains(&key.as_str()) {
+        if ![
+            "model",
+            "mode",
+            "hold_above",
+            "completion_no_below",
+            "completion_yes_above",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(format!("pane.toml: unknown key `{key}` in [decisions]"));
         }
     }
@@ -764,11 +784,43 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             number
         }
     };
+    let completion_no_below = match table.get("completion_no_below") {
+        None => defaults.completion_no_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `completion_no_below` must be a number".to_string())?;
+            if !(COMPLETION_NO_BELOW_MIN..=COMPLETION_NO_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `completion_no_below` must be between {COMPLETION_NO_BELOW_MIN} and {COMPLETION_NO_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+    let completion_yes_above = match table.get("completion_yes_above") {
+        None => defaults.completion_yes_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `completion_yes_above` must be a number".to_string())?;
+            if !(COMPLETION_YES_ABOVE_MIN..=COMPLETION_YES_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `completion_yes_above` must be between {COMPLETION_YES_ABOVE_MIN} and {COMPLETION_YES_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
 
     Ok(DecisionsConfig {
         model,
         mode,
         hold_above,
+        completion_no_below,
+        completion_yes_above,
     })
 }
 
@@ -956,4 +1008,38 @@ fn validate_concrete_model(key: &str, value: &str) -> Result<(), String> {
         ));
     }
     check_names_no_tool_path_or_grant(key, value)
+}
+
+#[cfg(test)]
+mod completion_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn the_completion_thresholds_default_without_a_decisions_table() {
+        let defaults = DecisionsConfig::default();
+        assert_eq!(defaults.completion_no_below, 0.10);
+        assert_eq!(defaults.completion_yes_above, 0.90);
+        let config = PaneConfig::parse_profile("", None).unwrap();
+        assert_eq!(config.decisions.completion_no_below, 0.10);
+        assert_eq!(config.decisions.completion_yes_above, 0.90);
+    }
+
+    #[test]
+    fn the_completion_thresholds_parse_and_are_refused_out_of_range() {
+        let config = PaneConfig::parse_profile(
+            "[decisions]\nmodel = \"jev-latest\"\ncompletion_no_below = 0.2\ncompletion_yes_above = 0.8\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.decisions.completion_no_below, 0.2);
+        assert_eq!(config.decisions.completion_yes_above, 0.8);
+
+        let error = PaneConfig::parse_profile("[decisions]\ncompletion_no_below = 0.6\n", None)
+            .unwrap_err();
+        assert!(error.contains("completion_no_below"), "{error}");
+
+        let error = PaneConfig::parse_profile("[decisions]\ncompletion_yes_above = 0.4\n", None)
+            .unwrap_err();
+        assert!(error.contains("completion_yes_above"), "{error}");
+    }
 }
