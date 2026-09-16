@@ -108,6 +108,19 @@ pub struct DecisionsConfig {
     /// The completion question's noul at or above which the fresh checker is
     /// spared, when nothing else was found. `0.5..=1.0`.
     pub completion_yes_above: f64,
+    /// A diff-hygiene `has_tests` noul at or below which the diff is read as
+    /// missing tests for the behaviour it changes (2641). `0.0..=0.5`.
+    pub hygiene_no_below: f64,
+    /// A diff-hygiene `out_of_scope`/`debug_leftovers`/`deletes_tests`/
+    /// `changes_signature` noul at or above which that question is decisive
+    /// (2641). `0.5..=1.0`.
+    pub hygiene_yes_above: f64,
+    /// A `judge` acceptance item's noul at or above which the item counts as
+    /// satisfied without the fresh checker (2642). `0.5..=1.0`.
+    pub judge_yes_above: f64,
+    /// A `judge` acceptance item's noul at or below which the item becomes a
+    /// finding held once (2642). `0.0..=0.5`.
+    pub judge_no_below: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -119,6 +132,10 @@ impl Default for DecisionsConfig {
             scout_above: 0.85,
             completion_no_below: 0.10,
             completion_yes_above: 0.90,
+            hygiene_no_below: 0.10,
+            hygiene_yes_above: 0.90,
+            judge_yes_above: 0.90,
+            judge_no_below: 0.10,
         }
     }
 }
@@ -739,6 +756,14 @@ const COMPLETION_NO_BELOW_MIN: f64 = 0.0;
 const COMPLETION_NO_BELOW_MAX: f64 = 0.5;
 const COMPLETION_YES_ABOVE_MIN: f64 = 0.5;
 const COMPLETION_YES_ABOVE_MAX: f64 = 1.0;
+const HYGIENE_NO_BELOW_MIN: f64 = 0.0;
+const HYGIENE_NO_BELOW_MAX: f64 = 0.5;
+const HYGIENE_YES_ABOVE_MIN: f64 = 0.5;
+const HYGIENE_YES_ABOVE_MAX: f64 = 1.0;
+const JUDGE_YES_ABOVE_MIN: f64 = 0.5;
+const JUDGE_YES_ABOVE_MAX: f64 = 1.0;
+const JUDGE_NO_BELOW_MIN: f64 = 0.0;
+const JUDGE_NO_BELOW_MAX: f64 = 0.5;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -752,6 +777,10 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "scout_above",
             "completion_no_below",
             "completion_yes_above",
+            "hygiene_no_below",
+            "hygiene_yes_above",
+            "judge_yes_above",
+            "judge_no_below",
         ]
         .contains(&key.as_str())
         {
@@ -838,6 +867,67 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let hygiene_no_below = match table.get("hygiene_no_below") {
+        None => defaults.hygiene_no_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `hygiene_no_below` must be a number".to_string())?;
+            if !(HYGIENE_NO_BELOW_MIN..=HYGIENE_NO_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `hygiene_no_below` must be between {HYGIENE_NO_BELOW_MIN} and {HYGIENE_NO_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+    let hygiene_yes_above = match table.get("hygiene_yes_above") {
+        None => defaults.hygiene_yes_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `hygiene_yes_above` must be a number".to_string())?;
+            if !(HYGIENE_YES_ABOVE_MIN..=HYGIENE_YES_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `hygiene_yes_above` must be between {HYGIENE_YES_ABOVE_MIN} and {HYGIENE_YES_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+    let judge_yes_above = match table.get("judge_yes_above") {
+        None => defaults.judge_yes_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `judge_yes_above` must be a number".to_string())?;
+            if !(JUDGE_YES_ABOVE_MIN..=JUDGE_YES_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `judge_yes_above` must be between {JUDGE_YES_ABOVE_MIN} and {JUDGE_YES_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+    let judge_no_below = match table.get("judge_no_below") {
+        None => defaults.judge_no_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `judge_no_below` must be a number".to_string())?;
+            if !(JUDGE_NO_BELOW_MIN..=JUDGE_NO_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `judge_no_below` must be between {JUDGE_NO_BELOW_MIN} and {JUDGE_NO_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -845,6 +935,10 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         scout_above,
         completion_no_below,
         completion_yes_above,
+        hygiene_no_below,
+        hygiene_yes_above,
+        judge_yes_above,
+        judge_no_below,
     })
 }
 
@@ -1065,5 +1159,38 @@ mod completion_threshold_tests {
         let error = PaneConfig::parse_profile("[decisions]\ncompletion_yes_above = 0.4\n", None)
             .unwrap_err();
         assert!(error.contains("completion_yes_above"), "{error}");
+    }
+
+    #[test]
+    fn the_hygiene_and_judge_thresholds_default_and_are_refused_out_of_range() {
+        let defaults = DecisionsConfig::default();
+        assert_eq!(defaults.hygiene_no_below, 0.10);
+        assert_eq!(defaults.hygiene_yes_above, 0.90);
+        assert_eq!(defaults.judge_yes_above, 0.90);
+        assert_eq!(defaults.judge_no_below, 0.10);
+
+        let config = PaneConfig::parse_profile(
+            "[decisions]\nmodel = \"jev-latest\"\nhygiene_no_below = 0.2\nhygiene_yes_above = 0.8\n\
+             judge_yes_above = 0.8\njudge_no_below = 0.2\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.decisions.hygiene_no_below, 0.2);
+        assert_eq!(config.decisions.hygiene_yes_above, 0.8);
+        assert_eq!(config.decisions.judge_yes_above, 0.8);
+        assert_eq!(config.decisions.judge_no_below, 0.2);
+
+        let error =
+            PaneConfig::parse_profile("[decisions]\nhygiene_no_below = 0.6\n", None).unwrap_err();
+        assert!(error.contains("hygiene_no_below"), "{error}");
+        let error =
+            PaneConfig::parse_profile("[decisions]\nhygiene_yes_above = 0.4\n", None).unwrap_err();
+        assert!(error.contains("hygiene_yes_above"), "{error}");
+        let error =
+            PaneConfig::parse_profile("[decisions]\njudge_yes_above = 0.4\n", None).unwrap_err();
+        assert!(error.contains("judge_yes_above"), "{error}");
+        let error =
+            PaneConfig::parse_profile("[decisions]\njudge_no_below = 0.6\n", None).unwrap_err();
+        assert!(error.contains("judge_no_below"), "{error}");
     }
 }

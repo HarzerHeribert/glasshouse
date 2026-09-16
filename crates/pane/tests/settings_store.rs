@@ -912,6 +912,14 @@ fn typed_values_are_parsed_without_toml_quoting() {
         registry::validate("decisions.scout_above", "0.9").expect("in range"),
         toml::Value::Float(0.9)
     );
+    assert!(registry::validate("decisions.hygiene_no_below", "0.6").is_err());
+    assert!(registry::validate("decisions.hygiene_yes_above", "0.4").is_err());
+    assert!(registry::validate("decisions.judge_yes_above", "0.4").is_err());
+    assert!(registry::validate("decisions.judge_no_below", "0.6").is_err());
+    assert_eq!(
+        registry::validate("decisions.judge_yes_above", "0.8").expect("in range"),
+        toml::Value::Float(0.8)
+    );
     assert!(registry::validate("limits.cells", "0").is_err());
     assert!(registry::validate("limits.cells", "many").is_err());
     assert!(registry::validate("web.allow_domains", "not a domain").is_err());

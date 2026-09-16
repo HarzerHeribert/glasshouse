@@ -5,9 +5,15 @@
 //! `tests/evidence_gate.rs`, path-aware here since one task now makes up to
 //! three kinds of request), `/v1/systemone` answers by the request's own
 //! question key -- `"intent"` (asked once per task, before the first turn)
-//! or `"satisfied"` (asked once per task, at the completion gate; 2616) --
-//! each with a scripted answer, a non-2xx status, a sleep past the 2 s
-//! bound, or (unscripted) a harmless default.
+//! or `"satisfied"` (asked once per task, at the completion gate; 2616,
+//! extended 2641/2642) -- each with a scripted answer, a non-2xx status, a
+//! sleep past the 2 s bound, or (unscripted) a harmless default. A
+//! `"satisfied"` request may carry the five diff-hygiene questions (2641)
+//! and one `judge_<n>` per undecided acceptance item (2642) in the same
+//! request; a test that scripts only `completion_answer` (the `satisfied`
+//! key) gets every other key auto-filled with a neutral 0.50 noul
+//! (`fill_unscripted_answers`), so a test written before 2641/2642 keeps
+//! working without listing keys it does not care about.
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -127,7 +133,7 @@ fn providers(
 
             if path == "/v1/systemone" {
                 let key = question_key(&body_text);
-                seen_decision_bodies.lock().unwrap().push(body_text);
+                seen_decision_bodies.lock().unwrap().push(body_text.clone());
                 seen_decision_headers.lock().unwrap().push(header_block);
                 let decision = match key.as_str() {
                     "intent" => intent
@@ -139,7 +145,10 @@ fn providers(
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
-                    Decision::Answer(value) => {
+                    Decision::Answer(mut value) => {
+                        if key == "satisfied" {
+                            fill_unscripted_answers(&mut value, &body_text);
+                        }
                         let response = value.to_string();
                         let _ = write!(
                             stream,
@@ -254,6 +263,74 @@ fn completion_answer(noul: f64) -> Value {
                 "noul": noul,
             }
         },
+        "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// Fills a neutral 0.50 noul answer for every question the request asked
+/// that the scripted response did not name -- so a test scripting only
+/// `satisfied` still answers whatever hygiene (2641) or judge (2642)
+/// questions the same request added, without needing to enumerate them. A
+/// noul of 0.50 sits strictly between every `*_no_below` and `*_yes_above`
+/// default, so an unscripted key is always undecided: no finding, no
+/// acceptance item settled.
+fn fill_unscripted_answers(value: &mut Value, body_text: &str) {
+    let body: Value = serde_json::from_str(body_text).unwrap();
+    let Some(questions) = body["questions"].as_object() else {
+        return;
+    };
+    let answers = value["answers"]
+        .as_object_mut()
+        .expect("a scripted answer body carries an `answers` object");
+    for key in questions.keys() {
+        answers
+            .entry(key.clone())
+            .or_insert_with(|| json!({"type": "noul", "noul": 0.5}));
+    }
+}
+
+/// A completion answer that also scripts the five hygiene nouls (2641), for
+/// a test asserting on a specific hygiene question.
+fn completion_answer_with_hygiene(noul: f64, hygiene: [f64; 5]) -> Value {
+    let keys = [
+        "has_tests",
+        "out_of_scope",
+        "debug_leftovers",
+        "deletes_tests",
+        "changes_signature",
+    ];
+    let mut answers = serde_json::Map::new();
+    answers.insert(
+        "satisfied".to_string(),
+        json!({"type": "noul", "noul": noul}),
+    );
+    for (key, value) in keys.iter().zip(hygiene.iter()) {
+        answers.insert((*key).to_string(), json!({"type": "noul", "noul": value}));
+    }
+    json!({
+        "model": "jev-latest",
+        "answers": Value::Object(answers),
+        "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// A completion answer that also scripts one `judge_<n>` noul per entry in
+/// `judge`, in order (2642).
+fn completion_answer_with_judge(noul: f64, judge: &[f64]) -> Value {
+    let mut answers = serde_json::Map::new();
+    answers.insert(
+        "satisfied".to_string(),
+        json!({"type": "noul", "noul": noul}),
+    );
+    for (index, value) in judge.iter().enumerate() {
+        answers.insert(
+            format!("judge_{index}"),
+            json!({"type": "noul", "noul": value}),
+        );
+    }
+    json!({
+        "model": "jev-latest",
+        "answers": Value::Object(answers),
         "usage": {"input_tokens": 40, "output_tokens": 12},
     })
 }
@@ -802,7 +879,9 @@ fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
     let messages = messages.lock().unwrap();
     assert_eq!(messages.len(), 2, "held once, then the same claim again");
     assert!(
-        messages[1].contains("the decision model reads the diff as not satisfying the request"),
+        // The diff is empty (this task never wrote a file), so the
+        // answer-state addendum to 2616 is what asked the question.
+        messages[1].contains("the decision model reads the answer as not satisfying the request"),
         "{}",
         messages[1]
     );
@@ -811,6 +890,7 @@ fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["noul"], 0.06, "{telemetry}");
     assert_eq!(telemetry["finding_added"], true, "{telemetry}");
+    assert_eq!(telemetry["state"], "answer", "{telemetry}");
     assert_eq!(
         decisions.lock().unwrap().len(),
         2,
@@ -1041,7 +1121,11 @@ fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
     code.push_str("return \"done\";");
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell("c1", &code)],
-        vec![],
+        // A non-read-only intent, so the non-empty diff this cell produces
+        // is what the completion question is asked about, not the answer
+        // state a read-only intent (the fake's unscripted default) would
+        // force (2641/2642's addendum to 2616).
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
         vec![Decision::Answer(completion_answer(0.50))],
     );
     let result = exec_bounded(&root, &endpoint, "write many files", None)
@@ -1064,5 +1148,301 @@ fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
     );
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["truncated"], true, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- diff hygiene (2641) --------------------------------------------------
+
+#[test]
+fn a_confident_out_of_scope_yes_is_one_finding_held_once_with_the_reason() {
+    let root = root("hygiene-out-of-scope");
+    write_config(&root, DECISIONS_ON);
+    let held = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![cell("c1", held), cell("c2", held)],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![Decision::Answer(completion_answer_with_hygiene(
+            0.94,
+            [0.5, 0.95, 0.5, 0.5, 0.5],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a hygiene finding is held once, not a refusal");
+    let messages = messages.lock().unwrap();
+    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert!(
+        messages[1].contains("the diff changes files the request did not ask about"),
+        "{}",
+        messages[1]
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["hygiene_findings"], 1, "{telemetry}");
+    assert_eq!(telemetry["hygiene"]["out_of_scope"], 0.95, "{telemetry}");
+    assert_eq!(telemetry["state"], "diff", "{telemetry}");
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        2,
+        "the intent question once, and the completion question once for the unchanged diff -- not twice"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_undecided_has_tests_answer_adds_no_finding() {
+    let root = root("hygiene-undecided");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell(
+            "c1",
+            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+        )],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![Decision::Answer(completion_answer_with_hygiene(
+            0.94,
+            [0.5, 0.5, 0.5, 0.5, 0.5],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None).expect("no finding, no hold");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "an undecided hygiene answer never holds"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["hygiene_findings"], 0, "{telemetry}");
+    assert_eq!(telemetry["hygiene"]["has_tests"], 0.5, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shadow_records_the_five_hygiene_nouls_and_adds_no_finding() {
+    let root = root("hygiene-shadow");
+    write_config(&root, DECISIONS_SHADOW);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell(
+            "c1",
+            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+        )],
+        vec![Decision::Answer(decision_answer("modify", 0.99))],
+        vec![Decision::Answer(completion_answer_with_hygiene(
+            0.06,
+            [0.05, 0.95, 0.95, 0.95, 0.95],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None).expect("shadow never holds");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "shadow finishes on the first claim"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["hygiene_findings"], 0, "{telemetry}");
+    assert_eq!(telemetry["hygiene"]["has_tests"], 0.05, "{telemetry}");
+    assert_eq!(telemetry["hygiene"]["out_of_scope"], 0.95, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- the empty-diff / read-only answer state (2641's addendum to 2616) ----
+
+#[test]
+fn an_answer_only_task_with_an_empty_diff_is_asked_over_the_answer_state() {
+    let root = root("answer-state-verified");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.94))],
+    );
+    let result = exec_bounded(&root, &endpoint, "read the file for me", None)
+        .expect("an answer-state completion verifies");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "a confident yes never holds"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let bodies = decisions.lock().unwrap();
+    let satisfied: Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(satisfied["state"]["answer"], "done", "{satisfied}");
+    assert!(
+        satisfied["state"].get("diff").is_none(),
+        "the answer state carries no diff key: {satisfied}"
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["state"], "answer", "{telemetry}");
+    assert!(telemetry["hygiene"].is_null(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_confident_no_over_the_answer_state_is_one_finding_held_once() {
+    let root = root("answer-state-no");
+    write_config(&root, DECISIONS_ON);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            cell("c1", "return \"done\";"),
+            cell("c2", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.05))],
+    );
+    let result = exec_bounded(&root, &endpoint, "read the file for me", None)
+        .expect("a confident no over the answer state is held once, not a refusal");
+    let messages = messages.lock().unwrap();
+    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert!(
+        messages[1].contains("the decision model reads the answer as not satisfying the request"),
+        "{}",
+        messages[1]
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], false);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["state"], "answer", "{telemetry}");
+    assert_eq!(telemetry["finding_added"], true, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- judge items (2642) ----------------------------------------------------
+
+const DECISIONS_ON_WITH_LISTER: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
+     [helpers]\nmodel = \"helper-tier\"\ncompletion_check = true\n";
+/// No `completion_check`, so a judge finding that does not spare the checker
+/// (a confident no, or shadow mode never sparing it) does not also pay for
+/// one -- these tests are about the judge decision alone.
+const DECISIONS_ON_WITH_LISTER_NO_CHECKER: &str =
+    "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n[helpers]\nmodel = \"helper-tier\"\n";
+const DECISIONS_SHADOW_WITH_LISTER: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"shadow\"\n\
+     [helpers]\nmodel = \"helper-tier\"\n";
+
+#[test]
+fn a_judge_item_answered_yes_is_satisfied_without_the_checker() {
+    let root = root("judge-yes");
+    write_config(&root, DECISIONS_ON_WITH_LISTER);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            prose("judge: the tone is friendly"),
+            cell("c1", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer_with_judge(
+            0.94,
+            &[0.95],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "make sure the tone is friendly", None)
+        .expect("a satisfied judge item spares the checker too");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        2,
+        "the lister, then the first turn -- no checker, no hold"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let acceptance = &result["telemetry"]["acceptance"];
+    assert_eq!(
+        acceptance["judged"], 0,
+        "the judge item is now met: {acceptance}"
+    );
+    assert_eq!(acceptance["met"], 1, "{acceptance}");
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["judged"]["yes"], 1, "{telemetry}");
+    assert_eq!(telemetry["judged"]["undecided"], 0, "{telemetry}");
+    assert!(telemetry["checker_skipped"].is_string(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_judge_item_answered_no_is_a_finding_held_once_then_verifies_unverified_with_the_item_named() {
+    let root = root("judge-no");
+    write_config(&root, DECISIONS_ON_WITH_LISTER_NO_CHECKER);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            prose("judge: the tone is friendly"),
+            cell("c1", "return \"done\";"),
+            cell("c1b", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer_with_judge(
+            0.94,
+            &[0.05],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "make sure the tone is friendly", None)
+        .expect("a not-satisfied judge item holds once, then verifies unverified");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        3,
+        "the lister, the first turn, the held claim again"
+    );
+    assert!(
+        messages[2].contains("the tone is friendly"),
+        "the held block names the item: {}",
+        messages[2]
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], false);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["judged"]["no"], 1, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_judge_item_answered_undecided_runs_the_checker_as_today() {
+    let root = root("judge-undecided");
+    write_config(&root, DECISIONS_ON_WITH_LISTER);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            prose("judge: the tone is friendly"),
+            cell("c1", "return \"done\";"),
+            prose("The change holds; nothing more is needed."),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer_with_judge(0.94, &[0.5]))],
+    );
+    let result = exec_bounded(&root, &endpoint, "make sure the tone is friendly", None)
+        .expect("an undecided judge item runs the checker and still finishes");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        3,
+        "the lister, the first turn, then the checker's own request"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["judged"]["undecided"], 1, "{telemetry}");
+    assert!(telemetry["checker_skipped"].is_null(), "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shadow_records_judged_and_changes_nothing() {
+    let root = root("judge-shadow");
+    write_config(&root, DECISIONS_SHADOW_WITH_LISTER);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![
+            prose("judge: the tone is friendly"),
+            cell("c1", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer_with_judge(
+            0.94,
+            &[0.95],
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "make sure the tone is friendly", None)
+        .expect("shadow never decides a judge item");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        2,
+        "shadow finishes on the first claim, no checker skip recorded as a hold"
+    );
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    let acceptance = &result["telemetry"]["acceptance"];
+    assert_eq!(
+        acceptance["judged"], 1,
+        "shadow never mutates the acceptance list's own status: {acceptance}"
+    );
+    let telemetry = &result["telemetry"]["decisions"]["completion"];
+    assert_eq!(telemetry["judged"]["yes"], 1, "{telemetry}");
     let _ = std::fs::remove_dir_all(root);
 }

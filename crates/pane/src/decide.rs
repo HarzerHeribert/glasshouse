@@ -253,7 +253,10 @@ pub fn decide(
 /// The one string the intent question's answer holds when this package
 /// should consider holding: `Hold::hold_for` compares against this exact
 /// spelling, which is also the criterion's own key below.
-const READ_ONLY: &str = "read_only";
+/// `session/task.rs::gate` compares against it too, to choose the
+/// completion question's answer state over its diff state (2641/2642's
+/// addendum to 2616).
+pub const READ_ONLY: &str = "read_only";
 
 const INTENT_KEY: &str = "intent";
 
@@ -398,25 +401,144 @@ fn task_decision_of(answers: Answers) -> Result<TaskDecision, DecideError> {
 /// other question this package asks.
 const SATISFIED_KEY: &str = "satisfied";
 
-fn satisfied_question() -> Question {
+/// The five diff-hygiene questions' keys (2641).
+const HYGIENE_HAS_TESTS_KEY: &str = "has_tests";
+const HYGIENE_OUT_OF_SCOPE_KEY: &str = "out_of_scope";
+const HYGIENE_DEBUG_LEFTOVERS_KEY: &str = "debug_leftovers";
+const HYGIENE_DELETES_TESTS_KEY: &str = "deletes_tests";
+const HYGIENE_CHANGES_SIGNATURE_KEY: &str = "changes_signature";
+
+/// What the completion question's shared `state` carries: the diff and the
+/// mechanical findings already found, when there is a diff to show -- or,
+/// when the diff is empty or the task's intent was [`READ_ONLY`], the
+/// model's own answer text instead. Asking about a diff that does not exist
+/// is the empty-diff defect Phase 66's shadow calibration measured: a
+/// read-only, answer-only task scored 0.10 against a diff state that was
+/// never anything but the placeholder sentence.
+pub enum CompletionState<'a> {
+    Diff {
+        diff: &'a str,
+        findings: &'a [String],
+    },
+    Answer {
+        answer: &'a str,
+    },
+}
+
+fn satisfied_question(state: &CompletionState<'_>) -> Question {
+    let instructions = match state {
+        CompletionState::Diff { .. } => {
+            "Does the diff satisfy what the request asked for? Answer near 1.0 when \
+             nothing the request asked for is missing and nothing unasked was changed; \
+             answer near 0.0 when the diff clearly does not satisfy the request."
+        }
+        CompletionState::Answer { .. } => {
+            "Does the answer satisfy what the request asked for? Answer near 1.0 when the \
+             answer fully addresses the request; answer near 0.0 when it clearly does not."
+        }
+    };
     Question::Noul {
-        instructions: "Does the diff satisfy what the request asked for? Answer near 1.0 when \
-                        nothing the request asked for is missing and nothing unasked was \
-                        changed; answer near 0.0 when the diff clearly does not satisfy the \
-                        request."
-            .to_string(),
+        instructions: instructions.to_string(),
     }
 }
 
-/// What the completion question answered (2616): a probability that the
-/// task's diff satisfies the request, and whether the diff sent had to be
-/// cut down to [`DIFF_STATE_BYTES`] to ask it. `session/task.rs::gate`
-/// decides what to do with the number -- this module only asks and parses.
+/// The five diff-hygiene questions (2641), asked in the same request as
+/// [`satisfied_question`] whenever [`CompletionState::Diff`] is in force --
+/// never for [`CompletionState::Answer`], which has no diff to ask about.
+fn hygiene_questions() -> [(&'static str, Question); 5] {
+    let noul = |text: &str| Question::Noul {
+        instructions: text.to_string(),
+    };
+    [
+        (
+            HYGIENE_HAS_TESTS_KEY,
+            noul(
+                "Does the diff add or change tests for the behaviour it changes? Answer \
+                 near 1.0 when it does; answer near 0.0 when it does not.",
+            ),
+        ),
+        (
+            HYGIENE_OUT_OF_SCOPE_KEY,
+            noul(
+                "Does the diff change files the request did not ask about? Answer near \
+                 1.0 when it does; answer near 0.0 when it does not.",
+            ),
+        ),
+        (
+            HYGIENE_DEBUG_LEFTOVERS_KEY,
+            noul(
+                "Does the diff leave debugging artefacts: prints, commented-out code, or \
+                 TODO markers? Answer near 1.0 when it does; answer near 0.0 when it does \
+                 not.",
+            ),
+        ),
+        (
+            HYGIENE_DELETES_TESTS_KEY,
+            noul(
+                "Does the diff delete or disable tests? Answer near 1.0 when it does; \
+                 answer near 0.0 when it does not.",
+            ),
+        ),
+        (
+            HYGIENE_CHANGES_SIGNATURE_KEY,
+            noul(
+                "Does the diff change a public function or type signature? Answer near \
+                 1.0 when it does; answer near 0.0 when it does not.",
+            ),
+        ),
+    ]
+}
+
+fn judge_key(index: usize) -> String {
+    format!("judge_{index}")
+}
+
+/// One judge item's question (2642): the item's own text and whatever
+/// evidence the acceptance list already gathered for it -- embedded in the
+/// instructions, since [`decide`]'s `state` is shared across every question
+/// in the request.
+fn judge_question(item: &str, evidence: &str) -> Question {
+    let instructions = if evidence.is_empty() {
+        format!(
+            "Does this acceptance item hold, given the diff or answer above? Answer near \
+             1.0 when it clearly holds; answer near 0.0 when it clearly does not. \
+             Item: {item}"
+        )
+    } else {
+        format!(
+            "Does this acceptance item hold, given the diff or answer above? Answer near \
+             1.0 when it clearly holds; answer near 0.0 when it clearly does not. \
+             Item: {item}\nEvidence already gathered: {evidence}"
+        )
+    };
+    Question::Noul { instructions }
+}
+
+/// The five diff-hygiene questions' answers (2641), `None` for
+/// [`CompletionState::Answer`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HygieneAnswer {
+    pub has_tests: f64,
+    pub out_of_scope: f64,
+    pub debug_leftovers: f64,
+    pub deletes_tests: f64,
+    pub changes_signature: f64,
+}
+
+/// What the completion question answered (2616, extended 2641/2642): a
+/// probability that the diff or answer satisfies the request, the five
+/// diff-hygiene answers when a diff was asked about, and one noul per
+/// acceptance judge item asked in the same request. `session/task.rs::gate`
+/// decides what to do with the numbers -- this module only asks and parses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionAnswer {
     pub noul: f64,
     pub latency_ms: u64,
     pub truncated: bool,
+    pub hygiene: Option<HygieneAnswer>,
+    /// One noul per judge item, in the same order they were given to
+    /// [`completion_satisfied`].
+    pub judge: Vec<f64>,
 }
 
 /// Cuts `diff` to at most [`DIFF_STATE_BYTES`], at the last hunk header
@@ -437,42 +559,98 @@ fn bound_diff(diff: &str) -> (String, bool) {
     }
 }
 
-/// Asks whether `diff` satisfies `request`, given the mechanical findings
-/// already found about the tree. Never surfaced as a task failure -- the
-/// caller (`session/task.rs::gate`) records the error and proceeds exactly
-/// as it would with no decision model.
+fn extract_noul(answers: &mut BTreeMap<String, Answer>, key: &str) -> Result<f64, DecideError> {
+    match answers.remove(key) {
+        Some(Answer::Noul(value)) => Ok(value),
+        Some(Answer::Choice { .. }) => Err(DecideError::Parse(format!(
+            "the `{key}` question was answered as a choice, not a noul"
+        ))),
+        None => Err(DecideError::Parse(format!("no answer for `{key}`"))),
+    }
+}
+
+/// Asks whether `state` satisfies `request` -- the diff, or the model's own
+/// answer when there is no diff to show or the task's intent was read-only
+/// -- together with the diff-hygiene questions (2641, only for
+/// [`CompletionState::Diff`]) and one question per `judge_items` (2642),
+/// all in the one request 2616 already bounds to [`DECISION_TIMEOUT`].
+/// Never surfaced as a task failure -- the caller (`session/task.rs::gate`)
+/// records the error and proceeds exactly as it would with no decision
+/// model.
 pub fn completion_satisfied(
     model: &str,
     request: &str,
-    diff: &str,
-    findings: &[String],
+    state: CompletionState<'_>,
+    judge_items: &[(String, String)],
 ) -> Result<CompletionAnswer, DecideError> {
-    let (bounded, truncated) = bound_diff(diff);
-    let mut state = serde_json::json!({
-        "request": request,
-        "diff": bounded,
-        "findings": findings,
-    });
-    if truncated {
-        state["diff_truncated"] = Value::Bool(true);
+    let (shared_state, truncated, ask_hygiene) = match &state {
+        CompletionState::Diff { diff, findings } => {
+            let (bounded, truncated) = bound_diff(diff);
+            let mut value = serde_json::json!({
+                "request": request,
+                "diff": bounded,
+                "findings": findings,
+            });
+            if truncated {
+                value["diff_truncated"] = Value::Bool(true);
+            }
+            (value, truncated, true)
+        }
+        CompletionState::Answer { answer } => (
+            serde_json::json!({ "request": request, "answer": answer }),
+            false,
+            false,
+        ),
+    };
+
+    let mut questions: Vec<(String, Question)> =
+        vec![(SATISFIED_KEY.to_string(), satisfied_question(&state))];
+    if ask_hygiene {
+        questions.extend(
+            hygiene_questions()
+                .into_iter()
+                .map(|(key, question)| (key.to_string(), question)),
+        );
     }
-    let questions = [(SATISFIED_KEY.to_string(), satisfied_question())];
-    let answers = decide(model, state, &questions)?;
-    let decision = answers
+    for (index, (item, evidence)) in judge_items.iter().enumerate() {
+        questions.push((judge_key(index), judge_question(item, evidence)));
+    }
+
+    let answers = decide(model, shared_state, &questions)?;
+    let latency_ms = answers
+        .decisions
+        .first()
+        .map_or(0, |decision| decision.latency_ms);
+    let mut by_key: BTreeMap<String, Answer> = answers
         .decisions
         .into_iter()
-        .find(|decision| decision.key == SATISFIED_KEY)
-        .ok_or_else(|| DecideError::Parse(format!("no answer for `{SATISFIED_KEY}`")))?;
-    match decision.answer {
-        Answer::Noul(noul) => Ok(CompletionAnswer {
-            noul,
-            latency_ms: decision.latency_ms,
-            truncated,
-        }),
-        Answer::Choice { .. } => Err(DecideError::Parse(
-            "the completion question was answered as a choice, not a noul".to_string(),
-        )),
+        .map(|decision| (decision.key, decision.answer))
+        .collect();
+
+    let noul = extract_noul(&mut by_key, SATISFIED_KEY)?;
+    let hygiene = if ask_hygiene {
+        Some(HygieneAnswer {
+            has_tests: extract_noul(&mut by_key, HYGIENE_HAS_TESTS_KEY)?,
+            out_of_scope: extract_noul(&mut by_key, HYGIENE_OUT_OF_SCOPE_KEY)?,
+            debug_leftovers: extract_noul(&mut by_key, HYGIENE_DEBUG_LEFTOVERS_KEY)?,
+            deletes_tests: extract_noul(&mut by_key, HYGIENE_DELETES_TESTS_KEY)?,
+            changes_signature: extract_noul(&mut by_key, HYGIENE_CHANGES_SIGNATURE_KEY)?,
+        })
+    } else {
+        None
+    };
+    let mut judge = Vec::with_capacity(judge_items.len());
+    for index in 0..judge_items.len() {
+        judge.push(extract_noul(&mut by_key, &judge_key(index))?);
     }
+
+    Ok(CompletionAnswer {
+        noul,
+        latency_ms,
+        truncated,
+        hygiene,
+        judge,
+    })
 }
 
 /// Every tool `registry::ALL` declares [`crate::tools::registry::Purity::Effectful`],
@@ -819,8 +997,12 @@ mod tests {
     fn the_satisfied_body_serializes_to_the_documented_shape() {
         let (bounded, truncated) = bound_diff("+one line\n");
         assert!(!truncated);
+        let state = CompletionState::Diff {
+            diff: "+one line\n",
+            findings: &[],
+        };
         let questions: BTreeMap<String, Question> =
-            [(SATISFIED_KEY.to_string(), satisfied_question())]
+            [(SATISFIED_KEY.to_string(), satisfied_question(&state))]
                 .into_iter()
                 .collect();
         let body = RequestBody {
@@ -838,6 +1020,52 @@ mod tests {
         );
         assert_eq!(value["state"]["request"], "fix the bug");
         assert_eq!(value["state"]["diff"], "+one line\n");
+    }
+
+    #[test]
+    fn the_answer_state_question_asks_about_the_answer_not_a_diff() {
+        let state = CompletionState::Answer { answer: "done" };
+        let question = satisfied_question(&state);
+        let Question::Noul { instructions } = question else {
+            panic!("expected a noul question");
+        };
+        assert!(instructions.contains("answer"), "{instructions}");
+        assert!(!instructions.contains("diff"), "{instructions}");
+    }
+
+    #[test]
+    fn hygiene_questions_cover_the_five_keys() {
+        let questions = hygiene_questions();
+        let keys: Vec<&str> = questions.iter().map(|(key, _)| *key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "has_tests",
+                "out_of_scope",
+                "debug_leftovers",
+                "deletes_tests",
+                "changes_signature",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_judge_question_embeds_the_item_and_its_evidence() {
+        let Question::Noul { instructions } =
+            judge_question("the tone is friendly", "no evidence gathered")
+        else {
+            panic!("expected a noul question");
+        };
+        assert!(
+            instructions.contains("the tone is friendly"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("no evidence gathered"),
+            "{instructions}"
+        );
+        assert_eq!(judge_key(0), "judge_0");
+        assert_eq!(judge_key(3), "judge_3");
     }
 
     #[test]

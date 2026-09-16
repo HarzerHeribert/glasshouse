@@ -112,9 +112,17 @@ pub enum FindingKind {
     NoVerification,
     /// An item of the request-derived acceptance list was not met.
     AcceptanceUnmet,
-    /// The decision model reads the task's diff as not satisfying the
-    /// request, at or below `[decisions] completion_no_below` (2616).
+    /// The decision model reads the task's diff or answer as not satisfying
+    /// the request, at or below `[decisions] completion_no_below` (2616).
     RequestNotSatisfied,
+    /// One of the five diff-hygiene questions answered decisively against
+    /// the diff: no test for the changed behaviour, a file outside the
+    /// request's scope, a debugging leftover, a deleted test, or a changed
+    /// public signature (2641).
+    HygieneIssue,
+    /// An acceptance list's `judge` item the decision model reads as not
+    /// satisfied, at or below `[decisions] judge_no_below` (2642).
+    JudgeNotSatisfied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

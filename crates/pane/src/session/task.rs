@@ -310,6 +310,17 @@ pub(super) struct CompletionTelemetry {
     pub(super) truncated: bool,
     pub(super) finding_added: bool,
     pub(super) checker_skipped: Option<String>,
+    /// Which state the satisfaction question was asked over (2641/2642's
+    /// addendum to 2616): `"diff"` or `"answer"`.
+    pub(super) state: &'static str,
+    /// The five diff-hygiene nouls (2641), `None` when `state` is `"answer"`.
+    pub(super) hygiene: Option<serde_json::Value>,
+    /// How many of the five hygiene questions were decisive and added a
+    /// finding (2641).
+    pub(super) hygiene_findings: u32,
+    /// How many acceptance `judge` items this call's answer settled, `{yes,
+    /// no, undecided}` (2642).
+    pub(super) judged: serde_json::Value,
 }
 
 impl TaskState {
@@ -413,6 +424,10 @@ impl TaskState {
                 "truncated": decision.truncated,
                 "finding_added": decision.finding_added,
                 "checker_skipped": decision.checker_skipped,
+                "state": decision.state,
+                "hygiene": decision.hygiene,
+                "hygiene_findings": decision.hygiene_findings,
+                "judged": decision.judged,
             })),
         }))
     }
@@ -553,7 +568,8 @@ impl TaskState {
             last_mutation,
         );
         let mut findings = findings;
-        if !self.acceptance.is_empty() {
+        let has_acceptance = !self.acceptance.is_empty();
+        if has_acceptance {
             // Every item is decided against the tree or a command run
             // through the one kernel under the session's own profile.
             let ctx = ToolContext {
@@ -573,80 +589,217 @@ impl TaskState {
             self.acceptance_verdicts =
                 crate::acceptance::evaluate(&self.acceptance, root, &mut runner);
             findings.extend(crate::acceptance::findings(&self.acceptance_verdicts));
-            output::acceptance(crate::acceptance::summary(
-                &self.acceptance,
-                &self.acceptance_verdicts,
-            ));
         }
 
-        // The completion question (2616): does the diff satisfy the
-        // request? `completion_answer` caches the wire answer keyed by the
-        // exact diff text it was asked about, so an identical second claim
-        // (the hold-once case) asks nothing -- but a diff that changed since
-        // the cached answer (the model fixed something and claimed again)
-        // is a new question, never the stale answer to a tree that no
-        // longer exists. Only in `mode != off` with a model configured;
-        // `mode = off` or no model stays byte-identical to before this
-        // question existed.
+        // The completion question (2616, extended 2641/2642): does the diff
+        // or the answer satisfy the request, does the diff show the
+        // hygiene a reviewer would check, and does the decision model
+        // settle any acceptance item this package cannot decide
+        // mechanically -- `completion_answer` caches the wire answer keyed
+        // by the exact diff or answer text it was asked about, so an
+        // identical second claim (the hold-once case) asks nothing, but a
+        // diff or answer that changed since the cached answer is a new
+        // question, never the stale answer to a tree that no longer
+        // exists. Only in `mode != off` with a model configured; `mode =
+        // off` or no model stays byte-identical to before this question
+        // existed.
         let diff = self.task_start.diff(after);
         let decisions_config = session.config().decisions.clone();
         if let Some(model) = decisions_config.model.clone()
             && decisions_config.mode != crate::config::DecisionMode::Off
         {
-            let diff_text = diff
-                .clone()
-                .unwrap_or_else(|| "(no observed changes)".to_string());
+            // An empty diff (nothing changed) or a read-only intent means
+            // there is no diff worth asking about -- the empty-diff defect
+            // Phase 66's shadow calibration measured, a diff-shaped question
+            // against a task that never touched a file.
+            let is_read_only_intent = self
+                .intent
+                .as_ref()
+                .is_some_and(|intent| intent.choice == crate::decide::READ_ONLY);
+            let diff_is_empty = diff.as_ref().is_none_or(|diff| diff.is_empty());
+            let use_answer_state = diff_is_empty || is_read_only_intent;
+            let cache_key = if use_answer_state {
+                candidate.to_string()
+            } else {
+                diff.clone().unwrap_or_default()
+            };
+            // Every acceptance item still `Status::Judge` after the
+            // mechanical pass above -- always the full judge list, since
+            // `evaluate` never remembers a previous decision.
+            let judge_indices: Vec<usize> = self
+                .acceptance_verdicts
+                .iter()
+                .enumerate()
+                .filter(|(_, verdict)| verdict.status == crate::acceptance::Status::Judge)
+                .map(|(index, _)| index)
+                .collect();
+            let judge_items: Vec<(String, String)> = judge_indices
+                .iter()
+                .map(|&index| {
+                    let verdict = &self.acceptance_verdicts[index];
+                    let text = match &verdict.item {
+                        crate::acceptance::Item::Judge { text } => text.clone(),
+                        _ => unreachable!("Status::Judge only ever applies to Item::Judge"),
+                    };
+                    (text, verdict.evidence.clone())
+                })
+                .collect();
             let stale = self
                 .completion_answer
                 .as_ref()
-                .is_none_or(|(asked_about, _)| asked_about != &diff_text);
+                .is_none_or(|(asked_about, _)| asked_about != &cache_key);
             if stale {
                 let finding_sentences: Vec<String> = findings
                     .iter()
                     .map(|finding| finding.sentence.clone())
                     .collect();
-                match crate::decide::completion_satisfied(
-                    &model,
-                    &self.task,
-                    &diff_text,
-                    &finding_sentences,
-                ) {
-                    Ok(answer) => self.completion_answer = Some((diff_text, answer)),
+                let state = if use_answer_state {
+                    crate::decide::CompletionState::Answer { answer: candidate }
+                } else {
+                    crate::decide::CompletionState::Diff {
+                        diff: &cache_key,
+                        findings: &finding_sentences,
+                    }
+                };
+                match crate::decide::completion_satisfied(&model, &self.task, state, &judge_items) {
+                    Ok(answer) => self.completion_answer = Some((cache_key, answer)),
                     Err(_) => self.decision_failures += 1,
                 }
             }
             if let Some((_, answer)) = self.completion_answer.clone() {
+                let decisions_on = decisions_config.mode == crate::config::DecisionMode::On;
                 let mut finding_added = false;
-                let mut checker_skipped = None;
-                if decisions_config.mode == crate::config::DecisionMode::On {
-                    if answer.noul <= decisions_config.completion_no_below {
+                if answer.noul <= decisions_config.completion_no_below {
+                    if decisions_on {
                         findings.push(crate::completion::Finding {
                             kind: crate::completion::FindingKind::RequestNotSatisfied,
                             path: None,
                             sentence: format!(
-                                "the decision model reads the diff as not satisfying the request ({:.2})",
+                                "the decision model reads {} as not satisfying the request ({:.2})",
+                                if use_answer_state {
+                                    "the answer"
+                                } else {
+                                    "the diff"
+                                },
                                 answer.noul
                             ),
                         });
                         finding_added = true;
-                    } else if answer.noul >= decisions_config.completion_yes_above
-                        && findings.is_empty()
-                        && self.completion_check
-                        && !self.checker_ran
-                    {
-                        checker_skipped = Some(format!("decision {:.2}", answer.noul));
-                        self.checker_ran = true;
                     }
                 }
+
+                let mut hygiene_findings = 0u32;
+                if let Some(hygiene) = &answer.hygiene {
+                    let checks: [(bool, &str); 5] = [
+                        (
+                            hygiene.has_tests <= decisions_config.hygiene_no_below,
+                            "no test for the changed behaviour — add one or say why.",
+                        ),
+                        (
+                            hygiene.out_of_scope >= decisions_config.hygiene_yes_above,
+                            "the diff changes files the request did not ask about — narrow it or say why.",
+                        ),
+                        (
+                            hygiene.debug_leftovers >= decisions_config.hygiene_yes_above,
+                            "the diff leaves debugging artefacts — remove the prints, commented-out code or TODOs.",
+                        ),
+                        (
+                            hygiene.deletes_tests >= decisions_config.hygiene_yes_above,
+                            "the diff deletes or disables tests — restore them or say why.",
+                        ),
+                        (
+                            hygiene.changes_signature >= decisions_config.hygiene_yes_above,
+                            "the diff changes a public function or type signature — confirm it is intended.",
+                        ),
+                    ];
+                    for (decisive, sentence) in checks {
+                        if decisive && decisions_on {
+                            hygiene_findings += 1;
+                            findings.push(crate::completion::Finding {
+                                kind: crate::completion::FindingKind::HygieneIssue,
+                                path: None,
+                                sentence: sentence.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                let mut judged_yes = 0u32;
+                let mut judged_no = 0u32;
+                let mut judged_undecided = 0u32;
+                for (&index, &noul) in judge_indices.iter().zip(answer.judge.iter()) {
+                    if noul >= decisions_config.judge_yes_above {
+                        judged_yes += 1;
+                        if decisions_on {
+                            self.acceptance_verdicts[index].status = crate::acceptance::Status::Met;
+                            self.acceptance_verdicts[index].evidence = format!(
+                                "the decision model reads this item as satisfied ({noul:.2})"
+                            );
+                        }
+                    } else if noul <= decisions_config.judge_no_below {
+                        judged_no += 1;
+                        if decisions_on {
+                            let text = match &self.acceptance_verdicts[index].item {
+                                crate::acceptance::Item::Judge { text } => text.clone(),
+                                _ => String::new(),
+                            };
+                            findings.push(crate::completion::Finding {
+                                kind: crate::completion::FindingKind::JudgeNotSatisfied,
+                                path: None,
+                                sentence: format!(
+                                    "the decision model reads the acceptance item as not satisfied ({noul:.2}): {text}"
+                                ),
+                            });
+                        }
+                    } else {
+                        judged_undecided += 1;
+                    }
+                }
+
+                let checker_skipped = if decisions_on
+                    && answer.noul >= decisions_config.completion_yes_above
+                    && findings.is_empty()
+                    && judged_undecided == 0
+                    && self.completion_check
+                    && !self.checker_ran
+                {
+                    self.checker_ran = true;
+                    Some(format!("decision {:.2}", answer.noul))
+                } else {
+                    None
+                };
+
                 self.completion_decision = Some(CompletionTelemetry {
                     noul: answer.noul,
                     latency_ms: answer.latency_ms,
                     truncated: answer.truncated,
                     finding_added,
                     checker_skipped,
+                    state: if use_answer_state { "answer" } else { "diff" },
+                    hygiene: answer.hygiene.map(|hygiene| {
+                        serde_json::json!({
+                            "has_tests": hygiene.has_tests,
+                            "out_of_scope": hygiene.out_of_scope,
+                            "debug_leftovers": hygiene.debug_leftovers,
+                            "deletes_tests": hygiene.deletes_tests,
+                            "changes_signature": hygiene.changes_signature,
+                        })
+                    }),
+                    hygiene_findings,
+                    judged: serde_json::json!({
+                        "yes": judged_yes,
+                        "no": judged_no,
+                        "undecided": judged_undecided,
+                    }),
                 });
             }
             output::decisions(self.decisions_telemetry(&decisions_config));
+        }
+        if has_acceptance {
+            output::acceptance(crate::acceptance::summary(
+                &self.acceptance,
+                &self.acceptance_verdicts,
+            ));
         }
 
         let mut sentences: Vec<String> = findings

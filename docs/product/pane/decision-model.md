@@ -88,22 +88,36 @@ again) is asked fresh, never judged against the stale answer to a tree that
 no longer exists. The diff sent with it is bounded to 64 KiB, cut at a hunk
 boundary.
 
+**The answer state, the hygiene questions, and judge items (2641/2642,**
+Phase 66's shadow calibration found asking about a diff that does not
+exist). An empty diff or a `read_only` intent asks the same question over
+`{request, answer}` instead. When there is a diff, the same request also
+asks five hygiene nouls (`has_tests`, `out_of_scope`, `debug_leftovers`,
+`deletes_tests`, `changes_signature`), each a finding held once at
+`hygiene_no_below`/`hygiene_yes_above` (0.10/0.90), and one `noul` per
+acceptance `judge` item: `judge_yes_above` (0.90) satisfies it without the
+checker, `judge_no_below` (0.10) is a finding held once naming the item,
+between them the fresh checker still decides it. One request throughout.
+
 **What a confident yes does not prove.** It is one more signal, not a
 verdict: the acceptance list and the final-state contract still decide their
 own items mechanically, from the tree and the trajectory, exactly as they do
 when no decision model is configured.
 
 `--output-format json` and `stream-json`'s `decisions.completion` carries
-`{noul, latency_ms, truncated, finding_added, checker_skipped}`, `null` when
-the question was never asked (no model, or `mode = off`).
+`{noul, latency_ms, truncated, finding_added, checker_skipped, state,
+hygiene, hygiene_findings, judged}`, `null` when the question was never
+asked (no model, or `mode = off`); `hygiene` is `null` when `state` is
+`"answer"`.
 
 ## 6. Not decided here
 
-Judge items or supervisor vocabulary — the remaining candidates the map's
-Phase 66 paragraph names — are not built (the preflight signal is, see §2;
-the approval hint is, see §7). Which cheaper model is the default (none;
-unset is off) and any action beyond one hold and one scout signal both wait
-for a measured need, the same as the supervisor's own *Not decided here*.
+Supervisor vocabulary — the remaining candidate the map's Phase 66
+paragraph names — is not built (the preflight signal, the completion
+question's hygiene and judge extensions, and the approval hint are; see §2,
+§5 and §7). Which cheaper model is the default (none; unset is off) and any
+action beyond one hold and one scout signal both wait for a measured need,
+the same as the supervisor's own *Not decided here*.
 
 ## 7. The approval hint (F4)
 
