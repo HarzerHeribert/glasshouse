@@ -807,7 +807,12 @@ fn run(
                     &state,
                 );
                 if let Some(request) = approvals.front() {
-                    tui::render_approval(frame, &request.action().confirmation(), approval_scroll);
+                    tui::render_approval(
+                        frame,
+                        &request.action().confirmation(),
+                        approval_scroll,
+                        request.hint_line(),
+                    );
                 } else if let Some(settings) = settings_editor.as_ref() {
                     settings.panel.render(frame, state.theme);
                 }

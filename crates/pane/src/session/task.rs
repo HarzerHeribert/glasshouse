@@ -291,6 +291,12 @@ pub(super) struct TaskState {
     /// What the last `gate` call did with [`Self::completion_answer`] --
     /// `None` until the completion question has been asked.
     pub(super) completion_decision: Option<CompletionTelemetry>,
+    /// This task's approval hints (F4, decision-model.md) that answered --
+    /// synced from `approval::Gate::hint_counts` each cell, since the hint
+    /// itself answers on a thread the approval seam owns, not this struct.
+    pub(super) approval_hints: u32,
+    /// This task's approval-hint requests that failed or timed out.
+    pub(super) approval_hint_failures: u32,
 }
 
 /// One `gate` call's completion-question telemetry (2616): the cached wire
@@ -339,6 +345,8 @@ impl TaskState {
             would_hold: 0,
             completion_answer: None,
             completion_decision: None,
+            approval_hints: 0,
+            approval_hint_failures: 0,
         }
     }
 
@@ -397,6 +405,8 @@ impl TaskState {
             "would_hold": self.would_hold,
             "holds": self.effect_holds,
             "overrides": self.effect_overrides,
+            "approval_hints": self.approval_hints,
+            "approval_hint_failures": self.approval_hint_failures,
             "completion": self.completion_decision.as_ref().map(|decision| serde_json::json!({
                 "noul": decision.noul,
                 "latency_ms": decision.latency_ms,

@@ -1583,3 +1583,39 @@ fn notices_stay_in_the_conversation_where_they_happened() {
     assert!(!text.contains(" notice "), "no transient box:\n{text}");
     assert_eq!(fg_of_row(&buffer, "login is no longer valid"), Color::Red);
 }
+
+/// The approval hint (F4, `decision-model.md`): one extra line beside the
+/// confirmation when a hint is present, and nothing extra when it is not.
+#[test]
+fn render_approval_shows_the_hint_line_only_when_one_is_present() {
+    use pane::approval::{Confirmation, Hint};
+    use pane::tools::invoke::CheckedArgs;
+    use pane::tui::render_approval;
+
+    let confirmation = Confirmation::new("write", "/workspace", &CheckedArgs::new());
+
+    let mut without_hint = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    without_hint
+        .draw(|frame| render_approval(frame, &confirmation, 0, None))
+        .unwrap();
+    let text = buffer_text(&without_hint.backend().buffer().clone());
+    assert!(!text.contains("fits the request"), "{text}");
+
+    let mut with_hint = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    with_hint
+        .draw(|frame| {
+            render_approval(
+                frame,
+                &confirmation,
+                0,
+                Some(Hint {
+                    fits: 0.91,
+                    asked_ms: 640,
+                }),
+            )
+        })
+        .unwrap();
+    let text = buffer_text(&with_hint.backend().buffer().clone());
+    assert!(text.contains("fits the request: 0.91"), "{text}");
+    assert!(text.contains("640 ms"), "{text}");
+}

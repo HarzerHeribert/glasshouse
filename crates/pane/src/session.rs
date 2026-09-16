@@ -866,7 +866,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
         };
 
     let approval_gate = if args.ask_approval {
-        interactive.as_ref().map(ui::LiveUi::approval_gate)
+        // The approval hint (F4, decision-model.md): the gate is session-scoped
+        // and outlives any one task, so its model and mode are attached once,
+        // here, exactly like `[decisions]` is read once at session start.
+        let decisions = config.borrow().decisions.clone();
+        interactive
+            .as_ref()
+            .map(ui::LiveUi::approval_gate)
+            .map(|gate| gate.with_decisions(decisions.model, decisions.mode))
     } else {
         None
     };
@@ -1340,8 +1347,15 @@ fn run_task_inner(
     .with_response_byte_cap(session.config().limits.response_bytes)
     .with_instruction_context()
     .with_config(session.config().clone())?;
+    // The approval hint's own `asked`/`failed` counts are session-wide (the
+    // gate outlives one task); this task's telemetry reports the delta from
+    // where they stood before this task's cells ran.
+    let approval_hint_baseline = session
+        .approval_gate
+        .as_ref()
+        .map_or((0, 0), crate::approval::Gate::hint_counts);
     if let Some(gate) = &session.approval_gate {
-        runtime = runtime.with_approval_gate(gate.clone());
+        runtime = runtime.with_approval_gate(gate.clone().with_task(task.to_string()));
     }
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
@@ -1517,6 +1531,15 @@ fn run_task_inner(
         );
         crate::runtime::state::install_helper_progress(previous);
         let mut step = step?;
+        // The approval hint answers on its own thread (approval.rs), so this
+        // cell's own confirmation may still be pending when the cell returns;
+        // syncing here just means a hint born mid-cell is visible by the next
+        // one, never that it is required before this cell can be observed.
+        if let Some(gate) = &session.approval_gate {
+            let (asked, failed) = gate.hint_counts();
+            task_state.approval_hints = asked.saturating_sub(approval_hint_baseline.0);
+            task_state.approval_hint_failures = failed.saturating_sub(approval_hint_baseline.1);
+        }
         // RuntimeState clears this ledger at each cell boundary, so each
         // record belongs to this step and enters cumulative spend once here.
         budget.add_helpers(&step.view.helpers);

@@ -99,8 +99,20 @@ the question was never asked (no model, or `mode = off`).
 
 ## 6. Not decided here
 
-Judge items, an approval line, or supervisor vocabulary — the remaining
-candidates the map's Phase 66 paragraph names — are not built (the preflight
-signal is; see §2). Which cheaper model is the default (none; unset is off)
-and any action beyond one hold and one scout signal both wait for a measured
-need, the same as the supervisor's own *Not decided here*.
+Judge items or supervisor vocabulary — the remaining candidates the map's
+Phase 66 paragraph names — are not built (the preflight signal is, see §2;
+the approval hint is, see §7). Which cheaper model is the default (none;
+unset is off) and any action beyond one hold and one scout signal both wait
+for a measured need, the same as the supervisor's own *Not decided here*.
+
+## 7. The approval hint (F4)
+
+With a model configured and `mode` on or shadow, the exact-call approval seam
+asks the decision model in the background, once per pending call, whether it
+fits the request and does nothing beyond it. `mode = on` shows one extra line
+beside the confirmation, `fits the request: 0.91 (decision, 640 ms)`; `mode =
+shadow` asks and counts it (telemetry's `approval_hints`,
+`approval_hint_failures`) but never shows the line. The confirmation is drawn
+immediately and never waits for the answer; a failed, slow, or absent
+decision leaves it exactly as it renders today. The hint is a line of text
+and a counter — it never changes `Decision`.

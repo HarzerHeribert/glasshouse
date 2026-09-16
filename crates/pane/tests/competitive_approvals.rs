@@ -33,7 +33,7 @@ fn approval_overlay_renders_decisions_and_survives_tiny_terminals() {
     for (width, height) in [(100, 30), (20, 8), (1, 1)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| pane::tui::render_approval(frame, &confirmation, u16::MAX))
+            .draw(|frame| pane::tui::render_approval(frame, &confirmation, u16::MAX, None))
             .unwrap();
         if width == 100 {
             let text: String = terminal

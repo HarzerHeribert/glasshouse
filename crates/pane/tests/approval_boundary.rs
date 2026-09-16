@@ -1,9 +1,17 @@
-//! Host-channel seam tests against the real V8 callback stack. These are not
-//! interactive-approval acceptance: the shipped TUI does not install the seam,
-//! and no decision in this file adds a permission or an OS sandbox grant.
+//! Host-channel seam tests against the real V8 callback stack. Most of this
+//! file is not interactive-approval acceptance: the shipped TUI does not
+//! install the seam, and no decision here adds a permission or an OS sandbox
+//! grant. The approval-hint tests at the end of the file are the exception --
+//! they drive the shipped `pane` binary in a real PTY, `--ask-approval` and
+//! all, because the hint (F4, `decision-model.md`) is drawn by the live
+//! terminal thread and nothing shorter exercises that seam.
+use std::io::{BufRead, BufReader, Read as IoRead, Write as IoWrite};
+use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use pane::approval::{Decision, Gate};
@@ -14,6 +22,7 @@ use pane::runtime::outcome::CellOutcome;
 use pane::runtime::preview::Value;
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::CancellationToken;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -466,4 +475,397 @@ fn answering_the_gate_does_not_expand_the_os_sandbox() {
     ));
     returned(&outcome, "confined");
     responder.join().unwrap();
+}
+
+// -- the approval hint (F4, decision-model.md) ---------------------------
+//
+// These four tests drive the shipped `pane` binary in a real PTY with
+// `--ask-approval`: the hint is drawn by the live terminal thread, and
+// nothing shorter than the real TUI exercises `session::ui::run`'s render
+// loop. A fake provider answers `/v1/messages` with one scripted `write`
+// call and `/v1/systemone` with the scripted `fits` answers below, exactly
+// as `tests/decisions.rs`'s `providers()` dispatches by path.
+
+/// What the fake decision endpoint does with the one `fits` question a
+/// pending approval asks.
+enum HintReply {
+    Answer(f64),
+    Sleep(Duration),
+}
+
+/// The single key of a decision request's `questions` object, exactly as
+/// `tests/decisions.rs::question_key` reads it.
+fn question_key(body_text: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(body_text).unwrap();
+    value["questions"]
+        .as_object()
+        .and_then(|questions| questions.keys().next())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A fake provider serving both `/v1/messages` (one scripted `write` cell,
+/// streamed exactly as the live TUI requests it) and `/v1/systemone`. A
+/// `[decisions]` model configured for these tests also asks the *existing*
+/// `intent` question once before the first turn and would ask `satisfied`
+/// once the task claims completion (`decision-model.md`) -- unrelated to the
+/// approval hint under test, so both get a harmless, never-hold, never-fail
+/// default answer here; only a request keyed `fits` draws from `hints`, in
+/// order, and only those bodies are recorded. A `fits` request past the end
+/// of `hints` gets a 500, which no test here needs but which keeps a bug
+/// from hanging on an empty queue. Returns the base URL and the raw `fits`
+/// request bodies, in arrival order.
+fn hint_provider(hints: Vec<HintReply>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    thread::spawn(move || {
+        let mut hints: std::collections::VecDeque<HintReply> = hints.into_iter().collect();
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).unwrap() == 0 {
+                return;
+            }
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let body_text = String::from_utf8_lossy(&body).into_owned();
+            if path == "/v1/systemone" {
+                let key = question_key(&body_text);
+                if key == "fits" {
+                    recorded.lock().unwrap().push(body_text);
+                    match hints.pop_front() {
+                        Some(HintReply::Answer(fits)) => {
+                            let response = serde_json::json!({
+                                "model": "fake-decider",
+                                "answers": {"fits": {"type": "noul", "noul": fits}},
+                                "usage": {"input_tokens": 10, "output_tokens": 4},
+                            })
+                            .to_string();
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                                response.len()
+                            );
+                        }
+                        Some(HintReply::Sleep(duration)) => {
+                            thread::sleep(duration);
+                            let response = "{}";
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                                response.len()
+                            );
+                        }
+                        None => {
+                            let response = "{}";
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 500 Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                                response.len()
+                            );
+                        }
+                    }
+                } else {
+                    // The task's own `intent` (before the first turn) or
+                    // `satisfied` (at the completion gate) question -- a
+                    // harmless answer that never holds and never fails, so
+                    // it cannot interact with the `fits` hint under test.
+                    let response = match key.as_str() {
+                        "intent" => serde_json::json!({
+                            "model": "fake-decider",
+                            "answers": {"intent": {
+                                "type": "choice", "choice": "modify",
+                                "probabilities": {"read_only": 0.0, "modify": 0.99, "run": 0.0, "other": 0.01},
+                                "confidence": 0.99,
+                            }},
+                            "usage": {"input_tokens": 10, "output_tokens": 4},
+                        }),
+                        _ => serde_json::json!({
+                            "model": "fake-decider",
+                            "answers": {"satisfied": {"type": "noul", "noul": 0.5}},
+                            "usage": {"input_tokens": 10, "output_tokens": 4},
+                        }),
+                    }
+                    .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                        response.len()
+                    );
+                }
+            } else {
+                let request: serde_json::Value =
+                    serde_json::from_str(&body_text).unwrap_or_default();
+                let text =
+                    "```pane\nwrite({path: \"a.txt\", content: \"1\"});\nreturn \"done\";\n```";
+                let (mime, out) = if request["stream"] == true {
+                    let events = [
+                        serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":10}}}),
+                        serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}}),
+                        serde_json::json!({"type":"message_delta","usage":{"output_tokens":20}}),
+                        serde_json::json!({"type":"message_stop"}),
+                    ];
+                    (
+                        "text/event-stream",
+                        events
+                            .iter()
+                            .map(|event| format!("data: {event}\n\n"))
+                            .collect::<String>(),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        serde_json::json!({"role":"assistant","content":[{"type":"text","text":text}],"usage":{"input_tokens":10,"output_tokens":20}}).to_string(),
+                    )
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                    out.len()
+                );
+            }
+        }
+    });
+    (base, seen)
+}
+
+/// A live `pane session --ask-approval` in a real PTY -- trimmed to what the
+/// four tests below need: no resize, no mouse reports (`tests/tui_live.rs`'s
+/// `App` covers those for the rest of the interactive surface).
+struct LiveApp {
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    input: Box<dyn IoWrite + Send>,
+    output: mpsc::Receiver<Vec<u8>>,
+    screen: vt100::Parser,
+    root: PathBuf,
+}
+impl LiveApp {
+    /// `config_toml` becomes `.pane/config.toml`, exactly as
+    /// `tests/decisions.rs::write_config` writes it -- empty means no
+    /// `[decisions]` section at all, i.e. decisions off.
+    fn start(base: &str, config_toml: &str) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "pane-approval-hint-live-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(root.join(".pane")).unwrap();
+        std::fs::write(root.join(".pane/config.toml"), config_toml).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_pane"));
+        command.args(["session", "--root"]);
+        command.arg(&root);
+        command.args(["--model", "fixture-model", "--glasshouse"]);
+        command.arg(root.join("no-glasshouse"));
+        command.arg("--gateway");
+        command.arg(root.join("no-gateway"));
+        command.env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"));
+        command.arg("--ask-approval");
+        command.env("ANTHROPIC_BASE_URL", base);
+        command.env("XDG_CONFIG_HOME", root.join("global-config"));
+        command.env_remove("ANTHROPIC_API_KEY");
+        command.env_remove("ANTHROPIC_AUTH_TOKEN");
+        command.env("TERM", "xterm-256color");
+        let child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let input = pair.master.take_writer().unwrap();
+        let (sender, output) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = [0; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if sender.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            _master: pair.master,
+            child,
+            input,
+            output,
+            screen: vt100::Parser::new(30, 80, 1000),
+            root,
+        }
+    }
+    fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).unwrap();
+        self.input.flush().unwrap();
+    }
+    /// Reply to `ESC[6n` the way a real terminal does -- `tests/tui_live.rs`
+    /// §1's finding: crossterm blocks on this reply on Windows.
+    fn answer_cursor_query(&mut self, bytes: &[u8]) {
+        if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+            let _ = self.input.write_all(b"\x1b[1;1R");
+            let _ = self.input.flush();
+        }
+    }
+    fn pump_until(
+        &mut self,
+        deadline: Instant,
+        predicate: impl Fn(&vt100::Screen) -> bool,
+    ) -> bool {
+        loop {
+            if predicate(self.screen.screen()) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(25)) {
+                self.answer_cursor_query(&bytes);
+                self.screen.process(&bytes);
+            }
+        }
+    }
+    fn contains(&mut self, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(
+            self.pump_until(deadline, |screen| screen.contents().contains(needle)),
+            "{needle:?} did not appear:\n{}",
+            self.screen.screen().contents()
+        );
+    }
+    /// Keeps pumping for `millis` regardless of content -- an absence
+    /// assertion needs this, since `contains` stops at the first match and a
+    /// screen that was never brought up to date could satisfy it by accident.
+    fn settle(&mut self, millis: u64) {
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        self.pump_until(deadline, |_| false);
+    }
+    fn screen_text(&self) -> String {
+        self.screen.screen().contents()
+    }
+}
+impl Drop for LiveApp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn a_hint_that_answers_in_time_is_shown_beside_the_confirmation() {
+    let (base, decisions) = hint_provider(vec![HintReply::Answer(0.91)]);
+    let mut app = LiveApp::start(
+        &base,
+        "[decisions]\nmodel = \"fake-decider\"\nmode = \"on\"\n",
+    );
+    app.contains("fixture-model");
+    app.send(b"write a.txt for me\r");
+    app.contains("Approve exact tool call");
+    app.contains("fits the request: 0.91");
+    assert_eq!(decisions.lock().unwrap().len(), 1);
+    app.send(b"o");
+    app.contains("done");
+}
+
+#[test]
+fn a_decision_delayed_past_the_timeout_never_delays_or_marks_the_confirmation() {
+    let (base, _decisions) = hint_provider(vec![HintReply::Sleep(Duration::from_secs(3))]);
+    let mut app = LiveApp::start(
+        &base,
+        "[decisions]\nmodel = \"fake-decider\"\nmode = \"on\"\n",
+    );
+    app.contains("fixture-model");
+    let sent = Instant::now();
+    app.send(b"write a.txt for me\r");
+    app.contains("Approve exact tool call");
+    assert!(
+        sent.elapsed() < Duration::from_secs(2),
+        "the confirmation waited on the decision model"
+    );
+    // decide.rs's own 2 s bound fires well before the fake's 3 s sleep ends;
+    // by 2.5 s the request has failed and no hint was ever stored.
+    app.settle(2_500);
+    assert!(
+        !app.screen_text().contains("fits the request"),
+        "a failed or slow decision must never show a line:\n{}",
+        app.screen_text()
+    );
+    app.send(b"o");
+    app.contains("done");
+}
+
+#[test]
+fn shadow_mode_records_the_hint_and_never_shows_the_line() {
+    let (base, decisions) = hint_provider(vec![HintReply::Answer(0.91)]);
+    let mut app = LiveApp::start(
+        &base,
+        "[decisions]\nmodel = \"fake-decider\"\nmode = \"shadow\"\n",
+    );
+    app.contains("fixture-model");
+    app.send(b"write a.txt for me\r");
+    app.contains("Approve exact tool call");
+    // No text to wait on distinguishes "recorded but not shown" from "not
+    // asked yet", so this settles a fixed interval and checks both sides.
+    app.settle(1_000);
+    assert!(
+        !app.screen_text().contains("fits the request"),
+        "shadow must never show the line:\n{}",
+        app.screen_text()
+    );
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        1,
+        "shadow still asks and records the hint"
+    );
+    app.send(b"o");
+    app.contains("done");
+}
+
+#[test]
+fn no_model_means_no_approval_hint_request() {
+    let (base, decisions) = hint_provider(vec![]);
+    let mut app = LiveApp::start(&base, "");
+    app.contains("fixture-model");
+    app.send(b"write a.txt for me\r");
+    app.contains("Approve exact tool call");
+    app.settle(1_000);
+    assert!(!app.screen_text().contains("fits the request"));
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        0,
+        "no model means no request ever reaches /v1/systemone"
+    );
+    app.send(b"o");
+    app.contains("done");
 }

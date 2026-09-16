@@ -11,8 +11,9 @@
 //! `docs/product/pane/sandbox-grants.md` §8.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -65,6 +66,29 @@ pub enum Decision {
     AllowOnce,
     AllowForSession,
     Deny,
+}
+
+/// The decision model's answer to "does this call fit the request" (F4,
+/// `decision-model.md`) -- informational only. It never changes [`Decision`],
+/// and it arrives on its own thread, after the confirmation is already shown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hint {
+    pub fits: f64,
+    pub asked_ms: u64,
+}
+
+/// The `[decisions]` model and mode, attached to a [`Gate`] once at session
+/// start (`with_decisions`). Shared by every clone of that gate, including
+/// the per-task clone a `Runtime` holds, so the counts below are session-wide.
+#[derive(Clone)]
+struct Decisions {
+    model: String,
+    mode: crate::config::DecisionMode,
+    /// This gate's cumulative count of approval hints that answered.
+    asked: Arc<AtomicU32>,
+    /// This gate's cumulative count of approval-hint requests that failed
+    /// or timed out.
+    failed: Arc<AtomicU32>,
 }
 
 /// A concrete canonical call. Full argument values are available only by an
@@ -156,6 +180,13 @@ pub struct Request {
     action: Action,
     reply: mpsc::SyncSender<Decision>,
     pending: Arc<AtomicBool>,
+    /// The approval hint, once the decision model has answered. Populated by
+    /// a background thread `Gate::admit` spawns; `None` before it answers,
+    /// on failure, or when no decision model is configured.
+    hint: Arc<Mutex<Option<Hint>>>,
+    /// Whether [`Self::hint_line`] may surface the hint at all -- `mode =
+    /// shadow` still fills [`Self::hint`] above, but never this gate.
+    show_hint: bool,
 }
 
 impl Request {
@@ -164,6 +195,21 @@ impl Request {
     }
     pub fn action(&self) -> &Action {
         &self.action
+    }
+
+    /// The recorded hint regardless of `mode` -- telemetry and tests read
+    /// this; the confirmation surface reads [`Self::hint_line`] instead.
+    pub fn hint(&self) -> Option<Hint> {
+        *self
+            .hint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The hint the confirmation surface may show: `None` before an answer
+    /// arrives, on failure, or with `mode = shadow` (recorded, never shown).
+    pub fn hint_line(&self) -> Option<Hint> {
+        if self.show_hint { self.hint() } else { None }
     }
 
     /// Returns false when the waiting callback has ended. A queued reply may
@@ -187,6 +233,11 @@ pub struct Gate {
     requests: mpsc::Sender<Request>,
     remembered: Arc<Mutex<BTreeSet<Action>>>,
     wait_clock: Option<Arc<WaitClock>>,
+    decisions: Option<Decisions>,
+    /// The current task's request text, attached to the clone a `Runtime`
+    /// holds for one task (`with_task`) -- `Gate` itself is session-scoped
+    /// and outlives any one task.
+    task: Option<String>,
 }
 
 impl Gate {
@@ -197,9 +248,47 @@ impl Gate {
                 requests,
                 remembered: Arc::new(Mutex::new(BTreeSet::new())),
                 wait_clock: None,
+                decisions: None,
+                task: None,
             },
             receiver,
         )
+    }
+
+    /// Attaches the `[decisions]` model and mode once, at session start
+    /// (`decision-model.md`). `None` leaves every clone of this gate exactly
+    /// as it is today: no thread, no request.
+    pub(crate) fn with_decisions(
+        mut self,
+        model: Option<String>,
+        mode: crate::config::DecisionMode,
+    ) -> Self {
+        self.decisions = model.map(|model| Decisions {
+            model,
+            mode,
+            asked: Arc::new(AtomicU32::new(0)),
+            failed: Arc::new(AtomicU32::new(0)),
+        });
+        self
+    }
+
+    /// Attaches the current task's request text to the clone a `Runtime`
+    /// holds for one task -- the approval hint's one `noul` question asks
+    /// whether a call fits this text.
+    pub(crate) fn with_task(mut self, task: String) -> Self {
+        self.task = Some(task);
+        self
+    }
+
+    /// This gate's cumulative approval-hint counts: `(answered, failed)`,
+    /// `(0, 0)` when no decision model is configured.
+    pub(crate) fn hint_counts(&self) -> (u32, u32) {
+        self.decisions.as_ref().map_or((0, 0), |decisions| {
+            (
+                decisions.asked.load(Ordering::Relaxed),
+                decisions.failed.load(Ordering::Relaxed),
+            )
+        })
     }
 
     pub(crate) fn with_wait_clock(mut self) -> Self {
@@ -236,16 +325,79 @@ impl Gate {
         let pending = Arc::new(AtomicBool::new(true));
         let _pending = Pending(pending.clone());
         let (reply, response) = mpsc::sync_channel(1);
+        let hint = Arc::new(Mutex::new(None));
+        let show_hint = self
+            .decisions
+            .as_ref()
+            .is_some_and(|decisions| decisions.mode == crate::config::DecisionMode::On);
         if self
             .requests
             .send(Request {
                 action: action.clone(),
                 reply,
                 pending,
+                hint: hint.clone(),
+                show_hint,
             })
             .is_err()
         {
             return false;
+        }
+        // The confirmation above is already sent to the human; this thread
+        // never delays it. Human approval waits up to ten minutes (line 23),
+        // and the decision model answers in ~0.5-1s (phase-66.md's Provider
+        // facts) or times out at its own two-second bound (`decide.rs`), so
+        // the hint is almost always ready before anyone reads the prompt.
+        if let Some(decisions) = self.decisions.clone()
+            && decisions.mode != crate::config::DecisionMode::Off
+        {
+            let task = self.task.clone().unwrap_or_default();
+            let tool = action.tool().to_string();
+            let summary = action.summary();
+            thread::spawn(move || {
+                let state = serde_json::json!({
+                    "request": task,
+                    "tool": tool,
+                    "summary": summary,
+                });
+                let questions = [(
+                    "fits".to_string(),
+                    crate::decide::Question::Noul {
+                        instructions: "The tool call fits what the request asked for \
+                                       and does nothing beyond it."
+                            .to_string(),
+                    },
+                )];
+                match crate::decide::decide(&decisions.model, state, &questions) {
+                    Ok(answers) => {
+                        let answer = answers
+                            .decisions
+                            .into_iter()
+                            .find(|decision| decision.key == "fits");
+                        match answer {
+                            Some(crate::decide::Decision {
+                                answer: crate::decide::Answer::Noul(fits),
+                                latency_ms,
+                                ..
+                            }) => {
+                                decisions.asked.fetch_add(1, Ordering::Relaxed);
+                                if let Ok(mut slot) = hint.lock() {
+                                    *slot = Some(Hint {
+                                        fits,
+                                        asked_ms: latency_ms,
+                                    });
+                                }
+                            }
+                            _ => {
+                                decisions.failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        decisions.failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
         }
         loop {
             if stopped() || waiting_started.elapsed() >= MAX_APPROVAL_WAIT {

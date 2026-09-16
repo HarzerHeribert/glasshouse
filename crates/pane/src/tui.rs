@@ -35,10 +35,16 @@ const NOT_CONNECTED: &str = "Glasshouse not connected.";
 
 /// Modal confirmation drawn last, above all other surfaces. The terminal
 /// owner retains the request and is the only code that can answer it.
+///
+/// `hint` is the approval hint (F4, `decision-model.md`): the caller passes
+/// `Request::hint_line()`, already gated by `mode` -- `None` here never
+/// distinguishes "no model", "not answered yet" and "shadow" from each other,
+/// because none of the three ever change what is drawn.
 pub fn render_approval(
     frame: &mut Frame<'_>,
     confirmation: &crate::approval::Confirmation,
     scroll: u16,
+    hint: Option<crate::approval::Hint>,
 ) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(100);
@@ -91,8 +97,15 @@ pub fn render_approval(
     } else {
         "[d/Esc] Deny · This action cannot be approved because its complete details exceed the display limit"
     };
+    let footer_text = match hint {
+        Some(hint) => format!(
+            "fits the request: {:.2} (decision, {} ms)\n{choices}",
+            hint.fits, hint.asked_ms
+        ),
+        None => choices.to_string(),
+    };
     frame.render_widget(
-        Paragraph::new(choices)
+        Paragraph::new(footer_text)
             .style(Style::default().fg(ACCENT))
             .wrap(Wrap { trim: false }),
         footer,

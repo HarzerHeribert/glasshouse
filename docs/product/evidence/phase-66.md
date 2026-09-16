@@ -122,3 +122,21 @@ came back at 0.98–1.00); `completion_yes_above` 0.90 would have spared the che
 **Gates.** `cargo test -p pane --test decisions`: 16 passed, 0 failed; `--test evidence_gate --test final_state_contract --test config`: 9 + 6 + 17; `--test settings_store --test session_output`: 29 + 9; `--lib`: 375 passed; fmt and clippy clean; the targeted gate (9 files) green on the worker's tree twice and again on the merged tree at integration.
 
 **Limits.** The two thresholds are defaults, not a calibration; `shadow` telemetry on real tasks decides them. A confident yes proves nothing the acceptance list or the final-state contract did not already decide mechanically. `Question::Noul` carries `instructions` only — the documented optional `criteria {true, false}` is folded into the sentence (Debt, one line, if a live probe shows the criteria matter). The hunk-boundary cut assumes one hunk header per changed file, which is `changes.rs`'s shape today. Not exercised: a live decision model. **Ruling at integration:** the worker's first version cached the answer for the whole task, so a task fixed after a confident no would have finished `verified = false` against a stale answer; the addendum keyed the cache by the diff, and the second mutation pins it.
+
+## Addendum — the approval hint (F4), no map line
+
+**State: COMPLETE** (2026-09-17, `GH-PANE-APPROVAL-HINT`, Sonnet high, Amber; report `.agent-runtime/report-pane-approval-hint.md`; integrated by the primary with a three-way apply — the worker's `decision-model.md` §6 edit and the preflight package's collided, both kept).
+
+**Contract.** Given a decision model and `mode` on or shadow, when a tool call waits for the person's confirmation, Pane asks one `noul` in the background — does this call fit the request and nothing beyond it — over `{request, tool, summary}`; `on` draws one extra line beside the confirmation (`fits the request: 0.91 (decision, 640 ms)`), `shadow` records it only; the confirmation is drawn first and never waits, and a failed, slow or absent decision leaves it exactly as today. The hint never changes `Decision`.
+
+**Production.** `crates/pane/src/approval.rs :: Gate::admit` (the thread, after the confirmation is sent), `Gate::with_decisions`/`with_task`, `Request::hint_line` (mode-gated); `session.rs` wires `[decisions]` into the gate and the task text into its per-task clone; `tui.rs :: render_approval` draws the line; telemetry `approval_hints`/`approval_hint_failures` in `session/task.rs`.
+
+**Tests.** `tests/approval_boundary.rs::{a_hint_that_answers_in_time_is_shown_beside_the_confirmation, a_decision_delayed_past_the_timeout_never_delays_or_marks_the_confirmation, shadow_mode_records_the_hint_and_never_shows_the_line, no_model_means_no_approval_hint_request}`, `tests/tui.rs::render_approval_shows_the_hint_line_only_when_one_is_present`.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| Shadow never shows the line | `approval.rs`: `mode == DecisionMode::On` → `… \|\| true` | `approval_boundary::shadow_mode_records_the_hint_and_never_shows_the_line` | KILLED (assertion at approval_boundary.rs:830) |
+
+**Gates.** `cargo test -p pane --test approval_boundary`: 17 passed; `--test tui`: 34; `--test competitive_approvals`: 3; `--test session`: 105; the targeted blast radius exit 0 in the worktree and again on the merged tree.
+
+**Limits.** Telemetry counts lag one cell when the hint answers after the task's last cell (the line itself does not). Whether the hint changes what people approve is unmeasured; it is a line, not a gate.
