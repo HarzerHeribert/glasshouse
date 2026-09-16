@@ -21,9 +21,17 @@
 //!
 //! # What each test is for
 //!
+//! Lines 1712 and 1720 lost their tests on 2026-09-16
+//! (design-decisions.md, "Glasshouse never decides which model is used"):
+//! both were about the automatic ranking's own behaviour and its
+//! announcements, and `glasshouse launch` no longer ranks anything —
+//! `--to`, `--fresh` and naming neither are the whole of what a launch
+//! decides now. Line 1714/1715's test survives because `--to`/`--fresh`
+//! still do what they always did; it no longer proves they beat a ranking,
+//! only that they are honoured.
+//!
 //! | line | test |
 //! |---|---|
-//! | 1712 | [`automatic_routing_can_be_turned_off_and_the_launch_says_so`], [`the_no_routing_flag_turns_the_ranking_off_for_one_launch`] |
 //! | 1713 | [`pinning_a_harness_opens_that_harness_and_not_the_other_one`] |
 //! | 1714, 1715 | [`to_and_fresh_override_a_ranking_that_would_have_chosen_otherwise`] |
 //! | 1716 | [`checkpoint_first_leaves_a_checkpoint_for_the_session_being_left`], [`checkpoint_first_says_when_it_had_nothing_to_check_point`], [`checkpoint_first_on_a_resume_leaves_a_checkpoint_for_the_session_being_left`], [`checkpoint_first_on_a_resume_of_the_session_in_hand_says_it_had_nothing_to_do`] |
@@ -32,7 +40,6 @@
 //! | 2479 | [`socket_path_prints_the_path_the_client_would_use_and_exits_zero_with_no_door_listening`] |
 //! | 1718 | [`a_person_takes_over_an_orchestrated_worker_and_the_orchestrator_is_locked_out`] |
 //! | 1719 | [`a_persons_keystroke_outranks_a_machine_message_to_the_same_session`] |
-//! | 1720 | [`every_automated_move_is_announced_before_it_happens`] |
 
 #![cfg(unix)]
 
@@ -229,119 +236,6 @@ fn install_argv_logging_harness(bin_dir: &Path, name: &str, log: &Path) -> PathB
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
     path
-}
-
-// ---------------------------------------------------------------------------
-// Line 1712 — the off switch
-// ---------------------------------------------------------------------------
-
-/// **Line 1712, through configuration.** *"Allow the user to disable
-/// automatic routing for the current Glasshouse instance."*
-///
-/// The first launch leaves a warm, resumable session behind, which
-/// `route_command::a_second_launch_continues_the_warm_session_rather_than_starting_another`
-/// proves the ranking continues. With `automatic = false` under `[routing]`,
-/// the second launch must **not** continue it: a second session is recorded
-/// and the harness is started fresh rather than with `--resume`.
-///
-/// The behavioural assertion is first and the message second, on purpose
-/// (practice §80): a mutation that removed the off switch would also remove
-/// the sentence, and a KILLED credited to a missing *message* would say
-/// nothing about where the work went.
-#[test]
-fn automatic_routing_can_be_turned_off_and_the_launch_says_so() {
-    let fixture = Launcher::with_extra_config("\n[routing]\nautomatic = false\n");
-
-    let first = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    assert!(
-        first.status.success(),
-        "the first launch must succeed:\n{}",
-        Launcher::both_streams(&first)
-    );
-    assert_eq!(fixture.recorded_sessions().len(), 1);
-
-    let second = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    let said = Launcher::both_streams(&second);
-    assert!(
-        second.status.success(),
-        "the second launch must succeed:\n{said}"
-    );
-
-    assert_eq!(
-        fixture.recorded_sessions().len(),
-        2,
-        "with automatic routing off, a launch takes no routing decision — so the warm session \
-         this project has is not continued and a new one is recorded. This is the assertion \
-         that fails when `launch_session` stops reading `EffectiveConfig::automatic_routing`:\n\
-         {said}"
-    );
-    let invocations = fixture.claude_invocations();
-    assert_eq!(
-        invocations.len(),
-        2,
-        "the harness ran twice:\n{invocations:?}"
-    );
-    assert!(
-        invocations.iter().all(|argv| !argv.contains("--resume")),
-        "nothing was resumed with routing off:\n{invocations:?}"
-    );
-
-    assert!(
-        said.contains("automatic routing is off"),
-        "a launch that took no routing decision must say so — a person who turned the ranking \
-         off still needs to know that is why nothing was continued:\n{said}"
-    );
-    assert!(
-        said.contains("glasshouse route"),
-        "and it must point at the command that answers `what would it have chosen`, because \
-         this launch deliberately did not compute that:\n{said}"
-    );
-    assert!(
-        !said.contains("continuing session"),
-        "with routing off there is no continuation to announce:\n{said}"
-    );
-}
-
-/// **Line 1712, for one launch.** The same switch as a flag, with the
-/// configuration left alone: `--no-routing` turns the ranking off for this
-/// invocation and the next launch without it behaves exactly as before.
-///
-/// The second half is what makes this a test of a *per-launch* control rather
-/// than of the same code path twice.
-#[test]
-fn the_no_routing_flag_turns_the_ranking_off_for_one_launch() {
-    let fixture = Launcher::new();
-
-    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    assert_eq!(fixture.recorded_sessions().len(), 1);
-
-    let off = fixture.glasshouse(&["launch", "claude-code", "--headless", "--no-routing"]);
-    let said = Launcher::both_streams(&off);
-    assert!(off.status.success(), "`--no-routing` must launch:\n{said}");
-    assert_eq!(
-        fixture.recorded_sessions().len(),
-        2,
-        "`--no-routing` starts a session rather than continuing the warm one:\n{said}"
-    );
-    assert!(
-        said.contains("--no-routing"),
-        "the announcement must name the flag that turned the ranking off, not just the state, \
-         so a person can tell a one-off from their configuration:\n{said}"
-    );
-
-    // And the very next launch, without the flag, routes again.
-    let on = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    let said_on = Launcher::both_streams(&on);
-    assert_eq!(
-        fixture.recorded_sessions().len(),
-        2,
-        "a launch without `--no-routing` continues a warm session again — the flag was for one \
-         launch and changed nothing standing:\n{said_on}"
-    );
-    assert!(
-        said_on.contains("continuing session"),
-        "and it announces the continuation as it always did:\n{said_on}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -673,86 +567,6 @@ fn checkpoint_first_on_a_resume_of_the_session_in_hand_says_it_had_nothing_to_do
         fixture.checkpoint_listing().contains("No checkpoints"),
         "and it must not have invented one:\n{}",
         fixture.checkpoint_listing()
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Line 1720 — no automated move is silent
-// ---------------------------------------------------------------------------
-
-/// **Line 1720.** *"Surface automation decisions instead of silently moving
-/// work between sessions."*
-///
-/// One test over every sentence `launch_session` can reach, because the claim
-/// is about coverage rather than about any one message: an announcement block
-/// that covers three of four decisions is one silent move away from the
-/// failure this line names.
-///
-/// Each section names the decision it is about and asserts the sentence for
-/// it. What is deliberately **not** asserted is a fresh session the *ranking*
-/// chose over one it could have continued: see this test's own note below.
-#[test]
-fn every_automated_move_is_announced_before_it_happens() {
-    let fixture = Launcher::new();
-
-    // 1. A continuation. The ranking moved the work into a session the person
-    //    did not name, which is the case line 1720 is written against.
-    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    let continued = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
-    let said = Launcher::both_streams(&continued);
-    assert!(
-        said.contains("continuing session"),
-        "a launch that continues an existing session must not do it silently:\n{said}"
-    );
-
-    // 2. An override that was honoured. The person's flag won, and what it
-    //    displaced is named — otherwise the person cannot tell that their
-    //    flag changed anything.
-    let overridden = fixture.glasshouse(&["launch", "claude-code", "--headless", "--fresh"]);
-    let said = Launcher::both_streams(&overridden);
-    assert!(
-        said.contains("because you named it") && said.contains("would have chosen"),
-        "an honoured override must say what the ranking would have done instead:\n{said}"
-    );
-
-    // 3. An override that was refused. A destination that does not exist is
-    //    not a destination, and a launch that silently used the ranking's own
-    //    answer instead would have moved the work somewhere nobody asked for.
-    let refused = fixture.glasshouse(&[
-        "launch",
-        "claude-code",
-        "--headless",
-        "--to",
-        "fresh:claude-code:not-a-profile-anybody-configured",
-    ]);
-    let said = Launcher::both_streams(&refused);
-    assert!(
-        said.contains("was not applied"),
-        "a refused override must say it was refused:\n{said}"
-    );
-
-    // 4. Routing off. Covered by its own test for behaviour; asserted here
-    //    for presence in the same block, because the claim of this test is
-    //    that the block covers every case rather than that each case works.
-    let off = fixture.glasshouse(&["launch", "claude-code", "--headless", "--no-routing"]);
-    let said = Launcher::both_streams(&off);
-    assert!(
-        said.contains("automatic routing is off"),
-        "a launch that took no routing decision must say so:\n{said}"
-    );
-
-    // 5. A forced checkpoint, in both of its outcomes.
-    let no_op = fixture.glasshouse(&[
-        "launch",
-        "claude-code",
-        "--headless",
-        "--fresh",
-        "--checkpoint-first",
-    ]);
-    let said = Launcher::both_streams(&no_op);
-    assert!(
-        said.contains("--checkpoint-first had nothing to check point"),
-        "a checkpoint that was not needed must say so rather than pass silently:\n{said}"
     );
 }
 

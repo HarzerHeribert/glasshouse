@@ -3,14 +3,19 @@
 use glasshouse::Runtime;
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 
-/// What one routing decision classified the work as, and the facts that
-/// answer was conditioned on — Phase 34D's answer beside Phase 34E's
-/// fingerprint. `None` from [`classify_for_routing`] when no task was
-/// stated, which is every launch and every `route` that reproduces the
-/// pre-classification behaviour byte for byte.
+/// What one routing decision classified the work as — Phase 34D's answer.
+/// `None` from [`classify_for_routing`] when no task was stated, which is
+/// every launch and every `route` that reproduces the pre-classification
+/// behaviour byte for byte.
+///
+/// Carried no `fingerprint` field as of 2026-09-16: its only reader was
+/// `launch_session`'s sticky-cache write, and `launch_session` no longer
+/// classifies a task at all (design-decisions.md, "Glasshouse never decides
+/// which model is used"). `glasshouse route` — this type's other
+/// constructor — never wrote the sticky cache either (`sticky: None`), so
+/// the field had exactly one reader and it is gone.
 pub(crate) struct ClassifiedRouting {
     pub(crate) answer: glasshouse::routing::request::RouterAnswer,
-    pub(crate) fingerprint: glasshouse::routing::request::RoutingFingerprint,
 }
 
 /// Everything [`classify_for_routing`] needs to build the router request
@@ -225,10 +230,7 @@ pub(crate) fn classify_for_routing(
             }
         }
     };
-    Some(ClassifiedRouting {
-        answer,
-        fingerprint,
-    })
+    Some(ClassifiedRouting { answer })
 }
 
 /// Line 1469's routing-model identity, for the text-keyed cache: the model
@@ -340,6 +342,16 @@ impl ClassificationStickyCache {
         glasshouse::routing::request::StickyClassification::from_json(&bytes)
     }
 
+    /// No production caller as of 2026-09-16: `launch_session`'s own
+    /// `remember_classification` was the only writer, and `launch_session`
+    /// no longer classifies a task at all (design-decisions.md, "Glasshouse
+    /// never decides which model is used"). `#[allow(dead_code)]` rather
+    /// than deleting it — `src/tests.rs`'s
+    /// `concurrent_sticky_classification_writes_never_produce_a_mixed_file`
+    /// still calls it directly, and that file is this packet's to leave
+    /// alone; the deletion package removes this type along with the rest of
+    /// the module.
+    #[allow(dead_code)]
     pub(crate) fn store(&self, record: &glasshouse::routing::request::StickyClassification) {
         let attempt = (|| -> std::io::Result<()> {
             if let Some(parent) = self.path.parent() {

@@ -60,3 +60,85 @@ pub(crate) fn format_age(timestamp: i64) -> String {
         s => format!("{}d ago", s / 86_400),
     }
 }
+
+/// Phase 56 line 1954's *"announce which subscription served each session"*,
+/// said on stderr beside the launch/resume announcements, before the session
+/// exists. `None` is announced as what it is — no entry names this resource,
+/// or the gateway has not assigned an upstream yet — rather than as a
+/// entitlement nobody configured.
+///
+/// `gateway_provider` is read only for the `GlasshouseGateway` / `None` case:
+/// the gateway's serving provider once it is known, so that case can say
+/// *which* provider no entry names instead of the pre-Phase-56/1954-gateway
+/// text that was true only because nothing asked yet. `None` there means
+/// exactly what it always meant — the gateway has not resolved an upstream
+/// for this call, which is still true of every caller other than
+/// `launch_session`'s gateway branch and `resume_session`'s announcement.
+///
+/// Relocated from `commands::routing_destinations` (Phase 59 decomposition;
+/// design-decisions.md, 2026-09-16, "Glasshouse never decides which model is
+/// used") since that module is scheduled for deletion and carries no ranking
+/// logic of its own — it is pure rendering, called by both `launch::launch_session`
+/// and `resume::resume_session`.
+pub(crate) fn announce_entitlement(
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
+    profile: &glasshouse::profile::LaunchProfile,
+    gateway_provider: Option<&str>,
+) {
+    use glasshouse::profile::BackendResource;
+
+    match entitlement {
+        Some(entitlement) => {
+            let served_by = entitlement.name();
+            eprintln!(
+                "glasshouse: entitlement `{served_by}` ({}) will serve this session.",
+                entitlement.describe()
+            );
+        }
+        None => match &profile.backend {
+            BackendResource::DirectProvider { provider } => eprintln!(
+                "glasshouse: no `[entitlements]` entry names provider `{provider}`, so no \
+                 entitlement rule applies to this session."
+            ),
+            BackendResource::GlasshouseGateway => match gateway_provider {
+                Some(provider) => eprintln!(
+                    "glasshouse: no `[entitlements]` entry names the gateway's provider \
+                     `{provider}`, so no entitlement rule applies to this session."
+                ),
+                None => eprintln!(
+                    "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
+                     starts, so no entitlement is named at launch."
+                ),
+            },
+            BackendResource::Native => eprintln!(
+                "glasshouse: no entitlement describes {}'s own sign-in.",
+                profile.harness.display_name()
+            ),
+        },
+    }
+}
+
+/// Line 1954's refusal check, extracted once so the direct/native path
+/// (asked before the gateway exists) and the gateway path (asked after it
+/// starts, once its serving provider is known) apply exactly one spelling of
+/// the refusal text — see practice §35 on what happens when a check like
+/// this gets copied instead.
+///
+/// Relocated from `commands::routing_destinations` alongside
+/// [`announce_entitlement`], for the same reason.
+pub(crate) fn entitlement_refusal_message(
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
+    harness: glasshouse::integrations::IntegrationId,
+    launch_profile_name: &str,
+) -> Option<String> {
+    let entitlement = entitlement?;
+    let refused = entitlement.rules().refusal(harness, None)?;
+    Some(format!(
+        "glasshouse: not starting this session — entitlement `{}` does not serve {refused}, \
+         and launch profile `{}` would charge it. Change the rule under `[entitlements.{}]`, \
+         or launch under a profile whose entitlement serves this work.",
+        entitlement.name(),
+        launch_profile_name,
+        entitlement.name()
+    ))
+}

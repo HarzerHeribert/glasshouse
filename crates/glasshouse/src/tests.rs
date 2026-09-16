@@ -240,43 +240,6 @@ fn every_gateway_the_binary_starts_is_given_somewhere_to_report_a_failure() {
     );
 }
 
-/// Capability map line 1851's structural half: every gateway this binary
-/// starts is also told where to report what the failure-domain term did
-/// to a failover it takes.
-///
-/// The same standing and the same limits as the two scans above — it
-/// proves *presence*, not behaviour, and line 1851 does not close on it.
-/// `evaluation_producers::a_failover_the_domain_term_prevented_is_\
-/// counted_and_one_it_did_not_is_not` is what proves the behaviour, and it
-/// enters at `start_if_required_with_degrade_sink`, the very door both
-/// sites below call. What it cannot see is these two arguments: a launch
-/// that fails over needs a gateway-backed profile, a provider that really
-/// answers badly, and a harness process that really talks to it, and
-/// nothing in this crate builds all three. So this is the §35 guard for
-/// the one link that test cannot reach — an edit dropping either site
-/// back to `None` would otherwise leave every suite green with line
-/// 1851's producer unreachable from the shipped binary.
-#[test]
-fn every_gateway_the_binary_starts_is_told_where_to_report_a_prevented_failover() {
-    let code = all_production_code();
-
-    let starts = code.matches("start_if_required_with_degrade_sink(").count();
-    let sinks = code
-        .matches("Some(crate::commands::routing_destinations::failover_prevention_sink(runtime)),")
-        .count();
-    assert_eq!(
-        starts, 2,
-        "this binary should start a gateway at exactly two sites (launch and \
-         resume); if that changed, this test needs to change with it"
-    );
-    assert_eq!(
-        sinks, starts,
-        "a gateway is started somewhere without a failover-prevention sink, so what \
-         failure-domain evidence did to its failovers would be counted nowhere — which \
-         is the state map line 1851 was left in"
-    );
-}
-
 /// This file's own source, with its `#[cfg(test)]` block (and `//`
 /// comments) stripped — the same idiom as
 /// `harness::resolving_a_launch_profile_touches_no_files`'s
@@ -614,29 +577,6 @@ fn an_unacknowledged_bypass_also_starts_no_process_and_records_no_session() {
 
 // --- map line 372 clause 2: automatic routing selects the profile too -
 
-/// The most recent routing decision `launch_session` recorded, as the
-/// `fresh:<harness>:<profile>` id [`record_routing_decision`] wrote —
-/// read back through the same evaluation ledger `glasshouse route`'s own
-/// counters read, rather than by capturing stderr, which this test
-/// module has no idiom for.
-fn last_routed_destination(runtime: &Runtime) -> String {
-    use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
-
-    let ledger = EvaluationObservations::open(runtime).unwrap();
-    let rows = ledger
-        .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 1)
-        .unwrap();
-    assert_eq!(
-        rows.len(),
-        1,
-        "launch_session must record exactly one routing decision when it routes at all"
-    );
-    rows[0]
-        .detail
-        .clone()
-        .expect("a routing-continuation row always carries the destination id")
-}
-
 /// Line 372 clause 1's own mechanism (`enabled = false`), reused here so
 /// the profile that alphabetically leads every name in this fixture is
 /// never a legal candidate — which is what makes a winner other than it
@@ -662,101 +602,6 @@ fn unacknowledged_bypass_profile(
     let mut profile = glasshouse::config::ProfileConfig::new(harness);
     profile.set_approval(glasshouse::config::ProfileApproval::Bypass);
     profile
-}
-
-/// Required behaviour 1: automatic on, no pinned profile — the ranked
-/// winner among the *enabled* profiles is what launches, and it is not
-/// simply the first configured name.
-///
-/// `aaa-disabled` sorts first among every configured name (including
-/// `native`) and is disabled, so it can never be offered at all —
-/// `bbb-yolo` is the only other non-native candidate, and it and
-/// `native` are the same backend class, so nothing but their id order
-/// separates them for the router in this bare fixture. A mutation that
-/// swaps the ranked winner for `effective.profile_names()`'s first
-/// element would answer `aaa-disabled`, which is not even an enabled
-/// candidate — so this fails loudly rather than by coincidence.
-#[test]
-fn automatic_routing_selects_among_enabled_profiles_when_none_is_pinned() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runtime = fixture_with_enabled_claude_code(tmp.path());
-    let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
-
-    let mut user = UserConfig::load(runtime.paths()).unwrap();
-    user.profiles_mut()
-        .set("aaa-disabled", disabled_profile(harness));
-    user.profiles_mut()
-        .set("bbb-yolo", unacknowledged_bypass_profile(harness));
-    user.save(runtime.paths()).unwrap();
-
-    let status = crate::commands::launch::launch_session(
-        &runtime,
-        Some("claude-code"),
-        crate::commands::launch::LaunchDestination::default(),
-        &ResponseRequest::default(),
-        false,
-        false,
-        crate::commands::launch::ExternalPresentation::Embedded,
-        &[],
-        None,
-    )
-    .unwrap();
-    // `bbb-yolo` wins the ranking (see above) and then fails the same
-    // unacknowledged-bypass check the pinned case does — after routing
-    // decided, before any process starts.
-    assert_eq!(status, ExitCode::FAILURE);
-    let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
-    assert!(sessions.store().list().unwrap().is_empty());
-
-    assert_eq!(
-        last_routed_destination(&runtime),
-        "fresh:claude-code:bbb-yolo",
-        "the ranking's winner must be an enabled profile the router actually ranked, not \
-         `aaa-disabled` — the first configured name, and disabled"
-    );
-}
-
-/// Required behaviour 2: automatic on, a profile pinned with `--profile`
-/// — the pin wins exactly as it always has, even when the ranking would
-/// have preferred a different enabled profile.
-#[test]
-fn a_pinned_profile_still_beats_the_automatic_ranking() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runtime = fixture_with_enabled_claude_code(tmp.path());
-    let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
-
-    let mut user = UserConfig::load(runtime.paths()).unwrap();
-    // Unpinned, the ranking would prefer `bbb-yolo` (it sorts first and
-    // ties with `ccc-yolo` on every axis in this bare fixture) — pinning
-    // `ccc-yolo` instead must still be what launches.
-    user.profiles_mut()
-        .set("bbb-yolo", unacknowledged_bypass_profile(harness));
-    user.profiles_mut()
-        .set("ccc-yolo", unacknowledged_bypass_profile(harness));
-    user.save(runtime.paths()).unwrap();
-
-    let status = crate::commands::launch::launch_session(
-        &runtime,
-        Some("claude-code"),
-        crate::commands::launch::LaunchDestination {
-            profile: Some("ccc-yolo"),
-            ..crate::commands::launch::LaunchDestination::default()
-        },
-        &ResponseRequest::default(),
-        false,
-        false,
-        crate::commands::launch::ExternalPresentation::Embedded,
-        &[],
-        None,
-    )
-    .unwrap();
-    assert_eq!(status, ExitCode::FAILURE);
-
-    assert_eq!(
-        last_routed_destination(&runtime),
-        "fresh:claude-code:ccc-yolo",
-        "an explicit `--profile` pin must win over the ranking's own preference"
-    );
 }
 
 /// Required behaviour 3: automatic routing off leaves the launch path

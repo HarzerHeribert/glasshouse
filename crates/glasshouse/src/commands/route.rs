@@ -1270,6 +1270,15 @@ pub(crate) fn routing_moment_from_str(
 /// module now compile on every platform because the MCP door reaches them
 /// over stdio, so this is live everywhere too — and a gate left here would
 /// be a Windows build error, which the cross-check caught.
+///
+/// No caller as of 2026-09-16: its one consumer was
+/// `api::unix::routing::recommend_route`, deleted with the control-API
+/// mirror of `glasshouse route` (design-decisions.md, "Glasshouse never
+/// decides which model is used"). `#[allow(dead_code)]` rather than
+/// deleting it — this file is GH-GLASSHOUSE-LAUNCH-NO-RANKING's to leave
+/// compiling, not to edit; the deletion package removes it with the rest of
+/// `route.rs`.
+#[allow(dead_code)]
 pub(crate) fn routing_moment_slug(
     moment: glasshouse::routing::session::RoutingMoment,
 ) -> &'static str {

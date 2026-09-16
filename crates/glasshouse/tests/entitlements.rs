@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
+use clap::Parser as _;
 use glasshouse::config::pairing::{WarmSession, WarmSessionState};
 use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::integrations::IntegrationId;
@@ -577,6 +578,36 @@ impl Binary {
         assert!(out.status.success(), "the launch must succeed:\n{said}");
         said
     }
+
+    /// The one recorded session — `glasshouse launch` no longer ranks this
+    /// project's sessions against a new one (design-decisions.md, 2026-09-16,
+    /// "Glasshouse never decides which model is used"), so a continuation
+    /// this fixture wants to observe has to name the session by id through
+    /// `--to` rather than rely on a bare launch picking it automatically.
+    fn only_session_id(&self) -> String {
+        let cli = glasshouse::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            self.base.join("data").to_str().unwrap(),
+            "--config-dir",
+            self.base.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = glasshouse::bootstrap(&cli, &self.root).unwrap();
+        let conn = rusqlite::Connection::open(runtime.database_path()).unwrap();
+        let mut statement = conn.prepare("SELECT id FROM sessions").unwrap();
+        let ids: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected exactly one recorded session: {ids:?}"
+        );
+        ids.into_iter().next().unwrap()
+    }
 }
 
 /// Write the shared fixture executable once per test binary instead of once
@@ -859,21 +890,21 @@ fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name(
     );
 }
 
-/// **The announcement on the path that continues.** The second launch is
-/// steered by the router into the session the first one started, and says
-/// which entitlement that session is charged to — the same entry, resolved
-/// by the same function.
+/// **The announcement on the path that continues.** A second launch naming
+/// the first one's session by `--to` continues it, and says which
+/// entitlement that session is charged to — the same entry, resolved by the
+/// same function.
 #[test]
 fn a_continued_session_announces_its_entitlement() {
-    // MAX_PLAN alone, no provider profiles: continuation IS the router
-    // steering the second launch, so automatic routing must stay on — and
-    // since map line 372 closed, an unpinned launch under automatic routing
-    // ranks every enabled profile, so the native entitlement this test
-    // announces must be the only candidate for the first launch to be
-    // native.
     let binary = Binary::with_config(MAX_PLAN);
     binary.launch_ok(None);
-    let said = binary.launch_ok(None);
+    let id = binary.only_session_id();
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--to", &id]);
+    let said = Binary::both_streams(&out);
+    assert!(
+        out.status.success(),
+        "the continuation must launch:\n{said}"
+    );
     assert!(said.contains("continuing session"), "{said}");
     assert!(
         said.contains(
@@ -884,23 +915,16 @@ fn a_continued_session_announces_its_entitlement() {
     assert_eq!(binary.harness_invocations().len(), 2);
 }
 
-/// **The launch the router never sees.** With routing off (`--no-routing`,
-/// or `automatic = false` under `[routing]`) `routing_destinations` and
-/// `choose` do not run, so the router's gate cannot refuse anything — and
-/// line 1954 says *never*. The launch path asks the same
-/// `EntitlementRules::refusal` once more, for the harness half a rule can
-/// answer without a classification, and refuses by name.
+/// **The launch path applies the harness rule.** `glasshouse launch` no
+/// longer ranks destinations at all (design-decisions.md, 2026-09-16,
+/// "Glasshouse never decides which model is used"), so there is no router
+/// gate left to ask — the launch path applies `EntitlementRules::refusal`
+/// directly, for the harness half a rule can answer without a
+/// classification, and refuses by name.
 #[test]
 fn a_routing_off_launch_still_applies_the_harness_rule() {
     let binary = Binary::with_config(&format!("{PROFILES}{TEAM_KEY_DENIES_CLAUDE_CODE}"));
-    let refused = binary.glasshouse(&[
-        "launch",
-        "claude-code",
-        "--headless",
-        "--no-routing",
-        "--profile",
-        "alpha",
-    ]);
+    let refused = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "alpha"]);
     let said = Binary::both_streams(&refused);
     assert!(!refused.status.success(), "{said}");
     assert!(
@@ -909,74 +933,13 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
     );
     assert!(binary.harness_invocations().is_empty());
 
-    // And with routing off the admitted profile still launches, announced.
-    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--no-routing"]);
+    // And the admitted profile still launches, announced.
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
     let said = Binary::both_streams(&out);
     assert!(out.status.success(), "{said}");
     assert!(
         said.contains(
             "entitlement `claude-code` (Claude Code's own sign-in) will serve this session."
-        ),
-        "{said}"
-    );
-    assert_eq!(binary.harness_invocations().len(), 1);
-}
-
-/// **The router-side guard's own work: a tier refusal of a launch's sole
-/// destination.** A launch that states heavy work under a profile whose
-/// entitlement denies heavy work is refused by name before anything starts —
-/// and only the router can refuse it, because the tier exists only once the
-/// task is classified; the harness-half gate after the profile resolves has
-/// no tier to read. The mutation this test exists to kill
-/// (`launch-guard-removed`) survived every other test in this file, because
-/// each of those launches was also refused by the harness half.
-#[test]
-fn a_launch_stating_heavy_work_is_refused_by_a_tier_rule_before_anything_starts() {
-    const NO_HEAVY_WORK: &str = "\n\
-         [entitlements.team-key]\nprovider = \"alpha-probe\"\n\
-         deny_tiers = [\"heavy\", \"frontier\"]\n";
-    let binary = Binary::with_config(&format!("{PROFILES}{NO_HEAVY_WORK}"));
-
-    let refused = binary.glasshouse(&[
-        "launch",
-        "claude-code",
-        "--headless",
-        "--profile",
-        "alpha",
-        "--task",
-        "run the whole test suite in the terminal and fix whatever breaks",
-    ]);
-    let said = Binary::both_streams(&refused);
-    assert!(
-        !refused.status.success(),
-        "heavy work charged to an entitlement that denies heavy work must be refused:\n{said}"
-    );
-    assert!(
-        said.contains("entitlement `team-key` does not serve the `heavy` tier"),
-        "{said}"
-    );
-    assert!(
-        binary.harness_invocations().is_empty(),
-        "nothing may have been started: {:?}",
-        binary.harness_invocations()
-    );
-
-    // The same profile, leaf-shaped work: admitted, and announced as an API
-    // key behind its provider.
-    let out = binary.glasshouse(&[
-        "launch",
-        "claude-code",
-        "--headless",
-        "--profile",
-        "alpha",
-        "--task",
-        "what is a monad",
-    ]);
-    let said = Binary::both_streams(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(
-        said.contains(
-            "entitlement `team-key` (behind provider `alpha-probe`) will serve this session."
         ),
         "{said}"
     );

@@ -21,7 +21,6 @@ mod checkpoints;
 mod events;
 mod inbox;
 mod memory;
-mod routing;
 mod sessions;
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glasshouse::Runtime;
+use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::events::{EventBus, EventLog, EventLogSink, EventSink};
 use glasshouse::guardrails::{NewAssumption, NewTransition};
 use glasshouse::policy;
@@ -51,7 +51,6 @@ use assumptions::{
 use checkpoints::{get_checkpoint, request_checkpoint};
 use events::{WatchState, Watches, project_events, pump_watches, watch_worker, watching};
 use memory::{Injected, current_memory, deliver_memory, get_memory, query_memory, select_memory};
-use routing::{recommend_route, resource_capacity, routing_model_status};
 use sessions::{
     Muted, Policied, deliver_policy, lifecycle_str, mute_refusal, mute_remaining, mute_session,
     send_through_pane, session_summary, spawn_session, unmute_session,
@@ -706,11 +705,6 @@ fn dispatch(
         }
         Request::ResourceCapacity => resource_capacity(runtime),
         Request::RoutingModel => routing_model_status(runtime),
-        Request::RecommendRoute {
-            task,
-            moment,
-            alternatives,
-        } => recommend_route(runtime, task.as_deref(), &moment, alternatives),
         Request::Events {
             after,
             limit,
@@ -833,4 +827,167 @@ fn dispatch(
 
 pub(super) fn api_error(err: ApiError) -> String {
     err.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Relocated from the deleted `api::unix::routing` (2026-09-16,
+// design-decisions.md, "Glasshouse never decides which model is used"): that
+// module's third verb, the control-API mirror of `glasshouse route`, went
+// with the ranking it reported on. These two verbs are current resource and
+// routing-model *status*, not a recommendation, and have nothing to do with
+// that ruling — they move here rather than disappear with the file they used
+// to share.
+// ---------------------------------------------------------------------------
+
+/// Current resource capacity and quota telemetry — capability map line 1679.
+///
+/// Mirrors `main.rs`'s own `resources_report` for its non-probe path: reads
+/// the user's configuration, folds in the persisted gateway-quota and
+/// gateway-health caches [`crate::api`]'s door doc comment already promises
+/// this project shares with every other process, and asks each installed
+/// harness for its own status the same cheap, no-quota way `glasshouse
+/// resources` does with no flags. Never makes a network request — this
+/// request carries no provider name to probe, unlike the CLI's own `--probe`.
+fn resource_capacity(runtime: &Runtime) -> Response {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return Response::err(err),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return Response::err(err),
+    };
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
+        .gather_gateway_quota(&glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths().gateway_data_dir(),
+        ))
+        .gather_gateway_health(&glasshouse::provider::telemetry::GatewayHealthCache::new(
+            runtime.paths().gateway_data_dir(),
+        ))
+        .gather_harness_status(now_unix);
+
+    Response::ok(glasshouse::provider::resources::capacity_json(
+        &effective, &telemetry, now_unix,
+    ))
+}
+
+/// Current routing-model selection and its health — capability map line 1680.
+///
+/// `selection` is the recorded [`config::RoutingModelChoice`] together with
+/// the layer it came from, reported the way every other layered value in
+/// this project is reported (see [`describe_layer`]). `resolution` is what
+/// will actually classify a request right now:
+/// `EffectiveConfig::routing_model_resolution` already checks a pinned
+/// choice against the providers configured this instant and degrades to
+/// heuristics with a named [`config::RoutingFallback`] when one has gone
+/// missing — this handler reports that computed state, keyed by the type's
+/// own variant names, rather than re-deriving or re-wording it into prose of
+/// its own. There is no live latency or health probe anywhere in this
+/// project (see that function's own doc comment); a project that has
+/// configured nothing gets [`config::RoutingFallback::NotConfigured`], the
+/// honest default, never a fabricated pin.
+fn routing_model_status(runtime: &Runtime) -> Response {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return Response::err(err),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return Response::err(err),
+    };
+    let gateway = match config::GatewayCatalogue::for_paths(runtime.paths()) {
+        Ok(gateway) => gateway,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
+
+    let selection = effective.routing_model();
+    let resolution = effective.routing_model_resolution();
+
+    Response::ok(serde_json::json!({
+        "selection": routing_choice_json(&selection.value),
+        "layer": describe_layer(resolution.layer),
+        "resolution": routing_resolution_json(&resolution.value),
+    }))
+}
+
+/// A recorded [`config::RoutingModelChoice`] as JSON. `provider`/`model` are
+/// `null` for every choice but [`config::RoutingModelChoice::Pinned`] —
+/// never an empty string, so an absent value cannot be mistaken for one that
+/// was measured and happened to be empty (§71).
+fn routing_choice_json(choice: &config::RoutingModelChoice) -> serde_json::Value {
+    match choice {
+        config::RoutingModelChoice::Deterministic => serde_json::json!({
+            "choice": "deterministic",
+            "provider": null,
+            "model": null,
+        }),
+        config::RoutingModelChoice::Automatic => serde_json::json!({
+            "choice": "automatic",
+            "provider": null,
+            "model": null,
+        }),
+        config::RoutingModelChoice::Pinned { provider, model } => serde_json::json!({
+            "choice": "pinned",
+            "provider": provider,
+            "model": model,
+        }),
+    }
+}
+
+/// A computed [`config::RoutingModelResolution`] as JSON — what will
+/// actually classify a request right now, distinct from the recorded
+/// [`routing_choice_json`].
+fn routing_resolution_json(resolution: &config::RoutingModelResolution) -> serde_json::Value {
+    match resolution {
+        config::RoutingModelResolution::Automatic => serde_json::json!({ "state": "automatic" }),
+        config::RoutingModelResolution::Pinned { provider, model } => serde_json::json!({
+            "state": "pinned",
+            "provider": provider,
+            "model": model,
+        }),
+        config::RoutingModelResolution::Heuristics(reason) => routing_fallback_json(reason),
+    }
+}
+
+/// Why deterministic heuristics are answering instead of a model, keyed by
+/// [`config::RoutingFallback`]'s own variant names rather than its
+/// [`std::fmt::Display`] prose — a client matching on `reason` must be able
+/// to tell the cases apart mechanically, not by parsing a sentence meant for
+/// a person.
+fn routing_fallback_json(reason: &config::RoutingFallback) -> serde_json::Value {
+    match reason {
+        config::RoutingFallback::NotConfigured => serde_json::json!({
+            "state": "heuristics",
+            "reason": "not_configured",
+        }),
+        config::RoutingFallback::DeterministicChosen => serde_json::json!({
+            "state": "heuristics",
+            "reason": "deterministic_chosen",
+        }),
+        config::RoutingFallback::ProviderNotConfigured { provider, model } => serde_json::json!({
+            "state": "heuristics",
+            "reason": "provider_not_configured",
+            "provider": provider,
+            "model": model,
+        }),
+    }
+}
+
+/// Matches `provider::resources::describe_layer`'s own wire spelling for
+/// [`config::Layer`] (`"project"` / `"user"` / `"default"`), duplicated
+/// rather than imported because that one is private to its own module.
+fn describe_layer(layer: config::Layer) -> &'static str {
+    match layer {
+        config::Layer::Project => "project",
+        config::Layer::User => "user",
+        config::Layer::Default => "default",
+    }
 }

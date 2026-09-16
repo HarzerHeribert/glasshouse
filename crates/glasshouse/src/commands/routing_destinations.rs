@@ -136,79 +136,6 @@ fn backend_for_entitlement(
     .with_tools_evidence(backend.tools_evidence())
 }
 
-/// Phase 56 line 1954's *"announce which subscription served each session"*,
-/// said on stderr beside the routing announcements, before the session
-/// exists. `None` is announced as what it is — no entry names this resource,
-/// or the gateway has not assigned an upstream yet — rather than as a
-/// entitlement nobody configured.
-///
-/// `gateway_provider` is read only for the `GlasshouseGateway` / `None` case:
-/// the gateway's serving provider once it is known, so that case can say
-/// *which* provider no entry names instead of the pre-Phase-56/1954-gateway
-/// text that was true only because nothing asked yet. `None` there means
-/// exactly what it always meant — the gateway has not resolved an upstream
-/// for this call, which is still true of every caller other than
-/// `launch_session`'s gateway branch and `resume_session`'s announcement.
-pub(crate) fn announce_entitlement(
-    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
-    profile: &glasshouse::profile::LaunchProfile,
-    gateway_provider: Option<&str>,
-) {
-    use glasshouse::profile::BackendResource;
-
-    match entitlement {
-        Some(entitlement) => {
-            let served_by = entitlement.name();
-            eprintln!(
-                "glasshouse: entitlement `{served_by}` ({}) will serve this session.",
-                entitlement.describe()
-            );
-        }
-        None => match &profile.backend {
-            BackendResource::DirectProvider { provider } => eprintln!(
-                "glasshouse: no `[entitlements]` entry names provider `{provider}`, so no \
-                 entitlement rule applies to this session."
-            ),
-            BackendResource::GlasshouseGateway => match gateway_provider {
-                Some(provider) => eprintln!(
-                    "glasshouse: no `[entitlements]` entry names the gateway's provider \
-                     `{provider}`, so no entitlement rule applies to this session."
-                ),
-                None => eprintln!(
-                    "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
-                     starts, so no entitlement is named at launch."
-                ),
-            },
-            BackendResource::Native => eprintln!(
-                "glasshouse: no entitlement describes {}'s own sign-in.",
-                profile.harness.display_name()
-            ),
-        },
-    }
-}
-
-/// Line 1954's refusal check, extracted once so the direct/native path
-/// (asked before the gateway exists) and the gateway path (asked after it
-/// starts, once its serving provider is known) apply exactly one spelling of
-/// the refusal text — see practice §35 on what happens when a check like
-/// this gets copied instead.
-pub(crate) fn entitlement_refusal_message(
-    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
-    harness: glasshouse::integrations::IntegrationId,
-    launch_profile_name: &str,
-) -> Option<String> {
-    let entitlement = entitlement?;
-    let refused = entitlement.rules().refusal(harness, None)?;
-    Some(format!(
-        "glasshouse: not starting this session — entitlement `{}` does not serve {refused}, \
-         and launch profile `{}` would charge it. Change the rule under `[entitlements.{}]`, \
-         or launch under a profile whose entitlement serves this work.",
-        entitlement.name(),
-        launch_profile_name,
-        entitlement.name()
-    ))
-}
-
 /// Which destinations a caller can actually *use*, which is not the same
 /// question as which ones exist.
 ///
@@ -219,6 +146,15 @@ pub(crate) fn entitlement_refusal_message(
 /// to enter is exactly the "producer with no reachable consumer" shape this
 /// project keeps paying for, so the launch path asks for `Enterable` and the
 /// diagnostic says out loud that it did not.
+///
+/// `Launchable`/`LaunchableAcrossProfiles` have no production caller as of
+/// 2026-09-16: they existed for `launch_session`'s own ranking, which is
+/// gone (design-decisions.md, "Glasshouse never decides which model is
+/// used"). `#[allow(dead_code)]` rather than deleting them — a unit test in
+/// `src/tests.rs` (`automatic_profile_selection_never_offers_a_disabled_profile`)
+/// still constructs `LaunchableAcrossProfiles` directly, and that file is
+/// this packet's to leave alone; the deletion package removes both the
+/// variants and that test together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestinationScope<'a> {
     /// Every session with warmth to speak of, running ones included, and one
@@ -237,6 +173,7 @@ pub(crate) enum DestinationScope<'a> {
     /// reading a diagnostic is choosing between them and a launch is not.
     ///
     /// History: design-decisions.md, "Trims: `commands/routing_destinations.rs`", DestinationScope::Launchable.
+    #[allow(dead_code)]
     Launchable { profile: &'a str },
     /// Map line 372's remaining clause: what this launch could actually
     /// enter, ranked across every *enabled* configured launch profile rather
@@ -251,6 +188,7 @@ pub(crate) enum DestinationScope<'a> {
     /// Only the *fresh* side widens: one candidate per enabled profile,
     /// exactly as `Everything` offers them, so the ranking has more than the
     /// one destination `Launchable` would have handed it.
+    #[allow(dead_code)]
     LaunchableAcrossProfiles,
 }
 
@@ -987,53 +925,6 @@ fn destination_backend(
     )
 }
 
-/// The sink `launch_session` and the resume path hand their gateway —
-/// **capability map line 1851**'s one production caller.
-///
-/// # Why a closure over a `Runtime` and not a ledger
-///
-/// `crate::gateway` has never had a database in scope and must not gain one:
-/// `gateway::session::FailoverPreventionSink`'s own doc comment records that
-/// this is what keeps that module incapable of reaching a project's files.
-/// The closure carries a [`Runtime`] — cheap, `Clone`, three paths — and
-/// opens the evaluation ledger inside
-/// [`glasshouse::evaluation::record_failover_prevention`] at the one moment a
-/// failover has actually been taken, which is practice §65's rule that a
-/// resource is acquired where its consumer starts and not a connection held
-/// for the life of a session that may never fail over at all.
-///
-/// The row is written from the gateway's own exchange thread, so nothing on
-/// the person's path waits for it, and a ledger that cannot be opened costs
-/// the observation rather than the exchange.
-pub(crate) fn failover_prevention_sink(
-    runtime: &Runtime,
-) -> glasshouse::gateway::session::FailoverPreventionSink {
-    let runtime = runtime.clone();
-    std::sync::Arc::new(
-        move |effect: &glasshouse::routing::interactive::FailureDomainEffect| {
-            let prevention = if effect.prevented() {
-                glasshouse::evaluation::FailoverPrevention::Prevented
-            } else {
-                glasshouse::evaluation::FailoverPrevention::NotPrevented
-            };
-            glasshouse::evaluation::record_failover_prevention(
-                &runtime,
-                prevention,
-                effect.displaced(),
-                glasshouse::evaluation::now_unix(),
-            );
-            // Capability map line 1852: the route the *measured* correlation
-            // steered this failover off — one that looked independent by
-            // provider and was not by observation. Its own row in the
-            // routing ledger, because that is where the observations it was
-            // derived from live and where `glasshouse route` reads it back.
-            if let Some(route) = effect.correlation_displaced() {
-                record_correlation_steer(&runtime, route, glasshouse::evaluation::now_unix());
-            }
-        },
-    )
-}
-
 /// Capability map line 1852's producer: one `routing_observations` row
 /// under [`glasshouse::routing::evidence::CORRELATION_PURPOSE`] per failover
 /// the correlation term steered, naming the route it steered off.
@@ -1046,6 +937,16 @@ pub(crate) fn failover_prevention_sink(
 /// as evidence for the correlation that produced it. Best-effort for the
 /// same reason `record_failover_prevention` is: a ledger that cannot be
 /// opened costs the measurement, never the failover.
+///
+/// No production caller as of 2026-09-16: its only one was
+/// `failover_prevention_sink`, deleted with the ranking whose failovers it
+/// measured (design-decisions.md, "Glasshouse never decides which model is
+/// used"). `#[allow(dead_code)]` rather than deleting it —
+/// `src/tests.rs::a_correlation_steered_failover_is_recorded_by_purpose_and_never_as_an_exchange`
+/// still calls it directly, and that test is not one of the three this
+/// packet's addendum named; the deletion package removes this function with
+/// the rest of the module.
+#[allow(dead_code)]
 pub(crate) fn record_correlation_steer(
     runtime: &Runtime,
     displaced: &glasshouse::routing::evidence::RouteIdentity,
@@ -1402,6 +1303,16 @@ pub(crate) struct ObservedHealth {
     /// Every resource adopted into `pool`, with the unix second its file was
     /// written. A `Vec` rather than a map because it is walked once per
     /// routed destination and holds one entry per configured destination.
+    ///
+    /// Neither this field nor [`ObservedHealth::observed_at`] below has a
+    /// reader as of 2026-09-16: both existed for `launch_session`'s own
+    /// `routing_evidence_for`, which read a destination's staleness for the
+    /// ranking decision it recorded — and that ranking is gone
+    /// (design-decisions.md, "Glasshouse never decides which model is
+    /// used"). `#[allow(dead_code)]` rather than deleting the field and its
+    /// population loop in [`observed_provider_health`]: the deletion package
+    /// removes `ObservedHealth` itself along with the rest of this module.
+    #[allow(dead_code)]
     pub(crate) observed_at: Vec<(glasshouse::routing::free::FreeResource, i64)>,
 }
 
@@ -1419,6 +1330,7 @@ impl ObservedHealth {
     /// no date is not in `pool`. That is what makes *"a reading whose age is
     /// unknown is `absent`, never fresh"* structural rather than a rule
     /// somebody has to remember.
+    #[allow(dead_code)]
     pub(crate) fn observed_at(
         &self,
         resource: &glasshouse::routing::free::FreeResource,
@@ -1678,26 +1590,12 @@ fn harness_efficiency_summary(
 }
 
 /// The pairing this session's launch profile answers to — Phase 9J's
-/// question, asked on the launch path so a session can record the answer.
-///
-/// # It goes through `pairing_queries`, which is what `glasshouse pairing`
-/// prints from
-///
-/// A second construction of the same `PairingQuery` here would be a second
-/// place for the provider lookup, the protocol fallback and the tool-call
-/// declaration to be wrong, and the two would eventually disagree about the
-/// same profile — one of them on screen and the other in the database, where
-/// nobody would see it. So the configured profiles are asked by name.
-///
-/// # The one profile that is not in that list
-///
-/// The implied Native profile exists for every harness by construction rather
-/// than by configuration, so `pairing_queries` deliberately omits it — see
-/// its own doc comment. For that profile the question has one honest answer
-/// and it needs no lookup: it names no model and no provider, so nothing
-/// establishes a relationship, and the classifier is still the thing that
-/// says so rather than a constant written here.
-pub(crate) fn session_pairing(
+/// question. `launch_session` now calls
+/// `glasshouse::session::launch_profile::session_pairing` directly (this
+/// module's own ranking uses were the only reason for the wrapper), but
+/// `destination_backend` above still needs it to build a candidate's own
+/// backend.
+fn session_pairing(
     effective: &EffectiveConfig<'_>,
     profile: &glasshouse::profile::LaunchProfile,
 ) -> glasshouse::harness::pairing::Pairing {

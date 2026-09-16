@@ -397,10 +397,10 @@ fn resolve_resume_overlay(
             evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
             Some(degrade_sink),
         ),
-        // Line 1851, on the resume path too: a resumed session's gateway
-        // fails over exactly as a launched one's does, and counting only the
-        // launched ones would make the denominator a subset nobody stated.
-        Some(crate::commands::routing_destinations::failover_prevention_sink(runtime)),
+        // Line 1851's producer (`FailoverPrevented`) is on the removal list
+        // with the ranking it measured — design-decisions.md, 2026-09-16,
+        // "Glasshouse never decides which model is used".
+        None,
     )?;
     if let Some(gateway) = gateway.as_ref() {
         gateway.routing().serve_session(session_id.as_str());
@@ -1197,130 +1197,22 @@ pub(crate) fn resolve_bootstrap_prompt(
     )))
 }
 
-/// Line 1592's task-boundary caller, and line 1601's explanation on it.
-/// Prints where the router would have sent this work and what the named
-/// session displaced — never changes the destination (see `RouteOnResume`)
-/// — and is best effort and silent on nothing to say, since everything it
-/// reads can fail (the session store, a deleted profile, a quota cache that
-/// will not open) without costing a person their resume.
+/// Whether a resume is a **task boundary** (line 1592) or the tail of a
+/// launch that already decided where it was going.
 ///
-/// It explains; it does not move the work. The session was named on the
-/// command line, so the named session goes in as `RoutingOverride::to`
-/// (line 1602's user override) rather than letting the router answer
-/// "somewhere else", with the ranking it displaced printed beside it.
-/// Line 1593 is earned on the launch path, where the choice is genuinely
-/// open, and not here.
-///
-/// History: design-decisions.md, "Trims: commands module docs", report_task_boundary_routing.
-fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
-    use glasshouse::routing::session::{
-        RouterInputs, RoutingMoment, RoutingOverride, TaskRequirements,
-    };
-
-    // Its own scope, and everything it opened is closed before it returns —
-    // see the call site.
-    let Some((id, harness)) = ({
-        let Ok(sessions) = ProjectSessions::open(runtime) else {
-            return;
-        };
-        let store = sessions.store();
-        store
-            .resolve_id(session)
-            .ok()
-            .and_then(|id| store.get(&id).ok().flatten())
-            .map(|record| (record.id.clone(), record.harness.clone()))
-    }) else {
-        return;
-    };
-    let Some(harness) = glasshouse::integrations::IntegrationId::ALL
-        .iter()
-        .copied()
-        .find(|candidate| candidate.slug() == harness)
-    else {
-        return;
-    };
-
-    let Ok(user) = UserConfig::load(runtime.paths()) else {
-        return;
-    };
-    let Ok(project) = config::load_project_config(runtime.project()) else {
-        return;
-    };
-    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
-    let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
-
-    let Ok(destinations) = crate::commands::routing_destinations::routing_destinations(
-        runtime,
-        &effective,
-        harness,
-        crate::commands::routing_destinations::DestinationScope::Everything,
-        None,
-    ) else {
-        return;
-    };
-    let current = destinations
-        .iter()
-        .find(|destination| destination.id() == id.as_str())
-        .cloned();
-    let overrides = effective.pairing_overrides();
-    // Line 1599's bridge again — see `observed_provider_health`. This report
-    // is read beside the launch path's own decision, so it weighs the same
-    // persisted readings that path does.
-    let health = crate::commands::routing_destinations::observed_provider_health(
-        runtime,
-        &effective,
-        &destinations,
-    );
-    // Phase 34D does not reach this report: `glasshouse resume` carries no
-    // task text, so there is nothing to classify and nothing is invented.
-    // The moment a `resume` learns what the next task is, this is the site
-    // that hands `classify_for_routing` a `TaskBoundary` moment.
-    let inputs = RouterInputs {
-        overrides: &overrides,
-        health: health.pool(),
-        now: std::time::Instant::now(),
-        requirements: TaskRequirements::default(),
-    };
-    let Some(routed) = crate::commands::routing_destinations::session_router(
-        runtime,
-        &effective,
-        RoutingOverride::to(id.as_str()),
-    )
-    .choose(
-        RoutingMoment::TaskBoundary,
-        current.as_ref(),
-        &destinations,
-        &inputs,
-    ) else {
-        return;
-    };
-    // A ranking that agreed with the user says nothing worth a line on their
-    // terminal; one that would have chosen differently is the whole reason
-    // line 1601 exists.
-    if let Some(automatic) = routed.overrode() {
-        eprintln!(
-            "glasshouse: resuming {} because you named it; the ranking would have chosen `{}` \
-             at this task boundary. `glasshouse route --moment task-boundary` says why.",
-            crate::commands::shared::short_id(&id),
-            automatic
-        );
-    }
-}
-
-/// Whether a resume is the moment a routing decision is taken, or the tail of
-/// one that already was.
-///
-/// `glasshouse resume` is line 1592's **task boundary**: one piece of work
-/// finished and another is beginning, which is exactly when the map allows the
-/// work to move. `launch_session` reaches the same code after having already
-/// decided at a *session* boundary, and routing twice for one launch would
-/// re-decide something nobody asked to have re-decided — the failure mode line
-/// 1592 is written against, one layer up from the per-turn one it names.
+/// Both variants are still constructed — `glasshouse resume` passes
+/// `AtTaskBoundary`, `launch_session` passes `AlreadyRouted` — but neither
+/// changes this function's behaviour any longer: the task-boundary report
+/// this distinction used to gate printed what a ranking would have chosen
+/// instead of the session the caller named, and that ranking is gone
+/// (design-decisions.md, 2026-09-16, "Glasshouse never decides which model
+/// is used"). The type stays because the two call sites still say, in their
+/// own words, which moment they are at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteOnResume {
-    /// Take the task-boundary decision here.
+    /// A task boundary: one piece of work finished and another is beginning.
     AtTaskBoundary,
-    /// The caller already routed; this is the tail of its decision.
+    /// The caller already resolved its destination; this is the tail of it.
     AlreadyRouted,
 }
 
@@ -1329,23 +1221,8 @@ pub(crate) fn resume_session(
     session: &str,
     harness_args: &[String],
     headless: bool,
-    routing: RouteOnResume,
+    _routing: RouteOnResume,
 ) -> anyhow::Result<ExitCode> {
-    // Line 1592's other moment, and it runs **before** this function's own
-    // session store is opened.
-    //
-    // Not a stylistic choice. `routing_destinations` opens a connection to
-    // this project's session database, and practice §65 is the record of what
-    // an extra open handle costs on a path nobody asserts about: SQLite takes
-    // advisory locks on Unix and mandatory `LockFileEx` locks on Windows, so
-    // two live connections to one database in one process is invisible on the
-    // machine this is developed on and a hang on the one it ships to. Running
-    // the routing report to completion first means exactly one connection is
-    // ever live.
-    if routing == RouteOnResume::AtTaskBoundary {
-        report_task_boundary_routing(runtime, session);
-    }
-
     let sessions = ProjectSessions::open(runtime)?;
     let store = sessions.store();
 
@@ -1528,7 +1405,7 @@ pub(crate) fn resume_session(
         };
         match lookup {
             Ok(entitlement) => {
-                crate::commands::routing_destinations::announce_entitlement(
+                crate::commands::shared::announce_entitlement(
                     entitlement.as_ref(),
                     &profile,
                     gateway_provider.as_deref(),

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use glasshouse::config::response::ResponseRequest;
-use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
+use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::events::{LifecycleEvent, ProcessExit};
 use glasshouse::guardrails::GuardrailOverride;
 use glasshouse::integrations::cmux;
@@ -29,52 +29,42 @@ pub(crate) fn resolved_gateway_pairing(
     glasshouse::session::launch_profile::gateway_pairing(effective)
 }
 
-// ---------------------------------------------------------------------------
-// Phase 37 — the session router's production callers, map lines 1592–1602.
-//
-// `glasshouse::routing::session` ranks *destinations*, and a destination is
-// something only this file can assemble: it needs this project's session
-// records, this user's launch profiles, the provider table and the quota
-// cache, none of which that module is allowed to reach (its own
-// `the_session_router_cannot_look_a_session_or_a_checkpoint_up` fails the
-// build if it ever tries). So the five inputs are read here, once, and every
-// caller below goes through the same two functions.
-// ---------------------------------------------------------------------------
-
 /// Everything a person typed about **where** this session goes and what it
-/// boots from — the four arguments `launch_session` reads before it resolves
+/// boots from — the arguments `launch_session` reads before it resolves
 /// anything.
 ///
-/// One type rather than four parameters because they are one statement, and
-/// the router reads all four together: `to` and `fresh` are line 1602's
-/// override outright, and `profile` and `from_checkpoint` are the two ways of
-/// saying "a new session" without using that word (see the override built in
-/// `launch_session`). Separating them would let a caller pass this decision's
-/// profile with last decision's override, which is the same reason
-/// `routing::session::RouterInputs` is one struct.
+/// One type rather than separate parameters because they are one statement:
+/// `profile` and `from_checkpoint` are the two ways of saying "a new
+/// session" without using that word, and `to`/`fresh` name an existing
+/// session or ask for a new one outright (see `launch_session`'s own use of
+/// them).
+///
+/// Ranking a set of candidate destinations (Phase 37) and classifying a
+/// `--task` string (Phase 34D) both left this type on 2026-09-16
+/// (design-decisions.md, "Glasshouse never decides which model is used"):
+/// what remains is the explicit path that was always available as
+/// `--no-routing` — `--to` continues exactly the session it names, `--fresh`
+/// starts a new one, and naming neither also starts a new one.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LaunchDestination<'a> {
     /// `--profile`: the launch profile a **new** session runs under.
     pub(crate) profile: Option<&'a str>,
     /// `--from-checkpoint`: the handoff a new session opens with.
     pub(crate) from_checkpoint: Option<&'a str>,
-    /// `--to`: this destination, whatever the ranking says.
+    /// `--to`: continue this session, or start a fresh one under the named
+    /// profile for a `fresh:<harness>:<profile>` identifier.
     pub(crate) to: Option<&'a str>,
-    /// `--fresh`: a new session, whatever the ranking says.
-    pub(crate) fresh: bool,
-    /// `--task`: what the work is, which decides what the destination must
-    /// be able to do (Phase 34D). `None` classifies nothing and reproduces
-    /// the launch exactly as it was before classification existed.
-    pub(crate) task: Option<&'a str>,
-    /// `--no-routing`: take no routing decision for this launch at all —
-    /// capability map line 1712.
+    /// `--fresh`: start a new session rather than continuing one.
     ///
-    /// Not a fifth way of naming a destination, which is why it sits here
-    /// beside them rather than being folded into one: the four fields above
-    /// say *where*, and this one says *stop deciding*. With it set, the four
-    /// above are still read and still obeyed — a person who says both "do
-    /// not rank" and "go here" has said two compatible things.
-    pub(crate) no_routing: bool,
+    /// `launch_session` never reads this field: it and `--to` are mutually
+    /// exclusive (`cli.rs`'s `conflicts_with`), and with no `--to` a launch
+    /// already starts a fresh session, so `--fresh` only ever asks for what
+    /// was already going to happen. Kept on this type (`#[allow(dead_code)]`
+    /// rather than dropped) so `main.rs`'s `Launch`/`Run` dispatch — frozen
+    /// to losing only `task` and `no_routing` this round — still has
+    /// somewhere to put the flag's value.
+    #[allow(dead_code)]
+    pub(crate) fresh: bool,
     /// `--checkpoint-first`: check point the session this work is leaving
     /// before it moves — capability map line 1716.
     pub(crate) checkpoint_first: bool,
@@ -84,9 +74,8 @@ pub(crate) struct LaunchDestination<'a> {
 /// one for `harness`.
 ///
 /// `None` for a recorded session's identifier, and `None` for a fresh
-/// identifier belonging to a different harness — which then reaches the router
-/// as an override naming a destination that was not offered, and is refused
-/// out loud rather than silently reinterpreted.
+/// identifier belonging to a different harness — which `launch_session`
+/// then treats as naming a session id rather than silently reinterpreting it.
 fn fresh_destination_profile(
     id: &str,
     harness: glasshouse::integrations::IntegrationId,
@@ -100,322 +89,6 @@ fn fresh_destination_profile(
     // part before it. A profile whose own name contains `@` cannot be named
     // through such an identifier — recorded, not guessed around.
     Some(profile.split_once('@').map_or(profile, |(name, _)| name))
-}
-
-/// The cost class of the destination a launch actually routed to — map line
-/// 1835's *"low-cost or free route"* versus *"the premium route it
-/// displaced"*, as a fact rather than a guess. Not
-/// `destination.backend().cost()`: that hardcodes `Cost::Metered` as a
-/// fail-closed constant, so the real value comes from
-/// [`ProviderConfig::cost_of`] instead — the same lookup `disposable_candidates`
-/// and `gateway_upstream` use — with the project layer winning over the user
-/// layer.
-///
-/// `None` when the destination names no configured provider (a harness's own
-/// sign-in) or assigns its model only at session start (gateway-backed):
-/// recorded as [`glasshouse::evaluation::UNKNOWN_COST_CLASS`] in its own
-/// bucket, never folded into `metered`.
-///
-/// History: design-decisions.md, "Trims: commands module docs", routed_cost_class.
-fn routed_cost_class(
-    user: &UserConfig,
-    project: Option<&ProjectConfig>,
-    destination: &glasshouse::routing::session::Destination,
-) -> Option<glasshouse::routing::Cost> {
-    let model = destination.backend().model().name()?;
-    let provider = destination.backend().provider();
-    let config = project
-        .and_then(|project| project.providers().get(provider))
-        .or_else(|| user.providers().get(provider))?;
-    Some(config.cost_of(model))
-}
-
-/// Whether the pool this launch handed the router held any observed health
-/// reading for the destination it chose — map line 1854's *sparse* half,
-/// keyed exactly as [`observed_provider_health`] keys it (the destination's
-/// own credential and model label), so a hit means the same resource. *Stale*
-/// is answered by the age of the provider file the pool was filled from,
-/// against [`glasshouse::evaluation::HEALTH_EVIDENCE_HORIZON_SECONDS`].
-///
-/// *Incorrectly segmented*, line 1854's third word, has no producer on this
-/// path and stays open on that word alone.
-///
-/// History: design-decisions.md, "Trims: commands module docs", routing_evidence_for.
-fn routing_evidence_for(
-    health: &crate::commands::routing_destinations::ObservedHealth,
-    destination: &glasshouse::routing::session::Destination,
-    now_unix: i64,
-) -> glasshouse::evaluation::RoutingEvidence {
-    use glasshouse::routing::free::FreeResource;
-
-    let chosen = FreeResource::new(
-        destination.backend().credential().clone(),
-        destination.backend().model().label(),
-    );
-    let held = health
-        .pool()
-        .observed()
-        .iter()
-        .any(|(resource, _)| *resource == chosen);
-    // A pool hit whose date is somehow missing answers `absent`, not fresh —
-    // `and_then` rather than `unwrap_or(now_unix)`, which is the one
-    // substitution that would turn an unknown into a favourable fact.
-    let observed_at = held.then(|| health.observed_at(&chosen)).flatten();
-    glasshouse::evaluation::RoutingEvidence::from_observation(observed_at, now_unix)
-}
-
-/// Capability map line 1566: one ledger row per tier movement the launch
-/// path acted on, under [`glasshouse::routing::evidence::TIER_ESCALATION_PURPOSE`]
-/// or [`glasshouse::routing::evidence::TIER_DOWNGRADE_PURPOSE`], so a later
-/// evaluation can count how often the router moved a tier and which way.
-///
-/// The same `glasshouse`/`session-router` identity and the same
-/// open-write-drop shape as [`record_routing_latency`], for the same reasons
-/// — and a `Held` movement writes nothing, because "the tier stood" is the
-/// row's absence, exactly as a launch that classified nothing leaves no
-/// latency row.
-fn record_tier_movement(
-    runtime: &Runtime,
-    harness: glasshouse::integrations::IntegrationId,
-    movement: &glasshouse::routing::session::TierMovement,
-) {
-    use glasshouse::routing::evidence::{
-        EvidenceLedger, NewObservation, TIER_DOWNGRADE_PURPOSE, TIER_ESCALATION_PURPOSE,
-    };
-    use glasshouse::routing::session::TierMovement;
-
-    let purpose = match movement {
-        TierMovement::Escalated { .. } => TIER_ESCALATION_PURPOSE,
-        TierMovement::Downgraded { .. } => TIER_DOWNGRADE_PURPOSE,
-        TierMovement::Held { .. } => return,
-    };
-    let ledger = match EvidenceLedger::open(runtime) {
-        Ok(ledger) => ledger,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "routing evidence ledger unavailable; the tier movement is not recorded"
-            );
-            return;
-        }
-    };
-    let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let observation = NewObservation::new("glasshouse", "session-router")
-        .with_harness(Some(harness.slug()))
-        .with_purpose(Some(purpose))
-        .with_timing(Some(now_unix), Some(now_unix));
-    if let Err(err) = ledger.record(observation, now_unix) {
-        tracing::warn!(error = %err, "could not record the tier movement");
-    }
-}
-
-/// Capability map line 1970: one ledger row per pool fallback the launch
-/// path acted on, in the same open-write-drop shape as
-/// [`record_tier_movement`] — a decision that made no fallback writes
-/// nothing, because "the broker stayed put" is the row's absence.
-///
-/// `purpose` is the trigger, `quota_context` is the account the work LEFT,
-/// `provider`/`model` are the chosen destination's, and the account the
-/// work went TO is `sessions.entitlement`. `cost`, when given, is map line
-/// 1307's [`glasshouse::routing::session::Routed::cost`], carried in from
-/// the same decision rather than recomputed from a `PriceTable` that may
-/// since have changed — the only launch writer with a `Destination` in
-/// scope, so most rows leave it `NULL`.
-///
-/// History: design-decisions.md, "Trims: commands module docs", record_entitlement_fallback.
-fn record_entitlement_fallback(
-    runtime: &Runtime,
-    harness: glasshouse::integrations::IntegrationId,
-    destination: &glasshouse::routing::session::Destination,
-    fallback: &glasshouse::routing::session::EntitlementFallback,
-    cost: Option<glasshouse::routing::evidence::ObservedCost>,
-) {
-    use glasshouse::routing::evidence::{
-        ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE, ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
-        EvidenceLedger, NewObservation,
-    };
-    use glasshouse::routing::session::FallbackReason;
-
-    let fallback_purpose = match fallback.reason() {
-        FallbackReason::Exhausted => ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE,
-        FallbackReason::Throttled => ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
-    };
-    let ledger = match EvidenceLedger::open(runtime) {
-        Ok(ledger) => ledger,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "routing evidence ledger unavailable; the entitlement fallback is not recorded"
-            );
-            return;
-        }
-    };
-    let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let observation = NewObservation::new(
-        destination.backend().provider(),
-        destination.backend().model().label(),
-    )
-    .with_harness(Some(harness.slug()))
-    .with_purpose(Some(fallback_purpose))
-    .with_quota_context(Some(fallback.from().to_owned()))
-    .with_timing(Some(now_unix), Some(now_unix))
-    .with_cost(cost);
-    if let Err(err) = ledger.record(observation, now_unix) {
-        tracing::warn!(error = %err, "could not record the entitlement fallback");
-    }
-}
-
-/// The workload tier a launch's routing decision used, and whether line
-/// 1459's conservative rule moved it — **capability map line 1834**'s
-/// producer input, from the classification that decision actually acted on.
-///
-/// `None` — no `--task`, so nothing classified — is
-/// [`glasshouse::evaluation::RoutingTier::Unclassified`], **its own bucket
-/// and never nothing**: a launch that states no task still made a routing
-/// decision, and omitting its row would make *"this project never states its
-/// tasks"* read as *"this project never launches"*.
-///
-/// *Escalated* is whether the tier the decision used differs from the tier
-/// the classifier stated, which is not the same as whether the conservative
-/// rule fired — see [`glasshouse::evaluation::RoutingTier::Classified`]'s own
-/// doc comment for the case at the top of the scale where the two part.
-fn routed_tier(
-    classified: Option<&crate::commands::routing_classification::ClassifiedRouting>,
-) -> glasshouse::evaluation::RoutingTier {
-    use glasshouse::evaluation::RoutingTier;
-
-    let Some(classified) = classified else {
-        return RoutingTier::Unclassified;
-    };
-    let answer = &classified.answer;
-    RoutingTier::Classified {
-        tier: answer.required_tier(),
-        escalated: answer.required_tier() != answer.stated_tier(),
-    }
-}
-
-/// Map line 1855's producer call, shared by both of `launch_session`'s
-/// routed exits: writes the launch's own expected output-token size only
-/// when its task class has a real median in [`comparable_output_tokens`]'s
-/// own window — the same window and the same reader
-/// [`session_router`] already consulted to rank this launch, read again
-/// here rather than threaded through, for the reason [`comparable_output_tokens`]'s
-/// own doc gives: this ledger read is fail-soft and costs this estimate
-/// alone, never the launch.
-///
-/// A launch that stated no task, or whose task class has no comparable rows
-/// in the window, writes nothing at all — never a fabricated zero.
-fn record_consumption_estimate(
-    runtime: &Runtime,
-    session_id: &str,
-    classified: Option<&crate::commands::routing_classification::ClassifiedRouting>,
-    observed_at_unix: i64,
-) {
-    let Some(task_class) = classified.map(|classified| classified.answer.task_class()) else {
-        return;
-    };
-    let Some(median_output_tokens) =
-        crate::commands::routing_destinations::comparable_output_tokens(runtime)
-            .into_iter()
-            .find(|class_output| class_output.class == task_class)
-            .and_then(|class_output| class_output.median_output_tokens)
-    else {
-        return;
-    };
-    glasshouse::evaluation::record_routing_consumption_estimate(
-        runtime,
-        session_id,
-        task_class,
-        median_output_tokens,
-        observed_at_unix,
-    );
-}
-
-/// Leave this decision's classification behind for the next one — line
-/// 1467's write side, called once the session the work landed on has an
-/// identifier. Only an answer a model actually gave is worth remembering:
-/// heuristics are free to re-run, and a reused answer is already on disk.
-fn remember_classification(
-    cache: &crate::commands::routing_classification::ClassificationStickyCache,
-    classified: Option<&crate::commands::routing_classification::ClassifiedRouting>,
-    session: &str,
-) {
-    let Some(classified) = classified else {
-        return;
-    };
-    if !classified.answer.provenance().asked_a_model() {
-        return;
-    }
-    cache.store(&glasshouse::routing::request::StickyClassification::new(
-        session,
-        classified.fingerprint.clone(),
-        classified.answer.classification(),
-        glasshouse::provider::cache::now_unix_seconds(),
-    ));
-}
-
-/// What `routing_observations.purpose` records for map line 1849's
-/// measurement. Spelled once, like [`CLASSIFICATION_PURPOSE`], and now in
-/// `routing::evidence` beside it, because `RoutingOverhead` reads this word
-/// back and a second spelling would split the only producer from the only
-/// reader.
-const ROUTING_LATENCY_PURPOSE: &str = glasshouse::routing::evidence::ROUTING_LATENCY_PURPOSE;
-
-/// Map line 1849: record what routing added to this launch, from the start
-/// of the decision (`started`) to its end — the point after which profile
-/// resolution, the gateway and the process spawn are the launch's own cost
-/// rather than routing's. Called only when a classification ran, so a
-/// launch that states no task opens no ledger and leaves no row — the row's
-/// absence is the honest reading of "nothing was added".
-///
-/// Timing columns are unix seconds (migration 11); a sub-second decision
-/// reads back as `0` through `duration_ms()`, with the millisecond figure
-/// logged beside it.
-///
-/// This row carries no session id, deliberately and permanently: the
-/// decision it measures happens before `store.create` mints one, and the
-/// column is for an exchange some session was served, not for the routing
-/// decision that preceded it.
-///
-/// History: design-decisions.md, "Trims: commands module docs", record_routing_latency.
-fn record_routing_latency(
-    runtime: &Runtime,
-    started: std::time::Instant,
-    started_at_unix: i64,
-    harness: glasshouse::integrations::IntegrationId,
-    answer: &glasshouse::routing::request::RouterAnswer,
-) {
-    let elapsed = started.elapsed();
-    let completed_at_unix = glasshouse::provider::cache::now_unix_seconds();
-    tracing::info!(
-        elapsed_ms = elapsed.as_millis() as u64,
-        asked_a_model = answer.provenance().asked_a_model(),
-        "routing decision latency before the harness starts"
-    );
-    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
-        Ok(ledger) => ledger,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "routing evidence ledger unavailable; routing latency is not recorded"
-            );
-            return;
-        }
-    };
-    let observation =
-        glasshouse::routing::evidence::NewObservation::new("glasshouse", "session-router")
-            .with_harness(Some(harness.slug()))
-            .with_purpose(Some(ROUTING_LATENCY_PURPOSE))
-            // Map line 1276's missing link, and the reason migration 23
-            // exists: `answer` has carried a `TaskClass` since Phase 34C and
-            // this row — the one row every routed request produces — has
-            // never written it down. `glasshouse::routing::burn` reads it
-            // back.
-            .with_task_class(Some(answer.task_class()))
-            .with_timing(Some(started_at_unix), Some(completed_at_unix));
-    if let Err(err) = ledger.record(observation, completed_at_unix) {
-        tracing::warn!(error = %err, "could not record routing latency");
-    }
 }
 
 // Eight, and the eighth arrived at integration: `external` is Phase 17's and
@@ -440,61 +113,32 @@ pub(crate) fn launch_session(
         profile: profile_name,
         from_checkpoint,
         to,
-        fresh,
-        task,
-        no_routing,
+        // `--fresh` and `--to` are mutually exclusive (`cli.rs`'s
+        // `conflicts_with`); with no `--to`, this launch starts a fresh
+        // session whether or not `--fresh` was also typed, so there is
+        // nothing left for this function to read it for.
+        fresh: _,
         checkpoint_first,
     } = destination;
-    // Map line 1849: the routing decision is timed from here. Whether the
-    // figure is ever recorded is decided by whether a task was stated.
-    let routing_started = std::time::Instant::now();
-    let routing_started_at_unix = glasshouse::provider::cache::now_unix_seconds();
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
     let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
     let selection = session::select::select(harness, effective)?;
-    // -----------------------------------------------------------------------
-    // Phase 37 lines 1592, 1593 and 1595–1600: **where** this work goes is
-    // decided here, at a session boundary, before a launch profile is
-    // resolved — because the destination is what chooses the profile and not
-    // the other way round.
-    //
-    // This is the production call the router was built for. Everything below
-    // it already worked; what it did not do was ask whether this project
-    // already had a session worth continuing, which is line 1593 in one
-    // sentence. Deleting the `choose` call below must break
-    // `tests/route_command.rs`, and that is the point (practice §35): the
-    // router's own eleven mutations prove its scoring and none of them can
-    // prove that anything calls it.
-    // -----------------------------------------------------------------------
-    // Which profile a *new* session would run under, from the same three
-    // sources it has always come from — with `--to fresh:<harness>:<profile>`
-    // added as a fourth, because an identifier a person pasted out of
-    // `glasshouse route` has to mean the same thing here as it did there.
+    // Which profile a *new* session would run under: `--to
+    // fresh:<harness>:<profile>` or `--profile`, because an identifier a
+    // person pasted out of `glasshouse sessions` has to mean the same thing
+    // here as it did there.
     let named_profile = to
         .and_then(|id| fresh_destination_profile(id, selection.id()))
         .or(profile_name);
-    // Map line 372's remaining clause: with no profile named, the router is
-    // asked to rank every *enabled* profile rather than the one implied
-    // fallback below picks for it. `--to`, `--fresh` and `--from-checkpoint`
-    // all leave `named_profile` unset too, and none of them names a profile
-    // either — the ranking still gets to pick which one a fresh session
-    // would run under; only `--to fresh:<harness>:<profile>` and `--profile`
-    // count as "the user pinned one," because those are the only two that
-    // said so by name.
-    let profile_selection = named_profile.is_none();
     // A profile the user disabled is not a profile Glasshouse may start,
     // and being asked for it by name is the one case where saying nothing
-    // would be worst: the routing filter above simply stops offering it, so
-    // without this a `--profile` naming it would launch it anyway and
-    // `enabled` would mean nothing on the path that actually starts a
-    // session.
+    // would be worst.
     //
-    // Refused *here*, before `routing_destinations` and before any
-    // pre-flight check, so a refusal costs nothing — no probe, no session
-    // record, no process — matching the harness-not-installed refusal below
-    // it in `session::select`.
+    // Refused *here*, before any pre-flight check, so a refusal costs
+    // nothing — no probe, no session record, no process — matching the
+    // harness-not-installed refusal below it in `session::select`.
     //
     // Only a name the person supplied is checked. `fresh_profile`'s fallback
     // is the implied Native profile, which nobody asked for and which
@@ -551,505 +195,46 @@ pub(crate) fn launch_session(
     };
     let fresh_profile = named_profile.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
 
-    // -----------------------------------------------------------------------
-    // Line 1712: the off switch, and it is taken **here** — before
-    // `routing_destinations` opens this project's session store, its quota
-    // cache and its health cache, and before anything classifies this
-    // launch's task.
+    // Capability map line 1712's own words are what every launch does now:
+    // `--to` continues exactly the session it names, `--fresh` starts a new
+    // one, and naming neither also starts a new one under `fresh_profile`.
+    // Nothing here ranks this project's warm sessions against a new one and
+    // nothing classifies a task — design-decisions.md, 2026-09-16, "Glasshouse
+    // never decides which model is used" (superseding Phase 37's ranking and
+    // Phase 34D's `--task` classification, both removed from this path).
     //
-    let sticky_cache = crate::commands::routing_classification::ClassificationStickyCache::new(
-        runtime.paths(),
-        runtime.project().id().as_str(),
-    );
-    let text_cache = crate::commands::routing_classification::ClassificationTextCache::new(
-        runtime.paths(),
-        runtime.project().id().as_str(),
-    );
-    // # Why routing off does not report what it would have done
-    //
-    // The obvious courtesy is to rank anyway and print *"routing is off; it
-    // would have continued session X"*. That is exactly the work the person
-    // turned off. The ranking's inputs are not free: three on-disk stores are
-    // opened to build the destinations — practice §65 is this project's
-    // record of what an unnecessary open handle costs on the platform it does
-    // not develop on, where SQLite's locks are mandatory rather than advisory
-    // — and the task classification on this path can reach a routing model.
-    // Doing all of it to render one sentence would make "off" mean "the same
-    // work, silently, and then a message about it".
-    //
-    // So the line says routing is off and where that was decided, and points
-    // at `glasshouse route`, which answers *"what would have happened"* on
-    // demand and starts nothing. Asking is a thing a person does
-    // deliberately; being charged for the answer is not.
-    // -----------------------------------------------------------------------
-    let automatic = effective.automatic_routing();
-    let routing_off = no_routing || !automatic.value;
-    if routing_off {
-        if no_routing {
-            eprintln!(
-                "glasshouse: automatic routing is off for this launch (--no-routing), so no \
-                 ranking was taken. `glasshouse route` shows what it would have chosen, \
-                 without starting anything."
-            );
-        } else {
-            eprintln!(
-                "glasshouse: automatic routing is off {}, so no ranking was taken. \
-                 `glasshouse route` shows what it would have chosen, without starting \
-                 anything.",
-                automatic.layer.describe_source()
-            );
+    // A `fresh:<harness>:<profile>` identifier falls through instead: it
+    // names a session that does not exist yet, and starting it is what the
+    // rest of this function already does under `fresh_profile`, which
+    // `named_profile` has already read that identifier's profile out of.
+    if let Some(id) = to
+        && fresh_destination_profile(id, selection.id()).is_none()
+    {
+        eprintln!("glasshouse: continuing session `{id}` because you named it.");
+        if checkpoint_first {
+            crate::commands::resume::checkpoint_before_moving(runtime, Some(id))?;
         }
-        // A `--to` naming a session this project already has is the one thing
-        // that still moves work into an existing session with the ranking
-        // off. It is not the ranking deciding — it is the person, and turning
-        // the ranking off was never a statement about their own flags.
-        //
-        // A `fresh:<harness>:<profile>` identifier falls through instead: it
-        // names a session that does not exist yet, and starting it is what
-        // the rest of this function already does under `fresh_profile`, which
-        // `named_profile` has already read that identifier's profile out of.
-        if let Some(id) = to
-            && fresh_destination_profile(id, selection.id()).is_none()
-        {
-            eprintln!(
-                "glasshouse: continuing session `{id}` because you named it; with routing off, \
-                 nothing else was considered."
-            );
-            if checkpoint_first {
-                crate::commands::resume::checkpoint_before_moving(runtime, Some(id))?;
-            }
-            return crate::commands::resume::resume_session(
-                runtime,
-                id,
-                harness_args,
-                headless,
-                crate::commands::resume::RouteOnResume::AlreadyRouted,
-            );
-        }
+        return crate::commands::resume::resume_session(
+            runtime,
+            id,
+            harness_args,
+            headless,
+            crate::commands::resume::RouteOnResume::AlreadyRouted,
+        );
     }
 
-    // Line 1712 again: with the ranking off, none of this runs at all —
-    // not the three stores `routing_destinations` opens, not the health
-    // bridge, not `choose`. `routed` is `None`, which the tail below already
-    // handles as "there was no routing decision", and the fresh destination
-    // is the profile this launch resolved on its own.
-    let (routed, classified, health) = if routing_off {
-        (
-            None,
-            None,
-            crate::commands::routing_destinations::ObservedHealth {
-                pool: glasshouse::routing::free::FreePool::new(),
-                observed_at: Vec::new(),
-            },
-        )
-    } else {
-        // Map line 372: automatic routing is on here (`routing_off` is
-        // false only when it is), so the fresh side of the candidate set
-        // widens to every enabled profile exactly when the person did not
-        // pin one — `Launchable` unchanged for a pin, `Launchable` unchanged
-        // for automatic off (that branch never reaches this arm at all).
-        let scope = if profile_selection {
-            crate::commands::routing_destinations::DestinationScope::LaunchableAcrossProfiles
-        } else {
-            crate::commands::routing_destinations::DestinationScope::Launchable {
-                profile: fresh_profile,
-            }
-        };
-        let destinations = crate::commands::routing_destinations::routing_destinations(
-            runtime,
-            &effective,
-            selection.id(),
-            scope,
-            task,
-        )?;
-        let overrides = effective.pairing_overrides();
-        // **Map line 1599's bridge, on the path that acts.** The live pool a
-        // gateway fills still does not exist here — that gateway is started
-        // further down, and only for a profile that needs one — but what a
-        // gateway *exports* does: `provider::telemetry::GatewayHealthReading`s,
-        // persisted to `GatewayHealthCache` under this run's own data directory,
-        // by whichever earlier `glasshouse run` or `glasshouse launch` served the
-        // work. `observed_provider_health` reads them into the pool
-        // `provider_health` looks in, and its own doc has the two hazards that
-        // make it a design rather than a wiring — the rendered `credential_label`
-        // against a `CredentialId`, and unix seconds against an epoch-less
-        // `Instant`. Neither is guessed at; a reading that cannot be attributed
-        // without guessing is not attributed, which leaves exactly the inert
-        // `0.0` this line had before the bridge.
-        //
-        // The reading comes from a *previous* process. That is the whole point:
-        // the health of a provider is not a fact this launch can observe about a
-        // session it has not started yet.
-        let health = crate::commands::routing_destinations::observed_provider_health(
-            runtime,
-            &effective,
-            &destinations,
-        );
-        // Capability map line 1419: the destination this launch lands on
-        // when classification does nothing — `fresh_profile`'s own fresh
-        // destination among the ones just built (`fresh_profile` is always
-        // concrete: it falls back to the implied Native profile above), read
-        // through the same `pricing.toml` `session_router` prices
-        // `expected_marginal_cost` from. A profile whose backend is a
-        // harness's own sign-in, or that names no model, or that
-        // `pricing.toml` does not price, leaves this `None` — inert, never
-        // guessed (`design-decisions.md`, *"The premium capacity a
-        // classifier protects"*).
-        let protected_capacity_prices =
-            glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
-        let protected_capacity_price = destinations
-            .iter()
-            .find(|destination| {
-                destination.is_fresh() && destination.launch_profile() == fresh_profile
-            })
-            .and_then(|destination| {
-                destination
-                    .backend()
-                    .model()
-                    .name()
-                    .map(|model| (destination.backend().provider(), model))
-            })
-            .and_then(|(provider, model)| protected_capacity_prices.price_for(provider, model));
-        // Phase 34D, on the path that acts: what the work *is* decides what the
-        // destination must be able to do. `None` — no `--task` — hands the
-        // router `TaskRequirements::default()` and asks nothing, which is this
-        // launch exactly as it was before classification existed.
-        let classified = crate::commands::routing_classification::classify_for_routing(
-            runtime,
-            &effective,
-            crate::commands::routing_classification::RoutingClassificationSite {
-                task,
-                moment: glasshouse::routing::session::RoutingMoment::SessionStart,
-                harness: Some(selection.id()),
-                harness_named: harness.is_some(),
-                to,
-                fresh,
-                destinations: &destinations,
-                health: health.pool(),
-                sticky: Some(&sticky_cache),
-                text_cache: Some(&text_cache),
-                protected_capacity_price,
-            },
-        );
-        let inputs = glasshouse::routing::session::RouterInputs {
-            overrides: &overrides,
-            health: health.pool(),
-            now: std::time::Instant::now(),
-            requirements: classified
-                .as_ref()
-                .map(|classified| classified.answer.requirements())
-                .unwrap_or_default(),
-        };
-        // Line 1602 on the path that acts, not only on the one that reports.
-        //
-        // Two of these are the user's flags. The other two are statements they
-        // already made by typing something else, and reading them as anything but
-        // "this launch is a fresh one" would be a router overruling a person:
-        // `--profile` names the profile a *new* session should run under, and
-        // `--from-checkpoint` hands a new session its opening prompt. Neither is
-        // a thing to do to a session that is already going.
-        let user_override = if to.is_some() || fresh {
-            crate::commands::routing_destinations::routing_override(to, fresh)
-        } else if from_checkpoint.is_some() {
-            glasshouse::routing::session::RoutingOverride::fresh()
-        } else if let Some(name) = profile_name {
-            glasshouse::routing::session::RoutingOverride::to(
-                crate::commands::routing_destinations::fresh_destination_id(selection.id(), name),
-            )
-        } else {
-            glasshouse::routing::session::RoutingOverride::none()
-        };
-        let router = crate::commands::routing_destinations::session_router(
-            runtime,
-            &effective,
-            user_override,
-        );
-        let routed = router.choose(
-            glasshouse::routing::session::RoutingMoment::SessionStart,
-            None,
-            &destinations,
-            &inputs,
-        );
-        // Phase 56 line 1954, the half a ranking cannot express. `choose`
-        // answers `None` when every destination failed a hard constraint and
-        // there is no current session to hold — and until now this launch read
-        // that as "nowhere to go" and started `fresh_profile` anyway, the
-        // silence Phase 35D's decision 3 recorded. A destination the user's
-        // own entitlement rule refused must not be started by that fallback,
-        // so the same gate is asked what it refused, and the launch stops by
-        // name. Only the entitlement constraint is read here: a protocol or
-        // tool-semantics refusal of the sole destination keeps the behaviour it
-        // had, which `profile::resolve` already refuses on its own terms.
-        let nowhere_to_go = routed.is_none();
-        if nowhere_to_go
-            && let Some(refused) = router.refused(&destinations, &inputs).into_iter().find(
-                |(destination, constraint)| {
-                    destination.is_fresh()
-                        && destination.launch_profile() == fresh_profile
-                        && matches!(
-                            constraint,
-                            glasshouse::routing::HardConstraint::Entitlement { .. }
-                        )
-                },
-            )
-        {
-            let (_, constraint) = refused;
-            let name = match &constraint {
-                glasshouse::routing::HardConstraint::Entitlement { entitlement, .. } => {
-                    entitlement.clone()
-                }
-                _ => unreachable!("filtered to the entitlement constraint above"),
-            };
-            eprintln!(
-                "glasshouse: not starting this session — {}, and launch profile `{fresh_profile}` \
-                 would charge it. Change the rule under `[entitlements.{name}]`, or launch \
-                 under a profile whose entitlement serves this work.",
-                constraint.reason().unwrap_or_default()
-            );
-            return Ok(ExitCode::FAILURE);
-        }
-        if let Some(classified) = &classified {
-            // The classification the decision just acted on, in the same words
-            // `glasshouse route --task` prints — including whether line 1459's
-            // conservative rules fired. And the end of what routing added to
-            // this launch (line 1849), recorded before anything below opens a
-            // ledger handle of its own.
-            eprintln!("glasshouse: {}", classified.answer.explain());
-            // Lines 1565 and 1566, on the path that acts: a moved tier is
-            // said before the destination it produced is announced below,
-            // and recorded so it can be counted. `glasshouse route` renders
-            // the same movement in its report and records nothing.
-            if let Some(routed) = &routed
-                && let Some(movement) = routed.movement().filter(|movement| movement.fired())
-            {
-                eprintln!(
-                    "glasshouse: tier {}. `glasshouse route --task ...` says why; `--to <id>` \
-                     overrules it.",
-                    movement.describe()
-                );
-                record_tier_movement(runtime, selection.id(), movement);
-            }
-            record_routing_latency(
-                runtime,
-                routing_started,
-                routing_started_at_unix,
-                selection.id(),
-                &classified.answer,
-            );
-        }
-        // Line 1970, on the path that acts — and OUTSIDE the classified
-        // guard, because a fallback is not a classification and a launch
-        // that states no task can still make one. The account the broker
-        // left is said before the destination it produced is announced
-        // below, and recorded so it can be counted. `glasshouse route`
-        // renders the same fallback in its report and records nothing.
-        if let Some(routed) = &routed
-            && let Some(fallback) = routed.fallback()
-        {
-            eprintln!(
-                "glasshouse: {}. `glasshouse route` says why.",
-                fallback.describe()
-            );
-            record_entitlement_fallback(
-                runtime,
-                selection.id(),
-                routed.chosen(),
-                fallback,
-                routed.cost(),
-            );
-        }
-        (routed, classified, health)
-    };
-
-    // A destination the router chose is announced before anything happens,
-    // never after: a person who did not want their previous session continued
-    // needs to read that on the way in, while `--fresh` is still an answer.
-    if let Some(routed) = &routed {
-        // Map lines 1829 and 1830: this is the one moment both facts are
-        // known, and the one the two `eprintln!`s below already render for a
-        // person without either being counted anywhere. `glasshouse route`
-        // (main.rs:1462) reaches the same router but never this branch, so
-        // it never reaches this call either — it reports without acting.
-        glasshouse::evaluation::record_routing_decision(
-            runtime,
-            routed.chosen().id(),
-            routed.chosen().is_fresh(),
-            routed.overrode(),
-            glasshouse::evaluation::now_unix(),
-        );
-        // -------------------------------------------------------------------
-        // Line 1720: *"surface automation decisions instead of silently
-        // moving work between sessions."* Every automated outcome this
-        // function can reach says so here, before it happens — an override
-        // that was refused, an override that was honoured, a continuation, or
-        // a fresh session the ranking chose over destinations it could have
-        // continued. The one case with nothing to announce is a project with
-        // no alternative: a ranking of one destination moved nothing.
-        // -------------------------------------------------------------------
-        if let Some(refusal) = routed.override_refused() {
-            eprintln!(
-                "glasshouse: your routing override was not applied — {refusal}. The ranking's \
-                 own choice was used instead."
-            );
-        }
-        if let Some(automatic) = routed.overrode() {
-            eprintln!(
-                "glasshouse: going to `{}` because you named it; the ranking would have chosen \
-                 `{automatic}`. `glasshouse route` says why.",
-                routed.chosen().id()
-            );
-        }
-        if let glasshouse::routing::session::Continuation::Existing(warm) =
-            routed.chosen().continuation()
-        {
-            eprintln!(
-                "glasshouse: continuing session {} ({}, idle {}) rather than starting a new one; \
-                 pass --fresh to start one anyway.",
-                routed.chosen().id(),
-                warm.state,
-                crate::commands::shared::format_age(
-                    glasshouse::provider::cache::now_unix_seconds() - warm.idle_seconds
-                )
-            );
-            // Map lines 1835 and 1854, on the branch where no session has to
-            // be minted for the route to have somewhere to land: the
-            // destination *is* the session this work continues, so its id is
-            // already the session id. The fresh branch records the same two
-            // rows once `store.create` below has produced one.
-            let observed_at = glasshouse::evaluation::now_unix();
-            glasshouse::evaluation::record_routed_session(
-                runtime,
-                routed.chosen().id(),
-                routed.chosen().id(),
-                routed_cost_class(&user, project.as_ref(), routed.chosen()),
-                routing_evidence_for(&health, routed.chosen(), observed_at),
-                routed_tier(classified.as_ref()),
-                observed_at,
-            );
-            // Map lines 1757 and 1766, on the same instant: the rationale
-            // behind the destination this row just attributed.
-            glasshouse::evaluation::record_session_route(
-                runtime,
-                routed.chosen().id(),
-                routed.chosen().id(),
-                routed.explanation(),
-                observed_at,
-            );
-            // Map line 1855's token half, on the same instant: the launch's
-            // own expected output-token size for the class it was classified
-            // as, written only when there is a real median to write.
-            record_consumption_estimate(
-                runtime,
-                routed.chosen().id(),
-                classified.as_ref(),
-                observed_at,
-            );
-            // Map line 1837, on the same instant: whether protected quota
-            // remained available for this launch, from the tier the decision
-            // used and the destination's own capacity band.
-            glasshouse::evaluation::record_reserve_availability(
-                runtime,
-                routed.chosen().id(),
-                routed_tier(classified.as_ref()),
-                routed.chosen().capacity_facts().band(),
-                observed_at,
-            );
-            // Line 1467: the session this work landed on is the sticky one.
-            remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
-            // Line 1716, on the path that migrates. Taken before
-            // `resume_session` so the checkpoint describes the moment the
-            // work left, and after the announcement above so the order a
-            // person reads matches the order things happened.
-            if checkpoint_first {
-                crate::commands::resume::checkpoint_before_moving(
-                    runtime,
-                    Some(routed.chosen().id()),
-                )?;
-            }
-            // Phase 17 line 760, on the branch that continues rather than
-            // mints: the session this pane now hosts was recorded somewhere
-            // else, so its record is moved here before it is resumed. Opened
-            // and dropped before `resume_session` opens its own connection —
-            // sequential, never two live handles (practice §65).
-            if let Some(pane) = &hosted_pane {
-                let sessions = ProjectSessions::open(runtime)?;
-                sessions.store().set_presentation(
-                    &SessionId::new(routed.chosen().id()),
-                    SessionPresentation::External,
-                    Some(pane.as_str()),
-                )?;
-            }
-            return crate::commands::resume::resume_session(
-                runtime,
-                routed.chosen().id(),
-                harness_args,
-                headless,
-                crate::commands::resume::RouteOnResume::AlreadyRouted,
-            );
-        }
-        // A fresh session the *ranking* chose, with sessions it could have
-        // continued and did not. Said out loud for the same reason the
-        // continuation above is: the person is about to start over, and the
-        // moment to learn that this project already had somewhere warm to go
-        // is before the new session exists rather than after.
-        //
-        // Only when the ranking chose it. A `--fresh` the person typed is
-        // already reported by the override line above, and repeating it as an
-        // automation decision would attribute their own choice to Glasshouse.
-        if routed.overrode().is_none() {
-            let continuable = routed
-                .considered()
-                .iter()
-                .filter(|(destination, _)| !destination.is_fresh())
-                .count();
-            if continuable > 0 {
-                eprintln!(
-                    "glasshouse: starting a new session; the ranking weighed {continuable} \
-                     session(s) this project could have continued and preferred a new one. \
-                     `glasshouse route` says why, and `--to <id>` overrules it."
-                );
-            }
-            // Map line 372: no profile was pinned, so this fresh destination
-            // is the ranking's own pick among every enabled profile rather
-            // than the implied fallback — said out loud, reusing the same
-            // `render()` `glasshouse route` prints rather than inventing a
-            // second explanation for the same decision.
-            if profile_selection {
-                eprintln!(
-                    "glasshouse: launching under profile `{}` — automatic routing's choice \
-                     among the enabled profiles.\n{}",
-                    routed.chosen().launch_profile(),
-                    routed.render()
-                );
-            }
-        }
-    }
-
-    // Line 1716 on every path that did **not** migrate into an existing
-    // session — the fresh launches, and a project with nothing recorded. The
-    // flag is a no-op here and says so rather than passing silently, because
-    // a person who asked for a checkpoint and got none needs to know which of
-    // the two happened.
+    // Line 1716, on every path that starts a fresh session rather than
+    // continuing one. The flag is a no-op here and says so rather than
+    // passing silently, because a person who asked for a checkpoint and got
+    // none needs to know which of the two happened.
     if checkpoint_first {
         crate::commands::resume::checkpoint_before_moving(runtime, None)?;
     }
 
-    // The chosen fresh destination names the profile this launch resolves.
-    // `routed` is `None` only when there was nowhere at all for the work to
-    // go, which for a fresh launch means no profile resolved for this
-    // harness; the implied Native profile always does, so the fallback below
-    // is unreachable in practice and is written as the same answer this
-    // function gave before the router existed rather than as a panic.
-    let requested_profile = routed
-        .as_ref()
-        .map(|routed| routed.chosen().launch_profile().to_owned())
-        // …and, since line 1712, the ordinary answer whenever routing is off:
-        // the profile this launch already resolved, which is `--profile`, the
-        // profile named inside a `--to fresh:<harness>:<profile>`, or the
-        // implied Native one. Reading `fresh_profile` rather than
-        // `profile_name` is what makes a `--to` identifier mean the same
-        // thing with the ranking off as it does with it on.
-        .unwrap_or_else(|| fresh_profile.to_owned());
+    // The fresh destination names the profile this launch resolves:
+    // `--profile`, the profile named inside a `--to fresh:<harness>:<profile>`,
+    // or the implied Native one.
+    let requested_profile = fresh_profile.to_owned();
 
     // Resolve the launch profile *before* anything is recorded or started.
     // A refusal here must cost nothing: no session record, no process. See
@@ -1069,38 +254,20 @@ pub(crate) fn launch_session(
 
     // Phase 56 line 1954, on the path that starts a session: which
     // entitlement it will be charged to, said before anything is recorded or
-    // started — and the harness half of that entitlement's rule applied once
-    // more here, through the same `EntitlementRules::refusal` the router
-    // asked, for the one launch the router never saw: line 1712's routing-off
-    // launch, where `routing_destinations` and `choose` do not run at all. A
-    // rule about *this harness* needs no classification to apply; the tier
-    // half does, and it is the router's (above). A contradiction in the
-    // `[entitlements]` tables is refused here for the same reason a bad
-    // profile is: it must cost nothing.
+    // started. A rule about *this harness* is checked through the same
+    // `EntitlementRules::refusal`, and a contradiction in the `[entitlements]`
+    // tables is refused here for the same reason a bad profile is: it must
+    // cost nothing.
     //
-    // 56A line 1969, the routing half: when the router chose a candidate
-    // that carries an entitlement, THAT entry serves — resolved by name from
-    // the same tables, never re-derived through the one-account lookup,
-    // which a provider several accounts legitimately back would refuse as
-    // ambiguous. The one-account lookup remains the answer for a launch the
-    // router never saw (routing off) and for a chosen candidate no entry
-    // describes; with routing off, a several-account provider is still
-    // refused, because without the broker's ranking there is nothing honest
-    // to pick an account by.
-    let chosen_entitlement_name = routed
-        .as_ref()
-        .and_then(|routed| routed.chosen().entitlement())
-        .map(|entitlement| entitlement.name().to_owned());
+    // The one-account lookup is the whole answer now: this launch names no
+    // destination-carried entitlement, so a provider several accounts
+    // legitimately back is refused as ambiguous rather than guessed at.
     let is_gateway_backend = matches!(
         launch_profile.backend,
         glasshouse::profile::BackendResource::GlasshouseGateway
     );
     let mut entitlement = if is_gateway_backend {
-        match crate::commands::resume::gateway_entitlement(
-            &effective,
-            &launch_profile,
-            chosen_entitlement_name.as_deref(),
-        ) {
+        match crate::commands::resume::gateway_entitlement(&effective, &launch_profile, None) {
             Ok(entry) => entry,
             Err(err) => {
                 eprintln!("glasshouse: {err}");
@@ -1108,22 +275,11 @@ pub(crate) fn launch_session(
             }
         }
     } else {
-        match &chosen_entitlement_name {
-            Some(name) => match effective.entitlements() {
-                Ok(pool) => pool.into_iter().find(|entry| entry.name() == name),
-                Err(err) => {
-                    eprintln!("glasshouse: {err}");
-                    return Ok(ExitCode::FAILURE);
-                }
-            },
-            None => {
-                match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
-                    Ok(entitlement) => entitlement,
-                    Err(err) => {
-                        eprintln!("glasshouse: {err}");
-                        return Ok(ExitCode::FAILURE);
-                    }
-                }
+        match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
+            Ok(entitlement) => entitlement,
+            Err(err) => {
+                eprintln!("glasshouse: {err}");
+                return Ok(ExitCode::FAILURE);
             }
         }
     };
@@ -1134,7 +290,7 @@ pub(crate) fn launch_session(
     // its consult, refusal and announcement happen once that provider is
     // known (see `start_if_required_with_degrade_sink`, further down).
     if !is_gateway_backend || entitlement.is_some() {
-        if let Some(message) = crate::commands::routing_destinations::entitlement_refusal_message(
+        if let Some(message) = crate::commands::shared::entitlement_refusal_message(
             entitlement.as_ref(),
             launch_profile.harness,
             &launch_profile.name,
@@ -1142,11 +298,7 @@ pub(crate) fn launch_session(
             eprintln!("{message}");
             return Ok(ExitCode::FAILURE);
         }
-        crate::commands::routing_destinations::announce_entitlement(
-            entitlement.as_ref(),
-            &launch_profile,
-            None,
-        );
+        crate::commands::shared::announce_entitlement(entitlement.as_ref(), &launch_profile, None);
     }
 
     // Phase 9K: the response profile is resolved *here*, on the production
@@ -1289,13 +441,12 @@ pub(crate) fn launch_session(
             evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
             Some(degrade_relay.sink()),
         ),
-        // Capability map line 1851: what the failure-domain term did to each
-        // failover this gateway takes. A sink rather than a ledger handle —
-        // `gateway::session::FailoverPreventionSink`'s own doc comment has
-        // practice §65's reason — so the evaluation ledger is opened, written
-        // and dropped inside the exchange thread that decided the failover,
-        // and never held open across the provider hop.
-        Some(crate::commands::routing_destinations::failover_prevention_sink(runtime)),
+        // Capability map line 1851's producer (`FailoverPrevented`) is on
+        // the removal list with the ranking it measured — design-decisions.md,
+        // 2026-09-16, "Glasshouse never decides which model is used".
+        // `None` reproduces `start_if_required_with_degrade_sink`'s own
+        // pre-1851 behaviour.
+        None,
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -1318,7 +469,7 @@ pub(crate) fn launch_session(
             },
             None => None,
         };
-        if let Some(message) = crate::commands::routing_destinations::entitlement_refusal_message(
+        if let Some(message) = crate::commands::shared::entitlement_refusal_message(
             entitlement.as_ref(),
             launch_profile.harness,
             &launch_profile.name,
@@ -1326,7 +477,7 @@ pub(crate) fn launch_session(
             eprintln!("{message}");
             return Ok(ExitCode::FAILURE);
         }
-        crate::commands::routing_destinations::announce_entitlement(
+        crate::commands::shared::announce_entitlement(
             entitlement.as_ref(),
             &launch_profile,
             gateway_provider.as_deref(),
@@ -1447,8 +598,7 @@ pub(crate) fn launch_session(
     // requirement forbids. The response profile beside them is communication
     // policy and nothing else: it cannot say which model ran, and the model
     // cannot say how the answer should read.
-    let pairing =
-        crate::commands::routing_destinations::session_pairing(&effective, &launch_profile);
+    let pairing = glasshouse::session::launch_profile::session_pairing(&effective, &launch_profile);
     let record = store.create(
         NewSession::embedded(selection.id().slug())
             .with_presentation(presentation)
@@ -1501,22 +651,11 @@ pub(crate) fn launch_session(
     // exchange can arrive.
     if let Some(gateway) = gateway.as_ref() {
         gateway.routing().serve_session(record.id.as_str());
-        // Map line 1301 (`GH-TASK-CLASS-COST-JOIN`): the same routing
-        // decision `record_routing_latency` already read a class off, so
-        // every row this gateway's own `record_routing_observation` writes
-        // from here on can join to it too. `None` for a routing-off launch
-        // or one that classified no task — `classified` is `None` in both,
-        // and the gateway stamps `NULL` exactly as it does when
+        // Map line 1301 (`GH-TASK-CLASS-COST-JOIN`): this launch classifies
+        // no task, so the gateway stamps `NULL` exactly as it does when
         // `serve_session` above is never called at all.
-        gateway.routing().serve_task_class(
-            classified
-                .as_ref()
-                .map(|classified| classified.answer.task_class()),
-        );
+        gateway.routing().serve_task_class(None);
     }
-    // Line 1467, the fresh half: the session just recorded is the one the
-    // next low-risk turn will be in.
-    remember_classification(&sticky_cache, classified.as_ref(), record.id.as_str());
 
     // `GH-LAUNCH-BRIEFING`: this project's memory, briefed to this session the
     // same way a door-spawned one already is — map lines 1125-1135, applied
@@ -1578,59 +717,6 @@ pub(crate) fn launch_session(
     // session refreshed. Empty, and free, for every other harness — see
     // `session::native_id::snapshot`.
     let index_before = session::native_id::snapshot(&record.harness, runtime.project().root());
-
-    // Map lines 1835 and 1854: the route this launch chose, attributed to the
-    // session it just produced.
-    //
-    // **Here, and not beside `record_routing_decision` above, because the id
-    // does not exist up there.** A fresh launch mints its session id at
-    // `store.create`, so a decision recorded before it can carry no session
-    // and an outcome learned a turn later would have nothing to attach to.
-    // Recording the decision itself later was the alternative and it is
-    // rejected: lines 1829 and 1830 count decisions, and a launch refused
-    // while resolving its profile made a decision and never reaches this
-    // line. So the decision keeps its own moment and this row records what
-    // that decision became — two rows, never an `UPDATE` of one.
-    if let Some(routed) = &routed {
-        let observed_at = glasshouse::evaluation::now_unix();
-        glasshouse::evaluation::record_routed_session(
-            runtime,
-            record.id.as_str(),
-            routed.chosen().id(),
-            routed_cost_class(&user, project.as_ref(), routed.chosen()),
-            routing_evidence_for(&health, routed.chosen(), observed_at),
-            routed_tier(classified.as_ref()),
-            observed_at,
-        );
-        // Map lines 1757 and 1766, on the same instant: the rationale
-        // behind the destination this row just attributed.
-        glasshouse::evaluation::record_session_route(
-            runtime,
-            record.id.as_str(),
-            routed.chosen().id(),
-            routed.explanation(),
-            observed_at,
-        );
-        // Map line 1855's token half, on the same instant: the launch's own
-        // expected output-token size for the class it was classified as,
-        // written only when there is a real median to write.
-        record_consumption_estimate(
-            runtime,
-            record.id.as_str(),
-            classified.as_ref(),
-            observed_at,
-        );
-        // Map line 1837, on the same instant: whether protected quota
-        // remained available for this launch, from the tier the decision
-        // used and the destination's own capacity band.
-        glasshouse::evaluation::record_reserve_availability(
-            runtime,
-            record.id.as_str(),
-            routed_tier(classified.as_ref()),
-            routed.chosen().capacity_facts().band(),
-            observed_at,
-        );
-    }
 
     tracing::info!(
         session = %record.id,

@@ -637,8 +637,8 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         from_checkpoint: Option<String>,
 
-        /// Continue this destination whatever the ranking says, by the
-        /// identifier `glasshouse route` prints.
+        /// Continue this session, by the identifier `glasshouse sessions`
+        /// prints.
         ///
         /// A recorded session's identifier continues that session; a
         /// `fresh:<harness>:<profile>` identifier starts a new one under that
@@ -646,30 +646,9 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         to: Option<String>,
 
-        /// Start a fresh session whatever the ranking says.
-        ///
-        /// Glasshouse prefers a relevant session this project already has
-        /// when its affinity outweighs starting over. This is how to say no
-        /// to that, once, without changing any configuration.
+        /// Start a fresh session rather than continuing one.
         #[arg(long, conflicts_with = "to")]
         fresh: bool,
-
-        /// Take no routing decision for this launch — capability map line
-        /// 1712.
-        ///
-        /// Glasshouse normally ranks this project's warm sessions against a
-        /// new one and continues the best of them. This turns that off for
-        /// one launch: what `--to`, `--fresh` and `--profile` say still
-        /// happens, and with none of them the session is a new one under the
-        /// profile this launch would have used anyway.
-        ///
-        /// The same switch, standing, is `automatic = false` under
-        /// `[routing]` in this project's or your own configuration. A launch
-        /// with routing off does **not** compute the ranking in order to tell
-        /// you what it would have chosen — see `glasshouse route`, which
-        /// answers that question without starting anything.
-        #[arg(long)]
-        no_routing: bool,
 
         /// Check point the session this work is leaving, before it moves —
         /// capability map line 1716.
@@ -717,18 +696,6 @@ pub enum Command {
         #[arg(long)]
         no_memory: bool,
 
-        /// Describe the work, so the destination is chosen for what it
-        /// actually needs.
-        ///
-        /// With a routing model configured, Glasshouse classifies the task
-        /// through it before deciding where the work goes — never sending
-        /// repository files, transcripts or secrets, only the task and a few
-        /// facts about the session — and falls back to deterministic
-        /// heuristics when none is configured or it does not answer. `--to`
-        /// and `--fresh` decide on their own and ask no model. Omitting
-        /// `--task` leaves the launch exactly as it has always been.
-        #[arg(long, value_name = "TEXT")]
-        task: Option<String>,
         /// Force, skip, or lower the assumption guardrail for this task —
         /// `force`, `skip` or `lower`.
         ///
@@ -832,8 +799,8 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         from_checkpoint: Option<String>,
 
-        /// Continue this destination whatever the ranking says, by the
-        /// identifier `glasshouse route` prints.
+        /// Continue this session, by the identifier `glasshouse sessions`
+        /// prints.
         ///
         /// A recorded session's identifier continues that session; a
         /// `fresh:<harness>:<profile>` identifier starts a new one under that
@@ -841,30 +808,9 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         to: Option<String>,
 
-        /// Start a fresh session whatever the ranking says.
-        ///
-        /// Glasshouse prefers a relevant session this project already has
-        /// when its affinity outweighs starting over. This is how to say no
-        /// to that, once, without changing any configuration.
+        /// Start a fresh session rather than continuing one.
         #[arg(long, conflicts_with = "to")]
         fresh: bool,
-
-        /// Take no routing decision for this launch — capability map line
-        /// 1712.
-        ///
-        /// Glasshouse normally ranks this project's warm sessions against a
-        /// new one and continues the best of them. This turns that off for
-        /// one launch: what `--to`, `--fresh` and `--profile` say still
-        /// happens, and with none of them the session is a new one under the
-        /// profile this launch would have used anyway.
-        ///
-        /// The same switch, standing, is `automatic = false` under
-        /// `[routing]` in this project's or your own configuration. A launch
-        /// with routing off does **not** compute the ranking in order to tell
-        /// you what it would have chosen — see `glasshouse route`, which
-        /// answers that question without starting anything.
-        #[arg(long)]
-        no_routing: bool,
 
         /// Check point the session this work is leaving, before it moves —
         /// capability map line 1716.
@@ -912,18 +858,6 @@ pub enum Command {
         #[arg(long)]
         no_memory: bool,
 
-        /// Describe the work, so the destination is chosen for what it
-        /// actually needs.
-        ///
-        /// With a routing model configured, Glasshouse classifies the task
-        /// through it before deciding where the work goes — never sending
-        /// repository files, transcripts or secrets, only the task and a few
-        /// facts about the session — and falls back to deterministic
-        /// heuristics when none is configured or it does not answer. `--to`
-        /// and `--fresh` decide on their own and ask no model. Omitting
-        /// `--task` leaves the launch exactly as it has always been.
-        #[arg(long, value_name = "TEXT")]
-        task: Option<String>,
         /// Force, skip, or lower the assumption guardrail for this task —
         /// `force`, `skip` or `lower`. The same override `launch` takes.
         #[arg(long, value_name = "force|skip|lower")]
@@ -1609,11 +1543,9 @@ mod tests {
             from_checkpoint,
             to,
             fresh,
-            no_routing,
             checkpoint_first,
             headless,
             no_memory,
-            task,
             guardrail,
             presentation,
             presentation_ref,
@@ -1625,9 +1557,6 @@ mod tests {
         assert_eq!(guardrail, None, "no override unless `--guardrail` is given");
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
-        // Opt-in, like every routing flag: a launch that describes no task
-        // classifies nothing and routes exactly as it always has.
-        assert_eq!(task, None);
         // Opt-in like `--headless`: a launch that names no presentation
         // backend and no pane is shown where it always was.
         assert_eq!(presentation, None);
@@ -1637,16 +1566,13 @@ mod tests {
         // communication behaviour untouched.
         assert_eq!(response_profile, None);
         assert_eq!(response_role, None);
-        // Opt-in, like every routing flag: a launch that names neither is
-        // the plain launch it has always been, and the router's automatic
-        // answer stands.
+        // Opt-in: a launch that names neither `--to` nor `--fresh` is the
+        // plain launch it has always been.
         assert_eq!(to, None);
         assert!(!fresh);
-        // And the two controls this launch did not ask for. Line 1712's off
-        // switch and line 1716's checkpoint are opt-in for the same reason
-        // every other flag here is: a plain `glasshouse launch` must keep
-        // meaning exactly what it meant before either existed.
-        assert!(!no_routing);
+        // Line 1716's checkpoint is opt-in for the same reason every other
+        // flag here is: a plain `glasshouse launch` must keep meaning
+        // exactly what it meant before it existed.
         assert!(!checkpoint_first);
         // Opt-in, like `--headless`: a launch that does not name a checkpoint
         // is the plain launch it has always been.

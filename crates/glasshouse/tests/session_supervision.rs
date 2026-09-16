@@ -605,6 +605,22 @@ impl Background {
         Self(Some(child))
     }
 
+    /// The same background launch, naming the session to continue by id —
+    /// `glasshouse launch` no longer ranks this project's warm sessions
+    /// against a new one (design-decisions.md, 2026-09-16, "Glasshouse never
+    /// decides which model is used"), so a resume this suite wants to
+    /// observe has to be asked for explicitly rather than assumed to be a
+    /// bare launch's automatic choice.
+    fn resume(fixture: &Fixture, id: &SessionId) -> Self {
+        let child = fixture
+            .command(&["launch", "claude-code", "--headless", "--to", id.as_str()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start a background glasshouse");
+        Self(Some(child))
+    }
+
     /// End it the way the incident ended those three: abruptly, with no
     /// chance to record anything.
     fn kill(&mut self) {
@@ -1741,8 +1757,8 @@ fn a_resumed_session_records_the_process_it_is_running_in() {
         .identity()
         .expect("the first launch recorded the process that created the session");
 
-    // The resume: a bare second launch takes the router's continuation branch.
-    let mut background = Background::launch(&fixture);
+    // The resume: a second launch names the stopped session by id.
+    let mut background = Background::resume(&fixture, &id);
     let resumed = fixture.wait_for(&id, "the resume to be recorded", |row| {
         row.lifecycle == "running"
     });
@@ -1803,7 +1819,7 @@ fn a_resumed_session_whose_process_is_gone_is_still_lost() {
     fixture.run(&["launch", "claude-code", "--headless"]);
     let id = fixture.only_session();
 
-    let mut background = Background::launch(&fixture);
+    let mut background = Background::resume(&fixture, &id);
     let resumed = fixture.wait_for(&id, "the resume to be recorded", |row| {
         row.lifecycle == "running"
     });
@@ -1980,7 +1996,7 @@ fn a_resumed_sessions_hook_is_believed_rather_than_refused_by_its_own_arrival() 
     fixture.run(&["launch", "claude-code", "--headless"]);
     let id = fixture.only_session();
 
-    let mut background = Background::launch(&fixture);
+    let mut background = Background::resume(&fixture, &id);
     fixture.wait_for(&id, "the resume to be recorded", |row| {
         row.lifecycle == "running"
     });
