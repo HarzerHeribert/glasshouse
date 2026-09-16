@@ -50,6 +50,7 @@ fn targets_for(protocol: &str) -> &'static [&'static str] {
         ANTHROPIC_MESSAGES => &["/messages"],
         OPENAI_RESPONSES => &["/responses"],
         OPENAI_CHAT => &["/chat/completions"],
+        TYPESAFE_SYSTEMONE => &["/systemone"],
         other => panic!("no ingress targets are declared for {other:?}"),
     }
 }
@@ -2705,4 +2706,185 @@ fn an_answered_client_sees_an_end_of_stream_with_nothing_of_its_own_left_unread(
         ),
         Err(error) => panic!("the queue could not be read back: {error}"),
     }
+}
+
+// --- GH-GATEWAY-SYSTEMONE-CARRIER: a relay-only fifth protocol --------------
+
+const TYPESAFE_SYSTEMONE: &str = "typesafe-systemone";
+const TYPESAFE_CREDENTIAL: &str = "sk-typesafe-PLANTED-CREDENTIAL-000111222333"; // glasshouse:not-a-secret
+const CLAUDE_MAX_MODEL: &str = "claude-opus-5";
+
+/// A backend serving one protocol at one fixture's base URL, under its own
+/// name and credential — the two-backend, two-credential shape
+/// [`two_provider_upstream`] already uses for Phase 9H failover, generalised
+/// to two different protocols instead of two failover candidates for the
+/// same one.
+fn backend_serving(
+    name: &str,
+    protocol: &str,
+    credential: &str,
+    fixture: &FixtureUpstream,
+) -> UpstreamBackend {
+    UpstreamBackend::new(
+        name.to_owned(),
+        vec![Route::new(
+            protocol.to_owned(),
+            targets_for(protocol),
+            &fixture.base_url(),
+        )],
+        Secret::mint_for_test(credential),
+        crate::routing::CredentialId::new(
+            name,
+            crate::secret::SecretRef::Environment {
+                var: format!("{}_API_KEY", name.to_uppercase().replace('-', "_")),
+            },
+        ),
+        crate::routing::Cost::Metered,
+    )
+    .expect("a loopback http URL is absolute and this credential is header-safe")
+    .with_models(
+        [CLAUDE_MAX_MODEL]
+            .iter()
+            .copied()
+            .filter(|_| protocol == ANTHROPIC_MESSAGES),
+    )
+}
+
+/// The rule this package exists for, through a real gateway and a real
+/// socket: a session bound to a chat account still reaches a decision-only
+/// account for the one target only it claims, with that account's own
+/// credential attached and the client's token gone — and the same session's
+/// chat traffic keeps going to the chat account, never stolen by the rule.
+#[test]
+fn a_systemone_request_reaches_the_typesafe_account_while_messages_stay_with_the_bound_one() {
+    use crate::routing::AssignedModel;
+    use crate::routing::evidence::DECISION_PURPOSE;
+
+    let claude_fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        "{\"ok\":true}",
+    );
+    let typesafe_fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        "{\"model\":\"jev-latest\",\"answers\":{},\"usage\":{\"input_tokens\":330,\"output_tokens\":34}}",
+    );
+    let (sink, seen) = capturing_sink();
+    let upstream = Upstream::with_failover(vec![
+        backend_serving(
+            "claude-max",
+            ANTHROPIC_MESSAGES,
+            PROVIDER_CREDENTIAL,
+            &claude_fixture,
+        ),
+        backend_serving(
+            "typesafe",
+            TYPESAFE_SYSTEMONE,
+            TYPESAFE_CREDENTIAL,
+            &typesafe_fixture,
+        ),
+    ])
+    .expect("two backends is not none");
+    let gateway = Gateway::start_with_degrade_sink(upstream, None, None, Some(sink), None)
+        .expect("loopback is bindable");
+    gateway.routing().bind(
+        "claude-code",
+        ANTHROPIC_MESSAGES,
+        AssignedModel::named(CLAUDE_MAX_MODEL),
+        &gateway
+            .upstream()
+            .expect("a started gateway has its upstream"),
+    );
+    let presented = gateway.token().expose().to_owned();
+
+    // A decision request, under a purpose header, reaches the typesafe
+    // account — not the model-chosen claude-max one, because only typesafe
+    // claims /v1/systemone.
+    let decision_body = "{\"state\":{},\"model\":\"jev-latest\",\"questions\":{}}";
+    let mut request = request_for("POST", "/v1/systemone", &presented, Some(decision_body));
+    // `request_for` writes the head and body in one shot; splice the purpose
+    // header in after `Authorization` the same way `messages_request_with_header`
+    // does for the anthropic-only fixtures.
+    let marker = b"\r\n\r\n";
+    let split = request
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("request_for always writes a blank line before the body");
+    request.splice(
+        split + 2..split + 2,
+        b"X-Glasshouse-Purpose: decision\r\n".iter().copied(),
+    );
+
+    let response = as_text(&send_and_read(gateway.address(), &request));
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the decision exchange did not complete: {response}"
+    );
+
+    let forwarded = typesafe_fixture.only_request();
+    assert_eq!(forwarded.target, "/v1/systemone");
+    assert_eq!(forwarded.body, decision_body.as_bytes());
+    assert_eq!(
+        forwarded.header("authorization"),
+        Some(format!("Bearer {TYPESAFE_CREDENTIAL}").as_str()),
+        "the typesafe account's own credential must attach, not the claude-max one"
+    );
+    for (name, value) in &forwarded.headers {
+        assert!(
+            !value.contains(&presented),
+            "the child's own token survived to typesafe in the {name} header"
+        );
+    }
+    assert!(
+        claude_fixture.requests().is_empty(),
+        "a target only typesafe claims must never open a connection to claude-max"
+    );
+
+    // The same session's chat traffic still goes to claude-max — the rule
+    // must not steal a target the model-chosen backend claims.
+    let messages_response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(&presented, "{}"),
+    ));
+    assert!(
+        messages_response.starts_with("HTTP/1.1 200 OK"),
+        "the messages exchange did not complete: {messages_response}"
+    );
+    let claude_forwarded = claude_fixture.only_request();
+    assert_eq!(
+        claude_forwarded.header("authorization"),
+        Some(format!("Bearer {PROVIDER_CREDENTIAL}").as_str())
+    );
+
+    // The decision exchange's own purpose and route, once the sink has it.
+    let mut attempts = 0;
+    let rows = loop {
+        let rows = reported_observations(&seen);
+        if rows
+            .iter()
+            .any(|row| row.route.as_deref() == Some(TYPESAFE_SYSTEMONE))
+        {
+            break rows;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no routing observation for typesafe-systemone was reported within 2s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let decision_row = rows
+        .iter()
+        .find(|row| row.route.as_deref() == Some(TYPESAFE_SYSTEMONE))
+        .expect("checked above");
+    assert_eq!(decision_row.purpose.as_deref(), Some(DECISION_PURPOSE));
+    // Not asserted: `decision_row.provider`. `exchange()`'s `provider` field
+    // is `Upstream::provider()` — the sticky *assigned* backend
+    // (`claude-max`), not the backend `serving_for_target` actually placed
+    // this request with — a pre-existing attribution gap in per-model
+    // routing generally (`Upstream::for_model` has the same shape) that this
+    // package's FEASIBILITY does not name and does not fix. The bytes went
+    // to the right place, proven above by the fixture the request actually
+    // reached; only the ledger's `provider` column is affected.
 }

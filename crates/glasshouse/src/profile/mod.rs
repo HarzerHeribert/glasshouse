@@ -105,6 +105,7 @@ const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
         // `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`,
         // the same standing as the OpenAI-Chat entry above.
         WireProtocol::GeminiGenerateContent => &["/models", "/v1beta/models"],
+        WireProtocol::TypesafeSystemOne => &["/systemone"],
     }
 }
 

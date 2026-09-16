@@ -340,6 +340,7 @@ fn wire_protocol_from_slug(slug: &str) -> Option<crate::harness::WireProtocol> {
         "openai-responses" => Some(WireProtocol::OpenAiResponses),
         "openai-chat" => Some(WireProtocol::OpenAiChat),
         "gemini-generate-content" => Some(WireProtocol::GeminiGenerateContent),
+        "typesafe-systemone" => Some(WireProtocol::TypesafeSystemOne),
         _ => None,
     }
 }

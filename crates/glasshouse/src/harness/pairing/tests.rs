@@ -28,6 +28,12 @@ fn wire_protocol_from_slug_round_trips_every_known_slug_and_refuses_an_unknown_o
         assert_eq!(wire_protocol_from_slug(protocol.slug()), Some(protocol));
     }
     assert_eq!(wire_protocol_from_slug("google-gemini"), None);
+    // Asserted absent by name, not added to the list above: no harness
+    // speaks typesafe-systemone at the ingress and no pairing affinity
+    // exists for it, so `wire_protocol_from_slug` — the reverse lookup a
+    // caller uses to identify a route's protocol for an affinity —
+    // deliberately does not produce it.
+    assert_eq!(wire_protocol_from_slug("typesafe-systemone"), None);
 }
 
 /// Line 557: both halves, and the second half is the one that matters.

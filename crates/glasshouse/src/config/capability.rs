@@ -36,11 +36,12 @@ use super::{ConfiguredHarness, ConfiguredWorkloadTier, is_false};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfiguredProtocol(WireProtocol);
 
-const WIRE_PROTOCOL_SPELLINGS: [WireProtocol; 4] = [
+const WIRE_PROTOCOL_SPELLINGS: [WireProtocol; 5] = [
     WireProtocol::AnthropicMessages,
     WireProtocol::OpenAiResponses,
     WireProtocol::OpenAiChat,
     WireProtocol::GeminiGenerateContent,
+    WireProtocol::TypesafeSystemOne,
 ];
 
 /// The compile-time guard that [`WIRE_PROTOCOL_SPELLINGS`] still lists every
@@ -53,6 +54,7 @@ fn wire_protocol_ordinal(protocol: WireProtocol) -> usize {
         WireProtocol::OpenAiResponses => 1,
         WireProtocol::OpenAiChat => 2,
         WireProtocol::GeminiGenerateContent => 3,
+        WireProtocol::TypesafeSystemOne => 4,
     }
 }
 

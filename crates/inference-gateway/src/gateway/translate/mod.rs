@@ -46,12 +46,13 @@ pub use openai_chat::TOOL_ERROR_MARKER;
 /// request limit.
 pub const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The four wire protocols, by slug, in the gateway's own order.
-pub const PROTOCOLS: [&str; 4] = [
+/// The five wire protocols, by slug, in the gateway's own order.
+pub const PROTOCOLS: [&str; 5] = [
     "anthropic-messages",
     "openai-responses",
     "openai-chat",
     "gemini-generate-content",
+    "typesafe-systemone",
 ];
 
 /// Whether an ordered pair is offered, and if not, why not.
@@ -110,6 +111,15 @@ const NO_GEMINI_HARNESS: &str = "not offered: no supported client speaks gemini-
      request of this shape can arrive; the Gemini CLI adapter is a separate package (T3b) and \
      these rows are decided when it lands";
 
+/// Why every row touching `typesafe-systemone` is refused, and it is not
+/// "untested" or "not yet". A decision request has no messages, tools or
+/// stream to translate, and a chat request has no questions — there is no
+/// shared shape for a codec to bridge, so no pair with this protocol is ever
+/// offered, regardless of which side it is on.
+const NOT_A_CHAT_PROTOCOL: &str = "not offered: typesafe-systemone is a decision protocol with no messages, tools or \
+     stream, and a chat protocol has no questions — there is no shared shape for a codec to \
+     translate, so this pair is never offered";
+
 /// The API version header `api.anthropic.com` requires on every request —
 /// the same value real clients send and the relay path already forwards
 /// verbatim (`gateway/mod.rs`'s fixture tests pin it). A translated request
@@ -151,7 +161,7 @@ fn api_key(serving: &UpstreamBackend) -> HeaderValue {
 /// protocol with itself, exactly once — `every_ordered_pair_appears_exactly_once`
 /// holds it to that, and `crate::provider`'s own test holds it against
 /// `WireProtocol`, which this file may not name.
-const TABLE: [Pair; 16] = [
+const TABLE: [Pair; 25] = [
     Pair {
         from: "anthropic-messages",
         to: "anthropic-messages",
@@ -263,6 +273,53 @@ const TABLE: [Pair; 16] = [
     Pair {
         from: "gemini-generate-content",
         to: "gemini-generate-content",
+        status: PairStatus::Refused(SAME_PROTOCOL),
+    },
+    // Every row touching typesafe-systemone, either side: refused for the
+    // reason that is true — see NOT_A_CHAT_PROTOCOL — never "not yet".
+    Pair {
+        from: "anthropic-messages",
+        to: "typesafe-systemone",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "openai-responses",
+        to: "typesafe-systemone",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "openai-chat",
+        to: "typesafe-systemone",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "gemini-generate-content",
+        to: "typesafe-systemone",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "typesafe-systemone",
+        to: "anthropic-messages",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "typesafe-systemone",
+        to: "openai-responses",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "typesafe-systemone",
+        to: "openai-chat",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "typesafe-systemone",
+        to: "gemini-generate-content",
+        status: PairStatus::Refused(NOT_A_CHAT_PROTOCOL),
+    },
+    Pair {
+        from: "typesafe-systemone",
+        to: "typesafe-systemone",
         status: PairStatus::Refused(SAME_PROTOCOL),
     },
 ];

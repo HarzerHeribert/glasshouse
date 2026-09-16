@@ -76,6 +76,15 @@ pub enum WireProtocol {
     /// `gemini-generate-content -> …` row in the gateway's pair table is
     /// refused by name rather than merely untested.
     GeminiGenerateContent,
+    /// TypeSafe AI's System One decision protocol — `POST …/v1/systemone`,
+    /// a typed-question request and a typed-answer response with its own
+    /// `usage` shape. Relay-only: a decision request has no messages, tools
+    /// or stream to translate, so no codec exists or may be inferred for it
+    /// (nothing in `translate/` names it, and the pair table refuses every
+    /// pair with it by name). This holds as long as System One stays a
+    /// decision wire rather than a chat wire — see
+    /// `docs/product/evidence/phase-66.md`, *Provider facts*.
+    TypesafeSystemOne,
 }
 
 impl WireProtocol {
@@ -85,6 +94,7 @@ impl WireProtocol {
             WireProtocol::OpenAiResponses => "openai-responses",
             WireProtocol::OpenAiChat => "openai-chat",
             WireProtocol::GeminiGenerateContent => "gemini-generate-content",
+            WireProtocol::TypesafeSystemOne => "typesafe-systemone",
         }
     }
 }

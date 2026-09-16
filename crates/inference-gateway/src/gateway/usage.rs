@@ -52,8 +52,11 @@ pub(super) struct Format {
     output: &'static str,
     /// The key stating how many input tokens it served from a cache. Read as
     /// the *read* figure only: a cache-creation count is a different quantity
-    /// and is not conflated with it.
-    cached: &'static str,
+    /// and is not conflated with it. `None` for a protocol whose usage has no
+    /// cached-input figure at all — the same "no arming needed" shape
+    /// [`Format::text_arm`] already uses for an optional slot, rather than a
+    /// literal chosen to never match.
+    cached: Option<&'static str>,
     /// The event marker that has to be seen before [`Format::text_value`]
     /// counts as generated text, or `None` where the value key is unambiguous
     /// on its own.
@@ -76,7 +79,7 @@ pub(super) struct Format {
 const ANTHROPIC_MESSAGES: Format = Format {
     input: "\"input_tokens\":",
     output: "\"output_tokens\":",
-    cached: "\"cache_read_input_tokens\":",
+    cached: Some("\"cache_read_input_tokens\":"),
     text_arm: Some("\"text_delta\""),
     text_value: "\"text\":\"",
     tool_call: "\"type\":\"tool_use\"",
@@ -87,7 +90,7 @@ const ANTHROPIC_MESSAGES: Format = Format {
 const OPENAI_CHAT: Format = Format {
     input: "\"prompt_tokens\":",
     output: "\"completion_tokens\":",
-    cached: "\"cached_tokens\":",
+    cached: Some("\"cached_tokens\":"),
     text_arm: None,
     text_value: "\"content\":\"",
     tool_call: "\"tool_calls\":",
@@ -99,10 +102,25 @@ const OPENAI_CHAT: Format = Format {
 const OPENAI_RESPONSES: Format = Format {
     input: "\"input_tokens\":",
     output: "\"output_tokens\":",
-    cached: "\"cached_tokens\":",
+    cached: Some("\"cached_tokens\":"),
     text_arm: Some("\"response.output_text.delta\""),
     text_value: "\"delta\":\"",
     tool_call: "\"type\":\"function_call\"",
+};
+
+/// TypeSafe System One: `usage` states exactly two counts and no cached-input
+/// figure (`docs/product/evidence/phase-66.md`, *Provider facts*). It has no
+/// text delta or tool-call marker either — a decision response is not a
+/// stream of generated text, so [`Format::text_arm`], [`Format::text_value`]
+/// and [`Format::tool_call`] name keys this protocol's usage scan will never
+/// see, the same as every other format's unreachable-until-matched fields.
+const TYPESAFE_SYSTEMONE: Format = Format {
+    input: "\"input_tokens\":",
+    output: "\"output_tokens\":",
+    cached: None,
+    text_arm: None,
+    text_value: "\"text\":\"",
+    tool_call: "\"type\":\"tool_use\"",
 };
 
 /// The format for a protocol slug, or `None` where this relay has no
@@ -127,6 +145,7 @@ pub(super) fn format_for(protocol: &str) -> Option<Format> {
         "anthropic-messages" => Some(ANTHROPIC_MESSAGES),
         "openai-chat" => Some(OPENAI_CHAT),
         "openai-responses" => Some(OPENAI_RESPONSES),
+        "typesafe-systemone" => Some(TYPESAFE_SYSTEMONE),
         _ => None,
     }
 }
@@ -270,7 +289,6 @@ impl Extractor {
             for (needle, slot) in [
                 (self.format.input, &mut self.input),
                 (self.format.output, &mut self.output),
-                (self.format.cached, &mut self.cached),
             ] {
                 if rest.starts_with(needle.as_bytes())
                     && let Digits::Value(value) = digits_at(buf, i + needle.len())
@@ -281,6 +299,12 @@ impl Extractor {
                     // provider means.
                     *slot = Some(value);
                 }
+            }
+            if let Some(needle) = self.format.cached
+                && rest.starts_with(needle.as_bytes())
+                && let Digits::Value(value) = digits_at(buf, i + needle.len())
+            {
+                self.cached = Some(value);
             }
             // The markers are only looked for on a streamed delivery — see
             // [`Delivery`] for why an instant inside a document is a reading
@@ -424,6 +448,23 @@ mod tests {
         assert!(format_for("anthropic-messages").is_some());
         assert!(format_for("openai-chat").is_some());
         assert!(format_for("openai-responses").is_some());
+        assert!(format_for("typesafe-systemone").is_some());
+    }
+
+    #[test]
+    fn a_typesafe_systemone_response_yields_the_two_counts_and_no_cached_figure() {
+        let mut extractor = Extractor::new(TYPESAFE_SYSTEMONE, Delivery::Document);
+        extractor.feed(
+            br#"{"model":"jev-latest","answers":{"key":{"choice":"a"}},"usage":{"input_tokens":330,"output_tokens":34}}"#,
+        );
+        assert_eq!(
+            extractor.usage(),
+            Some(Usage {
+                input: 330,
+                output: 34,
+                cached: None,
+            })
+        );
     }
 
     #[test]

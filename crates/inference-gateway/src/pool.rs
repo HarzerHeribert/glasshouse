@@ -39,6 +39,7 @@ pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
     WireProtocol::OpenAiResponses,
     WireProtocol::OpenAiChat,
     WireProtocol::GeminiGenerateContent,
+    WireProtocol::TypesafeSystemOne,
 ];
 
 /// The request-target path prefixes that belong to each ingress protocol.
@@ -55,6 +56,7 @@ const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
         // Two spellings, because Google's version segment is `v1beta` and
         // the `/v1` the gateway strips before matching does not cover it.
         WireProtocol::GeminiGenerateContent => &["/models", "/v1beta/models"],
+        WireProtocol::TypesafeSystemOne => &["/systemone"],
     }
 }
 

@@ -499,6 +499,21 @@ pub fn templates() -> Vec<Provider> {
             "https://generativelanguage.googleapis.com",
             vec!["GEMINI_API_KEY".to_owned()],
         ),
+        // TypeSafe AI's System One decision protocol. Read 2026-09-16 from
+        // docs.typesafe.ai, unverified against a live endpoint
+        // (`docs/product/evidence/phase-66.md`, *Provider facts*) — no probe
+        // with a real key was made here, so every `Declared` fact stays
+        // `Unverified`, including `model_list_endpoint` and
+        // `usage_telemetry`: `Verified` cites a probe that was actually made,
+        // and this package holds no key to make one with. A probe that
+        // upgrades either fact records the day it ran in that same evidence
+        // entry.
+        unverified_provider(
+            "typesafe",
+            WireProtocol::TypesafeSystemOne,
+            "https://api.typesafe.ai",
+            vec!["TYPESAFE_API_KEY".to_owned()],
+        ),
         // The two generic templates: a concrete protocol is established
         // (OpenAI-compatible chat completions, or Anthropic Messages), but
         // the base URL and credential are the user's to supply — there is no
@@ -551,3 +566,28 @@ pub fn usage_endpoint(provider_name: &str) -> Option<&'static str> {
 /// validation and this module's own tests cannot drift apart on which
 /// templates those are.
 pub const GENERIC_TEMPLATE_NAMES: &[&str] = &["openai-compatible", "anthropic-compatible"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typesafe_is_a_template_serving_only_system_one_with_every_fact_unverified() {
+        let typesafe = template("typesafe").expect("typesafe is a built-in template");
+        assert_eq!(typesafe.protocols.len(), 1);
+        let support = typesafe
+            .serves(WireProtocol::TypesafeSystemOne)
+            .expect("typesafe serves TypesafeSystemOne");
+        assert_eq!(support.base_url, "https://api.typesafe.ai");
+        assert_eq!(support.streaming, Declared::Unverified);
+        assert_eq!(support.tool_calls, Declared::Unverified);
+        assert_eq!(support.reasoning, Declared::Unverified);
+        assert_eq!(typesafe.model_list_endpoint, Declared::Unverified);
+        assert_eq!(typesafe.usage_telemetry, Declared::Unverified);
+        assert_eq!(typesafe.credential_env, vec!["TYPESAFE_API_KEY".to_owned()]);
+        assert!(typesafe.headers.is_empty());
+        // ... and it serves no other protocol — this template is relay-only
+        // for exactly one wire.
+        assert!(typesafe.serves(WireProtocol::AnthropicMessages).is_none());
+    }
+}

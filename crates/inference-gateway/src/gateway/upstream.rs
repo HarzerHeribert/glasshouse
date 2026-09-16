@@ -660,6 +660,36 @@ impl Upstream {
             .unwrap_or_else(|| self.serving())
     }
 
+    /// The backend that should carry a request for `model`, at `target`.
+    ///
+    /// [`Self::serving_for`] alone sends a target the model-chosen backend
+    /// does not claim into `unrouted`, even when some other configured
+    /// backend claims it — reachable whenever a session is bound to a chat
+    /// account and a request names a route only a relay-only provider
+    /// declares, such as `typesafe-systemone`'s `/systemone`
+    /// (`docs/product/evidence/phase-66.md`, *Provider facts*). This holds
+    /// as long as such a target has exactly one claimant: **when the
+    /// model-chosen backend does not claim `target`, and exactly one backend
+    /// does, that backend serves the request.** Two or more claimants keep
+    /// today's behaviour — the model-chosen backend, then `unrouted` — because
+    /// ranking between two decision providers is not this method's decision
+    /// to make.
+    #[must_use]
+    pub fn serving_for_target(&self, model: Option<&str>, target: &str) -> &UpstreamBackend {
+        let chosen = self.serving_for(model);
+        if chosen.route_for(target).is_some() {
+            return chosen;
+        }
+        let mut claimants = self
+            .backends
+            .iter()
+            .filter(|backend| backend.route_for(target).is_some());
+        match (claimants.next(), claimants.next()) {
+            (Some(only), None) => only,
+            _ => chosen,
+        }
+    }
+
     /// The first backend declaring `model`, or `None`.
     ///
     /// First rather than best: the order is the configured one, and a pool
@@ -913,6 +943,109 @@ mod per_model_tests {
         let empty = backend("a", &[]);
         assert!(!empty.serves_model("claude-opus-5"));
         assert!(empty.declared_models().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod target_rule_tests {
+    use super::*;
+
+    /// A backend serving `protocol` at `target`, optionally declaring
+    /// `models` — the shape a chat account (some models, `/v1/messages`) and
+    /// a decision-only account (no models, `/systemone`) both need.
+    fn backend_for(
+        provider: &str,
+        protocol: &str,
+        registered_targets: &'static [&'static str],
+        models: &[&str],
+    ) -> UpstreamBackend {
+        UpstreamBackend::new(
+            provider.to_string(),
+            vec![Route::new(
+                protocol.to_owned(),
+                registered_targets,
+                "https://example.invalid",
+            )],
+            Secret::mint_for_test("sk-test-credential-value"),
+            CredentialId::new(
+                provider,
+                crate::secret::SecretRef::Environment {
+                    var: format!("{provider}_KEY"),
+                },
+            ),
+            Cost::Metered,
+        )
+        .expect("a backend with one route")
+        .with_models(models.iter().copied())
+    }
+
+    /// The rule this package exists for: bound to A (a chat account), a
+    /// target only B (a decision-only account) claims is served by B, and
+    /// a target A does claim stays with A.
+    #[test]
+    fn a_target_claimed_by_exactly_one_backend_is_served_even_when_the_session_is_bound_elsewhere()
+    {
+        let pool = Upstream::with_failover(vec![
+            backend_for(
+                "claude-max",
+                "anthropic-messages",
+                &["/messages"],
+                &["claude-opus-5"],
+            ),
+            backend_for("typesafe", "typesafe-systemone", &["/systemone"], &[]),
+        ])
+        .unwrap();
+
+        // Bound to claude-max (its model), /v1/systemone is claimed only by
+        // typesafe.
+        let serving = pool.serving_for_target(Some("claude-opus-5"), "/v1/systemone");
+        assert_eq!(serving.provider(), "typesafe");
+
+        // The same session's /v1/messages request still goes to claude-max —
+        // the rule must not steal a target the model-chosen backend claims.
+        let serving = pool.serving_for_target(Some("claude-opus-5"), "/v1/messages");
+        assert_eq!(serving.provider(), "claude-max");
+    }
+
+    /// Two backends claiming the same target: today's behaviour holds
+    /// unchanged, because ranking between two decision providers is not this
+    /// method's call to make.
+    #[test]
+    fn two_claimants_keep_todays_behaviour() {
+        let pool = Upstream::with_failover(vec![
+            backend_for(
+                "claude-max",
+                "anthropic-messages",
+                &["/messages"],
+                &["claude-opus-5"],
+            ),
+            backend_for("typesafe-a", "typesafe-systemone", &["/systemone"], &[]),
+            backend_for("typesafe-b", "typesafe-systemone", &["/systemone"], &[]),
+        ])
+        .unwrap();
+
+        // claude-max is model-chosen and does not claim /v1/systemone; two
+        // backends do, so the model-chosen one keeps serving it (and its own
+        // route_for lookup then reports unrouted downstream, exactly as
+        // before this rule existed).
+        let serving = pool.serving_for_target(Some("claude-opus-5"), "/v1/systemone");
+        assert_eq!(serving.provider(), "claude-max");
+        assert!(serving.route_for("/v1/systemone").is_none());
+    }
+
+    /// No claimant at all: the model-chosen backend keeps serving, and it is
+    /// never `None` — `serving_for_target` always returns a backend.
+    #[test]
+    fn no_claimant_falls_back_to_the_model_chosen_backend() {
+        let pool = Upstream::with_failover(vec![backend_for(
+            "claude-max",
+            "anthropic-messages",
+            &["/messages"],
+            &["claude-opus-5"],
+        )])
+        .unwrap();
+        let serving = pool.serving_for_target(Some("claude-opus-5"), "/v1/nothing-claims-this");
+        assert_eq!(serving.provider(), "claude-max");
     }
 }
 

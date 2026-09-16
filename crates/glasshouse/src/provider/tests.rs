@@ -132,11 +132,15 @@ fn neither_openai_protocol_ever_satisfies_anthropic_messages() {
 /// complete against it.
 #[test]
 fn every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table() {
-    const ALL: [WireProtocol; 4] = [
+    const ALL: [WireProtocol; 5] = [
         WireProtocol::AnthropicMessages,
         WireProtocol::OpenAiResponses,
         WireProtocol::OpenAiChat,
         WireProtocol::GeminiGenerateContent,
+        // Relay-only: asserted absent from `supported` below by the loop's
+        // own generic check, never added to it — no harness speaks this
+        // protocol at the ingress and no codec exists for it.
+        WireProtocol::TypesafeSystemOne,
     ];
     let table = crate::gateway::translate::pairs();
     assert_eq!(table.len(), ALL.len() * ALL.len());
@@ -573,7 +577,9 @@ fn every_built_in_template_ships_no_header_unless_one_was_established() {
 /// was spliced in at its position in [`templates`] and nothing else in
 /// the file was touched, so the other thirteen are still pinned byte for
 /// byte against the pre-refactor capture. Regenerating the whole file
-/// would silently retire that claim.
+/// would silently retire that claim. GH-GATEWAY-SYSTEMONE-CARRIER's
+/// `typesafe` entry is a second such splice, inserted after `gemini` and
+/// before the two generic templates — no other line moved.
 #[test]
 fn templates_output_is_unchanged_by_the_literal_dedup_refactor() {
     let pinned = include_str!("testdata/templates_pin.txt");

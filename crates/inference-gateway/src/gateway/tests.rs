@@ -1591,6 +1591,39 @@ fn an_unknown_purpose_header_is_stripped_and_the_row_stays_harness_turn() {
     assert_eq!(row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
 }
 
+/// A `decision` purpose header stamps the reported observation and never
+/// reaches the upstream — the same shape `supervisor` and `helper` already
+/// have, for a Pane request naming what it asked a decision model about the
+/// task rather than the task itself.
+#[test]
+fn a_decision_purpose_header_stamps_the_row_and_never_reaches_the_upstream() {
+    use crate::routing::evidence::DECISION_PURPOSE;
+
+    let (sink, seen) = capturing_sink();
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway = bound_gateway_with_observation_sink(&fixture, sink);
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request_with_header(
+            gateway.token().expose(),
+            "{}",
+            "X-Glasshouse-Purpose: decision",
+        ),
+    ));
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    let request = fixture.only_request();
+    assert_eq!(
+        request.header("x-glasshouse-purpose"),
+        None,
+        "the purpose header must never reach the upstream"
+    );
+
+    let row = reported_purpose_observation(&seen);
+    assert_eq!(row.purpose.as_deref(), Some(DECISION_PURPOSE));
+}
+
 /// No header at all is recorded exactly as before this package.
 #[test]
 fn a_request_without_a_purpose_header_is_recorded_as_a_harness_turn() {

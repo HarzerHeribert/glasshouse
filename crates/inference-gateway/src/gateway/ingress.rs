@@ -550,7 +550,10 @@ fn forward(
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|model| !model.is_empty());
-    let serving = upstream.serving_for(requested);
+    // `serving_for_target` is `serving_for`'s own answer for every target the
+    // model-chosen backend claims, and only steps in for the one it does not
+    // — see its doc comment for why that never ranks between two claimants.
+    let serving = upstream.serving_for_target(requested, &head.target);
     let Some(route) = serving.route_for(&head.target) else {
         // Phase 56's one branch — see `unrouted`. A served target has a
         // route and never reaches it.

@@ -251,10 +251,29 @@ fn exactly_the_supported_pairs_are_supported_and_every_other_row_carries_a_reaso
         let refusal = pair.refusal().expect("a refused pair has a reason");
         if to == "gemini-generate-content" {
             assert_eq!(refusal, SAME_PROTOCOL);
+        } else if to == "typesafe-systemone" {
+            assert_eq!(refusal, NOT_A_CHAT_PROTOCOL);
         } else {
             assert!(refusal.contains("T3b"), "{}: {refusal}", pair.slug());
         }
     }
+}
+
+#[test]
+fn every_pair_touching_typesafe_systemone_is_refused_as_not_a_chat_protocol() {
+    for other in PROTOCOLS {
+        let out = lookup("typesafe-systemone", other).expect("a row exists");
+        let inbound = lookup(other, "typesafe-systemone").expect("a row exists");
+        assert!(!out.is_supported(), "{}", out.slug());
+        assert!(!inbound.is_supported(), "{}", inbound.slug());
+        if other == "typesafe-systemone" {
+            assert_eq!(out.refusal(), Some(SAME_PROTOCOL));
+        } else {
+            assert_eq!(out.refusal(), Some(NOT_A_CHAT_PROTOCOL));
+            assert_eq!(inbound.refusal(), Some(NOT_A_CHAT_PROTOCOL));
+        }
+    }
+    assert_eq!(PROTOCOLS.len(), 5);
 }
 
 #[test]

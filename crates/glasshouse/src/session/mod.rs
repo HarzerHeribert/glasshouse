@@ -100,6 +100,13 @@ pub fn session_protocol(protocol: Option<WireProtocol>) -> SessionProtocol {
         // Successor: the migration that adds `gemini-generate-content` to
         // the column's vocabulary, with `SessionProtocol`'s own variant.
         Some(WireProtocol::GeminiGenerateContent) => SessionProtocol::Unknown,
+        // Relay-only and never a session's route protocol — no harness binds
+        // a session to System One, it only carries a Pane decision request
+        // under whichever session is already bound elsewhere
+        // (`docs/product/evidence/phase-66.md`, *Provider facts*). Same
+        // recorded-limit shape as the Gemini arm above: `unknown` is an
+        // honest answer, not a guess.
+        Some(WireProtocol::TypesafeSystemOne) => SessionProtocol::Unknown,
         None => SessionProtocol::Unknown,
     }
 }
