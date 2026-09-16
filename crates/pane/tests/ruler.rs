@@ -32,6 +32,8 @@ fn attempt(
         changed_lines: None,
         interface: None,
         metrics: None,
+        decisions_mode: None,
+        decision_figures: None,
     }
 }
 
@@ -265,6 +267,8 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
             "exit_status",
             "interface",
             "metrics",
+            "decisions_mode",
+            "decisions_figures",
         ]
     );
 }

@@ -8,6 +8,7 @@
 
 pub mod attempt;
 pub mod cli;
+pub mod decisions;
 pub mod interface;
 pub mod meter;
 pub mod model;

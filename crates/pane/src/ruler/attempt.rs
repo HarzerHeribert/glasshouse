@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use super::decisions::DecisionFigures;
 use super::interface::{self, Metrics};
 use super::meter::Meter;
 use super::model::{Attempt, Harness, Outcome, Task, Tokens};
@@ -70,6 +71,21 @@ pub struct HarnessCommand {
     /// [`interface::RESULT_FILE`] in the attempt's worktree and parsed into
     /// [`Attempt::metrics`]; every other row's stdout is left alone.
     pub interface: Option<String>,
+    /// Set on a `pane:decisions-<mode>` arm: the model and mode that get
+    /// written into the attempt's own `<worktree>/.pane/config.toml` right
+    /// after the worktree is cut, never as a session flag -- the mode
+    /// travels only through that file (`decision-model.md` §1). `model` is
+    /// `None` for the `off` mode: the arm gets no `[decisions]` table at
+    /// all, since unset model already means off.
+    pub decisions: Option<DecisionsArm>,
+}
+
+/// What a `pane:decisions-<mode>` arm writes into its worktree's
+/// `.pane/config.toml`.
+#[derive(Debug, Clone)]
+pub struct DecisionsArm {
+    pub model: Option<String>,
+    pub mode: String,
 }
 
 impl HarnessCommand {
@@ -89,6 +105,30 @@ impl HarnessCommand {
             program: pane.program.clone(),
             args,
             interface: Some(mode.to_string()),
+            decisions: None,
+        }
+    }
+
+    /// The `pane` row expanded into one `pane:decisions-<mode>` arm, launched
+    /// with `--output-format json` so its stdout is the telemetry document --
+    /// never `--interface`/`--mode`, since the decision mode travels only
+    /// through the attempt's own `.pane/config.toml`. `model` is `None` for
+    /// the `off` mode.
+    pub fn pane_decisions_arm(
+        pane: &HarnessCommand,
+        model: Option<&str>,
+        mode: &str,
+    ) -> HarnessCommand {
+        let mut args = pane.args.clone();
+        args.extend(["--output-format".to_string(), "json".to_string()]);
+        HarnessCommand {
+            program: pane.program.clone(),
+            args,
+            interface: None,
+            decisions: Some(DecisionsArm {
+                model: model.map(str::to_string),
+                mode: mode.to_string(),
+            }),
         }
     }
 }
@@ -96,6 +136,11 @@ impl HarnessCommand {
 /// The `--harness` row name of the `pane` row's `<mode>` arm.
 pub fn pane_arm_name(mode: &str) -> String {
     format!("pane:{mode}")
+}
+
+/// The `--harness` row name of the `pane` row's `decisions-<mode>` arm.
+pub fn decisions_arm_name(mode: &str) -> String {
+    format!("pane:decisions-{mode}")
 }
 
 /// The harness slug Glasshouse knows a row by: a `pane:<mode>` arm is
@@ -125,6 +170,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "{statement}".to_string(),
             ],
             interface: None,
+            decisions: None,
         },
     );
     table.insert(
@@ -139,6 +185,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "{statement}".to_string(),
             ],
             interface: None,
+            decisions: None,
         },
     );
     table.insert(
@@ -151,6 +198,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "{statement}".to_string(),
             ],
             interface: None,
+            decisions: None,
         },
     );
     table
@@ -196,6 +244,8 @@ pub fn run_one(task: &Task, harness: &Harness, attempt_no: u32, opts: &RunOpts) 
         changed_lines: None,
         interface: None,
         metrics: None,
+        decisions_mode: None,
+        decision_figures: None,
     };
 
     if task.test.is_empty() || scratch_inside_checkout(&opts.scratch) {
@@ -242,20 +292,27 @@ fn run_attempt_in(
         .harnesses
         .get(harness.as_str())
         .and_then(|command| command.interface.clone());
-    let finish = |outcome, tokens, wall_clock, turns, changed_lines, metrics| Attempt {
-        task: task.id,
-        tier: task.tier,
-        harness: harness.clone(),
-        base_commit: base_commit.clone(),
-        attempt: attempt_no,
-        outcome,
-        tokens,
-        wall_clock,
-        turns,
-        changed_lines,
-        interface: interface.clone(),
-        metrics,
-    };
+    let decisions_mode = opts
+        .harnesses
+        .get(harness.as_str())
+        .and_then(|command| command.decisions.as_ref().map(|arm| arm.mode.clone()));
+    let finish =
+        |outcome, tokens, wall_clock, turns, changed_lines, metrics, decision_figures| Attempt {
+            task: task.id,
+            tier: task.tier,
+            harness: harness.clone(),
+            base_commit: base_commit.clone(),
+            attempt: attempt_no,
+            outcome,
+            tokens,
+            wall_clock,
+            turns,
+            changed_lines,
+            interface: interface.clone(),
+            metrics,
+            decisions_mode: decisions_mode.clone(),
+            decision_figures,
+        };
 
     let Some(command) = opts.harnesses.get(harness.as_str()) else {
         return finish(
@@ -265,8 +322,23 @@ fn run_attempt_in(
             None,
             None,
             None,
+            None,
         );
     };
+
+    if let Some(arm) = &command.decisions
+        && let Err(_message) = write_decisions_config(dir, arm)
+    {
+        return finish(
+            Outcome::Errored,
+            Tokens::default(),
+            Duration::default(),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
 
     // `--via-glasshouse` swaps the program the row's `command.args` template
     // is fed to; the template itself -- `{root}`/`{statement}` substitution
@@ -314,10 +386,8 @@ fn run_attempt_in(
     if let Some(gateway) = &opts.gateway {
         launch.env("ANTHROPIC_BASE_URL", gateway);
     }
-    let result_file = command
-        .interface
-        .as_ref()
-        .map(|_| dir.join(interface::RESULT_FILE));
+    let result_file = (command.interface.is_some() || command.decisions.is_some())
+        .then(|| dir.join(interface::RESULT_FILE));
     if let Some(path) = &result_file {
         match fs::File::create(path) {
             Ok(file) => {
@@ -328,6 +398,7 @@ fn run_attempt_in(
                     Outcome::Errored,
                     Tokens::default(),
                     Duration::default(),
+                    None,
                     None,
                     None,
                     None,
@@ -347,9 +418,11 @@ fn run_attempt_in(
             None,
             None,
             None,
+            None,
         );
     }
     let metrics = result_file.as_deref().and_then(read_metrics);
+    let decision_figures = result_file.as_deref().and_then(read_decision_figures);
 
     let test_result = run_test_commands(dir, task.test);
 
@@ -375,13 +448,62 @@ fn run_attempt_in(
         TestResult::Errored => Outcome::Errored,
     };
 
-    finish(outcome, tokens, wall_clock, turns, changed_lines, metrics)
+    finish(
+        outcome,
+        tokens,
+        wall_clock,
+        turns,
+        changed_lines,
+        metrics,
+        decision_figures,
+    )
+}
+
+/// Writes `<dir>/.pane/config.toml`'s `[decisions]` table for a
+/// `pane:decisions-<mode>` arm, right after the worktree is cut and before
+/// the harness launches. The `off` mode touches nothing -- unset model
+/// already means off, so there is no table to write. If the task's own
+/// commit already carries a `.pane/config.toml`, the table is appended to
+/// it; a file that already has a `[decisions]` table refuses the arm rather
+/// than guess which table wins.
+fn write_decisions_config(dir: &Path, arm: &DecisionsArm) -> Result<(), String> {
+    let Some(model) = &arm.model else {
+        return Ok(());
+    };
+    let config_dir = dir.join(".pane");
+    let config_path = config_dir.join("config.toml");
+    let existing = fs::read_to_string(&config_path).unwrap_or_default();
+    if existing.contains("[decisions]") {
+        return Err(format!(
+            "{} already has a [decisions] table",
+            config_path.display()
+        ));
+    }
+    fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("could not create {}: {e}", config_dir.display()))?;
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&format!(
+        "[decisions]\nmodel = \"{model}\"\nmode = \"{}\"\n",
+        arm.mode
+    ));
+    fs::write(&config_path, content)
+        .map_err(|e| format!("could not write {}: {e}", config_path.display()))
 }
 
 /// The captured telemetry document, or `None` when the file is unreadable
 /// or carries no `telemetry` -- unmeasured, never an empty measurement.
 fn read_metrics(path: &Path) -> Option<Metrics> {
     Metrics::from_result_json(&fs::read_to_string(path).ok()?)
+}
+
+/// The captured telemetry document's decision figures, or `None` when the
+/// file is unreadable or carries no `telemetry` -- unmeasured, never an
+/// empty measurement.
+fn read_decision_figures(path: &Path) -> Option<DecisionFigures> {
+    DecisionFigures::from_result_json(&fs::read_to_string(path).ok()?)
 }
 
 enum TestResult {

@@ -137,6 +137,26 @@ without re-reading a table.
 **`--repeat 3` is the default and the minimum.** A single attempt of an agent
 task measures the sample, not the harness.
 
+### Decisions arms
+
+`--pane-decisions off,shadow,on --decisions-model jev-latest` expands the
+`pane` row into one `pane:decisions-<mode>` arm per listed mode, refused
+(before any worktree is cut) unless `pane` is selected, together with
+`--pane-interface`, on a mode named twice or outside the three, or on
+`shadow`/`on` without `--decisions-model`. Each attempt's worktree gets
+`<root>/.pane/config.toml` written right after it is cut: `shadow`/`on` get
+`[decisions]\nmodel = "<model>"\nmode = "<mode>"\n`, appended to an existing
+file and refused if one already has a `[decisions]` table; `off` gets no
+file at all -- unset model already means off. Every arm still runs with
+`--output-format json`.
+
+The report gains a `-- decisions --` table, one row per task and arm:
+`verified n/m`, `findings`, `checker spared`, `holds`, `overrides`,
+`would_hold`, `failed`, mean parent tokens, mean wall, and `excluded` --
+attempts whose telemetry document was never captured. **`overrides` is a
+proxy for a false hold, not a measured one, until the campaign says
+otherwise.**
+
 ## 5. Two ways this measurement can lie, and what the ruler does about each
 
 **A task whose statement leaks its answer.** The statements above are derived

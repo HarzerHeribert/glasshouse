@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 
+use super::decisions::{DecisionFigures, DecisionRow};
 use super::interface::{CreditRatios, Metrics, RegretRow};
 use super::model::{Attempt, Outcome, Tier};
 use super::score::{AggregateRow, Row, Score, TaskRow, TierRow};
@@ -34,7 +35,7 @@ pub const HEADERS: [&str; 7] = [
 /// attempt never reached its test) -- `Attempt` carries no separate exit code.
 /// `interface` and `metrics` are a `pane:<mode>` ablation arm's mode and its
 /// own telemetry figures, `null` on every other row.
-pub const JSONL_KEYS: [&str; 13] = [
+pub const JSONL_KEYS: [&str; 15] = [
     "task",
     "harness",
     "commit",
@@ -48,6 +49,25 @@ pub const JSONL_KEYS: [&str; 13] = [
     "exit_status",
     "interface",
     "metrics",
+    "decisions_mode",
+    "decisions_figures",
+];
+
+/// The decisions table's columns, in order; rendered only when some attempt
+/// is a `pane:decisions-<mode>` arm.
+pub const DECISIONS_HEADERS: [&str; 12] = [
+    "task",
+    "arm",
+    "verified",
+    "findings",
+    "checker spared",
+    "holds",
+    "overrides",
+    "would_hold",
+    "failed",
+    "tokens(parent)",
+    "wall",
+    "excluded",
 ];
 
 /// The interface-regret table's columns, in order; rendered only when some
@@ -150,6 +170,52 @@ fn render_regret_table(rows: &[RegretRow], ratios: &CreditRatios) -> String {
     out
 }
 
+/// The third table: one row per `(task, arm)` group of `pane:decisions-<mode>`
+/// attempts, rendered only when [`decisions::rows`](super::decisions::rows)
+/// returns any -- a run without `--pane-decisions` prints nothing here.
+/// `overrides` is a proxy for a false hold (a held cell the model then
+/// overrode), not a measured one, until the measurement says otherwise.
+pub fn render_decisions_table(rows: &[DecisionRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    writeln!(
+        out,
+        "-- decisions (per task, per arm; overrides is a false-hold proxy, not a measured one) --"
+    )
+    .expect("String write is infallible");
+    writeln!(out, "{}", DECISIONS_HEADERS.join("  ")).expect("String write is infallible");
+    for row in rows {
+        writeln!(
+            out,
+            "{}  {}  {}/{}  {}  {}  {}  {}  {}  {}  {}  {}  {}",
+            row.task,
+            row.arm,
+            row.verified_n,
+            row.verified_m,
+            row.findings_sum,
+            row.checker_spared,
+            row.holds_sum,
+            row.overrides_sum,
+            row.would_hold_sum,
+            row.failed_sum,
+            fmt_tokens(row.tokens_mean),
+            fmt_ms(row.wall_mean),
+            row.excluded,
+        )
+        .expect("String write is infallible");
+    }
+    out
+}
+
+fn fmt_ms(ms: Option<u64>) -> String {
+    match ms {
+        Some(n) => fmt_wall(Some(std::time::Duration::from_millis(n))),
+        None => UNMEASURED.to_string(),
+    }
+}
+
 /// A per-attempt mean: whole numbers grouped, fractions to one decimal.
 fn fmt_measure(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
@@ -238,7 +304,7 @@ pub fn render_jsonl(attempts: &[Attempt]) -> String {
 
 fn render_jsonl_line(attempt: &Attempt) -> String {
     format!(
-        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics}}}",
+        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics},\"decisions_mode\":{decisions_mode},\"decisions_figures\":{decisions_figures}}}",
         task = json_str(attempt.task),
         harness = json_str(attempt.harness.as_str()),
         commit = json_str(&attempt.base_commit),
@@ -258,6 +324,33 @@ fn render_jsonl_line(attempt: &Attempt) -> String {
             .metrics
             .as_ref()
             .map_or("null".to_string(), render_metrics),
+        decisions_mode = attempt
+            .decisions_mode
+            .as_deref()
+            .map_or("null".to_string(), json_str),
+        decisions_figures = attempt
+            .decision_figures
+            .as_ref()
+            .map_or("null".to_string(), render_decision_figures),
+    )
+}
+
+/// The decision figures under stable keys; an absent figure is `null`.
+fn render_decision_figures(figures: &DecisionFigures) -> String {
+    format!(
+        "{{\"verified\":{},\"findings\":{},\"checker_skipped\":{},\"finding_added\":{},\"holds\":{},\"overrides\":{},\"would_hold\":{},\"asked\":{},\"failed\":{},\"latency_ms_total\":{},\"parent_known_tokens\":{},\"wall_time_ms\":{}}}",
+        json_opt(figures.verified),
+        json_opt(figures.findings),
+        json_opt(figures.checker_skipped),
+        json_opt(figures.finding_added),
+        json_opt(figures.holds),
+        json_opt(figures.overrides),
+        json_opt(figures.would_hold),
+        json_opt(figures.asked),
+        json_opt(figures.failed),
+        json_opt(figures.latency_ms_total),
+        json_opt(figures.parent_known_tokens),
+        json_opt(figures.wall_time_ms),
     )
 }
 

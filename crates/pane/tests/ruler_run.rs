@@ -20,8 +20,10 @@ use std::process::Command;
 
 use pane::ruler::attempt::{self, HarnessCommand, RunOpts};
 use pane::ruler::cli;
+use pane::ruler::decisions::{self, DecisionFigures};
 use pane::ruler::meter::{Meter, Readout};
-use pane::ruler::model::{Harness, Outcome, Task, Tier};
+use pane::ruler::model::{Attempt, Harness, Outcome, Task, Tier, Tokens};
+use pane::ruler::report;
 
 /// Writes an executable shell script to `dir` that appends its own working
 /// directory to `record`, then exits with `exit_code`.
@@ -245,6 +247,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
             program: harness_program,
             args: vec!["{statement}".to_string()],
             interface: None,
+            decisions: None,
         },
     );
     RunOpts {
@@ -521,6 +524,7 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
             program: fake_pane,
             args: pane_row.args,
             interface: None,
+            decisions: None,
         },
     );
 
@@ -575,6 +579,7 @@ fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
             program: fake_claude,
             args: claude_row.args,
             interface: None,
+            decisions: None,
         },
     );
 
@@ -620,6 +625,7 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
             program: fake_codex,
             args: codex_row.args,
             interface: None,
+            decisions: None,
         },
     );
 
@@ -675,6 +681,7 @@ fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
             program: fake_pane,
             args: pane_row.args,
             interface: None,
+            decisions: None,
         },
     );
 
@@ -742,6 +749,8 @@ fn the_accepted_flags_are_exactly_these() {
             "--via-glasshouse",
             "--pane-interface",
             "--credit-ratio",
+            "--pane-decisions",
+            "--decisions-model",
             "--out"
         ]
     );
@@ -1584,4 +1593,365 @@ fn a_pane_arm_without_a_telemetry_document_is_unmeasured_not_zero() {
     assert!(result.outcome.completed(), "{:?}", result.outcome);
     assert_eq!(result.interface.as_deref(), Some("cells"));
     assert_eq!(result.metrics, None);
+}
+
+/// Writes an executable shell script that, if `.pane/config.toml` exists in
+/// its own working directory, copies it verbatim to `config_record`, and
+/// otherwise leaves `config_record` empty -- a stand-in for `pane session`
+/// that reports back what the ruler wrote into the attempt's worktree before
+/// launch.
+fn write_config_capture_script(dir: &Path, name: &str, config_record: &Path) -> PathBuf {
+    let path = dir.join(name);
+    let contents = format!(
+        "#!/bin/sh\nif [ -f .pane/config.toml ]; then cat .pane/config.toml > \"{record}\"; else : > \"{record}\"; fi\nexit 0\n",
+        record = config_record.display(),
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Contract 1: `--pane-decisions off,shadow,on` turns the `pane` row into
+/// three `pane:decisions-<mode>` rows, each carrying `--output-format json`
+/// after the row's own template and leaving every other row alone -- the
+/// mode itself never reaches the argv (it travels through the worktree's
+/// own config file, contract 2).
+#[test]
+fn pane_decisions_expands_the_pane_row_into_one_arm_per_mode() {
+    let mut table = attempt::default_harnesses();
+    let selected = vec!["claude-code".to_string(), "pane".to_string()];
+    let modes = vec!["off".to_string(), "shadow".to_string(), "on".to_string()];
+
+    let rows =
+        cli::expand_pane_decisions(&selected, &modes, Some("jev-latest"), &mut table).unwrap();
+
+    assert_eq!(
+        rows,
+        vec![
+            "claude-code".to_string(),
+            "pane:decisions-off".to_string(),
+            "pane:decisions-shadow".to_string(),
+            "pane:decisions-on".to_string(),
+        ]
+    );
+    for mode in ["off", "shadow", "on"] {
+        let arm = &table[&format!("pane:decisions-{mode}")];
+        assert_eq!(
+            arm.args,
+            vec![
+                "session",
+                "--root",
+                "{root}",
+                "--task",
+                "{statement}",
+                "--output-format",
+                "json",
+            ]
+        );
+        assert!(!arm.args.contains(&"--interface".to_string()));
+        assert!(!arm.args.contains(&"--mode".to_string()));
+    }
+
+    let mut untouched = attempt::default_harnesses();
+    assert_eq!(
+        cli::expand_pane_decisions(&selected, &[], None, &mut untouched).unwrap(),
+        selected,
+        "no modes: the selection is returned as it was"
+    );
+}
+
+/// Contract 1: `--pane-decisions` without `pane` among the selected rows is
+/// refused, before any attempt starts, in one sentence naming the flag.
+#[test]
+fn pane_decisions_without_the_pane_row_is_refused() {
+    let out = scratch_dir("pane-decisions-refused");
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--pane-decisions".to_string(),
+        "shadow".to_string(),
+        "--decisions-model".to_string(),
+        "jev-latest".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+    let message = result.expect_err("--pane-decisions without pane must be refused");
+    assert!(message.contains("--pane-decisions"), "{message}");
+    assert!(message.contains("pane"), "{message}");
+    assert_eq!(
+        message.matches(". ").count(),
+        0,
+        "one sentence, not a paragraph: {message}"
+    );
+}
+
+/// Contract 1: a mode outside `off,shadow,on` is refused, naming the mode.
+#[test]
+fn pane_decisions_unknown_mode_is_refused() {
+    let mut table = attempt::default_harnesses();
+    let err = cli::expand_pane_decisions(
+        &["pane".to_string()],
+        &["turbo".to_string()],
+        Some("jev-latest"),
+        &mut table,
+    )
+    .expect_err("an unknown mode must be refused");
+    assert!(err.contains("turbo"), "{err}");
+}
+
+/// Contract 1: a mode named twice is refused, naming the mode.
+#[test]
+fn pane_decisions_names_a_mode_twice_is_refused() {
+    let mut table = attempt::default_harnesses();
+    let err = cli::expand_pane_decisions(
+        &["pane".to_string()],
+        &["shadow".to_string(), "shadow".to_string()],
+        Some("jev-latest"),
+        &mut table,
+    )
+    .expect_err("a mode named twice must be refused");
+    assert!(err.contains("shadow"), "{err}");
+}
+
+/// Contract 1: `shadow` and `on` are refused without `--decisions-model`;
+/// `off` alone needs none.
+#[test]
+fn pane_decisions_shadow_and_on_need_a_model_but_off_does_not() {
+    let mut table = attempt::default_harnesses();
+    let shadow_err = cli::expand_pane_decisions(
+        &["pane".to_string()],
+        &["shadow".to_string()],
+        None,
+        &mut table,
+    )
+    .expect_err("shadow without --decisions-model must be refused");
+    assert!(shadow_err.contains("--decisions-model"), "{shadow_err}");
+
+    let mut table = attempt::default_harnesses();
+    let on_err =
+        cli::expand_pane_decisions(&["pane".to_string()], &["on".to_string()], None, &mut table)
+            .expect_err("on without --decisions-model must be refused");
+    assert!(on_err.contains("--decisions-model"), "{on_err}");
+
+    let mut table = attempt::default_harnesses();
+    let rows = cli::expand_pane_decisions(
+        &["pane".to_string()],
+        &["off".to_string()],
+        None,
+        &mut table,
+    )
+    .expect("off needs no model");
+    assert_eq!(rows, vec!["pane:decisions-off".to_string()]);
+}
+
+/// `--pane-interface` and `--pane-decisions` cannot be combined: one
+/// expansion at a time.
+#[test]
+fn pane_interface_and_pane_decisions_together_is_refused() {
+    let out = scratch_dir("pane-interface-decisions-refused");
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "pane".to_string(),
+        "--pane-interface".to_string(),
+        "hybrid".to_string(),
+        "--pane-decisions".to_string(),
+        "on".to_string(),
+        "--decisions-model".to_string(),
+        "jev-latest".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+    let message = result.expect_err("combining the two expansions must be refused");
+    assert!(message.contains("--pane-interface"), "{message}");
+    assert!(message.contains("--pane-decisions"), "{message}");
+}
+
+/// Contract 2, end to end through `run_one`: the `off` arm's worktree gets
+/// no `.pane/config.toml` at all, while `shadow` and `on` get the exact
+/// `[decisions]` table -- written after `cut_worktree` and before the
+/// harness launches, so the fake harness (launched inside that worktree)
+/// can read back what the ruler wrote before it ran.
+#[test]
+fn a_decisions_off_arm_gets_no_config_file_while_shadow_and_on_get_the_exact_toml() {
+    let scratch = scratch_dir("pane-decisions-config");
+    let mut table = attempt::default_harnesses();
+    let rows = cli::expand_pane_decisions(
+        &["pane".to_string()],
+        &["off".to_string(), "shadow".to_string(), "on".to_string()],
+        Some("jev-latest"),
+        &mut table,
+    )
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            "pane:decisions-off".to_string(),
+            "pane:decisions-shadow".to_string(),
+            "pane:decisions-on".to_string(),
+        ]
+    );
+
+    let commit = leak(head_commit());
+    for mode in ["off", "shadow", "on"] {
+        let arm_name = format!("pane:decisions-{mode}");
+        let mut arm = table[&arm_name].clone();
+        let config_record = scratch.join(format!("{mode}-config.txt"));
+        let fake_pane =
+            write_config_capture_script(&scratch, &format!("fake_pane_{mode}.sh"), &config_record);
+        arm.program = fake_pane;
+        let mut harnesses = HashMap::new();
+        harnesses.insert(arm_name.clone(), arm);
+
+        let noop_cwd = scratch.join(format!("{mode}_test_cwd.txt"));
+        let test_script = write_script(&scratch, &format!("noop_test_{mode}.sh"), &noop_cwd, 0);
+        let task = base_task(commit, single_command(&test_script));
+        let opts = RunOpts {
+            scratch: scratch.clone(),
+            gateway: None,
+            via_glasshouse: None,
+            meter: Meter::None,
+            harnesses,
+        };
+
+        let result = attempt::run_one(&task, &Harness::new(arm_name.as_str()), 1, &opts);
+        assert!(result.outcome.completed(), "{mode}: {:?}", result.outcome);
+        assert_eq!(result.decisions_mode.as_deref(), Some(mode));
+
+        let content = fs::read_to_string(&config_record).unwrap_or_default();
+        match mode {
+            "off" => assert_eq!(content, "", "the off arm must get no config file"),
+            "shadow" | "on" => assert_eq!(
+                content,
+                format!("[decisions]\nmodel = \"jev-latest\"\nmode = \"{mode}\"\n")
+            ),
+            other => unreachable!("{other}"),
+        }
+    }
+}
+
+/// Contract 3: [`DecisionFigures`] reads every documented key, and
+/// `decisions` absent from the telemetry document leaves the whole
+/// `decisions.*` family `None` rather than reading a missing spare as
+/// "not spared".
+#[test]
+fn the_decision_figures_reader_reads_every_key_and_leaves_decisions_absent_as_none() {
+    let full = r#"{"telemetry":{"wall_time_ms":555,"tokens":{"parent":{"known_tokens":900}},"completion":{"verified":true,"findings":["a","b"]},"decisions":{"asked":1,"answered":1,"failed":0,"latency_ms_total":180,"would_hold":2,"holds":1,"overrides":1,"completion":{"noul":0.93,"latency_ms":40,"truncated":false,"finding_added":false,"checker_skipped":"decision 0.93"}}}}"#;
+    let figures = DecisionFigures::from_result_json(full).expect("a telemetry document is present");
+    assert_eq!(figures.verified, Some(true));
+    assert_eq!(figures.findings, Some(2));
+    assert_eq!(figures.checker_skipped, Some(true));
+    assert_eq!(figures.finding_added, Some(false));
+    assert_eq!(figures.holds, Some(1));
+    assert_eq!(figures.overrides, Some(1));
+    assert_eq!(figures.would_hold, Some(2));
+    assert_eq!(figures.asked, Some(1));
+    assert_eq!(figures.failed, Some(0));
+    assert_eq!(figures.latency_ms_total, Some(180));
+    assert_eq!(figures.parent_known_tokens, Some(900));
+    assert_eq!(figures.wall_time_ms, Some(555));
+
+    let absent = r#"{"telemetry":{"wall_time_ms":10,"tokens":{"parent":{"known_tokens":5}},"completion":{"verified":false,"findings":[]}}}"#;
+    let figures =
+        DecisionFigures::from_result_json(absent).expect("a telemetry document is present");
+    assert_eq!(figures.verified, Some(false));
+    assert_eq!(figures.findings, Some(0));
+    assert_eq!(
+        figures.checker_skipped, None,
+        "no decisions object means never asked, not spared=false"
+    );
+    assert_eq!(figures.finding_added, None);
+    assert_eq!(figures.holds, None);
+    assert_eq!(figures.overrides, None);
+    assert_eq!(figures.would_hold, None);
+    assert_eq!(figures.asked, None);
+    assert_eq!(figures.failed, None);
+    assert_eq!(figures.latency_ms_total, None);
+
+    assert_eq!(
+        DecisionFigures::from_result_json("not json"),
+        None,
+        "no telemetry document at all is unmeasured, not a figure of nought"
+    );
+}
+
+fn decision_attempt(
+    task: &'static str,
+    arm: &str,
+    attempt_no: u32,
+    decision_figures: Option<DecisionFigures>,
+) -> Attempt {
+    Attempt {
+        task,
+        tier: Tier::Leaf,
+        harness: Harness::new(arm),
+        base_commit: "0000000".to_string(),
+        attempt: attempt_no,
+        outcome: Outcome::Pass,
+        tokens: Tokens::default(),
+        wall_clock: std::time::Duration::from_secs(1),
+        turns: None,
+        changed_lines: None,
+        interface: None,
+        metrics: None,
+        decisions_mode: Some(arm.rsplit('-').next().unwrap().to_string()),
+        decision_figures,
+    }
+}
+
+/// Contract 4: the `checker spared` column counts attempts whose completion
+/// decision was a confident yes, `Some(true)` -- three attempts with
+/// `true, true, false` spare exactly two, not three.
+#[test]
+fn the_decisions_table_counts_checker_spared_from_three_attempts() {
+    let figures = |checker_skipped: Option<bool>| DecisionFigures {
+        checker_skipped,
+        ..DecisionFigures::default()
+    };
+    let attempts = vec![
+        decision_attempt("L1", "pane:decisions-on", 1, Some(figures(Some(true)))),
+        decision_attempt("L1", "pane:decisions-on", 2, Some(figures(Some(true)))),
+        decision_attempt("L1", "pane:decisions-on", 3, Some(figures(Some(false)))),
+    ];
+
+    let rows = decisions::rows(&attempts);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].checker_spared, 2);
+    assert_eq!(rows[0].excluded, 0);
+
+    let table = report::render_decisions_table(&rows);
+    assert!(table.contains("-- decisions"), "{table}");
+    assert!(
+        table.contains("L1  pane:decisions-on  0/0  0  2  0  0  0  0"),
+        "{table}"
+    );
+}
+
+/// An attempt whose stdout carried no telemetry document is excluded from
+/// the decisions table, never read as a zero.
+#[test]
+fn a_decisions_attempt_without_a_telemetry_document_is_excluded_not_zero() {
+    let attempts = vec![decision_attempt("L1", "pane:decisions-on", 1, None)];
+    let rows = decisions::rows(&attempts);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].excluded, 1);
+    assert_eq!(rows[0].checker_spared, 0);
+    assert_eq!(rows[0].tokens_mean, None);
+}
+
+/// Without `--pane-decisions` the decisions table renders nothing at all.
+#[test]
+fn no_decisions_arm_renders_no_decisions_table() {
+    let attempts: Vec<Attempt> = Vec::new();
+    assert_eq!(
+        report::render_decisions_table(&decisions::rows(&attempts)),
+        ""
+    );
 }

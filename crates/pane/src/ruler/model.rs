@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use super::decisions::DecisionFigures;
 use super::interface::Metrics;
 
 /// A workload tier, in the router's own vocabulary
@@ -194,4 +195,11 @@ pub struct Attempt {
     /// What that arm's own telemetry document reported; `None` when no
     /// document was captured -- unmeasured, never a zero.
     pub metrics: Option<Metrics>,
+    /// The `off`/`shadow`/`on` mode a `pane:decisions-<mode>` arm was
+    /// launched with; `None` for every other row.
+    pub decisions_mode: Option<String>,
+    /// What that arm's own telemetry document reported of the decision
+    /// model's figures; `None` when no document was captured -- unmeasured,
+    /// never a zero.
+    pub decision_figures: Option<DecisionFigures>,
 }

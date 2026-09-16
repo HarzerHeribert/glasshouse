@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use super::attempt::{self, HarnessCommand, RunOpts};
+use super::decisions;
 use super::interface::CreditRatios;
 use super::meter::Meter;
 use super::model::{Attempt, Harness, Task, Tier};
@@ -35,8 +36,14 @@ pub const ACCEPTED_FLAGS: &[&str] = &[
     "--via-glasshouse",
     "--pane-interface",
     "--credit-ratio",
+    "--pane-decisions",
+    "--decisions-model",
     "--out",
 ];
+
+/// The three decision modes `--pane-decisions` accepts, exactly
+/// `decision-model.md` §1's `mode` values.
+const DECISIONS_MODES: [&str; 3] = ["off", "shadow", "on"];
 
 /// A single attempt of an agent task measures the sample, not the harness --
 /// this is the minimum `--repeat` may be, and the default.
@@ -87,6 +94,20 @@ pub struct RunArgs {
     /// "assumed ratio"; nothing here is a billed figure.
     #[arg(long)]
     pub credit_ratio: Option<String>,
+    /// Expands the `pane` row into one `pane:decisions-<mode>` arm per
+    /// listed mode (`off,shadow,on`), each attempt's worktree getting a
+    /// `.pane/config.toml` written right after `cut_worktree` and before the
+    /// harness launches -- the mode never travels as a session flag. Refused
+    /// unless `pane` is a selected row, together with `--pane-interface`
+    /// (one expansion at a time), or listing a mode twice or outside the
+    /// three known ones.
+    #[arg(long, value_delimiter = ',')]
+    pub pane_decisions: Vec<String>,
+    /// The decision model named in a `shadow`/`on` arm's `.pane/config.toml`.
+    /// Required by every `--pane-decisions` mode but `off`, which gets no
+    /// `[decisions]` table at all.
+    #[arg(long)]
+    pub decisions_model: Option<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -124,6 +145,12 @@ fn run(flags: &[String]) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if !args.pane_interface.is_empty() && !args.pane_decisions.is_empty() {
+        return Err(
+            "--pane-interface and --pane-decisions cannot be combined: one expansion at a time"
+                .to_string(),
+        );
+    }
 
     let selected = resolve_harnesses(&args)?;
     let via_glasshouse = resolve_via_glasshouse(&args.via_glasshouse, &selected)?;
@@ -134,6 +161,12 @@ fn run(flags: &[String]) -> Result<(), String> {
 
     let mut harness_table = attempt::default_harnesses();
     let harnesses = expand_pane_interfaces(&selected, &args.pane_interface, &mut harness_table)?;
+    let harnesses = expand_pane_decisions(
+        &harnesses,
+        &args.pane_decisions,
+        args.decisions_model.as_deref(),
+        &mut harness_table,
+    )?;
     let via_glasshouse = via_glasshouse.map(|profiles| {
         harnesses
             .iter()
@@ -183,6 +216,10 @@ fn run(flags: &[String]) -> Result<(), String> {
     print!(
         "{}",
         report::render_table(&Score::with_ratios(&attempts, ratios))
+    );
+    print!(
+        "{}",
+        report::render_decisions_table(&decisions::rows(&attempts))
     );
     write_records(&args.out, &attempts)
 }
@@ -259,6 +296,69 @@ pub fn expand_pane_interfaces(
             table.insert(
                 name.clone(),
                 HarnessCommand::pane_interface_arm(&pane, mode),
+            );
+            rows.push(name);
+        }
+    }
+    Ok(rows)
+}
+
+/// Replaces the `pane` row in `selected` with one `pane:decisions-<mode>`
+/// row per mode, adding each arm's [`HarnessCommand`] to `table`. No modes:
+/// the selection is returned unchanged. Refuses a mode outside
+/// [`DECISIONS_MODES`], a mode listed twice, any mode list when `pane` was
+/// not selected, and `shadow`/`on` without `model` -- all before any
+/// worktree is cut. `off` never needs `model`: unset model already means
+/// off, and the arm gets no `[decisions]` table.
+pub fn expand_pane_decisions(
+    selected: &[String],
+    modes: &[String],
+    model: Option<&str>,
+    table: &mut HashMap<String, HarnessCommand>,
+) -> Result<Vec<String>, String> {
+    if modes.is_empty() {
+        return Ok(selected.to_vec());
+    }
+    if !selected.iter().any(|row| row == "pane") {
+        return Err(
+            "--pane-decisions expands the pane row, and --harness did not select pane".to_string(),
+        );
+    }
+    let mut parsed = Vec::new();
+    for mode in modes {
+        if !DECISIONS_MODES.contains(&mode.as_str()) {
+            return Err(format!(
+                "--pane-decisions knows off, shadow and on, not `{mode}`"
+            ));
+        }
+        if parsed.contains(mode) {
+            return Err(format!("--pane-decisions names {mode} twice"));
+        }
+        parsed.push(mode.clone());
+    }
+    for mode in &parsed {
+        if mode != "off" && model.is_none() {
+            return Err(format!(
+                "--pane-decisions {mode} needs --decisions-model <name>"
+            ));
+        }
+    }
+    let pane = table
+        .get("pane")
+        .cloned()
+        .ok_or_else(|| "the harness table has no pane row to expand".to_string())?;
+    let mut rows = Vec::new();
+    for row in selected {
+        if row != "pane" {
+            rows.push(row.clone());
+            continue;
+        }
+        for mode in &parsed {
+            let name = attempt::decisions_arm_name(mode);
+            let arm_model = if mode == "off" { None } else { model };
+            table.insert(
+                name.clone(),
+                HarnessCommand::pane_decisions_arm(&pane, arm_model, mode),
             );
             rows.push(name);
         }

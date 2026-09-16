@@ -25,6 +25,8 @@ fn arm(task: &'static str, mode: &str, attempt_no: u32, metrics: Option<Metrics>
         changed_lines: None,
         interface: Some(mode.to_string()),
         metrics,
+        decisions_mode: None,
+        decision_figures: None,
     }
 }
 
@@ -280,6 +282,8 @@ fn render_table_without_interfaces_is_unchanged() {
         changed_lines: None,
         interface: None,
         metrics: None,
+        decisions_mode: None,
+        decision_figures: None,
     };
     let table = report::render_table(&Score::of(std::slice::from_ref(&plain)));
     let expected = "task  harness  outcome  tokens/completed  wall  turns  tokens(failed)\n\
@@ -292,7 +296,9 @@ aggregate  claude-code  1/1 pass  150  10s  3  —\n";
 
     let jsonl = report::render_jsonl(std::slice::from_ref(&plain));
     assert!(
-        jsonl.contains("\"interface\":null,\"metrics\":null}"),
+        jsonl.contains(
+            "\"interface\":null,\"metrics\":null,\"decisions_mode\":null,\"decisions_figures\":null}"
+        ),
         "{jsonl}"
     );
 
