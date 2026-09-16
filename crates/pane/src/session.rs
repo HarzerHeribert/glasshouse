@@ -34,6 +34,7 @@ use crate::runtime::handles::HandleTable;
 use crate::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
 use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
+use crate::sandbox::modes::ModeOverlay;
 use crate::sandbox::profile::Profile;
 use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
@@ -517,9 +518,14 @@ pub struct SessionArgs {
     #[arg(long)]
     pub ask_approval: bool,
 
-    /// Start in planning mode; model code and tools are not executed.
+    /// Start in planning mode: reads run, no change executes. Same as `--mode plan`.
     #[arg(long)]
     pub plan: bool,
+
+    /// Start in `execute`, `explore` (read-only shell, writes only to scratch
+    /// and documentation globs) or `plan`.
+    #[arg(long, value_parser = |w: &str| tui::Mode::parse(w).ok_or("execute, explore or plan"))]
+    pub mode: Option<tui::Mode>,
 
     /// Select [profiles.NAME] in pane.toml over the base configuration.
     #[arg(long)]
@@ -691,14 +697,15 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // the next cell's runtime must be built from the choice just made, not
     // from what the file said at startup.
     let config = RefCell::new(loaded_settings.config);
-    let initial_mode = if args.plan
-        || crate::settings_session::value(&loaded_settings.values, "session.mode")
-            .and_then(toml::Value::as_str)
-            == Some("plan")
-    {
+    let initial_mode = if args.plan {
         tui::Mode::Plan
     } else {
-        tui::Mode::Execute
+        args.mode.unwrap_or_else(|| {
+            crate::settings_session::value(&loaded_settings.values, "session.mode")
+                .and_then(toml::Value::as_str)
+                .and_then(tui::Mode::parse)
+                .unwrap_or_default()
+        })
     };
     let initial_effort = crate::settings_session::value(&loaded_settings.values, "session.effort")
         .and_then(toml::Value::as_str)
@@ -1231,6 +1238,9 @@ fn run_task_inner(
         session.interface.get(),
         &session.manifest,
     );
+    if let Some(line) = prompt::request_mode_line(session.mode.get(), &ModeOverlay::default()) {
+        transcript.conversation.system.push_str(&line);
+    }
     if session.config().web.enabled {
         transcript.conversation.system.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
         transcript.conversation.system.push_str(
@@ -1287,58 +1297,15 @@ fn run_task_inner(
         .map_err(|e| format!("could not record the user turn: {e}"))?;
     transcript.conversation.messages.push(user_message);
 
-    if session.mode.get() == tui::Mode::Plan {
-        let mut request = transcript.conversation.clone();
-        request.system.push_str("\nPlanning mode: respond naturally with a plan. No code or tool call will execute in this mode.");
-        let since = SystemTime::now();
-        let requested_model = session.model.borrow().clone();
-        let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
-        let estimated = estimate_task_request_tokens(&request, &session.model.borrow(), task);
-        estimate_context(
-            &mut transcript.notebook,
-            estimated,
-            context_cap(session, &requested_model),
-        );
-        if let Some(ui) = session.ui {
-            ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
-        }
-        let (turn, elapsed_ms) = timed_send_task_turn(
-            &request,
-            session,
-            task,
-            crate::abi::telemetry::RequestCause::Implementation,
-        )
-        .map_err(|e| format!("request failed: {e}"))?;
-        let served = gateway::served_by(session.gateway, since);
-        record_request(
-            &mut transcript.notebook,
-            RequestMeasurement::from_response(
-                request_cell,
-                requested_model,
-                elapsed_ms,
-                // Project routing rows are not correlated to this request.
-                ServedBy::default(),
-                turn.usage.as_ref(),
-            ),
-        );
-        let text = message_text(&turn.message);
-        if text.trim().is_empty() {
-            return Err("the model returned an empty reply".into());
-        }
-        write_turn(session.interrupt, rollout, Role::Assistant, &text)
-            .map_err(|e| e.to_string())?;
-        budget.add(&served, turn.usage.as_ref(), estimated);
-        transcript.notebook.tokens = budget.tokens();
-        transcript.conversation.messages.push(turn.message);
-        transcript.notebook.cells.push(CellView {
-            table: Some("Planning mode · code was not executed".into()),
-            ..CellView::default()
-        });
-        render(transcript, &served, session, tui::Activity::Complete);
-        return Ok(());
-    }
+    // The request mode narrows this task's profile; the prompt line above
+    // informs, and this clone is what refuses (ruling *Request modes*).
+    let overlay = ModeOverlay::default();
+    let request_profile = session
+        .profile
+        .clone()
+        .narrowed_to(session.mode.get(), &overlay);
     let mut runtime = Runtime::with_limits(
-        session.profile,
+        &request_profile,
         session.glasshouse,
         session.id,
         DEFAULT_HEAP_LIMIT_BYTES,
@@ -1372,7 +1339,7 @@ fn run_task_inner(
     let supervisor_active =
         session.config().supervisor.enabled && session.config().supervisor.model.is_some();
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
-    let mut task_state = TaskState::new(task, session.profile, &session.config())
+    let mut task_state = TaskState::new(task, &request_profile, &session.config())
         .with_acceptance(acceptance_items)
         .with_decision(
             decision,
@@ -1524,7 +1491,7 @@ fn run_task_inner(
             &mut budget,
             rollout,
             session.interrupt,
-            session.profile,
+            &request_profile,
             session.dialect(),
             session,
             &mut task_state,
@@ -2889,10 +2856,6 @@ fn parse_tool_line(rest: &str) -> Option<(String, Args)> {
 /// is that a refusal is a value, so nothing here prompts, escalates, retries
 /// or returns an error to the caller.
 fn answer_tool(rest: &str, session: &Session<'_>) {
-    if session.mode.get() == tui::Mode::Plan {
-        session_println!("Planning mode does not execute tools. Use /mode execute first.");
-        return;
-    }
     let Some((tool, args)) = parse_tool_line(rest) else {
         session_println!(
             "/tool <name> [arg=value ...]; registered: {}",
@@ -2900,8 +2863,12 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
         );
         return;
     };
+    let overlay = ModeOverlay::default();
     let ctx = ToolContext {
-        profile: session.profile,
+        profile: &session
+            .profile
+            .clone()
+            .narrowed_to(session.mode.get(), &overlay),
         glasshouse: session.glasshouse,
         session: session.id,
     };

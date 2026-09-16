@@ -7,5 +7,6 @@
 
 pub mod linux;
 pub mod macos;
+pub mod modes;
 pub mod profile;
 pub mod windows;

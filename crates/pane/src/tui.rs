@@ -581,7 +581,7 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "/permissions".to_string(),
                     "inspect or configure next-session grants",
                 ),
-                ("/mode".to_string(), "execute or plan without running code"),
+                ("/mode".to_string(), "execute, explore (reads only) or plan"),
                 (
                     "/config".to_string(),
                     "inspect session limits and configuration",

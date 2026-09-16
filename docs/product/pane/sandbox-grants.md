@@ -684,3 +684,30 @@ behaviour:  File/shell tools use session-fixed permission checks and platform co
 invariant:  No grant is widened at the model's request, `deny` beats `allow` at every specificity, and a request outside the grant throws `PermissionDenied` inside the program without ever becoming a prompt.
 path:       `crates/pane/src/sandbox/{profile,macos,linux,windows}.rs`: one profile compiler from the settings document, three platform appliers, and one pre-call path check that enforces the filters the OS layer cannot express.
 test:       `crates/pane/tests/sandbox_grants.rs::a_program_cannot_widen_its_own_grant` — a cell that rewrites `.claude/settings.json` to allow `$HOME` and then reads `~/.ssh/id_ed25519` gets `PermissionDenied` on both calls; plus Phase 46's four named tests run against the sandboxed path.
+
+## 9. Request modes
+
+A request runs in `execute` (the session profile unchanged), `explore` or
+`plan`, chosen by `--mode`, `--plan` or `/mode execute|explore|plan`, and
+applied from the next request. **A mode narrows and never widens:**
+`Profile::narrowed_to` clones the session profile, and the mode is asked only
+after never-grantable, `deny` and `allow` have admitted a call, so every
+refusal above stays one in every mode. It grants no network and admits no MCP
+tool or server. `Profile::check` never sees a mode — the platform appliers
+probe it, and Windows refuses to exec a program the *session* could write.
+
+- **`explore`**: reading tools run; `write`/`edit` go through
+  `Profile::check_request` and are refused outside the writable globs
+  (default `.pane/scratch/**`, which `.pane/**` in §4.5's set still refuses);
+  `bash` runs only a read-only command (`ls cat head tail wc grep rg find stat
+  file git du df ps env which pwd echo date uname`, `git` limited to
+  `status log diff show blame ls-files`), per segment, with no file redirect,
+  process substitution, variable prefix, path-qualified or quoted command
+  name, and none of the writing flags (`find -delete/-exec…`, `rg --pre`,
+  `git --output`, `date -s`, `env <anything>`, `file -C`).
+- **`plan`**: the same, and every write refused.
+- On Windows the command tool is `cmd.exe`, whose line is not parsed here, so
+  every `bash` call is refused by name in both modes.
+- A refusal's rule starts `mode explore:` / `mode plan:`; the prompt names the
+  mode, and nothing depends on the model reading it. No settings key feeds
+  `ModeOverlay::new(writable, commands)` yet.

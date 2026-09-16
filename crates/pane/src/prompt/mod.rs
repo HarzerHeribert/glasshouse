@@ -272,6 +272,29 @@ pub struct SessionFacts {
 ///
 /// Pure in its argument, so the golden test that pins the binary's system
 /// bytes can build the same string without running a session.
+/// The system-prompt line naming the request mode in force, or `None` in
+/// `execute`. Information only: the narrowed profile is what refuses, so a
+/// model that ignores this line is refused all the same.
+pub fn request_mode_line(
+    mode: crate::sandbox::modes::RequestMode,
+    overlay: &crate::sandbox::modes::ModeOverlay,
+) -> Option<String> {
+    use crate::sandbox::modes::{READ_ONLY_COMMANDS, RequestMode};
+    let writes = match mode {
+        RequestMode::Execute => return None,
+        RequestMode::Plan => "every write is refused; answer with the plan itself".to_string(),
+        RequestMode::Explore => format!(
+            "write and edit are refused outside {}",
+            overlay.writable().join(", ")
+        ),
+    };
+    Some(format!(
+        "\nRequest mode: {}. Reading tools run; {writes}; bash runs only read-only commands ({}) with no redirect into a file; MCP tools are refused; network is unchanged. A refusal names the mode; do not retry it.\n",
+        mode.name(),
+        READ_ONLY_COMMANDS.join(", ")
+    ))
+}
+
 pub fn render_session_facts(facts: &SessionFacts) -> String {
     let writable = if facts.writable.is_empty() {
         "nothing is writable".to_string()

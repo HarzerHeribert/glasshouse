@@ -19,11 +19,32 @@ Five real tasks over Claude Max (`claude-sonnet-4-6`): intents `read_only` 1.00/
 
 ## Line 2637 — `explore` as a request mode
 
-**State: OPEN** — `GH-PANE-EXPLORE-MODE` (Red, Opus) dispatched 2026-09-17 00:10.
+**State: PARTIAL** (2026-09-17, `GH-PANE-EXPLORE-MODE`, Opus high, Red; report `.agent-runtime/report-pane-explore-mode.md`; integrated by the primary with a three-way apply over the approval-hint commit, the worker's `tui_live` patch and the `/mode` help text applied at integration). The enforcement is built; the line stays open on two producers named below.
+
+**Contract (as built).** Given a session in `explore`, when a cell, a direct `/tool` frame or a native tool frame invokes `write`/`edit` outside the writable globs, or `bash` with anything but a read-only command (a fixed list plus configured patterns; redirects, process substitution, `VAR=` prefixes, quoted or pathed names, `sudo`/`sh -c` refused), Pane refuses it with a rule starting `mode explore:` and executes nothing, while reads and read-only commands run exactly as in `execute`; the profile decides first (never-grantable, deny, allow) and the mode only narrows what the profile admitted; a narrowed profile admits no MCP tool; `/mode execute` lifts the narrowing from the next request; the OS layer is rendered from the unnarrowed profile (the appliers probe `check`, the mode lives in `check_request`).
+
+**Production.** `sandbox/modes.rs :: {RequestMode, ModeOverlay, Narrowing::{write_refusal, command_refusal}}`, `sandbox/profile.rs :: Profile::{narrowed_to, check_request, admits_command, admits_mcp_tool}`, `tools/invoke.rs :: check_arguments`, `session.rs :: run_task` (per-request narrowed profile clone, `--mode`), `session/controls.rs` (`/mode execute|explore|plan`), `prompt/mod.rs :: request_mode_line`.
+
+**Tests.** `tests/sandbox_profile.rs::{explore_refuses_a_write_outside_its_globs_and_names_the_mode, explore_admits_a_write_under_a_configured_documentation_glob, explore_runs_read_only_commands_and_refuses_every_writer_by_mode, reads_and_profile_refusals_are_unchanged_in_every_mode, a_configured_command_pattern_is_read_only_in_explore, a_writable_glob_outside_the_root_makes_nothing_writable}`, `tests/sandbox_apply.rs::a_request_mode_leaves_the_os_sandbox_exactly_as_the_profile_renders_it`, `tests/request_modes.rs::{explore_refuses_a_write_the_model_attempts_despite_the_prompt, explore_bash_runs_read_only_commands_and_refuses_writers, a_direct_tool_frame_is_refused_by_the_same_rule, slash_mode_execute_restores_writes_from_the_next_request}`, `tests/tui_live.rs::shift_tab_cycles_through_explore_into_a_plan_mode_that_reads`.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| A write outside the globs is refused | `modes.rs` glob match `→ \|\| true` | `sandbox_profile::explore_refuses_a_write_outside_its_globs_and_names_the_mode` | KILLED (`sandbox_profile.rs:111` expected a refusal, got a grant) |
+| A configured doc glob is writable | same match `→ && false` | `sandbox_profile::explore_admits_a_write_under_a_configured_documentation_glob` | KILLED (`:2176`) |
+| Only listed commands run | `READ_ONLY_COMMANDS.contains → \|\| true` | `sandbox_profile::explore_runs_read_only_commands_and_refuses_every_writer_by_mode` | KILLED (`:111`; `a_configured_command_pattern_is_read_only_in_explore` too) |
+| `/mode execute` lifts the narrowing | `controls.rs` keep the old mode on Execute | `request_modes::slash_mode_execute_restores_writes_from_the_next_request` | KILLED (`request_modes.rs:226`) |
+| The task runs under the narrowed profile | `session.rs narrowed_to(session.mode) → narrowed_to(Execute)` | `request_modes::explore_refuses_a_write_the_model_attempts_despite_the_prompt` | KILLED (`:163`) |
+| Direct frames pass the same check | `invoke.rs check_request → check` | `request_modes::a_direct_tool_frame_is_refused_by_the_same_rule` | KILLED (`:268`) |
+
+**Gates.** `cargo test -p pane --no-fail-fast` in the worktree: 93 targets, 1465 passed, 1 failed (`tui_live`, the superseded plan contract, patched at integration); targeted blast radius exit 0 in the worktree and on the merged tree (`request_modes` 6, `sandbox_apply` 28, `sandbox_profile` 46, `session` 105).
+
+**Open, and why.** (1) `[modes.explore] writable = […]` / `commands = […]` have no producer: `settings/registry.rs` refuses unknown keys and was another package's file this round — only `ModeOverlay::default()` reaches production. (2) The default writable glob `.pane/scratch/**` is refused by the profile's `.pane/**` never rule, so `explore` can write nothing today. Both go to `GH-PANE-SCRATCH-AND-PLAN-FILE` (the never-rule carve-out, Red) and `GH-PANE-MODES-WIRED` (the config keys, with 2639).
+
+**Limits.** In-process admission, not OS confinement: a read-only child still runs under the session's OS grant, and git config-driven execution (`core.fsmonitor`, textconv, pagers) is not seen by the word scan. `command_segments` does not track quotes (`grep "a>b"` is refused — the refusing direction). Acceptance commands and checkers run under the session profile. The Windows refusal-by-name is verified only by the `pane (windows-latest)` cell.
 
 ## Line 2638 — `plan` reads
 
-**State: OPEN** — same package.
+**State: PARTIAL** — same package. Plan mode no longer short-circuits: its cells run under the plan narrowing (reads and read-only commands run, every write refused with `mode plan:`), so "executes no change" holds by the profile rather than by not running anything. Production: `session.rs :: run_task` (short-circuit removed), `modes.rs :: Narrowing::compile` (`Plan` → no writable globs). Tests: `request_modes::plan_reads_and_refuses_a_write`, `sandbox_profile::plan_reads_and_refuses_every_write_even_under_a_documentation_glob`. Mutation: `Plan => Vec::new()` → `return (None, diagnostics)` KILLED by `request_modes::plan_reads_and_refuses_a_write` (`:199`, PLAN.md exists). **Open on "and write the plan file":** no plan file exists in current source (plan's output was the assistant reply in the rollout); the location is ruled in `GH-PANE-SCRATCH-AND-PLAN-FILE` (`.pane/scratch/plan.md`, the one write plan may make).
 
 ## Line 2639 — the mode proposed from the intent
 

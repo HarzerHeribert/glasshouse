@@ -786,10 +786,12 @@ fn double_ctrl_c_restores_the_terminal_before_exit() {
 }
 
 #[test]
-fn shift_tab_enters_a_real_nonexecuting_plan_mode() {
+fn shift_tab_cycles_through_explore_into_a_plan_mode_that_reads() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
+    app.send(b"\x1b[Z");
+    app.contains("Mode: explore");
     app.send(b"\x1b[Z");
     app.contains("Mode: plan");
     app.send(b"plan this\r");
@@ -798,11 +800,11 @@ fn shift_tab_enters_a_real_nonexecuting_plan_mode() {
         request["system"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("Planning mode")
+            .contains("Request mode: plan")
     );
-    app.contains("Planning mode");
-    app.contains("code was not executed");
-    assert!(!app.screen.screen().contents().contains("PANE / RETURN"));
+    // Plan runs cells under the plan narrowing (map line 2638): a cell that
+    // changes nothing runs, and writes are refused by the profile.
+    app.contains("LIVE RESULT INTACT");
     app.send(b"\x1b[Z");
     app.contains("Mode: execute");
     app.send(b"/context\r");

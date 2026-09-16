@@ -13,26 +13,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Mode {
-    #[default]
-    Execute,
-    Plan,
-}
-impl Mode {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Execute => "execute",
-            Self::Plan => "plan",
-        }
-    }
-    pub fn next(self) -> Self {
-        match self {
-            Self::Execute => Self::Plan,
-            Self::Plan => Self::Execute,
-        }
-    }
-}
+/// The request mode the sandbox enforces; one type, so the mode shown is the
+/// mode enforced.
+pub use crate::sandbox::modes::RequestMode as Mode;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StatusLine {
     #[default]

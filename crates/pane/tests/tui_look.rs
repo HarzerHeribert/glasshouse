@@ -254,7 +254,7 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
                 "browse models by agent, provider or intelligence"
             ),
             ("/motion".into(), "on or off · reduce animation"),
-            ("/mode".into(), "execute or plan without running code")
+            ("/mode".into(), "execute, explore (reads only) or plan")
         ]
     );
     for input in ["hello", "/model something", "/unknown"] {

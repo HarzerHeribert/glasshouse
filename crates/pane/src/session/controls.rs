@@ -691,12 +691,11 @@ pub(super) fn command(
             }
         }
         "mode" => {
-            let mode = match argument {
-                Some("plan") => Mode::Plan,
-                Some("execute") => Mode::Execute,
+            let mode = match argument.map(Mode::parse) {
+                Some(Some(mode)) => mode,
                 None => session.mode.get().next(),
-                _ => {
-                    session_println!("Use /mode execute|plan");
+                Some(None) => {
+                    session_println!("Use /mode execute|explore|plan");
                     return true;
                 }
             };
@@ -705,12 +704,13 @@ pub(super) fn command(
                 ui.mode(mode);
             }
             session_println!(
-                "Mode: {}{}",
+                "Mode: {} · {} · applies from the next request",
                 mode.name(),
-                if mode == Mode::Plan {
-                    " · code and tools do not execute"
-                } else {
-                    " · session sandbox applies"
+                match mode {
+                    Mode::Execute => "session sandbox applies",
+                    Mode::Explore =>
+                        "reads run; writes only under agent scratch and documentation globs; the shell is read-only",
+                    Mode::Plan => "reads run; no change executes; the shell is read-only",
                 }
             );
         }

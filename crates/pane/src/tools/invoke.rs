@@ -1253,7 +1253,10 @@ fn check_arguments(
             // grants for reading and not for writing is refused here, which
             // is the whole difference between the two kinds.
             (ArgKind::WritePath, Some(Argument::Text(value))) => {
-                let resolved = profile.check(tool.name(), Access::Write, Path::new(value))?;
+                // The request mode narrows here and never in `check`, which
+                // the OS appliers probe (`Profile::check_request`).
+                let resolved =
+                    profile.check_request(tool.name(), Access::Write, Path::new(value))?;
                 admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             // The project root stands in for a missing path, and it is

@@ -554,6 +554,50 @@ fn the_macos_profile_denies_writing_dot_claude_inside_the_project() {
     );
 }
 
+/// A request mode is an in-process narrowing only: the OS layer a narrowed
+/// profile renders is the session profile's, byte for byte, so everything the
+/// OS refuses stays refused in every mode (ruling *Request modes*).
+#[test]
+fn a_request_mode_leaves_the_os_sandbox_exactly_as_the_profile_renders_it() {
+    use pane::sandbox::modes::{ModeOverlay, RequestMode};
+    let fixture = Fixture::new("request-mode-os");
+    let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+    for mode in [RequestMode::Explore, RequestMode::Plan] {
+        let narrowed = profile.clone().narrowed_to(mode, &ModeOverlay::default());
+        assert_eq!(
+            macos::profile_text(&narrowed, Path::new(RESOLVED)),
+            macos::profile_text(&profile, Path::new(RESOLVED)),
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                linux::landlock_rules(&narrowed, Path::new(RESOLVED))
+            ),
+            format!("{:?}", linux::landlock_rules(&profile, Path::new(RESOLVED))),
+        );
+        // Windows refuses exec of a program the session could write; that
+        // probe must keep the session's answer in every mode.
+        let program = fixture.root.join("tool.exe");
+        assert!(narrowed.check("exec", Access::Write, &program).is_ok());
+        assert!(
+            narrowed
+                .check_request("write", Access::Write, &program)
+                .is_err()
+        );
+        let outside = fixture.outside.join("secret.txt");
+        assert_eq!(
+            narrowed
+                .check("read", Access::Read, &outside)
+                .unwrap_err()
+                .rule,
+            profile
+                .check("read", Access::Read, &outside)
+                .unwrap_err()
+                .rule,
+        );
+    }
+}
+
 // --- macOS: the sandbox, actually applied ------------------------------
 
 #[test]

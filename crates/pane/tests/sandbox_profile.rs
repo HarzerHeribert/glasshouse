@@ -7,6 +7,7 @@
 //! settings documents and paths; no tool is run, no process is spawned.
 
 use pane::project;
+use pane::sandbox::modes::{ModeOverlay, RequestMode};
 use pane::sandbox::profile::{Access, Effect, PermissionDenied, Profile};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,10 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// code's shape rather than of any one call: §1.1 (nothing can widen a built
 /// profile) and §1.4 (a refusal is a value, never a question).
 const SOURCE: &str = include_str!("../src/sandbox/profile.rs");
+
+/// The request-mode narrowing, which [`Profile::check`] and
+/// [`Profile::admits_command`] consult; the source-shape scans cover it too.
+const MODES_SOURCE: &str = include_str!("../src/sandbox/modes.rs");
 
 /// This repository's own `.claude/settings.json`, which `sandbox-grants.md`
 /// §2 names as the fixture. Pinned at compile time so the test decides on
@@ -420,7 +425,7 @@ fn the_profile_cannot_be_widened_after_it_is_built() {
         "unsafe",
     ] {
         assert!(
-            !SOURCE.contains(shape),
+            !SOURCE.contains(shape) && !MODES_SOURCE.contains(shape),
             "`{shape}` appears in the profile's source; a built profile must have no way to widen"
         );
     }
@@ -568,7 +573,7 @@ fn a_refusal_names_the_deciding_rule_and_never_prompts() {
         "eprintln!",
     ] {
         assert!(
-            !SOURCE.contains(shape),
+            !SOURCE.contains(shape) && !MODES_SOURCE.contains(shape),
             "`{shape}` appears in the profile's source; a refusal is a value, not a question"
         );
     }
@@ -2125,4 +2130,248 @@ fn a_unix_path_under_a_double_slash_question_mark_is_not_a_verbatim_prefix() {
             .check("Read", Access::Read, Path::new(spelled))
             .unwrap_or_else(|d| panic!("{spelled} is the directory the pattern named: {d:?}"));
     }
+}
+
+// --- Request modes (map lines 2637, 2638) ------------------------------
+
+/// A project whose profile admits every command line, so a refusal below is
+/// the mode's and not the profile's.
+fn open_profile(fixture: &Fixture) -> Profile {
+    Profile::compile(&fixture.root, Some(r#"{"permissions":{"allow":["Bash"]}}"#))
+}
+
+fn docs_overlay() -> ModeOverlay {
+    ModeOverlay::new(vec!["docs/**".to_string()], Vec::new())
+}
+
+#[test]
+fn explore_refuses_a_write_outside_its_globs_and_names_the_mode() {
+    let fixture = Fixture::new("explore-write");
+    let source = fixture.root.join("src/x.rs");
+    let execute = open_profile(&fixture);
+    execute
+        .check_request("write", Access::Write, &source)
+        .expect("execute writes inside the root as before");
+    let explore = execute.narrowed_to(RequestMode::Explore, &docs_overlay());
+    assert_eq!(explore.request_mode(), RequestMode::Explore);
+    let denied = refusal(explore.check_request("write", Access::Write, &source));
+    assert!(
+        denied.rule.starts_with("mode explore: writes only under"),
+        "{denied}"
+    );
+    assert!(denied.rule.contains("`docs/**`"), "{denied}");
+    assert_eq!(denied.tool, "write");
+}
+
+#[test]
+fn explore_admits_a_write_under_a_configured_documentation_glob() {
+    let fixture = Fixture::new("explore-docs");
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &docs_overlay());
+    explore
+        .check_request(
+            "write",
+            Access::Write,
+            &fixture.root.join("docs/notes/today.md"),
+        )
+        .expect("a configured documentation glob is writable in explore");
+    explore
+        .check_request("edit", Access::Write, &fixture.root.join("docs/a.md"))
+        .expect("edit asks the same question");
+}
+
+/// A mode never widens: `.pane/**` is never writable (§1.5), so the default
+/// scratch glob under it is still refused, and by the never-grantable rule.
+#[test]
+fn explore_scratch_under_dot_pane_stays_refused_by_the_profile() {
+    let fixture = Fixture::new("explore-scratch");
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    let denied = refusal(explore.check_request(
+        "write",
+        Access::Write,
+        &fixture.root.join(".pane/scratch/notes.md"),
+    ));
+    assert!(denied.rule.contains("`.pane/**`"), "{denied}");
+}
+
+#[test]
+fn reads_and_profile_refusals_are_unchanged_in_every_mode() {
+    let fixture = Fixture::new("mode-reads");
+    let root = fixture.pattern_root();
+    let settings = format!(
+        r#"{{"permissions":{{"allow":["Bash"],"deny":["Read({root}/secret/**)","Bash(git log*)"]}}}}"#
+    );
+    let execute = Profile::compile(&fixture.root, Some(&settings));
+    let elsewhere = Elsewhere::new("mode-reads").root.join("x.txt");
+    for mode in [RequestMode::Explore, RequestMode::Plan] {
+        let narrowed = execute.clone().narrowed_to(mode, &docs_overlay());
+        narrowed
+            .check("read", Access::Read, &fixture.root.join("src/lib.rs"))
+            .expect("reading runs as in execute");
+        let secret = fixture.root.join("secret/key");
+        assert_eq!(
+            refusal(narrowed.check("read", Access::Read, &secret)).rule,
+            refusal(execute.check("read", Access::Read, &secret)).rule
+        );
+        assert_eq!(
+            refusal(narrowed.check("read", Access::Read, &elsewhere)).rule,
+            refusal(execute.check("read", Access::Read, &elsewhere)).rule
+        );
+        // The profile's `deny` decides first, even for a read-only command.
+        let denied = refusal(narrowed.admits_command("git log"));
+        assert!(denied.rule.contains("permissions.deny"), "{denied}");
+        // A mode grants nothing the profile did not.
+        assert!(!narrowed.grants_network());
+    }
+}
+
+#[test]
+fn plan_reads_and_refuses_every_write_even_under_a_documentation_glob() {
+    let fixture = Fixture::new("plan");
+    let plan = open_profile(&fixture).narrowed_to(RequestMode::Plan, &docs_overlay());
+    plan.check("read", Access::Read, &fixture.root.join("docs/a.md"))
+        .expect("plan reads");
+    for path in ["docs/a.md", "src/x.rs"] {
+        let denied = refusal(plan.check_request("write", Access::Write, &fixture.root.join(path)));
+        assert!(
+            denied.rule.starts_with("mode plan: no change executes"),
+            "{denied}"
+        );
+    }
+}
+
+#[test]
+fn execute_is_the_profile_unchanged_and_a_narrowing_cannot_be_lifted() {
+    let fixture = Fixture::new("execute-unchanged");
+    let base = open_profile(&fixture);
+    let execute = base
+        .clone()
+        .narrowed_to(RequestMode::Execute, &docs_overlay());
+    assert_eq!(execute.request_mode(), RequestMode::Execute);
+    let source = fixture.root.join("src/x.rs");
+    assert!(
+        execute
+            .check_request("write", Access::Write, &source)
+            .is_ok()
+    );
+    assert!(execute.admits_command("rm -rf target").is_ok());
+    let relifted = base
+        .narrowed_to(RequestMode::Plan, &docs_overlay())
+        .narrowed_to(RequestMode::Execute, &docs_overlay());
+    assert_eq!(relifted.request_mode(), RequestMode::Plan);
+    assert!(
+        relifted
+            .check_request("write", Access::Write, &source)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_narrowing_mode_admits_no_mcp_tool() {
+    let fixture = Fixture::new("mode-mcp");
+    let base = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["mcp__docs__search"]}}"#),
+    );
+    assert!(base.admits_mcp_tool("mcp__docs__search"));
+    let explore = base.narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    assert!(!explore.admits_mcp_tool("mcp__docs__search"));
+    assert!(!explore.admits_mcp_server("docs"));
+}
+
+#[test]
+fn a_writable_glob_outside_the_root_makes_nothing_writable() {
+    let fixture = Fixture::new("mode-escape");
+    let elsewhere = Elsewhere::new("mode-escape");
+    let overlay = ModeOverlay::new(
+        vec![
+            "../**".to_string(),
+            format!("{}/**", elsewhere.pattern_root()),
+        ],
+        Vec::new(),
+    );
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &overlay);
+    let dropped = explore
+        .diagnostics()
+        .iter()
+        .filter(|d| d.contains("makes nothing writable"))
+        .count();
+    assert_eq!(dropped, 2, "{:?}", explore.diagnostics());
+    assert!(
+        explore
+            .check_request("write", Access::Write, &fixture.root.join("src/x.rs"))
+            .is_err()
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn explore_runs_read_only_commands_and_refuses_every_writer_by_mode() {
+    let fixture = Fixture::new("explore-bash");
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    for admitted in [
+        "git status",
+        "git log --oneline -5",
+        "ls -la src",
+        "cat Cargo.toml | wc -l",
+        "grep -rn needle src 2>/dev/null",
+        "rg needle 2>&1",
+        "find . -name '*.rs'",
+        "date +%s",
+        "env",
+    ] {
+        explore
+            .admits_command(admitted)
+            .unwrap_or_else(|d| panic!("`{admitted}` is read-only: {d}"));
+    }
+    for refused in [
+        "rm -rf x",
+        "cat a > b",
+        "echo x >> notes.md",
+        "cat a | tee b",
+        "sudo cat a",
+        "env X=1 cat a",
+        "X=1 cat a",
+        "sh -c ls",
+        "bash -c 'ls'",
+        "python -c 'print(1)'",
+        "find . -delete",
+        "find . -exec rm {} ;",
+        "git commit -m x",
+        "git -c core.pager=x status",
+        "git log --output=out.txt",
+        "/bin/rm x",
+        "echo $(rm x)",
+        "diff <(rm x) a",
+        "rg --pre ./run needle",
+        "date -s 12:00",
+        "ls; touch x",
+    ] {
+        let denied = refusal(explore.admits_command(refused));
+        assert!(
+            denied.rule.starts_with("mode explore:"),
+            "`{refused}` was refused by something other than the mode: {denied}"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_configured_command_pattern_is_read_only_in_explore() {
+    let fixture = Fixture::new("explore-configured");
+    let overlay = ModeOverlay::new(Vec::new(), vec!["cargo metadata*".to_string()]);
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &overlay);
+    explore
+        .admits_command("cargo metadata --format-version 1")
+        .expect("a configured pattern admits its command");
+    assert!(explore.admits_command("cargo metadata > m.json").is_err());
+    assert!(explore.admits_command("cargo build").is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn explore_refuses_the_cmd_tail_by_name_on_windows() {
+    let fixture = Fixture::new("explore-windows");
+    let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    let denied = refusal(explore.admits_command("dir"));
+    assert!(denied.rule.contains("cmd.exe"), "{denied}");
 }

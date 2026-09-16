@@ -18,6 +18,7 @@
 //! and [`Profile::check`] asks what any process may touch. A `Bash` pattern
 //! answers the first and contributes nothing to the second.
 
+use super::modes::{ModeOverlay, Narrowing, RequestMode};
 use crate::contract::ProjectConfig;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -161,6 +162,8 @@ pub struct Profile {
     mcp_allow: BTreeSet<String>,
     mcp_deny: BTreeSet<String>,
     diagnostics: Vec<String>,
+    /// The request mode this clone was narrowed to; `None` is `execute`.
+    narrowing: Option<Narrowing>,
 }
 
 /// The process names a shell may attempt after one complete command line has
@@ -275,6 +278,7 @@ impl Profile {
             mcp_allow: BTreeSet::new(),
             mcp_deny: BTreeSet::new(),
             diagnostics: Vec::new(),
+            narrowing: None,
         };
         if let Some(error) = anchor_error {
             let reason = format!(
@@ -517,6 +521,33 @@ impl Profile {
         self
     }
 
+    /// This profile narrowed to `mode` for one request (ruling *Request
+    /// modes*). Consuming, and it only narrows: every refusal the profile
+    /// makes still comes first, `execute` returns the profile unchanged, and a
+    /// profile already narrowed keeps its first narrowing.
+    #[must_use]
+    pub fn narrowed_to(mut self, mode: RequestMode, overlay: &ModeOverlay) -> Self {
+        if self.narrowing.is_none() {
+            let (narrowing, dropped) = Narrowing::compile(
+                mode,
+                overlay,
+                &self.root,
+                self.home.as_deref(),
+                &self.root_spelling,
+            );
+            self.narrowing = narrowing;
+            self.diagnostics.extend(dropped);
+        }
+        self
+    }
+
+    /// The request mode this profile enforces.
+    pub fn request_mode(&self) -> RequestMode {
+        self.narrowing
+            .as_ref()
+            .map_or(RequestMode::Execute, Narrowing::mode)
+    }
+
     /// Whether this session explicitly acknowledged running children without
     /// Pane's own OS confinement layer.
     pub(crate) fn os_sandbox_bypassed(&self) -> bool {
@@ -716,7 +747,8 @@ impl Profile {
     /// `deny: ["mcp__git__*"]` deny nothing at all while every path pattern
     /// beside it globbed — a grant nobody asked for and no diagnostic.
     pub fn admits_mcp_tool(&self, name: &str) -> bool {
-        if self.invalid_root.is_some() {
+        // An MCP tool's effect is undeclared, so a narrowing mode admits none.
+        if self.invalid_root.is_some() || self.narrowing.is_some() {
             return false;
         }
         if name.eq_ignore_ascii_case("webfetch") || name.eq_ignore_ascii_case("websearch") {
@@ -738,16 +770,17 @@ impl Profile {
     /// namespace (or a broader glob), and the candidate is not denied. This
     /// does not admit a call: every advertised tool is checked separately.
     pub fn admits_mcp_server(&self, server: &str) -> bool {
-        self.mcp_allow.iter().any(|pattern| {
-            let Some((server_pattern, tool_pattern)) = pattern
-                .strip_prefix("mcp__")
-                .and_then(|rest| rest.split_once("__"))
-            else {
-                return self.admits_mcp_tool(&format!("mcp__{server}__*"));
-            };
-            match_segment(server_pattern, server, false)
-                && self.admits_mcp_tool(&format!("mcp__{server}__{tool_pattern}"))
-        })
+        self.narrowing.is_none()
+            && self.mcp_allow.iter().any(|pattern| {
+                let Some((server_pattern, tool_pattern)) = pattern
+                    .strip_prefix("mcp__")
+                    .and_then(|rest| rest.split_once("__"))
+                else {
+                    return self.admits_mcp_tool(&format!("mcp__{server}__*"));
+                };
+                match_segment(server_pattern, server, false)
+                    && self.admits_mcp_tool(&format!("mcp__{server}__{tool_pattern}"))
+            })
     }
 
     /// The first question of §2: may this command line be attempted at all?
@@ -808,6 +841,13 @@ impl Profile {
                 executables.push(executable.to_string());
             }
         }
+        if let Some(rule) = self
+            .narrowing
+            .as_ref()
+            .and_then(|mode| mode.command_refusal(command_line))
+        {
+            return denied(rule);
+        }
         Ok(CommandGrant { executables })
     }
 
@@ -858,6 +898,33 @@ impl Profile {
     /// (see the `"Bash"` arm above), which is the whole of this answer.
     pub fn admits_every_command(&self) -> bool {
         self.command_allow.iter().any(|pattern| pattern == "*")
+    }
+
+    /// [`Profile::check`], then the request mode: the question a tool call
+    /// asks. `check` itself stays the session's answer, because the platform
+    /// appliers probe it to render the OS layer, and a mode must not change
+    /// that layer — on Windows a program the session could write is refused
+    /// exec, and a narrowed answer would lift that refusal.
+    pub fn check_request(
+        &self,
+        tool: &str,
+        access: Access,
+        path: &Path,
+    ) -> Result<PathBuf, PermissionDenied> {
+        let resolved = self.check(tool, access, path)?;
+        if access == Access::Write
+            && let Some(rule) = self
+                .narrowing
+                .as_ref()
+                .and_then(|mode| mode.write_refusal(&spelling(&resolved)))
+        {
+            return Err(PermissionDenied {
+                tool: tool.to_string(),
+                path: shown(&resolved),
+                rule,
+            });
+        }
+        Ok(resolved)
     }
 
     /// The second question of §2: may `tool` touch `path` for `access`, and
@@ -1316,7 +1383,7 @@ fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
 /// inside quotes splits too. That asks about more parts than a shell would
 /// run, which is the refusing direction, and it is why this can be a dozen
 /// lines rather than a grammar.
-fn command_segments(command_line: &str) -> Vec<String> {
+pub(super) fn command_segments(command_line: &str) -> Vec<String> {
     let chars: Vec<char> = command_line.chars().collect();
     let mut out = Vec::new();
     let mut current = String::new();
@@ -1384,7 +1451,7 @@ fn is_redirect_word(word: &str) -> bool {
 /// `segment` with every leading redirect word removed, so matching begins at
 /// the command: `2>&1 cargo test` becomes `cargo test`, while `1 cargo test`
 /// — a literal word, not an operator — is returned unchanged.
-fn skip_leading_redirects(segment: &str) -> &str {
+pub(super) fn skip_leading_redirects(segment: &str) -> &str {
     let mut rest = segment.trim_start();
     loop {
         let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
@@ -1724,7 +1791,7 @@ fn same_component(expected: &str, actual: &str) -> bool {
 
 /// Whether a written pattern names an absolute path, a `~`-rooted one, or a
 /// Windows drive — the three that are not resolved against the project root.
-fn is_rooted(pattern: &str) -> bool {
+pub(super) fn is_rooted(pattern: &str) -> bool {
     pattern.starts_with('/')
         || pattern == "~"
         || pattern.starts_with("~/")
@@ -1743,7 +1810,7 @@ fn is_rooted(pattern: &str) -> bool {
 /// pattern whose resolved form then leaves the root is refused by
 /// [`register`] rather than compiled, which is what makes it true that a
 /// project-relative glob cannot match its way out of the project.
-fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<String> {
+pub(super) fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<String> {
     // Both halves are reduced before they are spliced, and the pattern's own
     // half matters as much as the root's: `?` is a glob metacharacter here, so
     // a verbatim `//?/C:/…` left in either one splits at the `?` and anchors
@@ -1805,7 +1872,7 @@ fn split_pattern(pattern: &str) -> (&str, Option<&str>) {
 /// Naming an ancestor is a match because a pattern that names a directory
 /// covers its subtree — the `(subpath …)` term §3's seatbelt shape uses, and
 /// the "realpath closure of the glob" §2's table names.
-fn covers(glob: &[String], candidate: &[String], fold: bool) -> bool {
+pub(super) fn covers(glob: &[String], candidate: &[String], fold: bool) -> bool {
     (0..=candidate.len()).any(|end| match_components(glob, &candidate[..end], fold))
 }
 
@@ -1834,7 +1901,7 @@ fn match_components(glob: &[String], candidate: &[String], fold: bool) -> bool {
 /// instead would let either trick reach a path its author never spelled.
 /// Both errors are made in the refusing direction, and the answer is the same
 /// on macOS, Linux and Windows rather than three answers.
-fn match_segment(pattern: &str, text: &str, fold: bool) -> bool {
+pub(super) fn match_segment(pattern: &str, text: &str, fold: bool) -> bool {
     let (pattern, text) = if fold {
         (refusing_form(pattern), refusing_form(text))
     } else {
