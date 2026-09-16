@@ -591,7 +591,11 @@ fn body_head(body: &str) -> String {
 /// `ANTHROPIC_AUTH_TOKEN` carries a bearer token (the shape a gateway hands
 /// out); `ANTHROPIC_API_KEY` carries a provider key sent as `x-api-key`.
 /// Neither is read by any test -- see the packet's SECURITY section.
-fn credential_header() -> Option<(&'static str, String)> {
+///
+/// `pub(crate)` rather than private: `decide.rs` attaches the same
+/// credential to the decision request, since it is the only credential path
+/// and it is this module's.
+pub(crate) fn credential_header() -> Option<(&'static str, String)> {
     if let Ok(token) = env::var("ANTHROPIC_AUTH_TOKEN")
         && !token.is_empty()
     {

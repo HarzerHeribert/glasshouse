@@ -23,6 +23,8 @@ pub enum Kind {
     Bool,
     /// A signed integer; the range belongs to the runtime parser.
     Integer,
+    /// A floating-point number; the range belongs to the runtime parser.
+    Float,
     /// One of `choices`, and nothing else.
     Choice,
     /// One concrete model id, refused the way `pane.toml` refuses one.
@@ -72,11 +74,19 @@ const MODES: &[&str] = &["build", "plan"];
 const AGENT_MODES: &[&str] = &["auto", "off", "pinned"];
 const COMPLETION: &[&str] = &["silent", "recap"];
 const PREFLIGHT_SCOPE: &[&str] = &["auto", "always"];
+const DECISION_MODES: &[&str] = &["off", "shadow", "on"];
 
 /// The top-level tables `PaneConfig` parses. A key under one of these is
 /// validated by the runtime parser; everything else is owned here.
-pub(crate) const RUNTIME_TABLES: [&str; 6] =
-    ["limits", "supervisor", "helpers", "agents", "model", "web"];
+pub(crate) const RUNTIME_TABLES: [&str; 7] = [
+    "limits",
+    "supervisor",
+    "helpers",
+    "agents",
+    "model",
+    "web",
+    "decisions",
+];
 
 /// Whether a key belongs to a runtime table, and so reaches `PaneConfig`.
 pub fn is_runtime(key: &str) -> bool {
@@ -306,6 +316,33 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "decisions.mode",
+        label: "Decisions",
+        description: "`off` asks nothing. `shadow` asks and records what would hold. `on` holds a read-only request's effectful cell once.",
+        kind: Kind::Choice,
+        choices: DECISION_MODES,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "decisions.model",
+        label: "Decision model",
+        description: "The model asked the intent question. Unset means decisions are off.",
+        kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "decisions.hold_above",
+        label: "Hold confidence",
+        description: "Confidence at or above which a read-only intent holds an effectful cell or frame.",
+        kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "limits.cell_wall_clock_s",
         label: "Cell time limit",
         description: "Seconds one cell may run.",
@@ -478,6 +515,12 @@ pub fn validate(key: &str, value: &str) -> Result<toml::Value, String> {
                     format!("settings: `{key}` must be a whole number, not `{value}`")
                 })?)
             }
+            Kind::Float => toml::Value::Float(
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("settings: `{key}` must be a number, not `{value}`"))?,
+            ),
             Kind::List => parse_list(key, value)?,
             Kind::Choice => {
                 let word = normalise_choice(key, value.trim());
@@ -502,6 +545,11 @@ pub fn check_value(key: &str, value: &toml::Value) -> Result<(), String> {
         Kind::Integer => {
             if !value.is_integer() {
                 return Err(format!("settings: `{key}` must be a whole number"));
+            }
+        }
+        Kind::Float => {
+            if !(value.is_float() || value.is_integer()) {
+                return Err(format!("settings: `{key}` must be a number"));
             }
         }
         Kind::Choice => {

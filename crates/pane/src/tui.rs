@@ -791,6 +791,10 @@ pub struct Notebook {
     pub tokens: Option<TaskTokens>,
     pub context: Option<ContextTokens>,
     pub supervisor: Option<SupervisorStatus>,
+    /// The decision model's summary line for this task
+    /// (`decide::summary_line`), `None` only when no decision model is
+    /// configured at all.
+    pub decision: Option<String>,
 }
 
 pub fn handlers_panel(handlers: &[crate::runtime::handlers::HandlerInfo]) -> Panel {

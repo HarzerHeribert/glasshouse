@@ -47,11 +47,34 @@ body `{state, model, questions{key: {type, instructions, criteria}}}`, answers
 
 ## Line 2614 — Pane asks typed questions
 
-⟨open⟩
+**State: COMPLETE** (2026-09-16, `GH-PANE-DECISIONS-HOLD`, Sonnet high, Amber; report `.agent-runtime/report-pane-decisions-hold.md`; integrated by the primary on the targeted gate).
+
+**Contract.** Given `[decisions] model` in `.pane/config.toml`, when a task starts, Pane asks the decision model the intent question over the gateway's `/v1/systemone` with `x-glasshouse-model` and `x-glasshouse-purpose: decision`, on its own thread, bounded to two seconds — and on any failure, timeout or absent model the task proceeds exactly as it does without one, the failure recorded in one notice and in telemetry.
+
+**Production.** `crates/pane/src/decide.rs :: decide` (the body `{state, model, questions}`, the parsed `answers` with `choice`/`probabilities`/`confidence` or `noul`, `DECISION_TIMEOUT = 2 s`, `DecideError` carrying no body past 200 bytes), `intent_of` (the `intent` choice over `read_only | modify | run | other`); `crates/pane/src/session/system.rs :: task_decision` (the thread, the notice `decision: intent read_only (0.94, 180 ms)` or `decision: no answer (…)`); `config.rs :: DecisionsConfig`, `parse_decisions`; `settings/registry.rs` (`decisions.model|mode|hold_above`); `session/task.rs :: TaskState::decisions_telemetry`; `session/output.rs :: decisions`; the `/cell` note through `tui.rs :: Notebook.decision`.
+
+**Tests.** `tests/decisions.rs::{the_decision_request_carries_purpose_model_and_the_intent_question, a_failed_or_slow_decision_leaves_the_task_as_it_is, no_model_means_no_request_and_no_thread}`; `decide::tests` (6: the body shape byte for byte, the documented `choice` response, a missing `confidence` is a parse error, `EFFECTFUL_NAMES` equals the registry's effectful tools plus `checks`, `agent`, `mcp`, `names_effect` finds `write` at its line and nothing for `read`); `tests/config.rs` (17, the `[decisions]` table, refused unknown key and range).
+
+**Limits.** No live TypeSafe endpoint was called: the wire is the documented shape against a loopback fake, and every fact about the provider stays `Unverified` in the gateway's template. Wiring, no decision — no mutation owed.
 
 ## Line 2615 — request intent, effect hold
 
-⟨open⟩
+**State: COMPLETE** (same package and report).
+
+**Contract.** Given a `read_only` intent at or above `hold_above` (default 0.85), when a cell's free names or a lowered direct frame name an effectful capability (`bash`, `write`, `edit`, `checks`, `agent`, `mcp`), Pane in `mode = on` does not run it the first time and answers the model with one `## Held (decision)` block; the same call re-issued runs and counts an override; `mode = shadow` runs everything and counts the would-be hold — while no mode changes a grant, a `Profile`, a tool's `Purity` or an approval `Decision`.
+
+**Production.** `crates/pane/src/decide.rs :: hold_for` (the pure rule: mode, intent, threshold, effect, once), `names_effect` / `direct_frame_names_effect` over `CompiledCell::free_names` and `Lowered.calls`, `held_block`; `crates/pane/src/session/system.rs :: apply_decision_hold` (compiles the cell for its free names before V8 runs anything, returns the `Step` whose `answer` is the block, charges no cell of the budget); `session.rs :: act_on` (the one call); `TaskState.{intent, effect_holds, effect_overrides, would_hold}`.
+
+**Tests.** `tests/decisions.rs::{a_read_only_request_holds_the_first_effectful_cell_once_then_lets_it_run, a_confidence_below_hold_above_never_holds, shadow_records_the_would_be_hold_and_writes_the_file, a_modify_intent_or_a_pure_cell_is_never_held, a_direct_tool_frame_is_held_by_the_same_rule}` — binary-level through the built `pane` against a path-dispatching loopback fake.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| The threshold (2615) | `decide.rs`: `intent.confidence < hold_above` → `intent.confidence < hold_above \|\| true` | `tests/decisions.rs::a_read_only_request_holds_the_first_effectful_cell_once_then_lets_it_run` | KILLED — `assertion left == right failed: held, then the re-issue that runs; left: 1, right: 2` |
+| The once rule (2615) | `decide.rs`: `DecisionMode::On if already_held => Hold::Overridden` → `… if already_held && false` | the same test | KILLED — `left: 3, right: 2` (the re-issue is held again; the third request outruns the two-response fake) |
+
+**Gates.** `cargo test -p pane --test decisions`: 8 passed, 0 failed; `--lib decide::`: 6 passed; `--test config --test evidence_gate --test session_output`: 17 + 9 + 9 passed; `--test settings_store --test tui --test tui_look --test cell_inspection --test standing_handlers`: 29 + 33 + 42 + 19 + 19 passed; clippy clean; the targeted gate (13 files) green on the worker's tree and again on the merged tree at integration; size ratchet ok (the hold site lives in `session/system.rs` because `session.rs` sits at its baseline).
+
+**Limits.** The threshold 0.85 is a default, not a calibration — `shadow` telemetry on real tasks decides it. `effect_overrides` counts every later qualifying cell, not only the one after the hold (the worker's reading, tested). The `/cell` note line has no test of its own (Debt, one line). Not exercised: a live decision model. **Curiosity, recorded once:** the first integration gate saw `session_output::provider_failure_produces_machine_error_and_nonzero_exit` fail with `remove_dir_all` NotFound at its own cleanup; alone and as a whole target it passed four times in a row on the same tree, and the second targeted gate was green — a cleanup race in the test, not a package.
 
 ## Line 2616 — the diff matches the request, before completion
 

@@ -87,7 +87,9 @@ mod system;
 mod task;
 
 pub use system::{MANIFEST_PROBE, session_facts, session_facts_with, system_manifest};
-use system::{append_acceptance, build_system_prompt, preflight_block};
+use system::{
+    append_acceptance, apply_decision_hold, build_system_prompt, preflight_block, task_decision,
+};
 use task::{Observed, TaskSpend, TaskState, partial_effects};
 
 /// The longest a turn waits for an open event window to close before it is
@@ -711,6 +713,9 @@ fn run(args: SessionArgs) -> Result<(), String> {
     if config.borrow().supervisor.model.is_none() && !terminal {
         session_println!("supervisor: off (no model)");
     }
+    if config.borrow().decisions.model.is_none() && !terminal {
+        session_println!("decisions: off (no model)");
+    }
 
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
     // for the session's life. Reloading a persisted configuration must never
@@ -1240,6 +1245,7 @@ fn run_task_inner(
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
+    let (decision_intent, decision_failures) = task_decision(task, session);
     let acceptance_items = append_acceptance(task, session, transcript, &mut budget);
     {
         let _line = session.interrupt.writing();
@@ -1351,8 +1357,10 @@ fn run_task_inner(
     let supervisor_active =
         session.config().supervisor.enabled && session.config().supervisor.model.is_some();
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
-    let mut task_state =
-        TaskState::new(task, session.profile, &session.config()).with_acceptance(acceptance_items);
+    let mut task_state = TaskState::new(task, session.profile, &session.config())
+        .with_acceptance(acceptance_items)
+        .with_decision(decision_intent, decision_failures);
+    output::decisions(task_state.decisions_telemetry(&session.config().decisions));
 
     loop {
         let since = SystemTime::now();
@@ -1509,6 +1517,7 @@ fn run_task_inner(
         output::cell_helpers(&step.view.helpers);
         transcript.notebook.handlers = runtime.handlers();
         transcript.notebook.inbox_depth = window.depth() + runtime.batch_rolling_depth();
+        transcript.notebook.decision = task_state.decision_line(&session.config().decisions);
         let mut observed = Observed {
             notices: Vec::new(),
             capsule_block: None,
@@ -2080,6 +2089,21 @@ fn act_on(
             }
         }
     };
+
+    // The decision hold (`decision-model.md`): a read-only request above the
+    // configured confidence holds the first effectful cell or frame once.
+    // Moved to `system.rs` for the size ratchet; nothing about the shape
+    // changed.
+    if let Some(step) = apply_decision_hold(
+        session,
+        task_state,
+        runtime,
+        lowered.as_ref(),
+        &source,
+        &calls,
+    ) {
+        return Ok(step);
+    }
 
     let before = crate::changes::Snapshot::capture(profile);
     let outcome = if lowered.is_some() {

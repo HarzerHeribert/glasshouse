@@ -1268,6 +1268,8 @@ fn run(
                             state.panel = None;
                             if state.inspection.is_none() {
                                 state.note("No recorded cell at that number yet. Use /cells after an action.");
+                            } else if let Some(line) = &notebook.decision {
+                                state.note(line.clone());
                             }
                         }
                         continue;

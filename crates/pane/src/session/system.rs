@@ -94,6 +94,130 @@ pub(super) fn acceptance_block(
     Some((crate::acceptance::render_list(&items), items, record))
 }
 
+/// The decision hold, applied right before a cell or direct frame would run
+/// (`session.rs`'s `act_on`, at the `run_cell`/`run_direct_frame` site) --
+/// moved out of `session.rs` for the Phase 59 size ratchet, 2026-09-16.
+/// `Some(step)` means the caller returns it at once, without running
+/// anything; `None` means continue exactly as `act_on` already does.
+///
+/// `cell::compile` here is a second **parse**, never a second run -- V8 has
+/// not seen `source` yet, and `runtime.run_cell`/`run_direct_frame` parse it
+/// again themselves (`runtime/cell.rs::compile` touches no isolate).
+pub(super) fn apply_decision_hold(
+    session: &Session<'_>,
+    task_state: &mut TaskState,
+    runtime: &Runtime,
+    lowered: Option<&crate::abi::Lowered>,
+    source: &str,
+    calls: &[(&String, &String, &serde_json::Value)],
+) -> Option<Step> {
+    let effect = if let Some(lowered) = lowered {
+        crate::decide::direct_frame_names_effect(&lowered.calls).map(|name| (name, None))
+    } else {
+        crate::runtime::cell::compile(source, runtime.next_cell())
+            .ok()
+            .and_then(|compiled| crate::decide::names_effect(&compiled.free_names))
+            .map(|(name, offset)| {
+                let (line, _) = crate::runtime::cell::line_and_column(source, offset);
+                (name, Some(line))
+            })
+    };
+    let decisions = &session.config().decisions;
+    match crate::decide::hold_for(
+        decisions.mode,
+        task_state.intent.as_ref(),
+        decisions.hold_above,
+        effect.as_ref().map(|(name, line)| (name.as_str(), *line)),
+        task_state.effect_holds > 0,
+    ) {
+        crate::decide::Hold::Run => None,
+        crate::decide::Hold::Overridden => {
+            task_state.effect_overrides += 1;
+            output::decisions(task_state.decisions_telemetry(&session.config().decisions));
+            None
+        }
+        crate::decide::Hold::Shadow(_) => {
+            task_state.would_hold += 1;
+            output::decisions(task_state.decisions_telemetry(&session.config().decisions));
+            None
+        }
+        crate::decide::Hold::Held(block) => {
+            task_state.effect_holds += 1;
+            output::decisions(task_state.decisions_telemetry(&session.config().decisions));
+            // One `tool_result` per provider call this turn requested,
+            // exactly as a refused turn answers above `act_on`'s own
+            // ProtocolError case -- `calls` is the raw list scraped from the
+            // assistant message either way, so this covers a native
+            // `execute_cell` call and a lowered direct frame alike; a bare
+            // markdown program made no call and gets none.
+            let native_result = (!calls.is_empty()).then(|| Message {
+                role: Role::User,
+                content: calls
+                    .iter()
+                    .map(|(id, _, _)| Block::ToolResult {
+                        tool_use_id: (*id).clone(),
+                        content: block.clone(),
+                        is_error: false,
+                    })
+                    .collect(),
+                historical: None,
+            });
+            Some(Step {
+                answer: Some(block.clone()),
+                historical: Some(block),
+                native_result,
+                response: None,
+                prose: false,
+                record: None,
+                rollback: None,
+                view: CellView::default(),
+            })
+        }
+    }
+}
+
+/// The decision model's one intent question, asked once per task beside
+/// [`preflight_block`] and [`append_acceptance`] -- before the first turn,
+/// never inside it. Runs on its own thread, joined here: the 2 s bound is
+/// already inside the request (`decide::DECISION_TIMEOUT`), the same reason
+/// `helpers.rs::wait_for_helper` moves a side errand off the caller's own
+/// thread. A failed or absent decision leaves the task exactly as it is
+/// today; the error is recorded in the notice, never surfaced as a task
+/// failure.
+pub(super) fn task_decision(
+    task: &str,
+    session: &Session<'_>,
+) -> (Option<crate::decide::Intent>, u32) {
+    let decisions = session.config().decisions.clone();
+    let Some(model) = decisions.model else {
+        return (None, 0);
+    };
+    if decisions.mode == crate::config::DecisionMode::Off {
+        return (None, 0);
+    }
+    let request = task.to_string();
+    let handle = std::thread::spawn(move || crate::decide::intent_of(&model, &request));
+    match handle.join() {
+        Ok(Ok(intent)) => {
+            session_println!(
+                "decision: intent {} ({:.2}, {} ms)",
+                intent.choice,
+                intent.confidence,
+                intent.latency_ms
+            );
+            (Some(intent), 0)
+        }
+        Ok(Err(error)) => {
+            session_println!("decision: no answer ({error})");
+            (None, 1)
+        }
+        Err(_) => {
+            session_println!("decision: no answer (the request panicked)");
+            (None, 1)
+        }
+    }
+}
+
 /// The acceptance list in the task's system block: derived once from the
 /// request, shown beside the preflight, paid for as one helper call, and
 /// returned for the task state to check when the model claims completion.

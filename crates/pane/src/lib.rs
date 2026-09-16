@@ -13,6 +13,7 @@ pub mod commands;
 pub mod completion;
 pub mod config;
 pub mod contract;
+pub mod decide;
 pub mod events;
 pub mod gateway;
 pub mod glasshouse;

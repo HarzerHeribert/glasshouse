@@ -55,6 +55,61 @@ impl Default for SupervisorConfig {
     }
 }
 
+/// `[decisions] mode` -- whether the decision model's hold reaches the task
+/// model at all. `off` and an unset `model` are both "no request is ever
+/// made"; `mode` only matters once a model is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecisionMode {
+    Off,
+    #[default]
+    Shadow,
+    On,
+}
+
+impl DecisionMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" => Ok(Self::Off),
+            "shadow" => Ok(Self::Shadow),
+            "on" => Ok(Self::On),
+            other => Err(format!(
+                "pane.toml: `[decisions] mode` must be \"off\", \"shadow\" or \"on\", not `{other}`"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::On => "on",
+        }
+    }
+}
+
+/// `[decisions]` -- the decision model's one intent question and the hold it
+/// buys (`docs/product/pane/decision-model.md`). `model` has no default,
+/// exactly as `[supervisor] model` has none: unset means decisions are off,
+/// said once at start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionsConfig {
+    pub model: Option<String>,
+    pub mode: DecisionMode,
+    /// Confidence at or above which a read-only intent holds an effectful
+    /// cell or frame. `0.5..=1.0`.
+    pub hold_above: f64,
+}
+
+impl Default for DecisionsConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            mode: DecisionMode::default(),
+            hold_above: 0.85,
+        }
+    }
+}
+
 /// The whole of `pane.toml`. `project.rs`'s own invariant -- loading edits
 /// `[helpers]` -- the little-helper tier (`docs/product/pane/little-helpers.md`).
 ///
@@ -210,7 +265,10 @@ impl Default for HelpersConfig {
 }
 
 /// nothing -- holds here too: nothing in this module opens a path for writing.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `Eq` is not derived: [`DecisionsConfig::hold_above`] is an `f64`, and
+/// nothing here needs `PaneConfig` as a map key or in a set.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PaneConfig {
     pub limits: Limits,
     pub supervisor: SupervisorConfig,
@@ -218,6 +276,7 @@ pub struct PaneConfig {
     pub agents: AgentsConfig,
     pub model: ModelConfig,
     pub web: crate::web::WebConfig,
+    pub decisions: DecisionsConfig,
 }
 
 /// `[model]` -- the parent tier, the one the person talks to.
@@ -394,12 +453,20 @@ impl PaneConfig {
         })?;
 
         for key in table.keys() {
-            if !["limits", "supervisor", "helpers", "agents", "model", "web"]
-                .contains(&key.as_str())
+            if ![
+                "limits",
+                "supervisor",
+                "helpers",
+                "agents",
+                "model",
+                "web",
+                "decisions",
+            ]
+            .contains(&key.as_str())
             {
                 return Err(format!(
                     "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
-                     [agents], [model] and [web] are recognised"
+                     [agents], [model], [web] and [decisions] are recognised"
                 ));
             }
         }
@@ -437,6 +504,11 @@ impl PaneConfig {
         };
         crate::web::WebBroker::new(web.clone())?;
 
+        let decisions = match table.get("decisions") {
+            Some(value) => parse_decisions(value)?,
+            None => DecisionsConfig::default(),
+        };
+
         Ok(Self {
             limits,
             supervisor,
@@ -444,6 +516,7 @@ impl PaneConfig {
             agents,
             model,
             web,
+            decisions,
         })
     }
 }
@@ -642,6 +715,60 @@ fn parse_supervisor(value: &toml::Value) -> Result<SupervisorConfig, String> {
         every,
         model,
         enabled,
+    })
+}
+
+const HOLD_ABOVE_MIN: f64 = 0.5;
+const HOLD_ABOVE_MAX: f64 = 1.0;
+
+fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
+    let table = table_of(value, "decisions")?;
+    let defaults = DecisionsConfig::default();
+
+    for key in table.keys() {
+        if !["model", "mode", "hold_above"].contains(&key.as_str()) {
+            return Err(format!("pane.toml: unknown key `{key}` in [decisions]"));
+        }
+    }
+
+    let model = match table.get("model") {
+        None => None,
+        Some(value) => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `[decisions] model` must be a string".to_string())?;
+            check_names_no_tool_path_or_grant("model", text)?;
+            Some(text.to_string())
+        }
+    };
+    let mode = match table.get("mode") {
+        None => defaults.mode,
+        Some(value) => DecisionMode::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `mode` must be a string".to_string())?,
+        )?,
+    };
+    let hold_above = match table.get("hold_above") {
+        None => defaults.hold_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `hold_above` must be a number".to_string())?;
+            if !(HOLD_ABOVE_MIN..=HOLD_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `hold_above` must be between {HOLD_ABOVE_MIN} and {HOLD_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
+    Ok(DecisionsConfig {
+        model,
+        mode,
+        hold_above,
     })
 }
 

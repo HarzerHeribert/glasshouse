@@ -252,6 +252,20 @@ pub(super) struct TaskState {
     pub(super) acceptance_verdicts: Vec<crate::acceptance::Verdict>,
     /// Cells in a row that changed nothing (`progress::Stall`).
     pub(super) stall: crate::progress::Stall,
+    /// The decision model's answer to this task's one intent question, asked
+    /// once before the first turn -- `None` when no model is configured, the
+    /// mode is off, or the request failed (`decide-model.md`).
+    pub(super) intent: Option<crate::decide::Intent>,
+    /// `1` when the intent request was attempted and did not answer; `0`
+    /// otherwise. Never more than one decision is asked per task.
+    pub(super) decision_failures: u32,
+    /// Effectful cells or frames held this task (`mode = on`); the once rule
+    /// is `effect_holds == 0`.
+    pub(super) effect_holds: u32,
+    /// Effectful cells or frames that ran after an earlier hold this task.
+    pub(super) effect_overrides: u32,
+    /// Effectful cells or frames `mode = shadow` would have held.
+    pub(super) would_hold: u32,
 }
 
 impl TaskState {
@@ -277,6 +291,11 @@ impl TaskState {
             acceptance: Vec::new(),
             acceptance_verdicts: Vec::new(),
             stall: crate::progress::Stall::default(),
+            intent: None,
+            decision_failures: 0,
+            effect_holds: 0,
+            effect_overrides: 0,
+            would_hold: 0,
         }
     }
 
@@ -284,6 +303,55 @@ impl TaskState {
     pub(super) fn with_acceptance(mut self, items: Vec<crate::acceptance::Item>) -> Self {
         self.acceptance = items;
         self
+    }
+
+    /// The decision model's answer to this task's one intent question, asked
+    /// before `TaskState` existed -- `intent` is `None` and `decision_failures`
+    /// is `1` when the request was attempted and did not answer.
+    pub(super) fn with_decision(
+        mut self,
+        intent: Option<crate::decide::Intent>,
+        decision_failures: u32,
+    ) -> Self {
+        self.intent = intent;
+        self.decision_failures = decision_failures;
+        self
+    }
+
+    /// The `Telemetry.decisions` block: `docs/product/pane/decision-model.md`'s
+    /// schema, `None` only when no decision model is configured at all.
+    pub(super) fn decisions_telemetry(
+        &self,
+        config: &crate::config::DecisionsConfig,
+    ) -> Option<serde_json::Value> {
+        let model = config.model.as_deref()?;
+        let asked = self.intent.is_some() || self.decision_failures > 0;
+        let intent = self.intent.as_ref().map(|intent| {
+            serde_json::json!({ "choice": intent.choice, "confidence": intent.confidence })
+        });
+        Some(serde_json::json!({
+            "model": model,
+            "mode": config.mode.as_str(),
+            "asked": u32::from(asked),
+            "answered": u32::from(self.intent.is_some()),
+            "failed": self.decision_failures,
+            "latency_ms_total": self.intent.as_ref().map_or(0, |intent| intent.latency_ms),
+            "intent": intent,
+            "would_hold": self.would_hold,
+            "holds": self.effect_holds,
+            "overrides": self.effect_overrides,
+        }))
+    }
+
+    /// The `/cell` inspector's one line for this task, `None` only when no
+    /// decision model is configured at all.
+    pub(super) fn decision_line(&self, config: &crate::config::DecisionsConfig) -> Option<String> {
+        config.model.as_ref()?;
+        Some(crate::decide::summary_line(
+            self.intent.as_ref(),
+            self.effect_holds,
+            self.effect_overrides,
+        ))
     }
 
     /// Why the next parent request is being made, read from the last frame.

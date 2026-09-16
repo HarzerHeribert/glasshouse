@@ -178,6 +178,7 @@ struct Telemetry {
     stall_notices: u64,
     acceptance: Option<Value>,
     capsule: Option<Value>,
+    decisions: Option<Value>,
 }
 
 impl Default for Telemetry {
@@ -215,6 +216,7 @@ impl Default for Telemetry {
             stall_notices: 0,
             acceptance: None,
             capsule: None,
+            decisions: None,
         }
     }
 }
@@ -452,6 +454,7 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
         },
         "acceptance": telemetry.acceptance,
         "capsule": telemetry.capsule,
+        "decisions": telemetry.decisions,
     })
 }
 
@@ -909,6 +912,20 @@ pub(super) fn no_progress_notice() {
         if let Some(state) = state.borrow_mut().as_mut() {
             state.telemetry.no_progress_notices =
                 state.telemetry.no_progress_notices.saturating_add(1);
+        }
+    });
+}
+
+/// Stores this task's decision summary (`decide-model.md`): `None` only when
+/// no decision model is configured. A later call replaces the stored one, so
+/// the result always carries the latest hold/override counts.
+pub(super) fn decisions(value: Option<Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.telemetry.decisions = Some(value);
         }
     });
 }

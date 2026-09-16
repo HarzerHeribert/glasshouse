@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1366 closed · 93 active committed open (94%)** — across 19 phases.
+**1368 closed · 91 active committed open (94%)** — across 19 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -31,9 +31,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
+| Phase 66 | Pane: a decision model beside the task model | **1** | 3 | `2598` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
-| Phase 66 | Pane: a decision model beside the task model | **3** | 1 | `2598` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
@@ -87,6 +87,10 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
+### Phase 66 — Pane: a decision model beside the task model  (1 open, 3 closed)
+
+- **2616** ☐ Before a completion is accepted, ask the decision model whether the task's diff satisfies the request and hold the completion once on a confident no, with the answer beside the other findings; when a fresh checker is configured, run it only when the decision is not decisive; record every answer.
+
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
@@ -97,12 +101,6 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 66 — Pane: a decision model beside the task model  (3 open, 1 closed)
-
-- **2614** ☐ Ask a configured decision model typed questions from Pane over the gateway — bounded to two seconds, fail-open, never a capability — and record every answer with its confidence and latency in the machine result and the cell inspector.
-- **2615** ☐ Classify the request's intent once per task and, when it reads as read-only above the configured confidence, hold once a cell or direct frame that names an effectful capability with one line to the model; `shadow` records the would-be hold and holds nothing, and no mode changes a grant, a tool's purity or an approval.
-- **2616** ☐ Before a completion is accepted, ask the decision model whether the task's diff satisfies the request and hold the completion once on a confident no, with the answer beside the other findings; when a fresh checker is configured, run it only when the decision is not decisive; record every answer.
 
 ## Practice sections, by number
 

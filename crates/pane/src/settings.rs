@@ -1164,6 +1164,7 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
     let helpers = crate::config::HelpersConfig::default();
     let agents = crate::config::AgentsConfig::default();
     let web = crate::web::WebConfig::default();
+    let decisions = crate::config::DecisionsConfig::default();
     let count = |value: u64| toml::Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
     let word = |value: &str| toml::Value::String(value.to_string());
     vec![
@@ -1217,6 +1218,11 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
             count(web.max_response_bytes as u64),
         ),
         ("web.timeout_seconds", count(web.timeout_seconds)),
+        ("decisions.mode", word(decisions.mode.as_str())),
+        (
+            "decisions.hold_above",
+            toml::Value::Float(decisions.hold_above),
+        ),
     ]
 }
 
