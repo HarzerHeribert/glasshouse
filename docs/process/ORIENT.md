@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1369 closed · 90 active committed open (94%)** — across 18 phases.
+**1369 closed · 94 active committed open (94%)** — across 20 phases.
 
 boundary 100 closed · 0 open
-gateway 389 closed · 11 open
+gateway 389 closed · 12 open
 glasshouse 757 closed · 46 open
-pane 41 closed · 33 open
+pane 41 closed · 36 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -38,6 +38,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
+| Phase 68 | Gateway: successors named by the 2026-09-16 cleanup | **1** | 0 | `2627` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 
@@ -56,6 +57,7 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
+| Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **3** | 0 | `2618` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
 | Phase 61H | Runtime resilience across models and scripting styles | **8** | 0 | `2555` |
@@ -108,6 +110,10 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
+### Phase 68 — Gateway: successors named by the 2026-09-16 cleanup  (1 open, 0 closed)
+
+- **2629** ☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
+
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
@@ -118,6 +124,12 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
+
+### Phase 67 — Pane: successors named by the 2026-09-16 cleanup  (3 open, 0 closed)
+
+- **2623** ☐ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
+- **2624** ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
+- **2625** ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
 
 ## Practice sections, by number
 

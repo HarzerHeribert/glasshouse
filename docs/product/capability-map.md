@@ -2614,3 +2614,16 @@ approval, the supervisor's look every cell with a fixed nudge vocabulary. Eviden
 ☑ Ask a configured decision model typed questions from Pane over the gateway — bounded to two seconds, fail-open, never a capability — and record every answer with its confidence and latency in the machine result and the cell inspector.
 ☑ Classify the request's intent once per task and, when it reads as read-only above the configured confidence, hold once a cell or direct frame that names an effectful capability with one line to the model; `shadow` records the would-be hold and holds nothing, and no mode changes a grant, a tool's purity or an approval.
 ☑ Before a completion is accepted, ask the decision model whether the task's diff satisfies the request and hold the completion once on a confident no, with the answer beside the other findings; when a fresh checker is configured, run it only when the decision is not decisive; record every answer.
+
+Phase 67 — Pane: successors named by the 2026-09-16 cleanup
+
+Debts the cleanup round recorded once each (`design-decisions.md`, *Glasshouse does not route*; the
+Windows landing's and the matcher verifier's reports). Each is a product requirement, not a curiosity.
+
+☐ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
+☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
+☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
+
+Phase 68 — Gateway: successors named by the 2026-09-16 cleanup
+
+☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.

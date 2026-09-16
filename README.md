@@ -138,12 +138,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1369 closed** · **90 active committed open** (93%)
+`█████████████████████████████████████░░░` **1369 closed** · **94 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (97 of 115 active phases complete)</summary>
+<summary>Per-phase breakdown (97 of 117 active phases complete)</summary>
 
 **glasshouse** `█████████████████████████████████████░░░` 757/803
 
@@ -214,7 +214,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 60 — Parallel-session file coordination | 16/16 ✅ |
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 
-**gateway** `██████████████████████████████████████░░` 389/400
+**gateway** `██████████████████████████████████████░░` 389/401
 
 | Phase | Done |
 |---|---|
@@ -249,6 +249,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
+| Phase 68 — Gateway: successors named by the 2026-09-16 cleanup | 0/1 |
 
 **boundary** `████████████████████████████████████████` 100/100
 
@@ -263,7 +264,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 37 — Basic session-aware router | 11/11 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 
-**pane** `██████████████████████░░░░░░░░░░░░░░░░░░` 41/74
+**pane** `█████████████████████░░░░░░░░░░░░░░░░░░░` 41/77
 
 | Phase | Done |
 |---|---|
@@ -273,6 +274,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 61H — Runtime resilience across models and scripting styles | 0/8 |
 | Phase 65 — Pane: smarter-and-cheaper execution | 17/17 ✅ |
 | Phase 66 — Pane: a decision model beside the task model | 4/4 ✅ |
+| Phase 67 — Pane: successors named by the 2026-09-16 cleanup | 0/3 |
 
 **process** `████████████████████████████████████████` 82/82
 
