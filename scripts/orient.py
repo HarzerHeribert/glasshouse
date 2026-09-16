@@ -34,6 +34,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAP = os.path.join(REPO, "docs/product/capability-map.md")
+COMPONENTS = os.path.join(REPO, "docs/product/capability-map.components")
 HANDOFF = os.path.join(REPO, "docs/process/handoff.md")
 PRACTICE = os.path.join(REPO, "docs/process/orchestration-practice.md")
 EVIDENCE = os.path.join(REPO, "docs/product/evidence")
@@ -60,6 +61,40 @@ CHECKPOINT = re.compile(r"^## (Checkpoint\b.*)$")
 def read(path: str) -> list[str]:
     with open(path, encoding="utf-8") as fh:
         return fh.read().split("\n")
+
+
+def load_components() -> dict[str, str]:
+    """Parse `capability-map.components`: one `<phase id>\\t<component>` line."""
+    out: dict[str, str] = {}
+    for line in read(COMPONENTS):
+        if not line or line.startswith("#"):
+            continue
+        phase_id, _, comp = line.partition("\t")
+        out[phase_id] = comp
+    return out
+
+
+def attach_components(phases: list[dict]) -> None:
+    """Join each mandatory phase to its component from the sidecar.
+
+    Refuses loudly (non-zero exit, naming the phase) if a `Phase` heading has
+    no sidecar line, or the sidecar names a phase the map does not have — this
+    is what keeps the sidecar honest when a phase is appended to the map.
+    """
+    components = load_components()
+    mandatory_ids = {p["id"] for p in phases if not p["experimental"]}
+    missing = sorted(mandatory_ids - components.keys())
+    extra = sorted(components.keys() - mandatory_ids)
+    if missing or extra:
+        for pid in missing:
+            print(f"orient: {pid} has no line in "
+                  f"{os.path.relpath(COMPONENTS, REPO)}", file=sys.stderr)
+        for pid in extra:
+            print(f"orient: {os.path.relpath(COMPONENTS, REPO)} names "
+                  f"{pid!r}, which the map does not have", file=sys.stderr)
+        raise SystemExit(1)
+    for p in phases:
+        p["component"] = components.get(p["id"], "experimental")
 
 
 def map_state():
@@ -97,6 +132,7 @@ def map_state():
                 current["closed"] += 1
             else:
                 current["open"].append((idx, b.group(2)))
+    attach_components(phases)
     return phases
 
 
@@ -157,6 +193,11 @@ def render() -> str:
     add("")
     add(f"**{closed} closed · {openn} active committed open ({pct}%)** — "
         f"across {len([p for p in active if p['open']])} phases.")
+    add("")
+    for comp in sorted({p["component"] for p in mandatory}):
+        c_closed = sum(p["closed"] for p in mandatory if p["component"] == comp)
+        c_open = sum(len(p["open"]) for p in active if p["component"] == comp)
+        add(f"{comp} {c_closed} closed · {c_open} open")
     if gates or parked:
         add("")
         add(f"Not in the work queue: **{gate_open} deferred gate criteria** "
@@ -170,18 +211,23 @@ def render() -> str:
     add("Phases with open mandatory lines, fewest-open first — the cheapest")
     add("closures are usually at the top. Open the map at the line number given.")
     add("")
-    add("| phase | title | open | closed | map line |")
-    add("|---|---|---|---|---|")
-    for p in sorted((p for p in active if p["open"]),
-                    key=lambda p: (len(p["open"]), p["line"])):
-        add(f"| {p['id']} | {p['title']} | **{len(p['open'])}** | "
-            f"{p['closed']} | `{p['line']}` |")
-    add("")
+    for comp in sorted({p["component"] for p in active if p["open"]}):
+        add(f"**{comp}**")
+        add("")
+        add("| phase | title | open | closed | map line |")
+        add("|---|---|---|---|---|")
+        for p in sorted((p for p in active if p["open"] and p["component"] == comp),
+                        key=lambda p: (len(p["open"]), p["line"])):
+            add(f"| {p['id']} | {p['title']} | **{len(p['open'])}** | "
+                f"{p['closed']} | `{p['line']}` |")
+        add("")
 
     done = [p for p in mandatory if not p["open"] and p["closed"]]
     if done:
-        add(f"**Fully closed ({len(done)}):** " +
-            ", ".join(p["id"] for p in done) + ".")
+        for comp in sorted({p["component"] for p in done}):
+            comp_done = [p for p in done if p["component"] == comp]
+            add(f"**{comp} fully closed ({len(comp_done)}):** " +
+                ", ".join(p["id"] for p in comp_done) + ".")
         add("")
 
     add("## The nearly-finished phases, in full")

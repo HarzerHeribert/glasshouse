@@ -1,6 +1,9 @@
 # Glasshouse
 
-**Two things that belong together, and either one works alone.**
+See [`docs/product/architecture.md`](docs/product/architecture.md) for the
+full three-component picture.
+
+**Three things that belong together, and each one works alone.**
 
 - **`pane`** is a coding harness. You give it a task in a project and it works
   the task in turns. It needs an API key and nothing else — no Glasshouse, no
@@ -94,9 +97,10 @@ Nothing in this list requires a second session.
 - **One project, hard boundaries.** Memory, sessions, logs and runtime state are
   scoped to a single project root, and cross-project access is disabled
   structurally rather than by convention.
-- **One executable.** `glasshouse` is a single binary. No daemon, no background
-  service, no Node, no Python. The local gateway starts itself when a launch
-  needs one and stops with it.
+- **Three binaries, one boundary.** `glasshouse`, `pane` and `inference-gateway`
+  are each a single binary — no daemon, no Node, no Python. The gateway is
+  its own process; `pane` or `glasshouse` starts it when a launch needs one,
+  and it stops with the process that started it.
 
 ## When you run more than one
 
@@ -326,14 +330,15 @@ accepting generated code as proof of completion:
 ## Build
 
 ```sh
-cargo build --release            # glasshouse
-cargo build --release -p pane    # pane, which is not in default-members
+cargo build --release                          # glasshouse
+cargo build --release -p pane                  # pane, which is not in default-members
+cargo build --release -p inference-gateway     # inference-gateway, also not in default-members
 ```
 
-Two executables with no daemon, background service, Node, or Python
-requirement. `pane` is excluded from `default-members` deliberately — it
-carries an embedded V8 and a tokio stack that `glasshouse` does not want on a
-bare `cargo build`.
+Three executables (`glasshouse`, `pane`, `inference-gateway`) with no daemon,
+background service, Node, or Python requirement. `pane` is excluded from
+`default-members` deliberately — it carries an embedded V8 and a tokio stack
+that `glasshouse` does not want on a bare `cargo build`.
 
 ## Install
 

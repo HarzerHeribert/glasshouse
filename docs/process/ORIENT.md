@@ -15,6 +15,12 @@ next. **Read this first, then open only what you actually need.**
 
 **1369 closed · 90 active committed open (94%)** — across 18 phases.
 
+boundary 100 closed · 0 open
+gateway 389 closed · 11 open
+glasshouse 757 closed · 46 open
+pane 41 closed · 33 open
+process 82 closed · 0 open
+
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
 ## Where the work is
@@ -22,10 +28,11 @@ Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaitin
 Phases with open mandatory lines, fewest-open first — the cheapest
 closures are usually at the top. Open the map at the line number given.
 
+**gateway**
+
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
-| Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
@@ -33,17 +40,32 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
+
+**glasshouse**
+
+| phase | title | open | closed | map line |
+|---|---|---|---|---|
+| Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
-| Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
-| Phase 64 | pane: subagents | **5** | 0 | `2539` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
-| Phase 61H | Runtime resilience across models and scripting styles | **8** | 0 | `2555` |
 | Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
 | Phase 62 | Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | **14** | 0 | `2487` |
+
+**pane**
+
+| phase | title | open | closed | map line |
+|---|---|---|---|---|
+| Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
+| Phase 64 | pane: subagents | **5** | 0 | `2539` |
+| Phase 61H | Runtime resilience across models and scripting styles | **8** | 0 | `2555` |
 | Phase 61 | pane: the first-party harness | **15** | 20 | `2419` |
 
-**Fully closed (99):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, Phase 16, Phase 17, Phase 18, Phase 19, Phase 20, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 31, Phase 32, Phase 32A, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59, Phase 60, Phase 65, Phase 66.
+**boundary fully closed (8):** Phase 9J, Phase 33A, Phase 34, Phase 34A, Phase 34F, Phase 36, Phase 37, Phase 58.
+**gateway fully closed (23):** Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 32, Phase 32A, Phase 32B, Phase 32E, Phase 32F, Phase 33C, Phase 34B, Phase 34D, Phase 34E, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 39, Phase 56, Phase 56A.
+**glasshouse fully closed (58):** Phase 1, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, Phase 9A, Phase 9B, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 17, Phase 18, Phase 19, Phase 20, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 31, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 46, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 57, Phase 60.
+**pane fully closed (2):** Phase 65, Phase 66.
+**process fully closed (8):** Phase 0, Phase 2A, Phase 14, Phase 15, Phase 16, Phase 45, Phase 47, Phase 59.
 
 ## The nearly-finished phases, in full
 

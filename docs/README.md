@@ -21,6 +21,8 @@ sign something is wired to the wrong layer.
 
 ## `docs/product/` — what Glasshouse is
 
+- [`architecture.md`](product/architecture.md) — the three-component split:
+  Pane, the inference gateway, Glasshouse.
 - [`capability-map.md`](product/capability-map.md) — the authoritative
   capability map.
 - [`design-decisions.md`](product/design-decisions.md) — settled design

@@ -10,7 +10,7 @@ export const products = {
       ['Memory belongs to the project', 'Keep decisions and their rationale across sessions, with provenance and validity instead of treating every old note as a permanent rule.'],
       ['One project. Hard boundaries.', 'Keep session state and memory scoped to a single project. Isolation is part of the storage and runtime design.'],
       ['A leaner context window', 'Compact tool output before it crosses into the conversation through the context firewall.'],
-      ['A single Rust executable', 'Start in your project. No separate service, Node, or Python runtime required by the Glasshouse binary.'],
+      ['A single Rust binary', 'Glasshouse itself is one executable. A launch starts the inference-gateway process beside it — Pane is the third, separate binary.'],
     ],
     status: 'Active implementation. See the capability map for remaining gates.',
     link: 'https://github.com/HarzerHeribert/glasshouse#build', cta: 'Source & build instructions',

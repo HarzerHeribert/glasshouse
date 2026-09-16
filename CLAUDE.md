@@ -96,6 +96,8 @@ beside all of it.
 
 **Start here, in this order:**
 
+0. `docs/product/architecture.md` — the three-component split (Pane, the
+   inference gateway, Glasshouse); one page, read it once.
 1. `.agent-runtime/CONTINUATION.md` — the previous session's exact checkpoint
 2. `docs/process/ORIENT.md` — **generated** by `scripts/orient.py`: where the
    map stands, every phase ranked by open lines, the nearly-finished phases
@@ -109,11 +111,11 @@ beside all of it.
 
 **Then read on demand, never end to end:**
 
-- `docs/product/capability-map.md` — **authoritative**, and 178 KB. `ORIENT.md`
+- `docs/product/capability-map.md` — **authoritative**, and 214 KB. `ORIENT.md`
   carries the open lines for nearly-finished phases; for any other phase use
   `scripts/discover.py --phase <id>`. Open the map itself to quote a specific
   line, not to find out what is open.
-- `docs/process/orchestration-practice.md` — 176 KB. **Read sections by number.**
+- `docs/process/orchestration-practice.md` — 234 KB. **Read sections by number.**
   `ORIENT.md` has the index with one-line summaries.
 - `docs/product/evidence/phase-<id>.md` — the entry for the phase in hand.
 - `docs/process/assurance-economics.md` — before writing a packet; **Phase −1 is

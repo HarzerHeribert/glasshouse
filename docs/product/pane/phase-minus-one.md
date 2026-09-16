@@ -76,7 +76,7 @@ already exists. Everything else is a string check on paths.
 > behave identically otherwise except for the hop.*
 
 - **producer** — `Gateway::base_url()`,
-  `crates/glasshouse/src/gateway/mod.rs:469`. The listener binds
+  `crates/inference-gateway/src/gateway/mod.rs:647`. The listener binds
   `127.0.0.1:0`; there is no configuration in that module that could bind
   elsewhere (module doc, lines 33–41).
 - **caller** — `profile::resolve_with_gateway`,

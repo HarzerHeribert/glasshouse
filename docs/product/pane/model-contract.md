@@ -381,7 +381,7 @@ never serialised into a message.
 
 Byte for byte, the request pane builds is identical whether `ANTHROPIC_BASE_URL`
 names Glasshouse's gateway (`Gateway::base_url`,
-`crates/glasshouse/src/gateway/mod.rs:469`) or the provider directly. Not
+`crates/inference-gateway/src/gateway/mod.rs:647`) or the provider directly. Not
 "nearly identical": identical, and tested by equality of the serialised body
 across both modes.
 

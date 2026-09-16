@@ -1,4 +1,4 @@
-Glasshouse — Implementation Capability Map
+Glasshouse — Implementation Capability Map (three components since 2026-09-10: see docs/product/architecture.md; phase text below predates the split)
 
 > This describes the product. Do not cite it as instruction for how to run a
 > worker or a batch — that belongs in `docs/process/`.
