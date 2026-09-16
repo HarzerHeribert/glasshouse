@@ -20924,3 +20924,25 @@ instructions' checker before onCompletion"* — recorded as the phase's fourth l
 at the completion gate beside the existing findings. Map
 Phase 66 (lines 2613–2616); the ranked proposal and the day-one probes are in the
 session's `.agent-runtime/proposal-typesafe-jev.md`.
+
+## Glasshouse does not route, and the repo cleans up around the three components — the user, 2026-09-16
+
+Four rulings, given on the cleanup report (`.agent-runtime/report-repo-cleanup-2026-09-16.md`):
+
+1. **Glasshouse stays the control station for several sessions** — it makes orchestration
+   simpler and working with agents in one project more pleasant. It keeps the session
+   list, the control socket and MCP door, the cross-session file coordination, memory and
+   checkpoints. It provides **structured project memory**, and **semantic search over it
+   is wanted** (this supersedes Phase 52's deferral as a *product* decision; the gate's
+   criteria still apply before a vector dependency lands).
+2. **Glasshouse never decides which model is used.** Its routing recommendations
+   (`route`, `rate-route`, `task-progress`, the classifier, the candidate scorer, the
+   pressure and burn models, `routing-cost`) are removed; memory extraction takes a model
+   from configuration. If task routing ever exists it lives in the gateway, possibly with
+   TypeSafe classification models, as an **optional** feature — until then it is the
+   person's decision.
+3. **Everything should work on Windows.** The in-process `read`/`grep` from
+   `GH-PANE-WINDOWS-CELL` lands (the verified half only, not the paste grammar).
+4. **The three keep the Glasshouse brand** (`x-glasshouse-*`, `GLASSHOUSE_*`, the keychain
+   service), with a clear separation between them: one architecture document, one place
+   per component in `docs/product/`, and the boundary scans as the enforcement.
