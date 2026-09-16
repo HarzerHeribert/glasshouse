@@ -145,11 +145,11 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 <details>
 <summary>Per-phase breakdown (97 of 115 active phases complete)</summary>
 
+**glasshouse** `█████████████████████████████████████░░░` 757/803
+
 | Phase | Done |
 |---|---|
-| Phase 0 — Repository and executable foundation | 8/8 ✅ |
 | Phase 1 — Project-root detection and hard isolation | 15/15 ✅ |
-| Phase 2A — Cross-platform runtime | 16/16 ✅ |
 | Phase 2B — Agent and tool auto-detection | 16/16 ✅ |
 | Phase 2C — First-run onboarding | 19/19 ✅ |
 | Phase 2D — Settings foundation | 20/20 ✅ |
@@ -163,23 +163,12 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 9 — Antigravity adapter | 7/7 ✅ |
 | Phase 9A — Harness launch profiles | 26/26 ✅ |
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
-| Phase 9C — Provider protocol model | 12/12 ✅ |
-| Phase 9D — Built-in provider templates | 14/14 ✅ |
-| Phase 9E — Secret storage | 13/13 ✅ |
-| Phase 9F — Direct provider launch profiles | 13/13 ✅ |
-| Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
-| Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
-| Phase 9I — Free-pool routing | 14/14 ✅ |
-| Phase 9J — Harness-model pairing model | 20/20 ✅ |
 | Phase 9K — Harness-aware response profiles | 29/37 |
 | Phase 10 — Unified session model | 14/14 ✅ |
 | Phase 10A — Session supervision | 13/13 ✅ |
 | Phase 11 — Session overview | 10/10 ✅ |
 | Phase 12 — Unified lifecycle event bus | 8/8 ✅ |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
-| Phase 14 — Orchestrator role | 11/11 ✅ |
-| Phase 15 — Orchestrator wake-up flow | 8/8 ✅ |
-| Phase 16 — Worker transparency | 7/7 ✅ |
 | Phase 17 — cmux optional integration | 10/10 ✅ |
 | Phase 18 — Raw event recording | 10/10 ✅ |
 | Phase 19 — Portable session checkpoints | 14/14 ✅ |
@@ -206,42 +195,12 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 29 — Memory commits | 8/8 ✅ |
 | Phase 30 — Session context metadata | 8/8 ✅ |
 | Phase 31 — Compaction-aware behavior | 7/7 ✅ |
-| Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 21/21 ✅ |
-| Phase 32B — Quota telemetry sources | 14/14 ✅ |
-| Phase 32C — Subscription capacity estimation | 11/12 |
-| Phase 32D — Normalized remaining-capacity score | 11/12 |
-| Phase 32E — Burn rate and exhaustion forecasting | 10/10 ✅ |
-| Phase 32F — Protected quota reserve | 8/8 ✅ |
-| Phase 32G — Provider-aware request-cost estimation | 9/10 |
-| Phase 33 — Resource health | 13/15 |
-| Phase 33A — Routing evidence ledger | 15/15 ✅ |
-| Phase 33B — Reliability-adjusted agent performance | 11/14 |
-| Phase 33C — Failure, quota, and route correlation | 15/15 ✅ |
-| Phase 34 — Capability registry | 10/10 ✅ |
-| Phase 34A — Workload tiers | 10/10 ✅ |
-| Phase 34B — Routing-model role | 15/15 ✅ |
-| Phase 34C — Automatic routing-model selection | 12/13 |
-| Phase 34D — Router request schema | 13/13 ✅ |
-| Phase 34E — Router economics | 9/9 ✅ |
-| Phase 34F — Model capability and tier calibration | 11/11 ✅ |
-| Phase 35 — Lightweight task classification | 14/14 ✅ |
-| Phase 35A — Candidate generation | 11/11 ✅ |
-| Phase 35B — Candidate scoring | 25/25 ✅ |
-| Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
-| Phase 35D — Routing under subscription pressure | 8/8 ✅ |
-| Phase 36 — Session affinity | 8/8 ✅ |
-| Phase 37 — Basic session-aware router | 11/11 ✅ |
-| Phase 38 — Quota-preserving routing | 6/7 |
-| Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
 | Phase 43 — MCP surface for orchestrators | 10/10 ✅ |
 | Phase 44 — User control and override | 9/9 ✅ |
-| Phase 45 — Failure handling | 9/9 ✅ |
 | Phase 46 — Security and contamination tests | 8/8 ✅ |
-| Phase 47 — Observability without spectacle | 15/15 ✅ |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
@@ -251,19 +210,85 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 10/10 ✅ |
 | Phase 55 — V1 completion definition | 23/23 ✅ |
+| Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
+| Phase 60 — Parallel-session file coordination | 16/16 ✅ |
+| Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
+
+**gateway** `██████████████████████████████████████░░` 389/400
+
+| Phase | Done |
+|---|---|
+| Phase 9C — Provider protocol model | 12/12 ✅ |
+| Phase 9D — Built-in provider templates | 14/14 ✅ |
+| Phase 9E — Secret storage | 13/13 ✅ |
+| Phase 9F — Direct provider launch profiles | 13/13 ✅ |
+| Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
+| Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
+| Phase 9I — Free-pool routing | 14/14 ✅ |
+| Phase 32 — Resource registry | 12/12 ✅ |
+| Phase 32A — Unified quota and capacity model | 21/21 ✅ |
+| Phase 32B — Quota telemetry sources | 14/14 ✅ |
+| Phase 32C — Subscription capacity estimation | 11/12 |
+| Phase 32D — Normalized remaining-capacity score | 11/12 |
+| Phase 32E — Burn rate and exhaustion forecasting | 10/10 ✅ |
+| Phase 32F — Protected quota reserve | 8/8 ✅ |
+| Phase 32G — Provider-aware request-cost estimation | 9/10 |
+| Phase 33 — Resource health | 13/15 |
+| Phase 33B — Reliability-adjusted agent performance | 11/14 |
+| Phase 33C — Failure, quota, and route correlation | 15/15 ✅ |
+| Phase 34B — Routing-model role | 15/15 ✅ |
+| Phase 34C — Automatic routing-model selection | 12/13 |
+| Phase 34D — Router request schema | 13/13 ✅ |
+| Phase 34E — Router economics | 9/9 ✅ |
+| Phase 35 — Lightweight task classification | 14/14 ✅ |
+| Phase 35A — Candidate generation | 11/11 ✅ |
+| Phase 35B — Candidate scoring | 25/25 ✅ |
+| Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
+| Phase 35D — Routing under subscription pressure | 8/8 ✅ |
+| Phase 38 — Quota-preserving routing | 6/7 |
+| Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
-| Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
+
+**boundary** `████████████████████████████████████████` 100/100
+
+| Phase | Done |
+|---|---|
+| Phase 9J — Harness-model pairing model | 20/20 ✅ |
+| Phase 33A — Routing evidence ledger | 15/15 ✅ |
+| Phase 34 — Capability registry | 10/10 ✅ |
+| Phase 34A — Workload tiers | 10/10 ✅ |
+| Phase 34F — Model capability and tier calibration | 11/11 ✅ |
+| Phase 36 — Session affinity | 8/8 ✅ |
+| Phase 37 — Basic session-aware router | 11/11 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
-| Phase 59 — Decompression: the code's physical shape catches up with its architecture | 8/8 ✅ |
-| Phase 60 — Parallel-session file coordination | 16/16 ✅ |
+
+**pane** `██████████████████████░░░░░░░░░░░░░░░░░░` 41/74
+
+| Phase | Done |
+|---|---|
 | Phase 61 — pane: the first-party harness | 20/35 |
-| Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 | Phase 63 — pane's terminal interface | 0/5 |
 | Phase 64 — pane: subagents | 0/5 |
 | Phase 61H — Runtime resilience across models and scripting styles | 0/8 |
 | Phase 65 — Pane: smarter-and-cheaper execution | 17/17 ✅ |
 | Phase 66 — Pane: a decision model beside the task model | 4/4 ✅ |
+
+**process** `████████████████████████████████████████` 82/82
+
+| Phase | Done |
+|---|---|
+| Phase 0 — Repository and executable foundation | 8/8 ✅ |
+| Phase 2A — Cross-platform runtime | 16/16 ✅ |
+| Phase 14 — Orchestrator role | 11/11 ✅ |
+| Phase 15 — Orchestrator wake-up flow | 8/8 ✅ |
+| Phase 16 — Worker transparency | 7/7 ✅ |
+| Phase 45 — Failure handling | 9/9 ✅ |
+| Phase 47 — Observability without spectacle | 15/15 ✅ |
+| Phase 59 — Decompression: the code's physical shape catches up with its architecture | 8/8 ✅ |
+
+| Phase | Done |
+|---|---|
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 6/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 5/5 — deferred gate |
 

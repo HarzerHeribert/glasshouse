@@ -21,7 +21,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAP_PATH = REPO_ROOT / "docs" / "product" / "capability-map.md"
+COMPONENTS_PATH = REPO_ROOT / "docs" / "product" / "capability-map.components"
 README_PATH = REPO_ROOT / "README.md"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from orient import load_components  # noqa: E402  (the sidecar loader orient.py owns)
+
+# Fixed display order for the per-component sections -- not alphabetical.
+COMPONENT_ORDER = ["glasshouse", "gateway", "boundary", "pane", "process"]
 
 START_MARKER = "<!-- progress:start -->"
 END_MARKER = "<!-- progress:end -->"
@@ -125,6 +132,27 @@ def parse_phases(map_text):
     return phases
 
 
+def attach_components(phases):
+    """Join each mandatory phase to its component from the sidecar.
+
+    Mirrors orient.py's attach_components: refuses loudly, naming the phase,
+    if a `Phase` heading has no sidecar line.
+    """
+    components = load_components()
+    ids = {p["label"].split(" — ")[0] for p in phases}
+    missing = sorted(ids - components.keys())
+    if missing:
+        for pid in missing:
+            sys.stderr.write(
+                "progress.py: {} has no line in {}\n".format(
+                    pid, COMPONENTS_PATH.relative_to(REPO_ROOT)
+                )
+            )
+        raise SystemExit(1)
+    for p in phases:
+        p["component"] = components[p["label"].split(" — ")[0]]
+
+
 def totals(phases):
     done = sum(p["done"] for p in phases)
     total = sum(p["total"] for p in phases)
@@ -176,13 +204,32 @@ def render_block(phases, parked=0):
             len(active),
         ),
         "",
-        "| Phase | Done |",
-        "|---|---|",
     ]
+    # Phases are grouped by component (fixed display order, not alphabetical)
+    # so the breakdown reads as "what does each component still owe" rather
+    # than one flat 100+ row table. Gate phases keep their own trailing table.
+    by_component = {}
     for p in phases:
-        complete = p["total"] > 0 and p["done"] == p["total"]
-        mark = " " + CHECKMARK if complete else ""
-        lines.append("| {} | {}/{}{} |".format(p["label"], p["done"], p["total"], mark))
+        by_component.setdefault(p["component"], []).append(p)
+    for component in COMPONENT_ORDER:
+        section = by_component.get(component, [])
+        if not section:
+            continue
+        comp_done, comp_total = totals(section)
+        lines.append("**{}** `{}` {}/{}".format(
+            component, render_bar(comp_done, comp_total), comp_done, comp_total
+        ))
+        lines.append("")
+        lines.append("| Phase | Done |")
+        lines.append("|---|---|")
+        for p in section:
+            complete = p["total"] > 0 and p["done"] == p["total"]
+            mark = " " + CHECKMARK if complete else ""
+            lines.append("| {} | {}/{}{} |".format(p["label"], p["done"], p["total"], mark))
+        lines.append("")
+    if gates:
+        lines.append("| Phase | Done |")
+        lines.append("|---|---|")
     for p in gates:
         lines.append(
             "| {} | {}/{} — deferred gate |".format(p["label"], p["done"], p["total"])
@@ -219,6 +266,7 @@ def main(argv):
 
     map_text = MAP_PATH.read_text(encoding="utf-8")
     phases = parse_phases(map_text)
+    attach_components(phases)
     new_block = render_block(phases, count_parked(map_text))
 
     readme_text = README_PATH.read_text(encoding="utf-8")
