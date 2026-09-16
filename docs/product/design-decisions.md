@@ -5454,7 +5454,7 @@ be measured, on the artifact that carries them.
 ## Jev is a classifier for Pane first; routing stays static — the user, 2026-09-16
 
 TypeSafe AI's Jev — a System One decision model answering `noul`, `choice` and
-`score` questions with probabilities in 70–500 ms, €0.42 per million input tokens (the user, 2026-09-16; inference itself is free),
+`score` questions with probabilities in 70–500 ms, $0.042 per million input tokens (inference itself is free),
 output free, and **no text, code or tool call** — goes into Pane first, as a judge
 beside the task model, never as a task or helper model. First the user's own idea:
 classify the request's intent once and hold once an effectful cell under a read-only
