@@ -769,3 +769,34 @@ fn family_direct_tool_frame() {
         render(&findings)
     );
 }
+
+// ---------------------------------------------------------------------
+// Family 7 — a hard link planted in the scratchpad
+// ---------------------------------------------------------------------
+
+/// `phase-69.md` line 2637's defect: a hard link planted unconfined in
+/// `.pane/scratch/` (explore's own writable glob) made `write` rewrite
+/// `.pane/config.toml` through it. The shipped binary refuses, and every
+/// name of the file keeps its bytes.
+#[test]
+fn family_hard_link_in_the_scratchpad() {
+    let root = project("fam7-hard-link");
+    fs::create_dir_all(root.join(".pane/scratch")).unwrap();
+    fs::hard_link(
+        root.join(".pane/config.toml"),
+        root.join(".pane/scratch/hard"),
+    )
+    .unwrap();
+    let pre = snapshot(&root);
+    let stdout = execute_probe(&root, &write_action(".pane/scratch/hard", "changed"));
+    let post = snapshot(&root);
+    assert_eq!(diff(&pre, &post), None, "stdout:\n{stdout}");
+    assert_eq!(
+        fs::read_to_string(root.join(".pane/config.toml")).unwrap(),
+        PANE_CONFIG
+    );
+    assert!(
+        stdout.contains("hard-linked file (2 names)"),
+        "the refusal names the link count:\n{stdout}"
+    );
+}

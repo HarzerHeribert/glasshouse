@@ -84,6 +84,17 @@ These are numbered because 61D's acceptance quotes them.
    (a link or `..` under it is judged where it lands). macOS enforces the native
    exclusion for subprocesses too; active Linux Landlock cannot carve it out
    of a writable project and explicitly warns about future-session mutation.
+   **Hard links.** A write or edit whose target is an existing regular file
+   with more than one name is refused (`hard-linked file (<n> names)`), after
+   the never and `deny` rules and before any grant; an unreadable link count is
+   refused too. Names, not zones: a grant judges one name, and nothing on it says
+   where the other names are, so two ordinary project files linked together are
+   refused as well. On macOS the seatbelt already refuses a confined `ln` whose
+   source is under a `deny file-write*` subtree (`.pane/**`, `.claude/**`), so the
+   in-process rule is what stops a link planted from outside the sandbox; Linux
+   is not measured, and Windows reads no link count (`number_of_links` is
+   unstable) and refuses nothing here. A bash child could link between `check`
+   and the write tool's write; that window is the check itself.
 
 ## 2. The pattern language, and what each pattern is
 

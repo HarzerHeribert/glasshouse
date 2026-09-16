@@ -657,6 +657,83 @@ fn a_confined_child_writes_the_scratchpad_and_not_the_host_configuration() {
     }
 }
 
+/// The OS layer's answer to a hard link, measured against the real seatbelt
+/// (sandbox-grants.md §1.5): a confined child cannot link a file out of a
+/// `(deny file-write* (subpath …))` subtree — `link(2)` is judged on the
+/// source too — so `.pane/**` and `.claude/**` cannot gain a second name from
+/// inside the sandbox. A link to an ordinary project file is created, and the
+/// in-process check is then what refuses a write through it.
+#[test]
+fn a_confined_child_cannot_hard_link_a_never_writable_file_into_the_writable_tree() {
+    #[cfg(not(target_os = "macos"))]
+    eprintln!(
+        "skipped: seatbelt is macOS-only; Linux and Windows are not measured here (sandbox-grants.md §1.5)"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        use pane::sandbox::profile::Access;
+        use std::process::{Command, Stdio};
+
+        let fixture = Fixture::new("hard-link-exec");
+        std::fs::create_dir_all(fixture.root.join(".pane/scratch")).unwrap();
+        std::fs::create_dir_all(fixture.root.join(".git")).unwrap();
+        let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+        let root = fixture.resolved(&profile);
+        fixture.write(&root.join(".pane/config.toml"), "host\n");
+        fixture.write(&root.join(".claude/settings.json"), "{}\n");
+        fixture.write(&root.join(".git/config"), "git\n");
+        let ln = |source: &str, target: &str| {
+            let mut command = Command::new("/bin/ln");
+            command
+                .arg(source)
+                .arg(target)
+                .current_dir(&root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            macos::confine(&profile, Path::new("/bin/ln"), &mut command).unwrap();
+            command.output().unwrap()
+        };
+
+        for (source, target) in [
+            (".pane/config.toml", ".pane/scratch/hard"),
+            (".claude/settings.json", ".pane/scratch/hard-claude"),
+            (".claude/settings.json", "hard-claude"),
+        ] {
+            let refused = ln(source, target);
+            assert!(
+                !refused.status.success(),
+                "{source} -> {target}: {refused:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("Operation not permitted"),
+                "{source} -> {target}: {refused:?}"
+            );
+            assert!(!root.join(target).exists(), "{source} -> {target}");
+        }
+
+        // `.git/config` is an ordinary project file (§4 names `~/.gitconfig`,
+        // not the project's own), so the seatbelt links it; the profile is
+        // what refuses the write through either name.
+        for target in ["hard-git", ".pane/scratch/hard-git"] {
+            let linked = ln(".git/config", target);
+            assert!(linked.status.success(), "{target}: {linked:?}");
+            let denied = profile
+                .check_request("write", Access::Write, &root.join(target))
+                .expect_err("a write through a hard link is refused in-process");
+            assert!(denied.rule.starts_with("hard-linked file ("), "{denied}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/config")).unwrap(),
+            "git\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".pane/config.toml")).unwrap(),
+            "host\n"
+        );
+    }
+}
+
 /// A request mode is an in-process narrowing only: the OS layer a narrowed
 /// profile renders is the session profile's, byte for byte, so everything the
 /// OS refuses stays refused in every mode (ruling *Request modes*).

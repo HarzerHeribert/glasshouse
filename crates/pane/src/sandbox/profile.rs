@@ -1029,6 +1029,14 @@ impl Profile {
                 return denied(format!("`{}` in permissions.deny", rule.written));
             }
         }
+        // After every refusing rule, so a never-writable name is refused by
+        // its own rule; before every grant, because a grant judges a name and
+        // a write through a hard link reaches every other name of the file.
+        if access == Access::Write
+            && let Some(rule) = hard_link_refusal(&resolved)
+        {
+            return denied(rule);
+        }
         if contains(&self.root_spelling, &candidate)
             || self
                 .additional_roots
@@ -1057,6 +1065,42 @@ impl Profile {
         }
         denied(access.only_root_sentence(self.container_mode()).to_string())
     }
+}
+
+/// The refusal for a write whose target is an existing regular file with
+/// more than one name, or whose metadata cannot be read (sandbox-grants.md
+/// §1.5). A path that does not exist, a directory and a single-name file get
+/// `None`. Names, not zones: the other names are invisible from this one, so
+/// no grant on this name can say where the write lands.
+#[cfg(unix)]
+fn hard_link_refusal(resolved: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(resolved) {
+        Ok(meta) if meta.is_file() && meta.nlink() > 1 => Some(format!(
+            "hard-linked file ({} names): a write here reaches every name; copy it to a new file instead",
+            meta.nlink()
+        )),
+        Ok(_) => None,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            None
+        }
+        Err(error) => Some(format!(
+            "the link count of this file could not be read ({error}); a write is refused rather than granted"
+        )),
+    }
+}
+
+/// Windows: `MetadataExt::number_of_links` is unstable on the pinned
+/// toolchain, so no link count is read and nothing is refused here
+/// (sandbox-grants.md §1.5 states the gap).
+#[cfg(not(unix))]
+fn hard_link_refusal(_resolved: &Path) -> Option<String> {
+    None
 }
 
 /// The agent's scratchpad, relative to the project root: the one subtree of

@@ -2540,3 +2540,74 @@ fn explore_refuses_the_cmd_tail_by_name_on_windows() {
     let denied = refusal(explore.admits_command("dir"));
     assert!(denied.rule.contains("cmd.exe"), "{denied}");
 }
+
+/// §1.5's hard-link rule: a grant judges a name, and a write through a hard
+/// link reaches every other name of the file. The link is planted here,
+/// unconfined, exactly as `phase-69.md`'s measurement planted it.
+#[cfg(unix)]
+#[test]
+fn a_write_through_a_hard_link_to_a_never_writable_file_is_refused_in_every_mode() {
+    let fixture = Fixture::new("hard-link-never");
+    std::fs::create_dir_all(fixture.root.join(".pane/scratch")).unwrap();
+    let config = fixture.root.join(".pane/config.toml");
+    std::fs::write(&config, "model = \"x\"\n").unwrap();
+    let hard = fixture.root.join(".pane/scratch/hard");
+    std::fs::hard_link(&config, &hard).unwrap();
+    let execute = open_profile(&fixture);
+    let explore = execute
+        .clone()
+        .narrowed_to(RequestMode::Explore, &ModeOverlay::default());
+    for (mode, profile) in [("execute", &execute), ("explore", &explore)] {
+        for tool in ["write", "edit"] {
+            let denied = refusal(profile.check_request(tool, Access::Write, &hard));
+            assert_eq!(
+                denied.rule,
+                "hard-linked file (2 names): a write here reaches every name; copy it to a new file instead",
+                "{mode}/{tool}: {denied}"
+            );
+        }
+        // The never-writable name keeps its own rule: the link check is for
+        // the *other* names.
+        let denied = refusal(profile.check_request("write", Access::Write, &config));
+        assert!(denied.rule.contains(".pane/**"), "{mode}: {denied}");
+    }
+    // A read through the link is judged exactly as before.
+    execute
+        .check("read", Access::Read, &hard)
+        .expect("a read through a hard link is granted as today");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "model = \"x\"\n");
+}
+
+/// Names, not zones: both names are ordinary project files, and the rule
+/// still refuses, because nothing on this name says where the other is.
+#[cfg(unix)]
+#[test]
+fn a_hard_link_between_two_ordinary_project_files_is_refused_and_a_single_name_is_not() {
+    let fixture = Fixture::new("hard-link-ordinary");
+    std::fs::create_dir_all(fixture.root.join("src")).unwrap();
+    let a = fixture.root.join("src/a.rs");
+    let b = fixture.root.join("src/b.rs");
+    let single = fixture.root.join("src/single.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    std::fs::write(&single, "fn s() {}\n").unwrap();
+    std::fs::hard_link(&a, &b).unwrap();
+    std::fs::hard_link(&a, fixture.root.join("src/c.rs")).unwrap();
+    let profile = open_profile(&fixture);
+    for name in [&a, &b] {
+        let denied = refusal(profile.check_request("write", Access::Write, name));
+        assert!(
+            denied.rule.starts_with("hard-linked file (3 names)"),
+            "{denied}"
+        );
+    }
+    profile
+        .check_request("write", Access::Write, &single)
+        .expect("a single-name file is granted as today");
+    profile
+        .check_request("write", Access::Write, &fixture.root.join("src/new.rs"))
+        .expect("a new file is granted as today");
+    // A directory always has more than one link on Unix; it is not a file.
+    profile
+        .check_request("write", Access::Write, &fixture.root.join("src"))
+        .expect("a directory is not affected");
+}
