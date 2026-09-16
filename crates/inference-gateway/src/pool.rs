@@ -155,6 +155,10 @@ pub struct Pool {
 /// - **provider-backed** (`provider` names something in `providers`): the
 ///   account's own `credential` is resolved if it states one, and the
 ///   provider's declared `credential_env` names are tried if it does not.
+///   An account with `models` set gets its backend built `.with_models(…)`,
+///   the same declaration a broker-backed account's own catalogue already
+///   provides; unset behaves exactly as before this existed — the backend
+///   is a candidate for any model.
 ///
 /// An **empty catalogue** is not an error: it falls through to
 /// [`gateway_upstream`] over `providers` alone, which is the shape a
@@ -251,7 +255,10 @@ pub fn pool_from_catalogue(
                 Cost::Metered
             },
         ) {
-            Ok(backend) => backends.push(backend),
+            Ok(backend) => backends.push(match entry.models() {
+                Some(models) => backend.with_models(models),
+                None => backend,
+            }),
             Err(error) => notes.push(format!("account `{name}`: {error}")),
         }
     }

@@ -13,7 +13,21 @@ Targeted: the changed files' own targets plus the worker's quoted tests, on the 
 
 ## Line 2629 — `gateway.toml` declares an api-key account's models
 
-**State: OPEN.** Named by `GH-GATEWAY-PROCESS-TESTS` (2026-09-16): `pool.rs :: pool_from_catalogue` never calls `UpstreamBackend::with_models` for `kind = "api-key"`, so the migration refusal (`routing::interactive :: FailureResponse::OfferMigration`) is unreachable from the standalone binary and `tests/boundary.rs :: a_dead_account_request_is_refused_but_migration_refusal_is_unreachable_from_this_binary` is `#[ignore]`d with that reason in its name. A successor adds `models = [...]` per account and un-ignores it.
+**State: COMPLETE** (2026-09-16, `GH-GATEWAY-ACCOUNT-MODELS`, Sonnet high, Amber; report `.agent-runtime/report-gateway-account-models.md`; integrated by the primary on the targeted gate).
+
+**Contract.** Given `gateway.toml` with `[accounts.<name>] models = ["m1", "m2"]` on an api-key account, when a request names a model no configured account serves, the standalone `inference-gateway` answers an error and forwards to nobody, while an account without `models` keeps today's behaviour (serves any model) and same-model failover across accounts is unchanged.
+
+**Production.** `crates/inference-gateway/src/entitlement.rs :: AccountEntry::models` (serde default, skipped when unset; `models()` / `set_models()`); `crates/inference-gateway/src/pool.rs :: pool_from_catalogue` (the api-key arm calls `UpstreamBackend::with_models` when declared; subscription-backed accounts keep `subscription_models`); `docs/product/gateway/README.md` names the field.
+
+**Tests.** `crates/inference-gateway/tests/boundary.rs :: a_request_for_a_dead_model_is_refused_rather_than_served_by_another_model` (un-ignored and rewritten: account A serves `M` at a dead port, B declares only `N`; a request for `M` is non-2xx and B's fake records nothing); `config::tests::{an_account_declaring_models_parses_the_list, an_account_without_models_parses_to_none}`.
+
+| Decision | Mutation | Killing test | Result |
+|---|---|---|---|
+| Declared models reach the backend (2629) | `pool.rs`: `Some(models) => backend.with_models(models),` → `Some(_) => backend,` | `boundary::a_request_for_a_dead_model_is_refused_rather_than_served_by_another_model` | KILLED — `a request whose account is unreachable must not read as served: HTTP/1.1 200 OK` |
+
+**Gates.** `cargo test -p inference-gateway --test boundary`: 5 passed, 0 ignored; lib 528 passed; `tests/bin.rs` 10 passed; `cargo check -p glasshouse --all-targets --keep-going` clean with no host edit; the targeted gate (4 files) green on the worker's tree and on the merged tree at integration.
+
+**Limits.** This pins *account selection by declared model* at the process boundary; whether `routing::interactive`'s `OfferMigration` arm is reachable from the binary is a separate question the worker names as orthogonal. Subscription-broker accounts are unchanged. `entitlements --json` builds its own object from the cached catalogue and does not render `AccountEntry`, so the field does not appear there (packet error, accepted). The worker reports one pre-existing red among the binary's four `main.rs` unit tests, unrelated to this change — to be attributed on main.
 
 ## Line 2630 — one ingress list, served by the embedded gateway too
 

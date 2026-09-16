@@ -29,7 +29,9 @@ stdin reaches EOF or SIGTERM/SIGINT/SIGHUP; a fixed port is refused by name
 rather than silently ignored. Its config is `gateway.toml` under the
 platform config directory: `[accounts.<name>]` in the entitlement
 catalogue's own shape, and `[providers.<name>]` with `base_url`/`protocol`
-(or a `protocols` map) and `credential_env` names — never values.
+(or a `protocols` map) and `credential_env` names — never values. An
+api-key account may declare `models = ["m1", "m2"]`; unset, it serves
+whatever model is asked, as before.
 
 ## The CLI subcommands
 

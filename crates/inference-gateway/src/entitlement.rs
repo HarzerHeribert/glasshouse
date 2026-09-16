@@ -316,6 +316,14 @@ pub struct AccountEntry {
     provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spend_ceiling_tokens: Option<u64>,
+    /// The models an api-key account serves, or `None` to serve whatever is
+    /// asked — today's behaviour, and every account that predates this
+    /// field. `pool.rs :: pool_from_catalogue` reads this to declare an
+    /// [`crate::gateway::upstream::UpstreamBackend`]'s served models, the
+    /// same call a subscription-backed account already gets from its
+    /// broker's own catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    models: Option<Vec<String>>,
 }
 impl AccountEntry {
     pub fn kind(&self) -> Option<EntitlementKind> {
@@ -371,6 +379,18 @@ impl AccountEntry {
 
     pub fn set_spend_ceiling_tokens(&mut self, value: Option<u64>) -> &mut Self {
         self.spend_ceiling_tokens = value;
+        self
+    }
+
+    /// The models this account declares, or `None` when it declares none —
+    /// the account serves whatever is asked, unchanged from before this
+    /// field existed.
+    pub fn models(&self) -> Option<&[String]> {
+        self.models.as_deref()
+    }
+
+    pub fn set_models(&mut self, value: Option<Vec<String>>) -> &mut Self {
+        self.models = value;
         self
     }
 }

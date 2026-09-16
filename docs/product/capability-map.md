@@ -2626,5 +2626,5 @@ Windows landing's and the matcher verifier's reports). Each is a product require
 
 Phase 68 — Gateway: successors named by the 2026-09-16 cleanup
 
-☐ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
+☑ Let `gateway.toml` declare the model list an api-key account serves, so the standalone binary can refuse a request for a model no account serves rather than forwarding it, and `tests/boundary.rs`'s migration-refusal test runs un-ignored.
 ☑ Serve the same ingress targets from Glasshouse's embedded gateway as from the standalone binary — one `GATEWAY_INGRESS_PROTOCOLS` in the gateway crate, `typesafe-systemone` included, so a Pane launched by Glasshouse can reach the decision model exactly as a standalone Pane can.

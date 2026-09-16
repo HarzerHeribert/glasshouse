@@ -488,6 +488,40 @@ credential = "sk-ant-notarealkey-000"
         assert!(rendered.contains("never a value"), "{rendered}");
     }
 
+    /// An account that declares `models` parses it as the list it wrote.
+    #[test]
+    fn an_account_declaring_models_parses_the_list() {
+        let config: GatewayConfig = toml::from_str(
+            r#"
+[accounts.work]
+kind = "api-key"
+provider = "fake"
+models = ["a", "b"]
+"#,
+        )
+        .expect("the documented shape parses");
+        assert_eq!(
+            config.accounts["work"].models(),
+            Some(["a".to_owned(), "b".to_owned()].as_slice())
+        );
+    }
+
+    /// An account that says nothing about `models` parses to `None` — the
+    /// account serves whatever is asked, unchanged from before this field
+    /// existed.
+    #[test]
+    fn an_account_without_models_parses_to_none() {
+        let config: GatewayConfig = toml::from_str(
+            r#"
+[accounts.work]
+kind = "api-key"
+provider = "fake"
+"#,
+        )
+        .expect("the documented shape parses");
+        assert_eq!(config.accounts["work"].models(), None);
+    }
+
     /// A path that does not exist is an empty catalogue, not a crash.
     #[test]
     fn a_missing_config_is_an_empty_catalogue() {

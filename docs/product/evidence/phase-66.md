@@ -17,13 +17,22 @@ never in a packet, a report or a worker.
 **Gate.** `scripts/blast-radius.sh --targeted <changed files>` per package; the
 GitHub sweep's cells are the platform verdict.
 
-**Provider facts.** Every `Declared` fact about `typesafe` stays `Unverified` until
-a probe with a real key is recorded here with its date and its exact response shape.
-Read 2026-09-16 from docs.typesafe.ai, unverified against a live endpoint: `POST
-https://api.typesafe.ai/v1/systemone`, `Authorization: Bearer`, model `jev-latest`,
-body `{state, model, questions{key: {type, instructions, criteria}}}`, answers
-`{noul}` / `{choice, probabilities, confidence}` / `{score, legend, confidence}`,
-`usage{input_tokens, output_tokens}`.
+**Provider facts — VERIFIED 2026-09-16 (evening) with the user's key, three live calls from a
+script that never printed the key.** `POST https://api.typesafe.ai/v1/systemone`, `Authorization:
+Bearer`, `model: "jev-latest"` answers as `"model": "jev-1.13.0"`. Request `{state, model,
+questions{key: {type, instructions, criteria}}}` where **choice `criteria` is a map option →
+rubric** (a list is a 422 `dict_type`), **score `criteria` is an ordered list of level
+descriptions** (a map is a 422 `list_type`), noul `criteria` is optional `{true, false}`.
+Answers: noul `{noul: 0.04}`; choice `{choice, confidence: 1.0, probabilities{…}}`; score
+`{score: 2.72, confidence: 0.71, legend{"0": …, "4": …} (zero-indexed), probabilities{…}}`.
+`usage{input_tokens, output_tokens}` (406/65 for a 2-question small state; 20,489/41 for a 42 KB
+diff). Latency measured from macOS: 540–730 ms for small states, 1,029 ms for 42 KB — not the
+70–150 ms the marketing page implies; a per-cell question is therefore asynchronous or nothing.
+Headers: `x-typesafe-request-id`; no rate-limit headers; the docs say 429/529 want exponential
+backoff. Intent probe: "read the config file and tell me what the timeout is" → `read_only` 1.0,
+"needs a write" 0.04. Pane's `decide.rs` already sends the choice map and the bare noul, so
+its wire shape is correct as landed. The gateway's `typesafe` template stays `Declared`
+`Unverified` in code until a probe through the gateway (not direct) is recorded.
 
 ---
 

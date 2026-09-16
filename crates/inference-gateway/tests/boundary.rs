@@ -63,70 +63,55 @@ fn read_ready_line(stdout: &mut impl BufRead) -> (String, String) {
     )
 }
 
-/// Line 511/514's process-level form, attempted — and the reason it is
-/// `#[ignore]`d rather than counted as proof of the migration invariant.
+/// Line 511/514's process-level form: `a-live` sorts first and declares a
+/// different model than the request names, `z-dead` sorts second, declares
+/// the requested model, and sits at a dead port. The request must come back
+/// refused without ever reaching `a-live`.
 ///
-/// The assertions below hold: a single request to a dead account is
-/// answered from where it failed, and the fixture standing in for a
-/// different-model account records nothing. But that holds for a reason
-/// that has nothing to do with model-based migration refusal —
-/// `gateway/session/mod.rs::observe_exchange` only moves `Upstream`'s
-/// serving index for the *next* exchange, never retrying the one that just
-/// failed — and it would hold identically with no migration policy in the
-/// binary at all. Confirmed by mutation, not just read: flipping
-/// `routing/interactive/mod.rs`'s `OfferMigration` arm to a transparently-
-/// taken `FailOver` (same fields, `mutate.sh`'s
-/// `mutation-test1-take-migration-transparently`) **survives** against this
-/// test.
-///
-/// The reason it survives is a Phase −1 gap this package's FEASIBILITY did
-/// not name: `pool_from_catalogue` (`src/pool.rs`) never calls
-/// `UpstreamBackend::with_models` for a provider-backed (`kind = "api-key"`)
-/// account — only a subscription-broker-backed one gets a declared model
-/// list, from the broker's own catalogue. `gateway.toml` therefore has no
-/// way to make a second account declare "only model N", so a provider-key
-/// account is always "compatible with everything"
-/// (`UpstreamBackend::can_serve`'s empty-list fallback) and
-/// `Upstream::failover_candidates` retags every surviving candidate with
-/// the *requested* model before `on_provider_failure` ever compares models
-/// — so `candidate.model() == current.backend().model()` is true by
-/// construction and the `migration` bucket that arm reads from can never be
-/// populated from this call site. `OfferMigration` is reachable only from
-/// `routing/interactive`'s own unit tests, which build a `Backend` with its
-/// own declared model directly, bypassing `Upstream` entirely. See this
-/// package's report for the full trace.
-#[ignore = "provider-key accounts never declare a model list, so OfferMigration is unreachable \
-            and its mutation survives — see the doc comment"]
+/// The account order is deliberate: `a-live` sorts before `z-dead` in the
+/// catalogue's `BTreeMap`, so `Upstream`'s default serving index (0) would
+/// pick it if model-based selection did not override that default.
+/// `gateway/ingress.rs` calls `serving_for_target`, which resolves the
+/// account declaring the requested model — `z-dead` — before anything is
+/// sent, so the dead account is chosen and the fake `a-live` is never
+/// touched. Before `gateway.toml` could declare `models` on an api-key
+/// account, `pool_from_catalogue` never called `UpstreamBackend::with_models`
+/// for one, so neither account declared anything, `for_model` never matched
+/// either, and the default index-0 pick — `a-live` — would have carried the
+/// request itself. This is why the mutation dropping that call is caught
+/// here: without it, the fake records a request instead of nothing.
 #[test]
-fn a_dead_account_request_is_refused_but_migration_refusal_is_unreachable_from_this_binary() {
-    let b_live = FakeProvider::start();
+fn a_request_for_a_dead_model_is_refused_rather_than_served_by_another_model() {
+    let a_live = FakeProvider::start();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let config_path = scratch.path().join("gateway.toml");
     std::fs::write(
         &config_path,
         format!(
             r#"
-[providers.dead]
-base_url = "http://127.0.0.1:1"
-protocol = "anthropic-messages"
-credential_env = ["GATEWAY_BOUNDARY_DEAD_KEY"]
-
 [providers.live]
 base_url = "{}"
 protocol = "anthropic-messages"
 credential_env = ["GATEWAY_BOUNDARY_LIVE_KEY"]
 
-[accounts.a-dead]
-kind = "api-key"
-provider = "dead"
-credential = {{ env = "GATEWAY_BOUNDARY_DEAD_KEY" }}
+[providers.dead]
+base_url = "http://127.0.0.1:1"
+protocol = "anthropic-messages"
+credential_env = ["GATEWAY_BOUNDARY_DEAD_KEY"]
 
-[accounts.b-live]
+[accounts.a-live]
 kind = "api-key"
 provider = "live"
 credential = {{ env = "GATEWAY_BOUNDARY_LIVE_KEY" }}
+models = ["m-only-a-live-serves"]
+
+[accounts.z-dead]
+kind = "api-key"
+provider = "dead"
+credential = {{ env = "GATEWAY_BOUNDARY_DEAD_KEY" }}
+models = ["m-only-z-dead-serves"]
 "#,
-            b_live.base_url()
+            a_live.base_url()
         ),
     )
     .expect("the configuration is written");
@@ -135,8 +120,8 @@ credential = {{ env = "GATEWAY_BOUNDARY_LIVE_KEY" }}
         let mut command = gateway(&config_path, scratch.path());
         command
             .args(["serve", "--listen", "127.0.0.1:0"])
-            .env("GATEWAY_BOUNDARY_DEAD_KEY", "dead-account-key") // glasshouse:not-a-secret
             .env("GATEWAY_BOUNDARY_LIVE_KEY", "live-account-key") // glasshouse:not-a-secret
+            .env("GATEWAY_BOUNDARY_DEAD_KEY", "dead-account-key") // glasshouse:not-a-secret
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -145,17 +130,18 @@ credential = {{ env = "GATEWAY_BOUNDARY_LIVE_KEY" }}
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
     let (listening, token) = read_ready_line(&mut stdout);
 
-    let (status, _) = post(
+    let raw = post_with_headers(
         &format!("{listening}/v1/messages"),
         &format!("Bearer {token}"),
-        r#"{"model":"m-only-a-dead-serves","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
+        &[("x-glasshouse-model", "m-only-z-dead-serves")],
+        r#"{"model":"m-only-z-dead-serves","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
     );
     assert!(
-        !status.contains("200") && !status.starts_with("HTTP/1.1 2"),
-        "a request whose account is unreachable must not read as served: {status}"
+        !raw.starts_with("HTTP/1.1 2"),
+        "a request whose account is unreachable must not read as served: {raw}"
     );
     assert!(
-        b_live.requests(0).is_empty(),
+        a_live.requests(0).is_empty(),
         "the account naming a different model must never be tried for this exchange"
     );
 
