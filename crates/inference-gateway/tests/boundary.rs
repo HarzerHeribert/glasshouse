@@ -6,8 +6,10 @@
 //! rather than re-implementing.
 
 use std::io::{BufRead, BufReader, Read};
+#[cfg(unix)]
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 mod common;

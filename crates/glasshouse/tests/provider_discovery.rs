@@ -52,6 +52,10 @@ const EXPECTED_DISCOVERY_MATRIX: &[(&str, bool)] = &[
     // generic shape -- no model-list endpoint is claimed until a live probe
     // establishes one, so it offers no discovery.
     ("gemini", false),
+    // Phase 66 (2026-09-16): TypeSafe's System One endpoint is a decision
+    // protocol, not a chat one; every Declared is Unverified and there is no
+    // model-list endpoint, so it offers no discovery.
+    ("typesafe", false),
 ];
 
 // --- A. The discovery-availability matrix, across every shipped template ---
@@ -177,8 +181,8 @@ fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_seven() 
 
     assert_eq!(
         all_templates.len(),
-        15,
-        "total built-in templates count changed from 15 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
+        16,
+        "total built-in templates count changed from 16 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
         all_templates.len()
     );
 

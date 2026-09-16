@@ -2024,19 +2024,48 @@ fn spawn_with_confinement_policy(
     binary: &Path,
     descendants: &[PathBuf],
     tool: &str,
-    mut command: Command,
+    command: Command,
     pipes: Pipes,
     line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     if profile.os_sandbox_bypassed() {
-        apply_pipes(&mut command, pipes);
-        let child = command.spawn().map_err(SpawnRefusal::Failed)?;
-        return Ok((
-            ConfinedChild { inner: child },
-            Confinement::DangerouslyUnconfined,
-        ));
+        let child = spawn_bypassed(tool, command, pipes)?;
+        return Ok((child, Confinement::DangerouslyUnconfined));
     }
     confined_spawn_with_descendants(profile, binary, descendants, tool, command, pipes, line)
+}
+
+/// The explicit host-selected bypass: a plain `std` spawn with the pipes
+/// installed, on the two platforms whose child is a `std::process::Child`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn spawn_bypassed(
+    _tool: &str,
+    mut command: Command,
+    pipes: Pipes,
+) -> Result<ConfinedChild, SpawnRefusal> {
+    apply_pipes(&mut command, pipes);
+    let child = command.spawn().map_err(SpawnRefusal::Failed)?;
+    Ok(ConfinedChild { inner: child })
+}
+
+/// **The invariant: where no applier can hand back this module's own child,
+/// the bypass refuses rather than spawning.** On Windows the child is the
+/// applier's `ContainedChild` (its own `CreateProcessW`, never a `std`
+/// `Child`), so an unconfined `std` spawn has nothing to become; a bypass
+/// that spawns anyway would be the one unconfined path this module exists
+/// not to have. A Windows bypass that builds the command line through
+/// `LineShape` is its own package (2026-09-16, the Windows landing's Limits).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn spawn_bypassed(
+    tool: &str,
+    _command: Command,
+    _pipes: Pipes,
+) -> Result<ConfinedChild, SpawnRefusal> {
+    Err(SpawnRefusal::Denied(PermissionDenied {
+        tool: tool.to_string(),
+        path: String::new(),
+        rule: "the dangerously-unconfined bypass has no applier on this platform, so nothing was spawned".to_string(),
+    }))
 }
 
 #[cfg(target_os = "macos")]
