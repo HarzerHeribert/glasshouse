@@ -257,6 +257,13 @@ const READ_ONLY: &str = "read_only";
 
 const INTENT_KEY: &str = "intent";
 
+/// The choice `preflight::should_scout`'s decided signal fires on -- the
+/// criterion's own key below, mirroring [`READ_ONLY`]'s shape for the other
+/// question this package asks in the same request.
+pub const NEEDS_EXPLORATION: &str = "needs_exploration";
+
+const COMPLEXITY_KEY: &str = "complexity";
+
 fn intent_question() -> Question {
     let mut criteria = BTreeMap::new();
     criteria.insert(
@@ -285,6 +292,30 @@ fn intent_question() -> Question {
     }
 }
 
+/// The complexity question (F2, map 2614/2615's paragraph): asked in the
+/// same request as [`intent_question`], never a second round trip
+/// (`docs/product/pane/decision-model.md`).
+fn complexity_question() -> Question {
+    let mut criteria = BTreeMap::new();
+    criteria.insert(
+        "trivial".to_string(),
+        "one obvious edit or answer, no exploration needed".to_string(),
+    );
+    criteria.insert(
+        "routine".to_string(),
+        "a known shape of change in a known place".to_string(),
+    );
+    criteria.insert(
+        NEEDS_EXPLORATION.to_string(),
+        "the request needs the project read or searched before any change is safe".to_string(),
+    );
+    Question::Choice {
+        instructions: "How much exploration does this request need before it is safe to act?"
+            .to_string(),
+        criteria,
+    }
+}
+
 /// What the decision model answered about one request's intent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Intent {
@@ -293,31 +324,74 @@ pub struct Intent {
     pub latency_ms: u64,
 }
 
-/// Asks the intent question about `request` and answers with what came
-/// back, or the reason it did not. Never surfaced as a task failure -- the
-/// caller records the error in a notice and proceeds exactly as if no
-/// decision model were configured.
-pub fn intent_of(model: &str, request: &str) -> Result<Intent, DecideError> {
+/// What the decision model answered about how much exploration one request
+/// needs -- asked beside [`Intent`] in the same request, never on its own
+/// (`preflight::should_scout`'s fifth signal, F2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Complexity {
+    pub choice: String,
+    pub confidence: f64,
+}
+
+/// Both answers to the one request asked before a task's first turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskDecision {
+    pub intent: Intent,
+    pub complexity: Complexity,
+}
+
+/// Asks the intent and complexity questions about `request` in one request
+/// and answers with what came back, or the reason it did not. Never
+/// surfaced as a task failure -- the caller records the error in a notice
+/// and proceeds exactly as if no decision model were configured.
+pub fn task_questions(model: &str, request: &str) -> Result<TaskDecision, DecideError> {
     let state = serde_json::json!({ "request": request });
-    let questions = [(INTENT_KEY.to_string(), intent_question())];
+    let questions = [
+        (INTENT_KEY.to_string(), intent_question()),
+        (COMPLEXITY_KEY.to_string(), complexity_question()),
+    ];
     let answers = decide(model, state, &questions)?;
-    let decision = answers
-        .decisions
-        .into_iter()
-        .find(|decision| decision.key == INTENT_KEY)
-        .ok_or_else(|| DecideError::Parse(format!("no answer for `{INTENT_KEY}`")))?;
-    match decision.answer {
-        Answer::Choice {
+    task_decision_of(answers)
+}
+
+/// The decoding half of [`task_questions`], pulled out so a unit test can
+/// exercise it against a scripted [`Answers`] with no network involved.
+fn task_decision_of(answers: Answers) -> Result<TaskDecision, DecideError> {
+    let mut intent = None;
+    let mut complexity = None;
+    for decision in answers.decisions {
+        let Answer::Choice {
             choice, confidence, ..
-        } => Ok(Intent {
-            choice,
-            confidence,
-            latency_ms: decision.latency_ms,
-        }),
-        Answer::Noul(_) => Err(DecideError::Parse(
-            "the intent question was answered as a noul, not a choice".to_string(),
-        )),
+        } = decision.answer
+        else {
+            return Err(DecideError::Parse(format!(
+                "the `{}` question was answered as a noul, not a choice",
+                decision.key
+            )));
+        };
+        match decision.key.as_str() {
+            key if key == INTENT_KEY => {
+                intent = Some(Intent {
+                    choice,
+                    confidence,
+                    latency_ms: decision.latency_ms,
+                });
+            }
+            key if key == COMPLEXITY_KEY => {
+                complexity = Some(Complexity { choice, confidence });
+            }
+            other => {
+                return Err(DecideError::Parse(format!(
+                    "unexpected answer key `{other}`"
+                )));
+            }
+        }
     }
+    let intent =
+        intent.ok_or_else(|| DecideError::Parse(format!("no answer for `{INTENT_KEY}`")))?;
+    let complexity = complexity
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{COMPLEXITY_KEY}`")))?;
+    Ok(TaskDecision { intent, complexity })
 }
 
 /// The completion question's key, mirroring [`INTENT_KEY`]'s shape for the
@@ -574,6 +648,84 @@ mod tests {
             value["questions"]["intent"]["criteria"]["read_only"],
             "reads only"
         );
+    }
+
+    #[test]
+    fn the_task_questions_request_carries_intent_and_complexity_in_one_map() {
+        let questions: BTreeMap<String, Question> = [
+            (INTENT_KEY.to_string(), intent_question()),
+            (COMPLEXITY_KEY.to_string(), complexity_question()),
+        ]
+        .into_iter()
+        .collect();
+        let body = RequestBody {
+            state: &serde_json::json!({"request": "read the file"}),
+            model: "jev-latest",
+            questions,
+        };
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(
+            value["questions"].as_object().unwrap().len(),
+            2,
+            "one request, both questions: {value}"
+        );
+        assert_eq!(value["questions"]["intent"]["type"], "choice");
+        assert_eq!(value["questions"]["complexity"]["type"], "choice");
+        assert!(
+            value["questions"]["complexity"]["criteria"][NEEDS_EXPLORATION]
+                .as_str()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn task_decision_of_pairs_both_answers_by_key() {
+        let answers = Answers {
+            model: "jev-latest".to_string(),
+            decisions: vec![
+                Decision {
+                    key: INTENT_KEY.to_string(),
+                    answer: Answer::Choice {
+                        choice: "read_only".to_string(),
+                        probabilities: BTreeMap::new(),
+                        confidence: 0.94,
+                    },
+                    latency_ms: 640,
+                },
+                Decision {
+                    key: COMPLEXITY_KEY.to_string(),
+                    answer: Answer::Choice {
+                        choice: "routine".to_string(),
+                        probabilities: BTreeMap::new(),
+                        confidence: 0.81,
+                    },
+                    latency_ms: 640,
+                },
+            ],
+        };
+        let decision = task_decision_of(answers).unwrap();
+        assert_eq!(decision.intent.choice, "read_only");
+        assert_eq!(decision.intent.confidence, 0.94);
+        assert_eq!(decision.complexity.choice, "routine");
+        assert_eq!(decision.complexity.confidence, 0.81);
+    }
+
+    #[test]
+    fn task_decision_of_missing_complexity_is_a_parse_error() {
+        let answers = Answers {
+            model: "jev-latest".to_string(),
+            decisions: vec![Decision {
+                key: INTENT_KEY.to_string(),
+                answer: Answer::Choice {
+                    choice: "read_only".to_string(),
+                    probabilities: BTreeMap::new(),
+                    confidence: 0.94,
+                },
+                latency_ms: 640,
+            }],
+        };
+        let error = task_decision_of(answers).unwrap_err();
+        assert!(error.to_string().contains("complexity"), "{error}");
     }
 
     #[test]

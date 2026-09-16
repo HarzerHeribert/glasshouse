@@ -46,15 +46,19 @@ enum Decision {
 /// header block), shared with the fake server's own thread.
 type Recorded = Arc<Mutex<Vec<String>>>;
 
-/// The single key of a decision request's `questions` object -- `"intent"`
-/// or `"satisfied"`, the only two this package ever asks in one request.
+/// Which of the two requests this package ever sends to `/v1/systemone`:
+/// `"intent"` for the task-start request (which now also carries the
+/// `complexity` question in the same `questions` map -- F2 -- so a plain
+/// "first key" read would see `complexity` first once `BTreeMap` sorts them)
+/// or `"satisfied"` for the completion question (2616).
 fn question_key(body_text: &str) -> String {
     let value: Value = serde_json::from_str(body_text).unwrap();
-    value["questions"]
-        .as_object()
-        .and_then(|questions| questions.keys().next())
-        .cloned()
-        .unwrap_or_default()
+    let questions = value["questions"].as_object().cloned().unwrap_or_default();
+    if questions.contains_key("satisfied") {
+        "satisfied".to_string()
+    } else {
+        "intent".to_string()
+    }
 }
 
 /// A fake provider dispatching on the request's own path: `/v1/messages`
@@ -204,15 +208,37 @@ fn prose(text: &str) -> Value {
         "usage": {"input_tokens": 20, "output_tokens": 7}})
 }
 
+/// The intent answer alone, with a harmless default `complexity` answer
+/// (`routine` at a confidence under every `scout_above` a test configures) so
+/// every existing hold/override test -- which scripts only the intent choice
+/// it cares about -- keeps working now that `decide()` requires an answer for
+/// every question it asked, complexity included.
 fn decision_answer(choice: &str, confidence: f64) -> Value {
+    decision_answer_with_complexity(choice, confidence, "routine", 0.50)
+}
+
+/// Both answers from the one task-start request, for a test that scripts the
+/// complexity question itself (`preflight::SIGNAL_DECIDED_EXPLORATION`, F2).
+fn decision_answer_with_complexity(
+    intent_choice: &str,
+    intent_confidence: f64,
+    complexity_choice: &str,
+    complexity_confidence: f64,
+) -> Value {
     json!({
         "model": "jev-latest",
         "answers": {
             "intent": {
                 "type": "choice",
-                "choice": choice,
-                "probabilities": {"read_only": confidence, "modify": 0.0, "run": 0.0, "other": 0.0},
-                "confidence": confidence,
+                "choice": intent_choice,
+                "probabilities": {"read_only": intent_confidence, "modify": 0.0, "run": 0.0, "other": 0.0},
+                "confidence": intent_confidence,
+            },
+            "complexity": {
+                "type": "choice",
+                "choice": complexity_choice,
+                "probabilities": {"trivial": 0.0, "routine": 0.0, "needs_exploration": 0.0},
+                "confidence": complexity_confidence,
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
@@ -580,6 +606,180 @@ fn the_decision_request_carries_purpose_model_and_the_intent_question() {
     assert_eq!(body["model"], "jev-latest");
     assert_eq!(body["questions"]["intent"]["type"], "choice");
     assert!(body["questions"]["intent"]["criteria"]["read_only"].is_string());
+    assert_eq!(
+        body["questions"].as_object().unwrap().len(),
+        2,
+        "one request, both questions: {body}"
+    );
+    assert_eq!(body["questions"]["complexity"]["type"], "choice");
+    assert!(
+        body["questions"]["complexity"]["criteria"]["needs_exploration"].is_string(),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- the preflight signal (F2, map 2614/2615's paragraph) -----------------
+
+const DECISIONS_ON_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
+     [helpers]\nmodel = \"helper-tier\"\npreflight = true\nacceptance_list = false\n";
+const DECISIONS_SHADOW_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"shadow\"\n\
+     [helpers]\nmodel = \"helper-tier\"\npreflight = true\nacceptance_list = false\n";
+
+/// A harmless scout answer: five headings, each `(none found)` -- content
+/// does not matter to these tests, only that the scout was asked at all.
+fn scout_prose() -> Value {
+    prose(
+        "## Constraints\n(none found)\n\n## Files\n(none found)\n\n## Tests\n(none found)\n\n\
+         ## Capabilities\n(none found)\n\n## Risks\n(none found)\n",
+    )
+}
+
+/// A request with no deterministic preflight signal: no missing path, no
+/// absent executable, no verification word, under 80 words.
+const NO_SIGNAL_TASK: &str = "please give me a hand with something here";
+
+#[test]
+fn a_needs_exploration_answer_above_threshold_starts_the_scout_with_the_signal_named() {
+    let root = root("scout-signal-above");
+    write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![Decision::Answer(decision_answer_with_complexity(
+            "read_only",
+            0.94,
+            "needs_exploration",
+            0.90,
+        ))],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None)
+        .expect("the scout runs, then the task's own turn");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        2,
+        "no deterministic signal alone would have run the scout"
+    );
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(telemetry["scout_signal"], true, "{telemetry}");
+    assert_eq!(telemetry["would_scout"], false, "{telemetry}");
+    assert_eq!(
+        telemetry["complexity"]["choice"], "needs_exploration",
+        "{telemetry}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_needs_exploration_answer_below_threshold_does_not_start_the_scout() {
+    let root = root("scout-signal-below");
+    write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![Decision::Answer(decision_answer_with_complexity(
+            "read_only",
+            0.94,
+            "needs_exploration",
+            0.80,
+        ))],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None)
+        .expect("no signal at all, no scout, no hang");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "below scout_above, the model's answer adds no reason to scout"
+    );
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(telemetry["scout_signal"], false, "{telemetry}");
+    assert_eq!(telemetry["would_scout"], false, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_trivial_answer_never_suppresses_a_deterministic_signal() {
+    let root = root("scout-signal-trivial");
+    write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![Decision::Answer(decision_answer_with_complexity(
+            "read_only",
+            0.94,
+            "trivial",
+            0.99,
+        ))],
+        vec![],
+    );
+    let result = exec_bounded(
+        &root,
+        &endpoint,
+        "Rename the entry function in src/missing.rs quickly",
+        None,
+    )
+    .expect("the missing path alone runs the scout");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        2,
+        "a missing path is its own deterministic signal, trivial or not"
+    );
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(
+        telemetry["scout_signal"], false,
+        "trivial never contributes the decided signal: {telemetry}"
+    );
+    assert_eq!(telemetry["complexity"]["choice"], "trivial", "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shadow_records_would_scout_and_never_starts_the_scout() {
+    let root = root("scout-signal-shadow");
+    write_config(&root, DECISIONS_SHADOW_WITH_PREFLIGHT);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![Decision::Answer(decision_answer_with_complexity(
+            "read_only",
+            0.94,
+            "needs_exploration",
+            0.90,
+        ))],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None)
+        .expect("shadow never scouts, never hangs");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "shadow records the answer and changes nothing"
+    );
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(telemetry["would_scout"], true, "{telemetry}");
+    assert_eq!(telemetry["scout_signal"], false, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_failed_decision_leaves_preflight_exactly_as_it_is_today() {
+    let root = root("scout-signal-failed");
+    write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "return \"done\";")],
+        vec![Decision::Status(500)],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None)
+        .expect("a failed decision leaves preflight alone, no hang");
+    assert_eq!(
+        messages.lock().unwrap().len(),
+        1,
+        "no deterministic signal and no decision to add one"
+    );
+    let telemetry = &result["telemetry"]["decisions"];
+    assert_eq!(telemetry["failed"], 1, "{telemetry}");
+    assert!(telemetry["complexity"].is_null(), "{telemetry}");
+    assert_eq!(telemetry["scout_signal"], false, "{telemetry}");
+    assert_eq!(telemetry["would_scout"], false, "{telemetry}");
     let _ = std::fs::remove_dir_all(root);
 }
 

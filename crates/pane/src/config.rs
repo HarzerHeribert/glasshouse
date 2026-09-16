@@ -98,6 +98,10 @@ pub struct DecisionsConfig {
     /// Confidence at or above which a read-only intent holds an effectful
     /// cell or frame. `0.5..=1.0`.
     pub hold_above: f64,
+    /// Confidence at or above which a `needs_exploration` complexity answer
+    /// adds `preflight::SIGNAL_DECIDED_EXPLORATION` to `should_scout`'s
+    /// signals (F2, map 2614/2615's paragraph). `0.5..=1.0`.
+    pub scout_above: f64,
     /// The completion question's noul at or below which a claimed completion
     /// gets a `RequestNotSatisfied` finding (2616). `0.0..=0.5`.
     pub completion_no_below: f64,
@@ -112,6 +116,7 @@ impl Default for DecisionsConfig {
             model: None,
             mode: DecisionMode::default(),
             hold_above: 0.85,
+            scout_above: 0.85,
             completion_no_below: 0.10,
             completion_yes_above: 0.90,
         }
@@ -728,6 +733,8 @@ fn parse_supervisor(value: &toml::Value) -> Result<SupervisorConfig, String> {
 
 const HOLD_ABOVE_MIN: f64 = 0.5;
 const HOLD_ABOVE_MAX: f64 = 1.0;
+const SCOUT_ABOVE_MIN: f64 = 0.5;
+const SCOUT_ABOVE_MAX: f64 = 1.0;
 const COMPLETION_NO_BELOW_MIN: f64 = 0.0;
 const COMPLETION_NO_BELOW_MAX: f64 = 0.5;
 const COMPLETION_YES_ABOVE_MIN: f64 = 0.5;
@@ -742,6 +749,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "model",
             "mode",
             "hold_above",
+            "scout_above",
             "completion_no_below",
             "completion_yes_above",
         ]
@@ -784,6 +792,21 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             number
         }
     };
+    let scout_above = match table.get("scout_above") {
+        None => defaults.scout_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `scout_above` must be a number".to_string())?;
+            if !(SCOUT_ABOVE_MIN..=SCOUT_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `scout_above` must be between {SCOUT_ABOVE_MIN} and {SCOUT_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
     let completion_no_below = match table.get("completion_no_below") {
         None => defaults.completion_no_below,
         Some(value) => {
@@ -819,6 +842,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         model,
         mode,
         hold_above,
+        scout_above,
         completion_no_below,
         completion_yes_above,
     })

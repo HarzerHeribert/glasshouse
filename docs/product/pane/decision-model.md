@@ -6,9 +6,10 @@ first; routing stays static*. Tier Amber; one Sonnet worker.
 ## 1. Configuration: `.pane/config.toml`, read once at session start
 
     [decisions]
-    model      = "jev-latest"   # no default: unset means decisions are off, said once at start
-    mode       = "shadow"       # "off" | "shadow" | "on"; default "shadow" when a model is set
-    hold_above = 0.85           # confidence at or above which a read-only intent holds; 0.5..=1.0
+    model       = "jev-latest"   # no default: unset means decisions are off, said once at start
+    mode        = "shadow"       # "off" | "shadow" | "on"; default "shadow" when a model is set
+    hold_above  = 0.85           # confidence at or above which a read-only intent holds; 0.5..=1.0
+    scout_above = 0.85           # confidence at or above which needs_exploration adds a scout signal; 0.5..=1.0
 
 A value outside its range is refused at start with one sentence. `model`
 names no tool, path or grant, exactly as `[supervisor] model` does not.
@@ -23,6 +24,16 @@ criteria `read_only`, `modify`, `run`, `other`. It never sets a tool's
 proves a command-lifting equivalence. A failed, slow (past 2 s) or absent
 decision leaves the task exactly as it is without one — recorded, never
 surfaced as a task failure.
+
+Beside intent, the same request asks one complexity question — how much
+exploration this request needs — with criteria `trivial`, `routine`,
+`needs_exploration` (F2). A `needs_exploration` answer at or above
+`scout_above` adds `preflight::SIGNAL_DECIDED_EXPLORATION` to
+`should_scout`'s signals when `mode = "on"`: it can only add a reason to run
+the preflight scout, never remove one of the four deterministic signals, and
+a `trivial` answer never suppresses one either. `mode = "shadow"` records
+what would have happened (`would_scout`) and changes nothing; a failed, slow
+or absent decision leaves preflight exactly as it is today.
 
 ## 3. The hold
 
@@ -88,8 +99,8 @@ the question was never asked (no model, or `mode = off`).
 
 ## 6. Not decided here
 
-A preflight signal, judge items, an approval line, or supervisor
-vocabulary — the candidates the map's Phase 66 paragraph names — are not
-built. Which cheaper model is the default (none; unset is off) and any
-action beyond one hold both wait for a measured need, the same as the
-supervisor's own *Not decided here*.
+Judge items, an approval line, or supervisor vocabulary — the remaining
+candidates the map's Phase 66 paragraph names — are not built (the preflight
+signal is; see §2). Which cheaper model is the default (none; unset is off)
+and any action beyond one hold and one scout signal both wait for a measured
+need, the same as the supervisor's own *Not decided here*.

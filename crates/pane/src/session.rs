@@ -1239,13 +1239,14 @@ fn run_task_inner(
     // the model's first turn, so the block is paid for as one cache write
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
-    if let Some(block) = preflight_block(task, session, transcript) {
-        transcript.conversation.system.push_str(&block);
+    let (decision, decision_failures) = task_decision(task, session);
+    let preflight_outcome = preflight_block(task, session, transcript, decision.as_ref());
+    if let Some(block) = &preflight_outcome.block {
+        transcript.conversation.system.push_str(block);
     }
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
-    let (decision_intent, decision_failures) = task_decision(task, session);
     let acceptance_items = append_acceptance(task, session, transcript, &mut budget);
     {
         let _line = session.interrupt.writing();
@@ -1359,7 +1360,12 @@ fn run_task_inner(
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
     let mut task_state = TaskState::new(task, session.profile, &session.config())
         .with_acceptance(acceptance_items)
-        .with_decision(decision_intent, decision_failures);
+        .with_decision(
+            decision,
+            decision_failures,
+            preflight_outcome.scout_signal,
+            preflight_outcome.would_scout,
+        );
     output::decisions(task_state.decisions_telemetry(&session.config().decisions));
 
     loop {

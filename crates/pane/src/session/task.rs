@@ -256,6 +256,17 @@ pub(super) struct TaskState {
     /// once before the first turn -- `None` when no model is configured, the
     /// mode is off, or the request failed (`decide-model.md`).
     pub(super) intent: Option<crate::decide::Intent>,
+    /// The decision model's answer to the complexity question asked in the
+    /// same request as [`Self::intent`] -- `None` under the same conditions
+    /// (F2, map 2614/2615's paragraph).
+    pub(super) complexity: Option<crate::decide::Complexity>,
+    /// Whether `preflight::SIGNAL_DECIDED_EXPLORATION` was one of this task's
+    /// `Decision::Run` signals -- only possible with `mode = on`.
+    pub(super) scout_signal: bool,
+    /// Whether `mode = shadow` recorded that the complexity answer would have
+    /// added that signal, had `mode` been `on`. Never set alongside
+    /// [`Self::scout_signal`]: exactly one mode is in force per task.
+    pub(super) would_scout: bool,
     /// How many decision requests this task attempted and did not answer --
     /// the intent question (at most one, before the first turn) and the
     /// completion question (once per distinct diff claimed at the gate;
@@ -319,6 +330,9 @@ impl TaskState {
             acceptance_verdicts: Vec::new(),
             stall: crate::progress::Stall::default(),
             intent: None,
+            complexity: None,
+            scout_signal: false,
+            would_scout: false,
             decision_failures: 0,
             effect_holds: 0,
             effect_overrides: 0,
@@ -334,16 +348,24 @@ impl TaskState {
         self
     }
 
-    /// The decision model's answer to this task's one intent question, asked
-    /// before `TaskState` existed -- `intent` is `None` and `decision_failures`
-    /// is `1` when the request was attempted and did not answer.
+    /// The decision model's answer to this task's one request -- both the
+    /// intent and complexity questions, asked before `TaskState` existed.
+    /// `None` and `decision_failures` is `1` when the request was attempted
+    /// and did not answer. `scout_signal` and `would_scout` come from
+    /// `preflight_block`'s own use of [`Self::complexity`], computed before
+    /// `TaskState` existed for the same reason.
     pub(super) fn with_decision(
         mut self,
-        intent: Option<crate::decide::Intent>,
+        decision: Option<crate::decide::TaskDecision>,
         decision_failures: u32,
+        scout_signal: bool,
+        would_scout: bool,
     ) -> Self {
-        self.intent = intent;
+        self.intent = decision.as_ref().map(|decision| decision.intent.clone());
+        self.complexity = decision.map(|decision| decision.complexity);
         self.decision_failures = decision_failures;
+        self.scout_signal = scout_signal;
+        self.would_scout = would_scout;
         self
     }
 
@@ -358,6 +380,9 @@ impl TaskState {
         let intent = self.intent.as_ref().map(|intent| {
             serde_json::json!({ "choice": intent.choice, "confidence": intent.confidence })
         });
+        let complexity = self.complexity.as_ref().map(|complexity| {
+            serde_json::json!({ "choice": complexity.choice, "confidence": complexity.confidence })
+        });
         Some(serde_json::json!({
             "model": model,
             "mode": config.mode.as_str(),
@@ -366,6 +391,9 @@ impl TaskState {
             "failed": self.decision_failures,
             "latency_ms_total": self.intent.as_ref().map_or(0, |intent| intent.latency_ms),
             "intent": intent,
+            "complexity": complexity,
+            "scout_signal": self.scout_signal,
+            "would_scout": self.would_scout,
             "would_hold": self.would_hold,
             "holds": self.effect_holds,
             "overrides": self.effect_overrides,

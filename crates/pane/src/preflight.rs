@@ -30,6 +30,12 @@ pub const SIGNAL_MISSING_PATH: &str = "names a path that does not exist";
 pub const SIGNAL_ABSENT_EXECUTABLE: &str = "names an executable the session lacks";
 pub const SIGNAL_UNSEEN_VERIFICATION: &str = "asks for verification with no checks configured";
 pub const SIGNAL_LONG_REQUEST: &str = "exceeds 80 words";
+/// The decision model's complexity answer, when it reads `needs_exploration`
+/// at or above `scout_above` (F2, map 2614/2615's paragraph). This signal can
+/// only add to `Run` -- the four signals above stay authoritative on their
+/// own, and a `trivial` answer never removes one of them.
+pub const SIGNAL_DECIDED_EXPLORATION: &str =
+    "the decision model reads this request as needing exploration";
 
 /// The one reason to skip: nothing above held.
 pub const SKIP_NO_SIGNAL: &str = "no uncertainty signal: named paths exist, no absent executable or unseen verification, under 80 words";
@@ -104,15 +110,25 @@ const OPEN_QUESTION: [&str; 6] = [
 ///
 /// `Always` runs. `Auto` runs when any signal holds: a path-like token that
 /// does not exist under the manifest's root, an executable the manifest lists
-/// as absent, a verification word while no checks are configured, or a
-/// request over [`LONG_REQUEST_WORDS`] words. A short request naming only
-/// files that exist is the fast path and skips.
+/// as absent, a verification word while no checks are configured, a request
+/// over [`LONG_REQUEST_WORDS`] words, or `decided` reading `needs_exploration`
+/// at or above `scout_above` (F2). A short request naming only files that
+/// exist, with no exploration signal from the decision model, is the fast
+/// path and skips.
+///
+/// `decided` is the caller's own choice, not this function's: pass `None`
+/// whenever the decision model should not affect this task (no model
+/// configured, `mode` is `off` or `shadow`, or the request failed) --
+/// `should_scout` never removes a deterministic signal for `trivial`, but it
+/// also never second-guesses why `decided` was withheld.
 #[must_use]
 pub fn should_scout(
     task: &str,
     manifest: &Manifest,
     scope: PreflightScope,
     checks_configured: bool,
+    decided: Option<&crate::decide::Complexity>,
+    scout_above: f64,
 ) -> Decision {
     if scope == PreflightScope::Always {
         return Decision::Run(vec![SIGNAL_ALWAYS]);
@@ -137,6 +153,12 @@ pub fn should_scout(
     }
     if words.len() > LONG_REQUEST_WORDS {
         signals.push(SIGNAL_LONG_REQUEST);
+    }
+    if let Some(complexity) = decided
+        && complexity.choice == crate::decide::NEEDS_EXPLORATION
+        && complexity.confidence >= scout_above
+    {
+        signals.push(SIGNAL_DECIDED_EXPLORATION);
     }
     if signals.is_empty() {
         Decision::Skip(SKIP_NO_SIGNAL)
@@ -452,5 +474,59 @@ mod tests {
         let manifest = Manifest::default();
         assert!(!exists("Cargo.toml", &manifest));
         assert!(!exists("src", &manifest));
+    }
+
+    #[test]
+    fn a_needs_exploration_answer_at_or_above_threshold_runs_with_that_signal_alone() {
+        let manifest = Manifest::default();
+        let complexity = crate::decide::Complexity {
+            choice: crate::decide::NEEDS_EXPLORATION.to_string(),
+            confidence: 0.90,
+        };
+        let decision = should_scout(
+            "carry on",
+            &manifest,
+            PreflightScope::Auto,
+            true,
+            Some(&complexity),
+            0.85,
+        );
+        assert_eq!(decision, Decision::Run(vec![SIGNAL_DECIDED_EXPLORATION]));
+    }
+
+    #[test]
+    fn a_needs_exploration_answer_below_threshold_never_holds() {
+        let manifest = Manifest::default();
+        let complexity = crate::decide::Complexity {
+            choice: crate::decide::NEEDS_EXPLORATION.to_string(),
+            confidence: 0.80,
+        };
+        let decision = should_scout(
+            "carry on",
+            &manifest,
+            PreflightScope::Auto,
+            true,
+            Some(&complexity),
+            0.85,
+        );
+        assert_eq!(decision, Decision::Skip(SKIP_NO_SIGNAL));
+    }
+
+    #[test]
+    fn a_trivial_answer_never_suppresses_a_deterministic_signal() {
+        let manifest = Manifest::default();
+        let complexity = crate::decide::Complexity {
+            choice: "trivial".to_string(),
+            confidence: 0.99,
+        };
+        let decision = should_scout(
+            "Rename the entry function in src/missing.rs",
+            &manifest,
+            PreflightScope::Auto,
+            true,
+            Some(&complexity),
+            0.85,
+        );
+        assert_eq!(decision, Decision::Run(vec![SIGNAL_MISSING_PATH]));
     }
 }

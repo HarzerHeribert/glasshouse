@@ -343,6 +343,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "decisions.scout_above",
+        label: "Scout confidence",
+        description: "Confidence at or above which a `needs_exploration` complexity answer adds a reason to run the preflight scout.",
+        kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "decisions.completion_no_below",
         label: "Completion no threshold",
         description: "The completion question's noul at or below which a claimed completion gets a not-satisfied finding.",

@@ -61,6 +61,8 @@ impl Project {
             &self.manifest,
             PreflightScope::Auto,
             checks_configured,
+            None,
+            0.85,
         )
     }
 }
@@ -162,6 +164,8 @@ fn always_runs_whatever_the_request_says() {
         &project.manifest,
         PreflightScope::Always,
         true,
+        None,
+        0.85,
     );
     assert_eq!(signals(&decision), vec![SIGNAL_ALWAYS]);
 }

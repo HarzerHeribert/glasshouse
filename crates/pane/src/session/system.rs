@@ -176,18 +176,19 @@ pub(super) fn apply_decision_hold(
     }
 }
 
-/// The decision model's one intent question, asked once per task beside
+/// The decision model's one request, asked once per task beside
 /// [`preflight_block`] and [`append_acceptance`] -- before the first turn,
-/// never inside it. Runs on its own thread, joined here: the 2 s bound is
-/// already inside the request (`decide::DECISION_TIMEOUT`), the same reason
-/// `helpers.rs::wait_for_helper` moves a side errand off the caller's own
-/// thread. A failed or absent decision leaves the task exactly as it is
-/// today; the error is recorded in the notice, never surfaced as a task
-/// failure.
+/// never inside it. Carries both the intent and complexity questions
+/// (`docs/product/pane/decision-model.md`; F2 for the latter). Runs on its
+/// own thread, joined here: the 2 s bound is already inside the request
+/// (`decide::DECISION_TIMEOUT`), the same reason `helpers.rs::wait_for_helper`
+/// moves a side errand off the caller's own thread. A failed or absent
+/// decision leaves the task exactly as it is today; the error is recorded in
+/// the notice, never surfaced as a task failure.
 pub(super) fn task_decision(
     task: &str,
     session: &Session<'_>,
-) -> (Option<crate::decide::Intent>, u32) {
+) -> (Option<crate::decide::TaskDecision>, u32) {
     let decisions = session.config().decisions.clone();
     let Some(model) = decisions.model else {
         return (None, 0);
@@ -196,16 +197,18 @@ pub(super) fn task_decision(
         return (None, 0);
     }
     let request = task.to_string();
-    let handle = std::thread::spawn(move || crate::decide::intent_of(&model, &request));
+    let handle = std::thread::spawn(move || crate::decide::task_questions(&model, &request));
     match handle.join() {
-        Ok(Ok(intent)) => {
+        Ok(Ok(decision)) => {
             session_println!(
-                "decision: intent {} ({:.2}, {} ms)",
-                intent.choice,
-                intent.confidence,
-                intent.latency_ms
+                "decision: intent {} ({:.2}), complexity {} ({:.2}), {} ms",
+                decision.intent.choice,
+                decision.intent.confidence,
+                decision.complexity.choice,
+                decision.complexity.confidence,
+                decision.intent.latency_ms
             );
-            (Some(intent), 0)
+            (Some(decision), 0)
         }
         Ok(Err(error)) => {
             session_println!("decision: no answer ({error})");
@@ -247,6 +250,28 @@ pub(super) fn request_may_need_the_repository(task: &str) -> bool {
     task.split_whitespace().count() >= PREFLIGHT_MIN_WORDS
 }
 
+/// [`preflight_block`]'s result: the system-prompt block, if a scout ran and
+/// answered, plus what the decision model's complexity answer did to that
+/// choice -- `scout_signal` and `would_scout` feed straight into
+/// `TaskState::with_decision`'s telemetry.
+pub(super) struct PreflightOutcome {
+    pub(super) block: Option<String>,
+    /// Whether `preflight::SIGNAL_DECIDED_EXPLORATION` was one of the reasons
+    /// this task actually ran a scout (`mode = on` only).
+    pub(super) scout_signal: bool,
+    /// Whether the complexity answer would have added that signal had
+    /// `mode` been `on` (`mode = shadow` only; recorded, changes nothing).
+    pub(super) would_scout: bool,
+}
+
+impl PreflightOutcome {
+    const NONE: Self = Self {
+        block: None,
+        scout_signal: false,
+        would_scout: false,
+    };
+}
+
 /// One preflight block to append to this task's system prompt, or `None` when
 /// no scout ran or none answered.
 ///
@@ -257,38 +282,74 @@ pub(super) fn request_may_need_the_repository(task: &str) -> bool {
 /// (`smarter-cheaper-roadmap.md`, *Preflight Helper*). With
 /// `preflight_scope = "auto"` it runs only when the request carries an
 /// uncertainty signal, so a task that names existing files and available
-/// tools pays nothing.
+/// tools pays nothing -- unless `decision` names `needs_exploration` at or
+/// above `scout_above` while `[decisions] mode = "on"` (F2): that signal
+/// can only add a reason to run the scout, never remove one, and `mode =
+/// "shadow"` only records what would have happened (`would_scout`).
 pub(super) fn preflight_block(
     task: &str,
     session: &Session<'_>,
     transcript: &mut Transcript,
-) -> Option<String> {
+    decision: Option<&crate::decide::TaskDecision>,
+) -> PreflightOutcome {
     let helpers = session.config().helpers.clone();
     if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
-        return None;
+        return PreflightOutcome::NONE;
     }
+    let decisions = session.config().decisions.clone();
+    let complexity = decision.map(|decision| &decision.complexity);
+    let clears_scout_above = complexity.is_some_and(|complexity| {
+        complexity.choice == crate::decide::NEEDS_EXPLORATION
+            && complexity.confidence >= decisions.scout_above
+    });
+    let would_scout = decisions.mode == crate::config::DecisionMode::Shadow && clears_scout_above;
+    let decided_for_scout = if decisions.mode == crate::config::DecisionMode::On {
+        complexity
+    } else {
+        None
+    };
     let checks_configured = crate::verification::load(session.profile)
         .map(|config| !config.checks.is_empty())
         .unwrap_or(false);
-    let decision = crate::preflight::should_scout(
+    let scouting_decision = crate::preflight::should_scout(
         task,
         &session.manifest,
         helpers.preflight_scope,
         checks_configured,
+        decided_for_scout,
+        decisions.scout_above,
+    );
+    let scout_signal = matches!(
+        &scouting_decision,
+        crate::preflight::Decision::Run(signals)
+            if signals.contains(&crate::preflight::SIGNAL_DECIDED_EXPLORATION)
     );
     session_println!(
         "preflight: {}",
-        crate::preflight::signals_summary(&decision)
+        crate::preflight::signals_summary(&scouting_decision)
     );
-    if matches!(decision, crate::preflight::Decision::Skip(_)) {
-        return None;
+    if matches!(scouting_decision, crate::preflight::Decision::Skip(_)) {
+        return PreflightOutcome {
+            block: None,
+            scout_signal,
+            would_scout,
+        };
     }
-    let model = helpers.model.as_deref()?;
-    let effort = helpers.effort.for_helper("find")?;
+    let none = PreflightOutcome {
+        block: None,
+        scout_signal,
+        would_scout,
+    };
+    let Some(model) = helpers.model.as_deref() else {
+        return none;
+    };
+    let Some(effort) = helpers.effort.for_helper("find") else {
+        return none;
+    };
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
     let brief = crate::preflight::scouting_brief(task, &session.manifest);
-    let record = crate::helpers::preflight(
+    let Some(record) = crate::helpers::preflight(
         &brief,
         crate::helpers::HelperRoute { model, effort },
         session.profile,
@@ -310,7 +371,9 @@ pub(super) fn preflight_block(
             visible.notebook.preflight = Some(record.clone());
             ui.publish(&visible, &ServedBy::default(), tui::Activity::Searching);
         },
-    )?;
+    ) else {
+        return none;
+    };
     if record.outcome.cancelled {
         session.interrupt.consumed();
     }
@@ -318,14 +381,19 @@ pub(super) fn preflight_block(
     // Keep the resolved Scout beside this request for every later task-frame.
     // The next task clears it before deciding whether another preflight runs.
     transcript.notebook.preflight = Some(record.clone());
-    record.outcome.ok.then(|| {
+    let block = record.outcome.ok.then(|| {
         let named = crate::preflight::spans(&record.outcome.text);
         let served: Vec<(String, String)> = preflight_served(session.profile, &named)
             .into_iter()
             .map(|(path, _why, text)| (path, text))
             .collect();
         crate::preflight::render(task, &record.outcome.text, &served)
-    })
+    });
+    PreflightOutcome {
+        block,
+        scout_signal,
+        would_scout,
+    }
 }
 
 /// The named files that can be served whole: inside the grant, a regular
