@@ -748,10 +748,13 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     app.send(b"\x1b[200~first line\nsecond line\x1b[201~");
     app.contains("second line");
     let screen = app.screen.screen().contents();
-    if screen.contains("you: first line") {
+    let a_turn_is_running = screen.contains("thinking") || screen.contains("LIVE RESULT INTACT");
+    if !screen.contains("first line") && a_turn_is_running {
         // The console stripped the markers and the pasted newline submitted
-        // the first line as a turn (the once-session test has the trace);
-        // the composition guard is not measurable here. Take that turn's
+        // the first line as a turn (the once-session test has the trace):
+        // the session is thinking on it while the composer holds the second
+        // line, and a running turn never rows its message while it runs.
+        // The composition guard is not measurable here. Take that turn's
         // request and let it end, so the assertions below read the request
         // they were written for.
         println!(
