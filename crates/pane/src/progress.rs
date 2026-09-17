@@ -294,8 +294,18 @@ mod tests {
 /// Cells in a row without progress before the stall notice fires.
 pub const DEFAULT_STALL_WINDOW: u32 = 6;
 
-/// The stall notice: a nudge with the count, never a stop. The task's own
-/// wall clock is the boundary; the cell cap is a backstop against a runaway.
+/// Stall windows in a row, each already noticed and each followed by nothing,
+/// before the task is ended.
+///
+/// **Three, because three is what a person would call patience**: with the
+/// default window that is eighteen consecutive cells in which the tree did not
+/// change, no fact was recorded and no verification result moved — after the
+/// model has been told so twice and carried on regardless. Nothing here counts
+/// *work*; it counts the absence of any.
+pub const DEFAULT_STALL_LIMIT: u32 = 3;
+
+/// The stall notice: a nudge with the count. The task ends only after
+/// [`DEFAULT_STALL_LIMIT`] of these in a row, never on one.
 #[must_use]
 pub fn stall_notice(cells: u32) -> String {
     format!(
@@ -309,14 +319,21 @@ pub fn stall_notice(cells: u32) -> String {
 /// fact, no verification — and says so once per window
 /// (`smarter-cheaper-roadmap.md`, *Stall detection replaces the cell cap*).
 ///
-/// The invariant: **a stall never ends the task.** It is a notice at the
-/// head of the next feedback and a count in the telemetry; the task's
-/// wall clock and the cell backstop are the only hard limits.
+/// **One stall is a notice; a run of them is the end of the task** (the user,
+/// 2026-09-17: limits are dumb for abstract tasks, but a task that has stopped
+/// producing anything must still stop without a person watching it). This is
+/// the ender that needs no model, and it is what a session with no supervisor
+/// configured falls back on. It counts nothing but the absence of progress:
+/// a task writing files, recording facts or running verifications resets it
+/// however long it takes, which is exactly what a cell count could not do.
 #[derive(Debug, Clone)]
 pub struct Stall {
     window: u32,
     since: u32,
     notices: u32,
+    /// Notices since the last real progress — the streak
+    /// [`Stall::stalled_windows`] reports and `session.rs` ends a task on.
+    windows: u32,
 }
 
 impl Default for Stall {
@@ -331,23 +348,36 @@ impl Stall {
             window: window.max(1),
             since: 0,
             notices: 0,
+            windows: 0,
         }
     }
 
     /// `Some(notice)` on the `window`-th cell in a row without progress; the
     /// count restarts after a notice so a long stall is noticed again.
+    ///
+    /// Progress clears the streak as well as the count: a task that gets
+    /// somewhere, however slowly, is never closer to being ended than one
+    /// that has just started.
     pub fn observe(&mut self, progressed: bool) -> Option<String> {
         if progressed {
             self.since = 0;
+            self.windows = 0;
             return None;
         }
         self.since += 1;
         if self.since >= self.window {
             self.since = 0;
             self.notices += 1;
+            self.windows += 1;
             return Some(stall_notice(self.window));
         }
         None
+    }
+
+    /// Whole windows of nothing since the last progress. `session.rs` ends the
+    /// task at [`DEFAULT_STALL_LIMIT`].
+    pub fn stalled_windows(&self) -> u32 {
+        self.windows
     }
 
     pub fn notices(&self) -> u32 {
@@ -363,6 +393,29 @@ impl Stall {
 #[cfg(test)]
 mod stall_tests {
     use super::*;
+
+    /// The ender that needs no model: whole windows of nothing, in a row.
+    #[test]
+    fn a_run_of_empty_windows_is_what_ends_a_task_and_any_progress_clears_it() {
+        let mut stall = Stall::new(3);
+        assert_eq!(stall.stalled_windows(), 0);
+        for _ in 0..3 {
+            stall.observe(false);
+        }
+        assert_eq!(stall.stalled_windows(), 1, "one window of nothing");
+        for _ in 0..3 {
+            stall.observe(false);
+        }
+        assert_eq!(stall.stalled_windows(), 2);
+        // A task that gets anywhere is never closer to being ended than one
+        // that has just started.
+        stall.observe(true);
+        assert_eq!(stall.stalled_windows(), 0, "progress clears the streak");
+        for _ in 0..(3 * DEFAULT_STALL_LIMIT) {
+            stall.observe(false);
+        }
+        assert_eq!(stall.stalled_windows(), DEFAULT_STALL_LIMIT);
+    }
 
     #[test]
     fn a_stall_is_noticed_on_the_window_and_progress_resets_it() {

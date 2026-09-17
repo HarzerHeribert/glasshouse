@@ -1988,6 +1988,46 @@ fn a_confident_loop_buys_exactly_one_line_and_nudges_with_it() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// **The supervisor is what ends a task now, and it takes three verdicts.**
+///
+/// A nudge never ends anything; three looks in a row that all decided to
+/// intervene do — at the default cadence, a dozen cells of being told the same
+/// thing and carrying on. The ending sentence names the criterion layer 2
+/// chose, never the prose layer 3 wrote: no model-written sentence is ever
+/// interpolated into a preamble.
+#[test]
+fn three_verdicts_in_a_row_end_the_task_and_name_the_criterion() {
+    let root = root("supervision-ends");
+    write_config(&root, SUPERVISED_BY_THE_DECISION_MODEL);
+    let never_returns: Vec<Value> = (0..12)
+        .map(|n| cell(&format!("c{n}"), "const x = 1;"))
+        .collect();
+    let (endpoint, messages, _decisions, _headers) = providers_with_supervision(
+        never_returns,
+        (0..3)
+            .map(|_| Decision::Answer(supervision_answer("repeating_a_failing_call", 0.95)))
+            .collect(),
+    );
+    // Whatever the model does with its last turn, the loop stops there: the
+    // twelve scripted cells are far more than the three looks it takes.
+    let _ = exec_bounded(&root, &endpoint, "keep going", None);
+    let messages = messages.lock().unwrap();
+    assert!(
+        messages.len() <= 5,
+        "the task stops on the third verdict, not after twelve cells: {}",
+        messages.len()
+    );
+    let ending = messages
+        .iter()
+        .find(|body| body.contains("The supervisor has said 3 times"))
+        .unwrap_or_else(|| panic!("the task ends on the third verdict: {messages:?}"));
+    assert!(
+        ending.contains("the same call keeps failing the same way"),
+        "the sentence names the criterion, not the phrased nudge: {ending}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// No model configured that could write a sentence: the nudge still fires,
 /// carrying the criterion's own words. A worse sentence, never a lost
 /// intervention.

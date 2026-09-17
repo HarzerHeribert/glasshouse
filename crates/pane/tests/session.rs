@@ -1582,13 +1582,18 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
     let root = scratch_dir("cell-cap-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    // The default cap is a 120-cell backstop since 2026-09-14; this test pins
-    // the cap's mechanics at a configured 40 so it stays forty-one turns.
+    // There is no default cap since 2026-09-17; a ceiling exists only when
+    // this person sets one, and this test pins that ceiling's mechanics.
+    //
+    // Twelve, not forty: these scripted cells run `const x = 1;` forever, which
+    // changes no file, records no fact and verifies nothing, so the stall
+    // ender reaches them at eighteen cells. A ceiling has to be under that to
+    // be the thing this test is measuring.
     std::fs::create_dir_all(root.join(".pane")).unwrap();
-    std::fs::write(root.join(".pane/config.toml"), "[limits]\ncells = 40\n").unwrap();
+    std::fs::write(root.join(".pane/config.toml"), "[limits]\ncells = 12\n").unwrap();
 
-    // 40 is the configured cap; the forty-first turn is the final-answer turn.
-    let turns = 41;
+    // 12 is the configured cap; the thirteenth turn is the final-answer turn.
+    let turns = 13;
     let replies = (0..turns)
         .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
         .collect();
@@ -1615,11 +1620,12 @@ fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
         "the task must stop one turn after the cap, not run on"
     );
     assert!(
-        !last_user_text(&bodies[turns - 2]).starts_with("The cell limit is reached"),
+        !last_user_text(&bodies[turns - 2]).starts_with("The cell limit this project set"),
         "the turn before the cap carries the ordinary result block"
     );
     assert!(
-        last_user_text(&bodies[turns - 1]).starts_with("The cell limit is reached"),
+        last_user_text(&bodies[turns - 1])
+            .starts_with("The cell limit this project set (12) is reached"),
         "the final-answer turn opens with the one sentence that replaces \
          the preamble: {}",
         last_user_text(&bodies[turns - 1])
@@ -1683,7 +1689,7 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/120"),
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1"),
         "the usage line must carry the gateway's own figures: {result_block}"
     );
 
@@ -1962,11 +1968,131 @@ fn a_returned_object_is_output_and_the_task_continues() {
     assert!(rest.contains("\"n\": number"), "{rest}");
 }
 
-/// Addendum 2: the third consecutive prose turn carries the exhausted
-/// preamble naming the reason, the task ends after one more turn whatever
-/// the model does, and the second prose turn ends nothing. A fifth reply is
-/// scripted so a loop that ran on would be served and counted. A program in
-/// between resets the count.
+/// **Nothing counts cells any more** (the user, 2026-09-17: "Limits are dumb
+/// for abstract tasks"). A task whose cells keep producing something runs as
+/// long as the work takes, past the 120 that used to be the default ceiling
+/// and would have ended this session at cell 120 of 120 — which is what it did
+/// to a real four-hour run that morning, mid-implementation.
+///
+/// The cells here write a different file each time, so they make progress and
+/// the stall ender never reaches them: what is being proved is that no *count*
+/// of work ends a task, not that a stalled one runs forever.
+#[test]
+fn no_count_of_cells_ends_a_task_that_keeps_producing_something() {
+    let root = scratch_dir("no-cell-cap-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    // Past the old 120-cell default, then a final answer.
+    let cells = 130;
+    let mut replies: Vec<String> = (0..cells)
+        .map(|n| {
+            assistant_reply(&format!(
+                "```pane\nwrite({{path: \"note-{n}.txt\", content: \"{n}\"}});\n```"
+            ))
+        })
+        .collect();
+    replies.push(ending_reply());
+    let (base_url, bodies) = start_fake_provider(replies);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-no-cell-cap",
+        "keep going",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        cells + 1,
+        "every scripted turn ran: no ceiling ended the task"
+    );
+    for body in bodies.iter() {
+        let text = last_user_text(body);
+        assert!(
+            !text.starts_with("The cell limit"),
+            "no cell limit exists to be reached: {text}"
+        );
+    }
+    // The usage line shows the count with no denominator, because a
+    // denominator nobody chose is a fiction.
+    let mid = last_user_text(&bodies[cells - 1]);
+    assert!(mid.contains("· cells "), "{mid}");
+    assert!(
+        !mid.contains(&format!("cells {}/", cells - 1)),
+        "an uncapped task shows the count alone: {mid}"
+    );
+}
+
+/// The ender that needs no model: whole windows in which nothing changed.
+///
+/// These cells run the same no-op forever — no file, no fact, no verification
+/// — which is the one thing that must still end a task without a person
+/// watching it. Three stall windows of six cells is the patience; the
+/// nineteenth turn is the final-answer turn the preamble asks for.
+#[test]
+fn a_task_that_stops_producing_anything_ends_on_the_stall_with_its_reason() {
+    let root = scratch_dir("stall-end-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    // Far more than the ender needs, so a loop that ran on would be served.
+    let replies = (0..40)
+        .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
+        .collect();
+    let (base_url, bodies) = start_fake_provider(replies);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-stall-end",
+        "go nowhere",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        !output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        19,
+        "three windows of six cells, then one turn to answer"
+    );
+    let last = last_user_text(&bodies[18]);
+    assert!(
+        last.starts_with("Nothing has changed for 18 cells across 3 notices"),
+        "the ending sentence names what was observed: {last}"
+    );
+    assert!(
+        !last_user_text(&bodies[17]).starts_with("Nothing has changed"),
+        "the window before it ends nothing"
+    );
+}
+
+/// A turn that runs no program is the one thing still counted anywhere in the
+/// loop, and the count is six rather than three (the user, 2026-09-17: limits
+/// are dumb for abstract tasks, and a model reasoning in prose toward a hard
+/// decision is not a model stuck).
+///
+/// **It is counted because nothing else can see it**: a prose turn runs no
+/// cell, so it writes no record, so `progress::Stall` never observes it and
+/// the supervisor's cadence never advances. Six turns is what it costs to find
+/// out; hundreds of requests was the alternative.
+///
+/// The sixth carries the exhausted preamble naming the reason, the task ends
+/// after one more turn whatever the model does, and the fifth ends nothing. An
+/// eighth reply is scripted so a loop that ran on would be served and counted.
+/// A program in between resets the count.
 #[test]
 fn repeated_malformed_executable_replies_are_bounded() {
     let prose = || assistant_reply("<php-pane>read({path: 'roman.py'});</php-pane>");
@@ -1974,7 +2100,7 @@ fn repeated_malformed_executable_replies_are_bounded() {
     let root = scratch_dir("prose-cap-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, bodies) = start_fake_provider(vec![prose(), prose(), prose(), prose(), prose()]);
+    let (base_url, bodies) = start_fake_provider((0..8).map(|_| prose()).collect());
     let output = run_session(
         &root,
         &rollout,
@@ -1991,18 +2117,20 @@ fn repeated_malformed_executable_replies_are_bounded() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        4,
-        "the third prose turn buys exactly one more turn"
+        7,
+        "the sixth prose turn buys exactly one more turn"
     );
+    for (index, body) in bodies.iter().enumerate().take(6) {
+        assert!(
+            !last_user_text(body).contains("No program has run"),
+            "prose turn {index} ends nothing: {}",
+            last_user_text(body)
+        );
+    }
     assert!(
-        !last_user_text(&bodies[2]).contains("Three turns without a program"),
-        "the second prose turn ends nothing: {}",
-        last_user_text(&bodies[2])
-    );
-    assert!(
-        last_user_text(&bodies[3]).starts_with("Three turns without a program;"),
-        "the third carries the exhausted preamble naming the reason: {}",
-        last_user_text(&bodies[3])
+        last_user_text(&bodies[6]).starts_with("No program has run for 6 turns;"),
+        "the sixth carries the exhausted preamble naming the reason: {}",
+        last_user_text(&bodies[6])
     );
     drop(bodies);
 
@@ -2033,7 +2161,7 @@ fn repeated_malformed_executable_replies_are_bounded() {
     assert_eq!(bodies.len(), 6, "a program resets the count");
     for body in bodies.iter() {
         assert!(
-            !last_user_text(body).contains("Three turns without a program"),
+            !last_user_text(body).contains("No program has run"),
             "{}",
             last_user_text(body)
         );
@@ -2115,7 +2243,7 @@ fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1/120"),
+        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1"),
         "the usage line must carry the response's own usage: {result_block}"
     );
 
@@ -2211,7 +2339,7 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1/120"),
+        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1"),
         "the gateway's row (120) must win over the response's usage (30): {result_block}"
     );
 
@@ -2658,7 +2786,8 @@ fn a_loaded_cell_limit_ends_the_task() {
         "the task must stop one turn after the loaded cap, not run on"
     );
     assert!(
-        last_user_text(&bodies[turns - 1]).starts_with("The cell limit is reached"),
+        last_user_text(&bodies[turns - 1])
+            .starts_with("The cell limit this project set (2) is reached"),
         "a `cells = 2` pane.toml must end the task after two cells: {}",
         last_user_text(&bodies[turns - 1])
     );
@@ -4557,14 +4686,13 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
     let edit = assistant_reply(
         "```pane-edit\n{\"cell\":1,\"replace\":\"throw\",\"with\":\"return\"}\n```",
     );
-    let (base, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nconst before = 1; throw new SyntaxError('runtime');\n```"),
-        edit.clone(),
-        edit.clone(),
-        edit.clone(),
-        edit.clone(),
-        edit,
-    ]);
+    // One program, then edits that run nothing. Eight replies are scripted so
+    // a loop that ran past the bound would be served and counted.
+    let mut replies = vec![assistant_reply(
+        "```pane\nconst before = 1; throw new SyntaxError('runtime');\n```",
+    )];
+    replies.extend(std::iter::repeat_n(edit, 8));
+    let (base, bodies) = start_fake_provider(replies);
     let output = run_session(
         &root,
         &rollout,
@@ -4578,8 +4706,9 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        5,
-        "invalid edits exhaust after three plus the final turn"
+        8,
+        "the first reply is a program, so six edits that run nothing land on the \
+         seventh turn, and the eighth is the final-answer turn"
     );
     assert!(!last_user_text(&bodies[1]).contains("pane-edit"));
     assert!(last_user_text(&bodies[2]).contains("No syntax-failed cell"));

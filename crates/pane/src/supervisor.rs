@@ -71,6 +71,13 @@ pub struct Decision {
     pub intervene: bool,
     pub reason: String,
     pub ok: bool,
+    /// Which criterion layer 2 chose, when it was layer 2 that decided.
+    ///
+    /// `reason` is prose and may have been written by a model, so it varies
+    /// between two looks that decided the same thing; the criterion does not.
+    /// A task ended for a repeated verdict names this, never the prose — no
+    /// model-written sentence is ever interpolated into a preamble.
+    pub criterion: Option<String>,
 }
 
 impl Decision {
@@ -82,6 +89,7 @@ impl Decision {
             intervene: false,
             reason: reason.into(),
             ok: false,
+            criterion: None,
         }
     }
 }
@@ -180,6 +188,7 @@ impl Supervisor {
                 intervene: false,
                 reason: answered.choice,
                 ok: true,
+                criterion: None,
             };
         };
         let reason = supervisor
@@ -190,8 +199,34 @@ impl Supervisor {
         Decision {
             intervene: true,
             reason,
+            criterion: Some(criterion),
             ok: true,
         }
+    }
+}
+
+/// Consecutive looks that all decided to intervene before the task is ended.
+///
+/// **Three, because three is what a person would call patience**: at the
+/// default cadence of one look every four cells, that is a dozen cells during
+/// which the supervisor said something was wrong, the model was told in the
+/// head of its next message, and nothing changed. Two would end a task that
+/// took one nudge to correct; more than three spends the session watching a
+/// trajectory everyone already agrees is going nowhere.
+pub const DEFAULT_VERDICT_LIMIT: u32 = 3;
+
+/// A criterion as a short noun phrase, for the sentence that ends a task.
+///
+/// Deliberately not [`criterion_reason`], which is an instruction to a model
+/// mid-task; this states what was observed, and it is ours rather than any
+/// model's words.
+#[must_use]
+pub fn criterion_phrase(criterion: &str) -> &'static str {
+    match criterion {
+        "repeating_a_failing_call" => "the same call keeps failing the same way",
+        "looping_over_the_same_reads" => "the same files keep being read without a change",
+        "stopped_without_returning" => "these cells are not advancing the task",
+        _ => "this trajectory is not making progress",
     }
 }
 
@@ -289,6 +324,9 @@ fn parse_decision(message: &Message) -> Decision {
             intervene: raw.intervene,
             reason: raw.reason,
             ok: true,
+            // The prose look decides in a sentence rather than by criterion;
+            // a task ended on a run of these names the generic phrase.
+            criterion: None,
         },
         Err(_) => Decision::not_intervene("unparseable"),
     }
@@ -457,7 +495,8 @@ mod tests {
             Decision {
                 intervene: true,
                 reason: "looping".to_string(),
-                ok: true
+                ok: true,
+                criterion: None,
             }
         );
     }

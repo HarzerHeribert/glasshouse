@@ -1179,7 +1179,9 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
         ),
         ("limits.cell_wall_clock_s", count(limits.cell_wall_clock_s)),
         ("limits.response_bytes", count(limits.response_bytes as u64)),
-        ("limits.cells", count(limits.cells)),
+        // `0` is this file's spelling for "no ceiling", the same as absent,
+        // so the row round-trips through the parser unchanged.
+        ("limits.cells", count(limits.cells.unwrap_or(0))),
         (
             "supervisor.enabled",
             toml::Value::Boolean(supervisor.enabled),

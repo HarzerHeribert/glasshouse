@@ -28,7 +28,7 @@ use crate::events::window::{Window, WindowConfig};
 use crate::gateway::{self, Gateway};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
-use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
+use crate::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
 use crate::rollout::{self, Rollout};
 use crate::runtime::handles::HandleTable;
 use crate::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
@@ -47,11 +47,16 @@ use crate::tui::{
 };
 use crate::wire;
 
-/// How many prose turns in a row end the task (the primary's addendum of
-/// 2026-09-06): on this one, the answer carries the exhausted preamble and
-/// the loop ends after one more turn whatever the model does. A program or
-/// two blocks resets the count; the cell limit remains the outer stop.
-const PROSE_TURN_CAP: u32 = 3;
+/// Turns in a row that ran no program before the task ends.
+///
+/// **The one count left in this loop, and it counts the absence of work
+/// rather than its amount.** A prose turn runs no cell, so it writes no
+/// record: `progress::Stall` never observes it and the supervisor's cadence
+/// never advances, which means a model that only ever talks is invisible to
+/// both enders. Six, because that is what it costs to find out — the old cap
+/// was three, and hundreds of requests was the alternative the primary named
+/// on 2026-09-06.
+const TURNS_WITHOUT_A_PROGRAM: u32 = 6;
 const REQUEST_MEASUREMENT_CAP: usize = 64;
 
 macro_rules! session_println {
@@ -60,6 +65,7 @@ macro_rules! session_println {
 
 mod context;
 mod controls;
+mod ending;
 mod mode_proposal;
 mod native;
 mod resume;
@@ -1180,8 +1186,12 @@ struct Step {
     /// The task's terminal response (`runtime-contract.md` §9.2): rendered
     /// and kept as the assistant's own turn, with no request after it.
     response: Option<String>,
-    /// Whether the message carried no program (§5's prose), counted by
-    /// [`run_task`] against [`PROSE_TURN_CAP`].
+    /// Whether the message carried no program (§5's prose).
+    ///
+    /// **Nothing counts these any more.** Three prose turns in a row used to
+    /// end the task, and a model reasoning its way toward a hard decision in
+    /// prose is indistinguishable, to a counter, from a model stuck; the
+    /// supervisor judges that now, on the trajectory.
     prose: bool,
     /// The cell this turn ran, for the supervisor's own buffer
     /// (`supervisor.md` §2) -- `None` for prose and for two blocks, neither
@@ -1352,7 +1362,12 @@ fn run_task_inner(
     let mut final_turn = false;
     let mut terminal_failure = None;
     let mut incomplete;
-    let mut prose_turns = 0u32;
+    // Consecutive looks that decided to intervene, and the criterion the last
+    // of them chose. `supervisor::DEFAULT_VERDICT_LIMIT` of these in a row end
+    // the task -- the supervisor's judgement, not a count of work.
+    let mut verdicts = 0u32;
+    let mut verdict_criterion: Option<String> = None;
+    let mut turns_without_a_program = 0u32;
     let supervisor = Supervisor::new();
     let supervisor_active = crate::supervisor::active(&session.config());
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
@@ -1598,7 +1613,11 @@ fn run_task_inner(
                 .record_context(&transcript.conversation.system)
                 .map_err(|e| format!("could not record directory instructions: {e}"))?;
         }
-        prose_turns = if step.prose { prose_turns + 1 } else { 0 };
+        turns_without_a_program = if step.prose {
+            turns_without_a_program + 1
+        } else {
+            0
+        };
         let helper_delivered_interrupt = step
             .view
             .helpers
@@ -1652,6 +1671,16 @@ fn run_task_inner(
                     &trajectory,
                     task_state.stall.since_progress(),
                 );
+                if decision.intervene {
+                    verdicts += 1;
+                    verdict_criterion = decision.criterion.clone();
+                } else if decision.ok {
+                    // A look that ran and saw nothing wrong clears the streak:
+                    // patience is consecutive, not cumulative. A look that
+                    // could not be made says nothing either way and leaves it.
+                    verdicts = 0;
+                    verdict_criterion = None;
+                }
                 let (nudge, status) = crate::supervisor::outcome(decision);
                 nudge_reason = nudge;
                 transcript.notebook.supervisor = Some(status);
@@ -1665,20 +1694,29 @@ fn run_task_inner(
         let completed = step.answer.is_none();
         let stop = completed || final_turn || poisoned;
         incomplete = poisoned || (stop && !completed);
-        let exhausted = if budget.cell_limit_reached() {
-            Some(ExhaustedReason::CellLimit)
-        } else if prose_turns >= PROSE_TURN_CAP {
-            Some(ExhaustedReason::ThreeTurnsWithoutAProgram)
-        } else {
-            None
-        };
+        // Why a task ends lives in `ending.rs`, which is also where the
+        // reasoning for each ender is written down.
+        let exhausted = ending::exhausted(
+            &ending::Ending {
+                cap: session.config().limits.cells,
+                cap_reached: budget.cell_limit_reached(),
+                verdicts,
+                criterion: verdict_criterion.as_deref(),
+                turns_without_a_program,
+                stalled_windows: task_state.stall.stalled_windows(),
+            },
+            crate::supervisor::DEFAULT_VERDICT_LIMIT,
+            TURNS_WITHOUT_A_PROGRAM,
+            crate::progress::DEFAULT_STALL_LIMIT,
+            crate::progress::DEFAULT_STALL_WINDOW,
+        );
         if !stop && let Some(reason) = exhausted {
-            step.answer = step
-                .answer
-                .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble(reason)));
-            step.historical = step
-                .historical
-                .map(|history| format!("{}\n\n{history}", prompt::exhausted_preamble(reason)));
+            ending::announce(
+                &reason,
+                &mut step.answer,
+                &mut step.historical,
+                step.native_result.as_mut(),
+            );
             final_turn = true;
         }
 
@@ -3084,7 +3122,7 @@ mod tests {
     ) -> Step {
         let session = SessionId::new("admit");
         let mut runtime = Runtime::new(profile, &Glasshouse::None, &session);
-        let mut budget = TaskSpend::new(40);
+        let mut budget = TaskSpend::new(Some(40));
         let mut rollout =
             Rollout::create(&root.join("rollout.jsonl"), session.clone(), "system").unwrap();
         let interrupt = Interrupter::new(session.clone());
@@ -3457,11 +3495,11 @@ mod tests {
             cache_read_input_tokens: Some(70),
             cache_creation_input_tokens: Some(20),
         };
-        let mut direct = TaskSpend::new(10);
+        let mut direct = TaskSpend::new(Some(10));
         direct.add(&ServedBy::default(), Some(&usage), 999);
         assert_eq!(direct.used(), 105);
 
-        let mut gateway = TaskSpend::new(10);
+        let mut gateway = TaskSpend::new(Some(10));
         gateway.add(
             &ServedBy {
                 input_tokens: Some(3),
@@ -3474,7 +3512,7 @@ mod tests {
         );
         assert_eq!(gateway.used(), 107);
 
-        let mut absent = TaskSpend::new(10);
+        let mut absent = TaskSpend::new(Some(10));
         absent.add(
             &ServedBy::default(),
             Some(&wire::Usage {
@@ -3490,7 +3528,7 @@ mod tests {
 
     #[test]
     fn task_spend_adds_parent_and_helper_usage_once_with_honest_coverage() {
-        let mut spend = TaskSpend::new(10);
+        let mut spend = TaskSpend::new(Some(10));
         spend.add(
             &ServedBy::default(),
             Some(&wire::Usage {
@@ -3540,7 +3578,7 @@ mod tests {
 
     #[test]
     fn task_spend_marks_missing_and_historical_helper_usage_partial() {
-        let mut spend = TaskSpend::new(10);
+        let mut spend = TaskSpend::new(Some(10));
         spend.add_helpers(&[
             crate::helpers::HelperRecord {
                 usage: crate::helpers::HelperUsage {

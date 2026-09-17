@@ -13,14 +13,14 @@ pub(super) struct TaskSpend {
     pub(super) cells_used: u64,
     pub(super) reported: bool,
     pub(super) estimated: bool,
-    pub(super) cells_cap: u64,
+    pub(super) cells_cap: Option<u64>,
     /// The runtime's cumulative reduction ledger as last reported, so each
     /// frame's telemetry carries only what that frame added.
     pub(super) reductions_seen: crate::runtime::observation::ReductionStats,
 }
 
 impl TaskSpend {
-    pub(super) fn new(cells_cap: u64) -> Self {
+    pub(super) fn new(cells_cap: Option<u64>) -> Self {
         Self {
             parent_used: 0,
             helpers: HelperTokens::default(),
@@ -205,8 +205,10 @@ impl TaskSpend {
 
     /// The cell limit buys exactly one final-answer turn. Token spend is not
     /// consulted here or anywhere else in the task loop.
+    /// Whether a ceiling this person set has been reached. No ceiling is no
+    /// limit: `None` never ends a task.
     pub(super) fn cell_limit_reached(&self) -> bool {
-        self.cells_used >= self.cells_cap
+        self.cells_cap.is_some_and(|cap| self.cells_used >= cap)
     }
 }
 

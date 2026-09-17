@@ -6,6 +6,16 @@ use crate::config::PaneConfig;
 use crate::spend::Tier;
 use crate::tui::{Mode, Panel, PanelRow, TierModels};
 
+/// The cell ceiling as a person reads it. `None` is the default and means
+/// there is none: a task ends on evidence that it has stopped producing
+/// anything, not on a count of cells.
+fn cell_limit(limits: &crate::config::Limits) -> String {
+    match limits.cells {
+        Some(cap) => format!("{cap} cells"),
+        None => "none (a task ends on evidence, not a count)".to_string(),
+    }
+}
+
 pub(super) fn show(session: &Session<'_>, panel: Panel) {
     if let Some(ui) = session.ui {
         ui.panel(panel);
@@ -752,7 +762,7 @@ pub(super) fn command(
                     "Task spend",
                     format!(
                         "Last task: {used} cumulative tokens\nToken spend is telemetry and has no cap.\nCell limit: {}\nConfigure runtime limits in .pane/config.toml for the next session.",
-                        session.config().limits.cells
+                        cell_limit(&session.config().limits)
                     ),
                 ),
             );
@@ -827,7 +837,7 @@ pub(super) fn command(
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nWeb: {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .pane/config.toml (loaded at startup)\nPermissions: native global/project config (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nWeb: {}\nTask spend: tracked, uncapped\nCell limit: {} · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .pane/config.toml (loaded at startup)\nPermissions: native global/project config (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),
@@ -835,7 +845,7 @@ pub(super) fn command(
                         session.profile.command_pattern_count(),
                         session.profile.grants_network(),
                         session.config().web.describe(),
-                        session.config().limits.cells,
+                        cell_limit(&session.config().limits),
                         session.config().limits.cell_wall_clock_s,
                         session.config().limits.response_bytes,
                         session
@@ -1269,7 +1279,7 @@ mod tests {
             // does not silently swallow it.
             assert!(saved.helpers.enabled);
             // And an unrelated setting survived the edit.
-            assert_eq!(saved.limits.cells, 42);
+            assert_eq!(saved.limits.cells, Some(42));
 
             assign_model(session, Tier::Subagents, "claude-sonnet-5").unwrap();
             let saved = PaneConfig::load(&root).unwrap();
@@ -1323,7 +1333,7 @@ mod tests {
         let base = PaneConfig::parse(text).unwrap();
         with_selected_session(&root, Some("review"), |session| {
             assign_model(session, Tier::Helpers, "changed-helper").unwrap();
-            assert_eq!(session.config().limits.cells, 17);
+            assert_eq!(session.config().limits.cells, Some(17));
             assert!(session.config().web.enabled);
             assert_eq!(
                 session.config().helpers.model.as_deref(),

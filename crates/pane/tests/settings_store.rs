@@ -167,7 +167,7 @@ fn global_defaults_are_overridden_by_the_project_with_visible_origins() {
         loaded.config.model.parent.as_deref(),
         Some("claude-sonnet-5")
     );
-    assert_eq!(loaded.config.limits.cells, 12);
+    assert_eq!(loaded.config.limits.cells, Some(12));
     assert_eq!(loaded.origins["model.parent"], "project");
     assert_eq!(loaded.origins["limits.cells"], "global");
     // Curated presentation keys have a value before anyone has saved one.
@@ -276,7 +276,8 @@ fn runtime_defaults_are_shown_before_anything_is_saved() {
     );
     assert_eq!(
         loaded.values["limits"]["cells"].as_integer(),
-        Some(pane::config::Limits::default().cells as i64)
+        // `0` is the file's spelling for the default, which is no ceiling.
+        Some(pane::config::Limits::default().cells.unwrap_or(0) as i64)
     );
     assert_eq!(
         string(&loaded.values, "helpers.effort.check").as_deref(),
@@ -367,7 +368,7 @@ fn saving_preserves_comments_and_unrelated_values() {
     assert!(text.contains("# how long one cell may run"), "{text}");
     assert!(text.contains("cell_wall_clock_s = 45"), "{text}");
     assert!(text.contains("cells = 7"), "{text}");
-    assert_eq!(loaded.config.limits.cells, 7);
+    assert_eq!(loaded.config.limits.cells, Some(7));
     assert_eq!(loaded.config.limits.cell_wall_clock_s, 45);
     assert_eq!(string(&loaded.values, "ui.theme").as_deref(), Some("amber"));
     assert_eq!(loaded.origins["ui.theme"], "project");
@@ -396,7 +397,7 @@ fn an_invalid_value_writes_nothing() {
     let snapshot = store.read(Scope::Local).expect("read");
 
     let error = store
-        .save(Scope::Local, &snapshot, &[edit("limits.cells", "0")])
+        .save(Scope::Local, &snapshot, &[edit("limits.cells", "1001")])
         .expect_err("out of range");
     assert!(error.contains("between 1 and 1000"), "{error}");
 
@@ -814,7 +815,7 @@ fn the_legacy_file_is_a_visible_fallback_until_it_is_migrated() {
 
     // Legacy alone: it is still read, and the notice says where from.
     let loaded = store.load(None).expect("legacy fallback");
-    assert_eq!(loaded.config.limits.cells, 9);
+    assert_eq!(loaded.config.limits.cells, Some(9));
     assert_eq!(loaded.origins["limits.cells"], "legacy");
     assert!(
         loaded
@@ -858,7 +859,7 @@ fn the_legacy_file_is_a_visible_fallback_until_it_is_migrated() {
     let loaded = store.load(None).expect("after migration");
     assert_eq!(loaded.config.model.parent.as_deref(), Some("claude-opus-5"));
     assert_eq!(loaded.origins["model.parent"], "project");
-    assert_eq!(loaded.config.limits.cells, 5);
+    assert_eq!(loaded.config.limits.cells, Some(5));
     assert!(
         loaded
             .notices
@@ -951,7 +952,13 @@ fn typed_values_are_parsed_without_toml_quoting() {
         registry::validate("decisions.judge_yes_above", "0.8").expect("in range"),
         toml::Value::Float(0.8)
     );
-    assert!(registry::validate("limits.cells", "0").is_err());
+    // `0` is the file's spelling for "no ceiling", so it validates; a figure
+    // outside the range and a word still do not.
+    assert_eq!(
+        registry::validate("limits.cells", "0").expect("no ceiling"),
+        toml::Value::Integer(0)
+    );
+    assert!(registry::validate("limits.cells", "1001").is_err());
     assert!(registry::validate("limits.cells", "many").is_err());
     assert!(registry::validate("web.allow_domains", "not a domain").is_err());
     assert!(registry::validate("model.parent", "/etc/passwd").is_err());

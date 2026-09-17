@@ -126,7 +126,7 @@ fn the_worked_turn_renders_byte_for_byte() {
             task_used: 3_412,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -392,7 +392,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_used: 0,
             task_cap: 400_000,
             cells_used: 0,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -416,7 +416,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -443,7 +443,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -477,7 +477,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
             task_used: 359_999,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -497,7 +497,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
             task_used: 360_000,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -506,18 +506,36 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     assert!(!rendered.contains("400,000"));
     assert!(!rendered.contains("finish or return"));
 
+    // Every way a task can end says so in one sentence, names what was
+    // observed, and ends in the one thing the model may still do.
     for reason in [
-        ExhaustedReason::CellLimit,
-        ExhaustedReason::ThreeTurnsWithoutAProgram,
+        ExhaustedReason::CellLimit { cap: 120 },
+        ExhaustedReason::Supervised {
+            reason: "these cells are not advancing the task".to_string(),
+            looks: 3,
+        },
+        ExhaustedReason::Stalled {
+            windows: 3,
+            cells: 18,
+        },
+        ExhaustedReason::NoProgram { turns: 6 },
     ] {
-        let sentence = prompt::exhausted_preamble(reason);
+        let sentence = prompt::exhausted_preamble(&reason);
         assert!(!sentence.contains('\n'));
-        assert_eq!(sentence.matches('.').count(), 1);
-        assert!(sentence.contains("return"));
+        assert_eq!(sentence.matches('.').count(), 1, "{sentence}");
+        assert!(sentence.contains("return"), "{sentence}");
     }
+    // The reason is the fact, not a number the model has to interpret.
     assert!(
-        prompt::exhausted_preamble(ExhaustedReason::ThreeTurnsWithoutAProgram)
-            .starts_with("Three turns without a program;")
+        prompt::exhausted_preamble(&ExhaustedReason::Supervised {
+            reason: "the same call keeps failing the same way".to_string(),
+            looks: 3,
+        })
+        .starts_with("The supervisor has said 3 times that the same call keeps failing")
+    );
+    assert!(
+        prompt::exhausted_preamble(&ExhaustedReason::CellLimit { cap: 40 })
+            .contains("this project set (40)")
     );
 }
 
@@ -583,7 +601,7 @@ fn an_unattributed_throw_omits_the_position_line() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -623,7 +641,7 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -696,7 +714,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
             task_used: 1_000,
             task_cap: 100_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     };
@@ -737,7 +755,7 @@ fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> Stri
             task_used: 3_412,
             task_cap: 400_000,
             cells_used: cell,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan,
     })
@@ -798,7 +816,7 @@ fn compaction_never_drops_an_error() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan: Vec::new(),
     });
@@ -930,7 +948,7 @@ fn every_descriptor_survives_compaction_when_the_handles_do_not() {
                 task_used: 3_412,
                 task_cap: 400_000,
                 cells_used: cell,
-                cells_cap: 40,
+                cells_cap: Some(40),
             },
             plan: Vec::new(),
         })

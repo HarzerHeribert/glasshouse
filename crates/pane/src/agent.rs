@@ -992,7 +992,7 @@ fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>)
             task_used: 0,
             task_cap: 0,
             cells_used: cell,
-            cells_cap: 0,
+            cells_cap: None,
         },
         plan: turn.plan.clone(),
     }

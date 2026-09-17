@@ -228,28 +228,61 @@ pub fn project_runtime_history(conversation: &mut Conversation, active_from: usi
     }
 }
 
-/// Why the preamble is being replaced: the configured cell limit, or three
-/// prose turns in a row (the primary's addendum of 2026-09-06 — a model that
-/// never programs must not spend hundreds of requests to find out).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the preamble is being replaced, and **it is always something observed
+/// rather than something counted** (the user, 2026-09-17: "Limits are dumb for
+/// abstract tasks").
+///
+/// Each variant carries the fact behind it, because the sentence the model
+/// reads on its last turn is the only place that fact ever appears: a task
+/// ended for a reason it cannot see is a task that ends twice the same way.
+/// A ceiling the person set is still a reason — it is theirs, not ours.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExhaustedReason {
-    CellLimit,
-    ThreeTurnsWithoutAProgram,
+    /// The person configured `[limits] cells` and the task reached it.
+    CellLimit { cap: u64 },
+    /// The supervisor returned the same not-working verdict `looks` times
+    /// running, and nothing changed between them.
+    Supervised { reason: String, looks: u32 },
+    /// `windows` whole stall windows in a row: no tree change, no new fact,
+    /// no verification result moved, after being told so.
+    Stalled { windows: u32, cells: u32 },
+    /// `turns` messages in a row that ran no program at all.
+    ///
+    /// **This is not a budget on thinking.** A turn carrying no program runs
+    /// no cell, so it writes no record — and with no record there is nothing
+    /// for the stall guard to observe or the supervisor to look at. It is the
+    /// only evidence a prose-only task ever produces, which is why it is the
+    /// one thing still counted anywhere in this loop.
+    NoProgram { turns: u32 },
 }
 
 /// The one sentence that replaces the preamble when the task is exhausted —
 /// §6's last paragraph, naming the reason. The only permitted action is a
 /// top-level returned string.
-pub fn exhausted_preamble(reason: ExhaustedReason) -> &'static str {
+///
+/// One sentence, always, ending in what the model may still do: this is the
+/// last thing it reads before the task closes, and a paragraph here competes
+/// with the answer it is being asked for.
+#[must_use]
+pub fn exhausted_preamble(reason: &ExhaustedReason) -> String {
     match reason {
-        ExhaustedReason::CellLimit => {
-            "The cell limit is reached; the only action this turn may take is returning a \
-             final answer string at top level."
-        }
-        ExhaustedReason::ThreeTurnsWithoutAProgram => {
-            "Three turns without a program; the only action this turn may take is returning a \
-             final answer string at top level."
-        }
+        ExhaustedReason::CellLimit { cap } => format!(
+            "The cell limit this project set ({cap}) is reached; the only action this turn may \
+             take is returning a final answer string at top level."
+        ),
+        ExhaustedReason::Supervised { reason, looks } => format!(
+            "The supervisor has said {looks} times that {reason}; the only action this turn may \
+             take is returning a final answer string at top level."
+        ),
+        ExhaustedReason::NoProgram { turns } => format!(
+            "No program has run for {turns} turns; the only action this turn may take is \
+             returning a final answer string at top level."
+        ),
+        ExhaustedReason::Stalled { windows, cells } => format!(
+            "Nothing has changed for {cells} cells across {windows} notices — no file, no fact, \
+             no verification; the only action this turn may take is returning a final answer \
+             string at top level."
+        ),
     }
 }
 
@@ -642,7 +675,9 @@ pub struct Budget {
     pub task_used: u64,
     pub task_cap: u64,
     pub cells_used: u64,
-    pub cells_cap: u64,
+    /// The ceiling this person set, or `None` — the usage line then shows the
+    /// count alone, because a denominator nobody chose is a fiction.
+    pub cells_cap: Option<u64>,
 }
 
 /// §6's user message: the yield/throw line, then `## Handles`, `## Error`,
@@ -728,12 +763,14 @@ fn render_result_with_state(result: &CellResult, include_state: bool) -> String 
 }
 
 fn render_usage_line(budget: &Budget) -> String {
+    let cells = match budget.cells_cap {
+        Some(cap) => format!("{}/{}", thousands(budget.cells_used), thousands(cap)),
+        None => thousands(budget.cells_used),
+    };
     format!(
-        "turn output cap {} · task spent {} · cells {}/{}",
+        "turn output cap {} · task spent {} · cells {cells}",
         thousands(budget.turn_cap),
         thousands(budget.task_used),
-        thousands(budget.cells_used),
-        thousands(budget.cells_cap),
     )
 }
 

@@ -40,7 +40,11 @@ fn absent_pane_toml_means_the_defaults() {
     assert_eq!(config, PaneConfig::default());
     assert_eq!(config.limits.cell_wall_clock_s, 30);
     assert_eq!(config.limits.response_bytes, 16384);
-    assert_eq!(config.limits.cells, 120, "a backstop, not a working budget");
+    assert_eq!(
+        config.limits.cells, None,
+        "no ceiling unless this person sets one: a task ends on evidence that it stopped \
+         producing anything, not on a count of cells"
+    );
     assert_eq!(config.supervisor.every, 4);
     assert_eq!(config.supervisor.model, None);
     assert!(config.supervisor.enabled);

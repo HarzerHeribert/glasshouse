@@ -14,7 +14,17 @@ use crate::tools::registry;
 pub struct Limits {
     pub cell_wall_clock_s: u64,
     pub response_bytes: usize,
-    pub cells: u64,
+    /// A ceiling on cells **only when this person set one**, and `0` in the
+    /// file means the same as absent (the user, 2026-09-17: "Limits are dumb
+    /// for abstract tasks").
+    ///
+    /// It used to default to 120, and on 2026-09-17 that default ended a
+    /// four-hour session at cell 120 of 120, mid-implementation, with code
+    /// that did not compile — and cancelled that session's own `cargo test`
+    /// job on the way out. What ends a task now is evidence that it has
+    /// stopped producing anything: `progress::Stall`'s run of empty windows,
+    /// or the supervisor's repeated verdict.
+    pub cells: Option<u64>,
     /// Whether a terminal return is held once for the deterministic
     /// final-state contract check and the no-progress guard's findings
     /// (`smarter-cheaper-roadmap.md`, *Evidence-gated completion*). On by
@@ -27,10 +37,8 @@ impl Default for Limits {
         Self {
             cell_wall_clock_s: 30,
             response_bytes: 16 * 1024,
-            // A backstop against a runaway, not a working budget: the task's
-            // own wall clock and the stall notice are the controls
-            // (`progress::Stall`, 2026-09-14).
-            cells: 120,
+            // No ceiling unless this person asks for one.
+            cells: None,
             evidence_gate: true,
         }
     }
@@ -800,7 +808,10 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         return Err("pane.toml: `task_tokens` must be an integer".into());
     }
     let cells = match int_field(table, "cells")? {
-        Some(v) => u64::try_from(CELLS.check(v)?).expect("range is non-negative"),
+        // Zero is the explicit "no ceiling", as `[agents] deadline_minutes`
+        // spells the same intent; absent leaves the default, which is none.
+        Some(0) => None,
+        Some(v) => Some(u64::try_from(CELLS.check(v)?).expect("range is non-negative")),
         None => defaults.cells,
     };
 
