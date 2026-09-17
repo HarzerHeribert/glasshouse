@@ -1738,35 +1738,127 @@ exit 0
     shared_fixture("codex", &script)
 }
 
-/// Windows counterpart of the function above. `cmd.exe` batch has no sane
-/// UTC-instant-formatting primitive of its own, so the `.cmd` shim (the same
-/// executable shape `install_marker_harness` uses for Windows, so resolution
-/// goes through the identical `.cmd`-via-`cmd.exe` path production code
-/// does) delegates the actual work to a short PowerShell script, which both
-/// platforms Windows CI runs ship.
+/// Windows counterpart of the function above: the same `.cmd` executable
+/// shape `install_marker_harness` uses, so resolution goes through the
+/// identical `.cmd`-via-`cmd.exe` path production code does.
+///
+/// `cmd.exe` batch has no UTC-instant-formatting primitive of its own, and
+/// the PowerShell this fixture used to delegate to costs more than the
+/// tests' whole 20-second bound to start on the `windows-11-arm` runner. So
+/// the instant comes in from the test instead, through
+/// [`ROLLOUT_TIMESTAMP_VAR`] — the fixture is launched by the shipped binary,
+/// which passes its own environment down to the harness (`pty`'s
+/// `into_builder` snapshots `std::env::vars_os`), the same way `CODEX_HOME`
+/// already reaches it. The baked fallback keeps the fixture meaningful
+/// standalone; nothing that captures an identifier relies on it.
+///
+/// `%CD:\=/%` is the forward-slashed working directory the PowerShell
+/// version produced, and the redirection is written before `echo` so no
+/// trailing space reaches the JSON.
 #[cfg(windows)]
 fn install_codex_rollout_harness(_bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
-    let ps1_template = r#"$cwd = (Get-Location).Path.Replace('\', '/')
-$ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-$dir = Join-Path $env:CODEX_HOME 'sessions\2026\08\25'
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd + '","timestamp":"' + $ts + '","originator":"codex-tui"}}'
-Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
-"#;
-    let ps1 = ps1_template.replace(PLACEHOLDER, id);
-    // Same `id` -> same ps1 bytes -> same shared ps1 path, so the .cmd
-    // content that embeds it below is itself deterministic and shareable.
-    let ps1_path = shared_fixture("codex-rollout.ps1", &ps1);
+    let template = codex_rollout_cmd("echo GLASSHOUSE-CODEX-RAN");
+    shared_fixture("codex.cmd", &template.replace(PLACEHOLDER, id))
+}
 
-    shared_fixture(
-        "codex.cmd",
-        &format!(
-            "@echo off\r\necho GLASSHOUSE-CODEX-RAN\r\n\
-             powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
-            ps1_path.display()
-        ),
+/// The environment variable the Windows rollout fixtures read their header
+/// `timestamp` out of. Set by every test that starts one; ignored by the
+/// Unix fixtures, which format the instant themselves at run time.
+const ROLLOUT_TIMESTAMP_VAR: &str = "GLASSHOUSE_TEST_ROLLOUT_TIMESTAMP";
+
+/// The body shared by both Windows rollout fixtures, with `first_line` the
+/// one line that differs (the run marker, or the argument echo).
+///
+/// Uses `\r\n` throughout: a batch file with bare LF line endings is read by
+/// `cmd.exe` but has bitten this repository before.
+#[cfg(windows)]
+fn codex_rollout_cmd(first_line: &str) -> String {
+    // The header line, written with its redirection first so that no trailing
+    // space can reach the JSON, and with nothing `cmd.exe` treats as special
+    // inside it (the JSON has no `<`, `>`, `|`, `&`, `^` or literal `%`).
+    let header = ">\"%DIR%\\rollout-test-__ROLLOUT_ID__.jsonl\" echo \
+         {\"type\":\"session_meta\",\"payload\":{\"id\":\"__ROLLOUT_ID__\",\"cwd\":\"%CD:\\=/%\",\
+         \"timestamp\":\"%TS%\",\"originator\":\"codex-tui\"}}";
+
+    // Two `set` statements rather than an `if (…) else (…)` block: a block's
+    // body is expanded when the block is parsed, not when it runs.
+    //
+    // `ping` is three seconds of delay, and it is what makes the stamped
+    // instant provably inside `native_id::capture`'s window rather than
+    // probably inside it. The window is `[session.created_at, now-at-capture]`
+    // (`session::native_id::capture`); `rollout_timestamp` stamps two seconds
+    // ahead of the test's clock so a slow binary start cannot push
+    // `created_at` past it, and this delay keeps the harness running past that
+    // instant so the upper bound cannot close before it either. `timeout /t`
+    // is the other batch sleep and refuses to run with stdin redirected.
+    format!(
+        "@echo off\r\n\
+         {first_line}\r\n\
+         set \"TS=2026-08-25T12:00:00Z\"\r\n\
+         if defined {ROLLOUT_TIMESTAMP_VAR} set \"TS=%{ROLLOUT_TIMESTAMP_VAR}%\"\r\n\
+         set \"DIR=%CODEX_HOME%\\sessions\\2026\\08\\25\"\r\n\
+         if not exist \"%DIR%\" mkdir \"%DIR%\"\r\n\
+         {header}\r\n\
+         ping -n 4 127.0.0.1 >nul\r\n\
+         exit /b 0\r\n"
     )
+}
+
+/// The instant the Windows rollout fixtures stamp into their header, as
+/// `YYYY-MM-DDTHH:MM:SSZ` — two seconds ahead of now, for the reason
+/// [`codex_rollout_cmd`]'s `ping` line gives. Set on every command that can
+/// reach one of those fixtures; harmless on Unix, whose fixtures format the
+/// instant themselves.
+fn rollout_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock set after 1970")
+        .as_secs();
+    utc_rfc3339(now + 2)
+}
+
+/// `epoch_seconds` as `YYYY-MM-DDTHH:MM:SSZ`, the shape
+/// `harness::codex`'s `parse_rfc3339_utc` reads back. Hinnant's
+/// `civil_from_days`, the inverse of the era arithmetic that function uses.
+fn utc_rfc3339(epoch_seconds: u64) -> String {
+    let days = i64::try_from(epoch_seconds / 86_400).expect("a representable day count");
+    let seconds_of_day = epoch_seconds % 86_400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60
+    )
+}
+
+/// [`utc_rfc3339`] is the only date arithmetic in this file and it cannot be
+/// exercised on the platform it exists for, so it is checked directly: the
+/// epoch itself, an ordinary instant, the last second of a year, midnight,
+/// and a leap day.
+#[test]
+fn the_rollout_timestamp_is_formatted_as_utc_rfc3339() {
+    assert_eq!(utc_rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(utc_rfc3339(1_756_123_456), "2025-08-25T12:04:16Z");
+    assert_eq!(utc_rfc3339(1_767_225_599), "2025-12-31T23:59:59Z");
+    assert_eq!(utc_rfc3339(1_788_912_000), "2026-09-09T00:00:00Z");
+    assert_eq!(utc_rfc3339(1_835_417_228), "2028-02-29T06:07:08Z");
 }
 
 /// The whole point of section D's production wiring: that `glasshouse launch
@@ -1822,7 +1914,10 @@ fn a_codex_session_s_identifier_is_captured_by_the_launch_path() {
         .arg(&config_dir)
         .arg("launch")
         .arg("codex")
-        .env("CODEX_HOME", &codex_home);
+        .env("CODEX_HOME", &codex_home)
+        // Read by the Windows fixture, which has no clock of its own; the
+        // Unix one formats the instant itself and ignores this.
+        .env(ROLLOUT_TIMESTAMP_VAR, rollout_timestamp());
 
     let mut session = Session::spawn(command);
     let status = session.wait_for_exit();
@@ -1930,7 +2025,9 @@ fn a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit() 
                 "--config-dir".to_owned(),
                 config_dir.display().to_string(),
             ])
-            .env("CODEX_HOME", &codex_home),
+            .env("CODEX_HOME", &codex_home)
+            // See the launch-path test above: the Windows fixture's clock.
+            .env(ROLLOUT_TIMESTAMP_VAR, rollout_timestamp()),
     );
 
     shell.expect("root ");
@@ -4720,34 +4817,18 @@ exit 0
     shared_fixture("codex", &script)
 }
 
-/// Windows counterpart of the function above, following
-/// [`install_codex_rollout_harness`]'s `.cmd`-delegates-to-PowerShell shape:
-/// `cmd.exe` echoes the arguments itself (`%*`, its own equivalent of `$*`)
-/// and then hands the rollout-writing to a short PowerShell script, since
-/// batch has no sane UTC-instant-formatting primitive of its own.
+/// Windows counterpart of the function above, and the same
+/// [`codex_rollout_cmd`] body [`install_codex_rollout_harness`] uses — only
+/// its first line differs: `cmd.exe` echoes the arguments itself with `%*`,
+/// its own equivalent of `$*`.
 #[cfg(windows)]
 fn install_codex_rollout_and_argv_harness(
     _bin_dir: &std::path::Path,
     id: &str,
 ) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
-    let ps1_template = r#"$cwd = (Get-Location).Path.Replace('\', '/')
-$ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-$dir = Join-Path $env:CODEX_HOME 'sessions\2026\08\25'
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd + '","timestamp":"' + $ts + '","originator":"codex-tui"}}'
-Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
-"#;
-    let ps1 = ps1_template.replace(PLACEHOLDER, id);
-    let ps1_path = shared_fixture("codex-rollout-argv.ps1", &ps1);
-
-    shared_fixture(
-        "codex.cmd",
-        &format!(
-            "@echo off\r\necho ARGV:%*\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
-            ps1_path.display()
-        ),
-    )
+    let template = codex_rollout_cmd("echo ARGV:%*");
+    shared_fixture("codex.cmd", &template.replace(PLACEHOLDER, id))
 }
 
 /// The Codex counterpart of
@@ -4808,7 +4889,11 @@ fn a_recorded_codex_session_is_resumed_through_its_own_subcommand() {
             .arg(&state_dir)
             .arg("--config-dir")
             .arg(&config_dir)
-            .env("CODEX_HOME", &codex_home);
+            .env("CODEX_HOME", &codex_home)
+            // Stamped per invocation, not once for the closure: each run of
+            // the fake harness rewrites the header, and only the first one's
+            // instant has to fall inside a discovery window.
+            .env(ROLLOUT_TIMESTAMP_VAR, rollout_timestamp());
         for arg in args {
             command = command.arg(arg);
         }
