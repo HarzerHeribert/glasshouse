@@ -239,6 +239,58 @@ fn the_brief_never_instructs_the_scout_to_implement_or_fix() {
 
 // --- the rendered block --------------------------------------------------
 
+/// A file the scout named and the bounds refused is stated with its reason,
+/// so the model can read it itself. Silence here is what makes a model
+/// re-derive what it was almost handed.
+#[test]
+fn a_named_file_that_was_not_served_is_stated_with_its_reason() {
+    let report = "## Files\nsrc/big.rs:1 — the whole thing\n## Risks\nnone read\n";
+    let served = vec![(
+        "src/small.rs".to_string(),
+        "pub fn small() {}\n".to_string(),
+    )];
+    let unserved = vec![(
+        "src/big.rs".to_string(),
+        "not served whole: 99999 bytes, over the 32768-byte limit".to_string(),
+    )];
+    let block = preflight::render_serving("Do the thing", report, &served, &unserved, None);
+
+    assert!(
+        block.contains("## Named but not served (1)"),
+        "the section exists when something was refused:\n{block}"
+    );
+    assert!(
+        block.contains("- src/big.rs — not served whole: 99999 bytes, over the 32768-byte limit"),
+        "the file is named with the bound that refused it:\n{block}"
+    );
+    assert!(
+        block.contains("1 named but not served"),
+        "the scouting record counts it too:\n{block}"
+    );
+    let served_at = block.find("## Served in full (1)").unwrap();
+    let unserved_at = block.find("## Named but not served (1)").unwrap();
+    let record_at = block.find("## Scouting record").unwrap();
+    assert!(
+        served_at < unserved_at && unserved_at < record_at,
+        "it sits with the material it is about:\n{block}"
+    );
+}
+
+/// Nothing refused, nothing said: the ordinary block is unchanged.
+#[test]
+fn nothing_refused_adds_no_section() {
+    let report = "## Files\nsrc/small.rs:1 — it\n## Risks\nnone read\n";
+    let served = vec![(
+        "src/small.rs".to_string(),
+        "pub fn small() {}\n".to_string(),
+    )];
+    let block = preflight::render("Do the thing", report, &served, None);
+    assert!(
+        !block.contains("Named but not served"),
+        "no notice when every named file was served:\n{block}"
+    );
+}
+
 #[test]
 fn render_leads_with_the_request_and_stays_under_the_line_bound() {
     let mut report = String::from("## Constraints\n");

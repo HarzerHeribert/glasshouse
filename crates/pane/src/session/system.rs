@@ -559,11 +559,18 @@ pub(super) fn preflight_block(
     transcript.notebook.preflight = Some(record.clone());
     let block = record.outcome.ok.then(|| {
         let named = crate::preflight::spans(&record.outcome.text);
-        let served: Vec<(String, String)> = preflight_served(session.profile, &named)
+        let (served, unserved) = preflight_serving(session.profile, &named);
+        let served: Vec<(String, String)> = served
             .into_iter()
             .map(|(path, _why, text)| (path, text))
             .collect();
-        crate::preflight::render(task, &record.outcome.text, &served, ranking_note.as_deref())
+        crate::preflight::render_serving(
+            task,
+            &record.outcome.text,
+            &served,
+            &unserved,
+            ranking_note.as_deref(),
+        )
     });
     PreflightOutcome {
         block,
@@ -572,20 +579,42 @@ pub(super) fn preflight_block(
     }
 }
 
-/// The named files that can be served whole: inside the grant, a regular
-/// file, UTF-8, and small enough that *in full* is true of it.
+/// A file the preflight serves whole: the path the scout named, why it named
+/// it, and the file's complete text.
+pub(super) type ServedFile = (String, String, String);
+
+/// A file the scout named that the preflight did not serve, and the reason in
+/// the person's words.
+pub(super) type UnservedFile = (String, String);
+
+/// The named files that can be served whole -- inside the grant, a regular
+/// file, UTF-8, and small enough that *in full* is true of it -- and beside
+/// them every named file that was **not** served, with its reason.
 ///
-/// **The profile decides, not this function.** A scout that named a path
-/// outside the grant has it refused here for the same reason `read` would
-/// refuse it, and a preflight is not a way around a grant.
-pub(super) fn preflight_served(
+/// **The profile decides what may be served, not this function.** A scout
+/// that named a path outside the grant has it refused here for the same
+/// reason `read` would refuse it, and a preflight is not a way around a
+/// grant.
+///
+/// **A file the scout named and the preflight did not serve is stated, never
+/// dropped.** Not serving it is right — the section claims *in full*, and a
+/// truncated file under that heading is a claim the model cannot check — but
+/// silence turns a bounded offer into an invisible one: the model cannot
+/// `read` a file it was never told about, so it re-derives what it was almost
+/// given. Each reason names the bound so the model can act on it.
+pub(super) fn preflight_serving(
     profile: &Profile,
     named: &[(String, String)],
-) -> Vec<(String, String, String)> {
+) -> (Vec<ServedFile>, Vec<UnservedFile>) {
     let mut served = Vec::new();
+    let mut unserved: Vec<(String, String)> = Vec::new();
     for (path, why) in named {
         if served.len() == PREFLIGHT_SERVE_FILES {
-            break;
+            unserved.push((
+                path.clone(),
+                format!("not served: this section serves at most {PREFLIGHT_SERVE_FILES} files"),
+            ));
+            continue;
         }
         let candidate = std::path::Path::new(path);
         let absolute = if candidate.is_absolute() {
@@ -598,20 +627,37 @@ pub(super) fn preflight_served(
             crate::sandbox::profile::Access::Read,
             &absolute,
         ) else {
+            unserved.push((
+                path.clone(),
+                "not served: outside this session's grant".into(),
+            ));
             continue;
         };
         let Ok(metadata) = fs::metadata(&granted) else {
+            unserved.push((path.clone(), "not served: no such file".into()));
             continue;
         };
-        if !metadata.is_file() || metadata.len() > PREFLIGHT_SERVE_BYTES {
+        if !metadata.is_file() {
+            unserved.push((path.clone(), "not served: not a regular file".into()));
+            continue;
+        }
+        if metadata.len() > PREFLIGHT_SERVE_BYTES {
+            unserved.push((
+                path.clone(),
+                format!(
+                    "not served whole: {} bytes, over the {PREFLIGHT_SERVE_BYTES}-byte limit",
+                    metadata.len()
+                ),
+            ));
             continue;
         }
         let Ok(text) = fs::read_to_string(&granted) else {
+            unserved.push((path.clone(), "not served: not UTF-8 text".into()));
             continue;
         };
         served.push((path.clone(), why.clone(), text));
     }
-    served
+    (served, unserved)
 }
 
 /// The compiled profile, as the model needs to read it.

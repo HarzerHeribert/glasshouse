@@ -430,6 +430,39 @@ fn render(profile: &Profile, load: &InstructionLoad, index: Option<&InstructionI
         out.push_str("\nInstruction coverage is incomplete: ");
         out.push_str(&reasons.into_iter().collect::<Vec<_>>().join(", "));
         out.push_str(".\n");
+        out.push_str(&render_named_omissions(profile, &load.omissions));
+    }
+    out
+}
+
+/// The documents an omission names, listed by path.
+///
+/// **A bound that fires names what it dropped.** The reason line above says
+/// only *that* something was left out; a person who wrote an instruction
+/// document and a model asked to obey it both need to know *which* one is
+/// missing, and the model can then read it with `read` rather than proceeding
+/// as though the policy it was given were whole. An omission with no path is
+/// a scan budget rather than a document and is already covered by the reason
+/// line, so it is not repeated here.
+fn render_named_omissions(profile: &Profile, omissions: &[InstructionOmission]) -> String {
+    let named: Vec<&InstructionOmission> = omissions
+        .iter()
+        .filter(|omission| omission.path.is_some())
+        .collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Instruction documents not loaded:\n");
+    for omission in named {
+        let path = omission.path.as_deref().unwrap_or(Path::new(""));
+        let relative = path.strip_prefix(profile.root()).unwrap_or(path);
+        let shown = display_relative(relative);
+        let shown = if shown.is_empty() {
+            path.display().to_string()
+        } else {
+            shown
+        };
+        out.push_str(&format!("- `{shown}` — {}\n", omission.reason));
     }
     out
 }

@@ -82,12 +82,38 @@ fn oversized_documents_are_omitted_with_a_clear_bounded_notice() {
     let rendered = instructions::root(&profile);
     assert!(!rendered.contains(&"x".repeat(1024)));
     assert!(rendered.contains("Instruction coverage is incomplete: per-document byte limit"));
+    // The reason line says *that* something was dropped; this says *which*,
+    // so the model can read it for itself instead of proceeding as though the
+    // policy it was handed were whole.
+    assert!(
+        rendered.contains("Instruction documents not loaded:")
+            && rendered.contains("`AGENTS.md` — per-document byte limit"),
+        "the omitted document is named, not merely counted:\n{rendered}"
+    );
     let loaded = instructions::docs_for_paths(&profile, &[root.join("file.rs")]);
     assert!(!loaded.complete && loaded.documents.is_empty());
     assert!(loaded.omissions.iter().any(|omission| {
         omission.path.as_deref() == Some(profile.root().join("AGENTS.md").as_path())
             && omission.reason == "per-document byte limit"
     }));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The ordinary session gains no notice: a project whose instructions all fit
+/// says nothing about bounds at all. This is the risk of the whole package --
+/// a notice that fires when nothing was dropped is noise in every session.
+#[test]
+fn a_complete_load_says_nothing_about_omissions() {
+    let root = fixture("complete-load");
+    std::fs::write(root.join("AGENTS.md"), "root policy\n").unwrap();
+    let profile = Profile::compile(&root, None);
+    let rendered = instructions::root(&profile);
+    assert!(rendered.contains("root policy"));
+    assert!(
+        !rendered.contains("Instruction coverage is incomplete")
+            && !rendered.contains("Instruction documents not loaded"),
+        "nothing was dropped, so nothing is said:\n{rendered}"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

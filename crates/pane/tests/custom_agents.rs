@@ -214,3 +214,30 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
     }
     server.join().unwrap();
 }
+
+/// A definition file past the catalogue's own limit is reported, not turned
+/// into "define this file" advice about a file that already exists.
+#[test]
+fn a_definition_past_the_catalogue_limit_is_named_as_unloaded_not_as_missing() {
+    let fixture = Fixture::new();
+    for index in 0..129 {
+        fixture.write(
+            &format!("agent{index:03}"),
+            "instructions = \"do the thing\"\n",
+        );
+    }
+    let catalog = Catalog::load(&fixture.profile());
+    assert_eq!(
+        catalog.omitted(),
+        1,
+        "one file past the 128-definition limit was not loaded"
+    );
+    let error = catalog
+        .resolve("agent128")
+        .expect_err("the last file is past the limit, so it did not load");
+    assert!(
+        error.contains("were not loaded") && error.contains("at most 128"),
+        "the refusal says the file exists but was not loaded, rather than telling the person to \
+         create it: {error}"
+    );
+}

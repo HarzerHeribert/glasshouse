@@ -1069,6 +1069,13 @@ pub struct ScoutRanking {
     /// Candidates dropped before the request was even sent, to keep `state`
     /// under [`RANK_STATE_BYTES`].
     pub dropped: u32,
+    /// Candidates that cleared the floor but sat past
+    /// [`MAX_RANKED_SCOUT_FILES`], so the brief never names them.
+    ///
+    /// **A bound that fires is counted where the Scout reads.** Without this
+    /// the brief lists twenty-four files and reads as though those were all
+    /// that qualified, and the Scout stops looking.
+    pub past_cap: u32,
     pub latency_ms: u64,
 }
 
@@ -1077,6 +1084,12 @@ impl ScoutRanking {
     /// b.rs 0.81` (`little-helpers.md`).
     pub fn note(&self) -> String {
         let mut line = format!("ranked {}, skipped {}", self.ranked, self.skipped);
+        if self.dropped > 0 {
+            line.push_str(&format!(", {} not sent (request bound)", self.dropped));
+        }
+        if self.past_cap > 0 {
+            line.push_str(&format!(", {} past the brief's limit", self.past_cap));
+        }
         if !self.kept.is_empty() {
             let top: Vec<String> = self
                 .kept
@@ -1205,16 +1218,18 @@ pub fn rank_scout_candidates(
         .iter()
         .filter(|(_, score)| *score < route.floor)
         .count() as u32;
-    let kept = scored
+    let passing: Vec<(String, f64)> = scored
         .into_iter()
         .filter(|(_, score)| *score >= route.floor)
-        .take(MAX_RANKED_SCOUT_FILES)
         .collect();
+    let past_cap = passing.len().saturating_sub(MAX_RANKED_SCOUT_FILES) as u32;
+    let kept = passing.into_iter().take(MAX_RANKED_SCOUT_FILES).collect();
     Some(ScoutRanking {
         ranked,
         kept,
         skipped,
         dropped,
+        past_cap,
         latency_ms,
     })
 }
@@ -1231,6 +1246,20 @@ fn scout_ranking_section(ranking: &ScoutRanking) -> String {
         section.push_str(&format!(
             "({} candidate file(s) skipped below the relevance floor)\n",
             ranking.skipped
+        ));
+    }
+    // What this list is not: the bounds above it, named. A Scout told only
+    // what ranked well reads the list as the whole field and stops looking.
+    if ranking.past_cap > 0 {
+        section.push_str(&format!(
+            "({} further file(s) cleared the floor but are not listed here: this brief names at most {MAX_RANKED_SCOUT_FILES})\n",
+            ranking.past_cap
+        ));
+    }
+    if ranking.dropped > 0 {
+        section.push_str(&format!(
+            "({} candidate file(s) were never ranked: the ranking request could not carry them)\n",
+            ranking.dropped
         ));
     }
     section.push_str("Read these first, in this order, before searching further.\n");

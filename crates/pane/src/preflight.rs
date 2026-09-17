@@ -240,6 +240,23 @@ pub fn render(
     served: &[(String, String)],
     ranking: Option<&str>,
 ) -> String {
+    render_serving(task, report, served, &[], ranking)
+}
+
+/// [`render`], and beside the files served in full the files that were named
+/// and **not** served, each with the reason.
+///
+/// **The section says what it is not giving you.** A named file the bounds
+/// refused is one the model can still read for itself -- but only if it is
+/// told the file exists, which is the whole difference between a bounded
+/// offer and an invisible one.
+pub fn render_serving(
+    task: &str,
+    report: &str,
+    served: &[(String, String)],
+    unserved: &[(String, String)],
+    ranking: Option<&str>,
+) -> String {
     let sections = sections_of(report);
     let mut block = String::from("\n\n");
     block.push_str(RENDER_REQUEST_HEADING);
@@ -283,11 +300,24 @@ pub fn render(
     for (path, text) in served {
         block.push_str(&format!("### {path}\n```\n{}\n```\n\n", text.trim_end()));
     }
+    if !unserved.is_empty() {
+        block.push_str(&format!("## Named but not served ({})\n", unserved.len()));
+        block.push_str("Read any of these yourself if the task needs them.\n");
+        for (path, reason) in unserved {
+            block.push_str(&format!("- {path} — {reason}\n"));
+        }
+        block.push('\n');
+    }
     block.push_str(&format!(
-        "## Scouting record\nscout · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full{}\n",
+        "## Scouting record\nscout · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full{}{}\n",
         SECTIONS.len(),
         spans(report).len(),
         served.len(),
+        if unserved.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} named but not served", unserved.len())
+        },
         ranking
             .map(|note| format!(" · {note}"))
             .unwrap_or_default(),

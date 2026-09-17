@@ -227,6 +227,53 @@ fn the_scout_reads_the_higher_ranked_file_first_and_skips_the_one_below_the_floo
     );
 }
 
+/// Twenty-five files clear the floor and the brief names twenty-four, so the
+/// twenty-fifth is counted rather than vanishing. A Scout shown a list with
+/// no remainder reads it as the whole field and stops looking.
+#[test]
+fn files_past_the_briefs_limit_are_counted_not_dropped() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let answers: BTreeMap<String, f64> = (0..25).map(|i| (i.to_string(), 0.90)).collect();
+    let (url, _messages, _systemone) = fake(
+        "unused",
+        SystemOne {
+            answers,
+            delay: None,
+        },
+    );
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &url);
+    }
+    let candidates: Vec<ScoutCandidate> = (0..25)
+        .map(|i| candidate(&format!("file{i}.rs"), "fn f() {}"))
+        .collect();
+    let ranking = rank_scout_candidates(
+        "find the timeout",
+        &candidates,
+        ScoutRankRoute {
+            model: "jev-latest",
+            floor: 0.10,
+            apply: true,
+        },
+    )
+    .expect("a scripted answer for every candidate ranks");
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert_eq!(ranking.ranked, 25, "{ranking:?}");
+    assert_eq!(ranking.kept.len(), 24, "the brief names at most 24");
+    assert_eq!(
+        ranking.past_cap, 1,
+        "the file the cap cut is counted, not silently dropped: {ranking:?}"
+    );
+    assert!(
+        ranking.note().contains("1 past the brief's limit"),
+        "the record says what the bound cut: {}",
+        ranking.note()
+    );
+}
+
 /// A timed-out decision leaves today's order: `rank_scout_candidates`
 /// answers `None` rather than a partial or default ranking.
 #[test]

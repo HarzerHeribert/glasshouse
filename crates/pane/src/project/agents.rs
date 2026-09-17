@@ -70,6 +70,15 @@ impl Definition {
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     definitions: BTreeMap<String, Result<Definition, String>>,
+    /// Definition files the [`MAX_AGENTS`] bound stopped this catalogue from
+    /// loading.
+    ///
+    /// **A bound that fires is reported where it is felt.** Without this, a
+    /// profile whose file exists but sits past the limit resolves to *unknown
+    /// agent profile; define `.pane/agents/NAME.toml`* — an instruction to
+    /// create a file that is already there. The count turns that lie into the
+    /// truth.
+    omitted: usize,
 }
 
 impl Catalog {
@@ -94,6 +103,7 @@ impl Catalog {
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect();
         paths.sort();
+        catalog.omitted = paths.len().saturating_sub(MAX_AGENTS);
         for path in paths.into_iter().take(MAX_AGENTS) {
             let Some(name) = path
                 .file_stem()
@@ -134,6 +144,12 @@ impl Catalog {
         self.definitions.keys().map(String::as_str)
     }
 
+    /// How many definition files the catalogue's own bound left unloaded.
+    #[must_use]
+    pub fn omitted(&self) -> usize {
+        self.omitted
+    }
+
     pub fn resolve(&self, name: &str) -> Result<&Definition, String> {
         if !valid_name(name) {
             return Err(
@@ -144,7 +160,16 @@ impl Catalog {
         self.definitions
             .get(name)
             .ok_or_else(|| {
-                format!("unknown agent profile {name}; define .pane/agents/{name}.toml")
+                let mut message =
+                    format!("unknown agent profile {name}; define .pane/agents/{name}.toml");
+                if self.omitted > 0 {
+                    message.push_str(&format!(
+                        " ({} further definition file(s) in .pane/agents were not loaded: this \
+                         catalogue holds at most {MAX_AGENTS})",
+                        self.omitted
+                    ));
+                }
+                message
             })?
             .as_ref()
             .map_err(Clone::clone)
