@@ -161,4 +161,28 @@ Five scripted `pane session --output-format json` runs against the scratch Pytho
 
 ## Line 2646 — off / shadow / on measured
 
-**State: OPEN** — the orchestrator's, last: `pane ruler run` over one request set × three modes.
+**State: COMPLETE** (2026-09-17 01:22–03:10, the orchestrator; producer `GH-PANE-RULER-DECISIONS` 6998b78b; record `ruler/2026-09-17-decisions-3/attempts.jsonl`; the run's stdout in `ruler/2026-09-17-decisions-3.log`).
+
+**Setup.** `pane ruler run --task L2 --task L4 --harness pane --pane-decisions off,shadow,on --decisions-model jev-latest --repeat 3` on the release build of 91a7eee7 (every Phase 69 package up to the drift question; the mode proposal and the wired helpers landed after the run started), parent and helpers `claude-sonnet-4-6` over the user's Max subscription, Jev through the embedded gateway, a run-time global config granting `cargo test/build/check/fmt/clippy` and read-only shell patterns, `helpers.preflight = true`. Two earlier runs were invalid (the run script's exit trap deleted the config after a restart; every attempt failed at startup) and were discarded.
+
+**Task outcomes** (the ruler's own test command on the harness's tree):
+
+| task | off | shadow | on |
+|---|---|---|---|
+| L2 (a test pins that a referenced file cannot be stored) | 2/3 | 1/3 | 1/3 |
+| L4 (the `1836` line prints after `served:`) | 3/3 | 3/3 | 2/3 |
+
+**Decisions table** (the ruler's, from each attempt's telemetry; `verified` = completion claims the checker verified of those measured; `findings` Σ; `checker spared` = `checker_skipped == true`; `overrides` is the false-hold proxy):
+
+| task | arm | verified | findings | checker spared | holds | overrides | would_hold | failed | tokens (parent) | wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L2 | off | 1/3 | 2 | 0 | 0 | 0 | 0 | 0 | 1,003,658 | 3m35s |
+| L2 | shadow | 2/3 | 1 | 0 | 0 | 0 | 0 | 0 | 1,739,764 | 5m46s |
+| L2 | on | 2/3 | 1 | 0 | 0 | 0 | 0 | 0 | 1,533,780 | 4m30s |
+| L4 | off | 1/2 | 1 | 0 | 0 | 0 | 0 | 0 | 1,507,262 | 4m39s |
+| L4 | shadow | 2/3 | 1 | 0 | 0 | 0 | 0 | 0 | 1,122,426 | 4m17s |
+| L4 | on | 0/3 | 3 | 0 | 0 | 0 | 0 | 0 | 1,600,193 | 5m37s |
+
+**Reading.** With three attempts per arm on two tasks, no effect of `on` over `off` is distinguishable from the sample's own noise: task outcomes move in both directions (L2 on 1/3 vs off 2/3; L4 shadow 3/3 vs off 3/3), the checker was never spared (a spare needs a confident yes, no findings and every judge item decided in the same call — never all true here), no intent hold fired and none would have (`would_hold` 0 in shadow: these tasks' intents are `modify`/`run`), and the decision requests never failed (`failed` 0 across 18 attempts; latencies 570–690 ms in the logs). Tokens and wall are dominated by the task, not the decisions (L2 on cost 53% more parent tokens than off, L4 shadow 26% less — noise, not a signal). **Consequence, per the non-negotiable: no threshold becomes a default from this run.** `mode` stays unset by default; `hold_above` 0.85, the completion pair 0.10/0.90, the hygiene and judge pairs, `drift_no_below` 0.10, `mode_above` 0.85 and the helper floors 0.10 remain the packages' defaults, not calibrations.
+
+**Limits.** Two tasks, both `modify`-shaped, so the mode proposal (2639) and the intent hold never engaged; the drift question is not in this table (the reader predates it — the live probe under *Live probes* saw one hold); L2's statement is terse and its outcome noisy in every arm; the measurement ran beside four workers' cargo builds on the same machine, which inflates every wall figure equally. A larger set (the standard tier, or the Terminal-Bench tasks the interface ablation used) with a `read_only` share is the next campaign, and it is the user's to schedule: it costs about two hours of the Max subscription per twelve attempts.

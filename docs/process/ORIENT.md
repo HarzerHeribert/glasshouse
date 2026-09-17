@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1379 closed · 95 active committed open (94%)** — across 20 phases.
+**1380 closed · 94 active committed open (94%)** — across 20 phases.
 
 boundary 100 closed · 0 open
 gateway 391 closed · 11 open
 glasshouse 757 closed · 46 open
-pane 49 closed · 38 open
+pane 50 closed · 37 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -56,7 +56,7 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 69 | Pane: request modes and the decision model's helpers | **2** | 8 | `2632` |
+| Phase 69 | Pane: request modes and the decision model's helpers | **1** | 9 | `2632` |
 | Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **3** | 0 | `2618` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
@@ -110,15 +110,14 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
+### Phase 69 — Pane: request modes and the decision model's helpers  (1 open, 9 closed)
+
+- **2640** ☐ Gate remote commands in `explore`: every `ssh` and `scp` cell is parsed, mutating verbs, redirections and remote scripts are refused statically, the rest is judged by the decision model ("this remote command only reads") above a threshold or refused with the reason, and every remote command is logged in the rollout.
+
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
-
-### Phase 69 — Pane: request modes and the decision model's helpers  (2 open, 8 closed)
-
-- **2640** ☐ Gate remote commands in `explore`: every `ssh` and `scp` cell is parsed, mutating verbs, redirections and remote scripts are refused statically, the rest is judged by the decision model ("this remote command only reads") above a threshold or refused with the reason, and every remote command is logged in the rollout.
-- **2646** ☐ Measure the decision model's effect: one request set run with decisions off, shadow and on, compared on checker findings, verified claims, spared checker runs, holds and false holds, tokens and time — recorded before any threshold becomes a default.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
