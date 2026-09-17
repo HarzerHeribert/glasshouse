@@ -2158,8 +2158,10 @@ impl DispatchReservationCache {
 }
 
 pub mod context_limits;
+pub mod turn_costs;
 
 pub use context_limits::{ContextLimitCache, ObservedWindow};
+pub use turn_costs::{TurnCost, TurnCostLedger};
 
 #[cfg(test)]
 mod dispatch_reservation_cache_tests;

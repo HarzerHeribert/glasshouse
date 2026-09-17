@@ -449,6 +449,18 @@ credential = {{ env = "GATEWAY_BOUNDARY_429_KEY" }}
 /// `.sqlite`/`.db` file. Whatever the directory *does* hold is listed in the
 /// assertion, so a new file this test has not been taught about fails loud
 /// rather than being silently allowed.
+///
+/// **It fired on 2026-09-17, exactly as designed, and the expectation that
+/// changed is named here rather than loosened.** Until then the directory held
+/// *nothing*: `serve` installed `null_sink()`, so the input, output and cached
+/// token counts `gateway::usage` reads out of every response were computed and
+/// dropped, and `routing-cost --json` — the one command a client asks — had
+/// nothing to print. A standalone gateway now keeps those counts in
+/// `gateway-turn-costs/<provider>.json`, the same small per-provider JSON cache
+/// the quota and context-limit caches already are, written by the **binary**
+/// through the sink the library reports to. What has not changed, and is what
+/// this test is really for, is below: no database, no session store, and the
+/// gateway library itself still keeps nothing and still cannot reach a store.
 #[test]
 fn standalone_serving_writes_no_ledger() {
     let provider = FakeProvider::start();
@@ -516,16 +528,49 @@ credential = {{ env = "GATEWAY_BOUNDARY_LEDGER_KEY" }}
         }
     }
 
-    // No health cache or anything else materialised in this scenario —
-    // verified against the shipped binary before writing this assertion
-    // (see this package's report): a standalone gateway backed by
-    // provider-key accounts writes nothing at all to its data directory, not
-    // even a cache, so there is no name to allow. If a future build starts
-    // writing one, this fails loud with its name rather than silently
-    // accepting it.
+    // Exactly one kind of file is expected here, and it is named rather than
+    // pattern-allowed: the turn-cost cache this gateway keeps so a client can
+    // learn what its own turns cost. Anything else — a health cache, a session
+    // file, a store nobody meant to add — still fails loud with its name.
+    let unexpected: Vec<_> = entries
+        .iter()
+        .filter(|path| {
+            !path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "gateway-turn-costs")
+        })
+        .collect();
     assert!(
-        entries.is_empty(),
-        "the data directory is expected to hold nothing after standalone serving; found: {entries:?}"
+        unexpected.is_empty(),
+        "only the turn-cost cache is expected after standalone serving; found: {unexpected:?}"
+    );
+    // The rows are the point: a client asking `routing-cost` must find what
+    // the turns it just paid for cost.
+    assert_eq!(
+        entries.len(),
+        1,
+        "one provider served, so one provider file: {entries:?}"
+    );
+    let kept = std::fs::read_to_string(&entries[0]).expect("the turn-cost cache reads");
+    // Two rows for three exchanges, and the missing one is the **first**.
+    // `gateway::mod`'s accept loop snapshots `routing.assignment()` *before*
+    // forwarding — deliberately, so a bind landing mid-flight is not
+    // attributed to the exchange in flight — and the first request of a
+    // session is the one that binds it, so its snapshot is `None` and
+    // `record_routing_observation` returns without producing an observation.
+    // Recorded here rather than worked around: it is the producer's
+    // behaviour, it predates this cache, and a client reading the *newest*
+    // row is unaffected by the oldest one being absent.
+    assert_eq!(
+        kept.matches("\"observed_at_unix\"").count(),
+        2,
+        "every exchange after the one that bound the assignment: {kept}"
+    );
+    assert!(
+        kept.contains("\"input_tokens\": 1"),
+        "the provider's own counts reached the cache: {kept}"
     );
     let forbidden: Vec<_> = entries
         .iter()

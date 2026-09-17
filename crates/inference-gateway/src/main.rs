@@ -41,6 +41,7 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -49,7 +50,7 @@ use serde::Serialize;
 use inference_gateway::config::{self, GatewayConfig};
 use inference_gateway::entitlement::{EntitlementKind, EntitlementVendor};
 use inference_gateway::gateway::subscription_broker::RunningSubscriptionBroker;
-use inference_gateway::gateway::{self, BackendDemand, null_sink};
+use inference_gateway::gateway::{self, BackendDemand};
 use inference_gateway::pool::{self, Pool};
 use inference_gateway::provider::cache::{
     ModelCache, ModelCatalogue, ModelEntry, now_unix_seconds,
@@ -319,14 +320,15 @@ fn run() -> Result<()> {
                 ),
             }
         }
-        // Reads no configuration and needs no data directory: it answers
-        // from a ledger, and this process has none.
+        // Reads no configuration: it answers from what a serving process of
+        // this same installation wrote down, which is the data directory and
+        // nothing else.
         Command::RoutingCost {
             hours,
             json,
             since,
             session,
-        } => routing_cost(*hours, *json, *since, session.as_deref()),
+        } => routing_cost(&data_dir(&cli)?, *hours, *json, *since, session.as_deref()),
     }
 }
 
@@ -426,10 +428,11 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
                 // prior.
                 Some(inference_gateway::provider::telemetry::GatewayQuotaCache::new(data_dir)),
                 None,
-                // Nobody is listening, said out loud. A hosted gateway
-                // installs an emitter here; this one has no host and drops
-                // what it observes.
-                Some(null_sink()),
+                // This binary is the host of last resort. A gateway with a
+                // real host emits to it; this one keeps what a turn cost, so
+                // `routing-cost --json` can answer the one question a client
+                // asks it -- see `turn_cost_sink`.
+                Some(turn_cost_sink(data_dir)),
                 None,
             )?
             .context("a gateway was required and none was started")?
@@ -454,7 +457,7 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
                         })
                         .map_err(|refusal| refusal.to_string())
                 },
-                Some(null_sink()),
+                Some(turn_cost_sink(data_dir)),
             )?
         }
     };
@@ -924,42 +927,148 @@ fn connect(
     fail!(reason)
 }
 
-/// `routing-cost --json --since <unix>` — and the standalone reading of it.
+/// The observation sink a gateway with no other host installs.
 ///
-/// **A standalone gateway keeps no ledger, so there are no rows and this
-/// prints none.** That is not a stub: a host's `--json` is JSON Lines with
-/// no wrapper and no summary, and its own empty-window case returns the
-/// empty string and exits `0`. An empty window and an absent ledger produce
-/// the same well-formed output, so a caller parsing line by line needs no
-/// special case for either.
+/// **What crosses the sink is already everything a cost reader needs** —
+/// `gateway::session` builds a `NewObservation` carrying the provider, the
+/// model, the protocol, the credential label, the purpose, and the provider's
+/// own input, output and cached token counts, from figures `gateway::usage`
+/// read out of bytes the relay was forwarding anyway. Until now the standalone
+/// binary passed `null_sink()` and every one of those figures was computed and
+/// dropped, which is why `routing-cost` had nothing to print and why Pane's
+/// `ServedBy` was always unknown.
 ///
-/// It is not reachable another way, either. What this process measures lives
-/// in `gateway::usage`, which is private to the library and, more to the
-/// point, lives in the memory of a **running `serve`** — a separate process
-/// from this invocation, with no channel between them. Reaching it would
-/// mean the gateway had grown a store or an IPC surface, and the first is
-/// what the extraction removed.
-fn routing_cost(hours: u32, json: bool, since: Option<i64>, session: Option<&str>) -> Result<()> {
-    let window = match since {
-        Some(since) => format!("since the Unix second {since}"),
-        None => format!("over the last {hours} hour(s)"),
-    };
-    let filter = match session {
-        Some(session) => format!(" for the session `{session}`"),
-        None => String::new(),
-    };
-    eprintln!(
-        "routing-cost: this gateway keeps no routing ledger, so it has no rows {window}{filter}. \
-         A host that installs an observation sink records them on its own side of the process \
-         boundary"
-    );
-    if !json {
+/// **The library still keeps nothing.** This closure is the binary's, on the
+/// host's side of the sink exactly as the type's own doc requires; the gateway
+/// module neither knows a store exists nor gains a way to reach one. What it
+/// writes is the same small per-provider JSON cache the quota and
+/// context-limit caches already are, and it is installed beside them so that a
+/// gateway told to keep no telemetry keeps no rows either.
+///
+/// A degrade observation is not a served turn and is dropped here, which is
+/// the whole of this sink's filtering.
+fn turn_cost_sink(data_dir: &Path) -> gateway::ObservationSink {
+    let ledger = inference_gateway::provider::telemetry::TurnCostLedger::new(data_dir);
+    Arc::new(move |observation| {
+        let gateway::Observation::Routed {
+            observation,
+            observed_at_unix,
+        } = observation
+        else {
+            return;
+        };
+        let provider = observation.provider.clone();
+        // Absent is never zero: a count this gateway could not read stays
+        // unstated all the way to the reader, the same rule the observation
+        // itself follows.
+        let count = |value: Option<i64>| value.and_then(|value| u64::try_from(value).ok());
+        ledger.append(
+            &provider,
+            inference_gateway::provider::telemetry::TurnCost {
+                observed_at_unix,
+                model: observation.model.clone(),
+                route: observation.route.clone(),
+                quota_context: observation.quota_context.clone(),
+                purpose: observation.purpose.clone(),
+                input_tokens: count(observation.input_tokens),
+                output_tokens: count(observation.output_tokens),
+                cached_input_tokens: count(observation.cached_input_tokens),
+            },
+        );
+    })
+}
+
+/// `routing-cost --json --since <unix>` — the standalone reading of what
+/// [`turn_cost_sink`] kept.
+///
+/// **`--json` is JSON Lines with no wrapper and no summary**, ascending by the
+/// second each exchange completed, because the client takes the *last* row in
+/// the window as the one closest to the request it is answering for. An empty
+/// window prints nothing and exits `0`, so a caller parsing line by line needs
+/// no special case for it — and a gateway that never served anything, or was
+/// run without telemetry, is exactly that empty window rather than an error.
+///
+/// `--session` filters nothing here: a standalone gateway is told no session
+/// id, so every row it keeps has none, and a filter on one would print an
+/// empty window while implying the rows had been examined.
+fn routing_cost(
+    data_dir: &Path,
+    hours: u32,
+    json: bool,
+    since: Option<i64>,
+    session: Option<&str>,
+) -> Result<()> {
+    let ledger = inference_gateway::provider::telemetry::TurnCostLedger::new(data_dir);
+    let since = since.unwrap_or_else(|| {
+        let window = i64::from(hours) * 3_600;
+        inference_gateway::provider::cache::now_unix_seconds().saturating_sub(window)
+    });
+    let rows = ledger.since(since);
+    if let Some(session) = session {
+        eprintln!(
+            "routing-cost: this gateway records no session id, so `{session}` selects nothing; \
+             printing every row in the window"
+        );
+    }
+    let mut stdout = std::io::stdout();
+    if json {
+        for (provider, row) in &rows {
+            writeln!(stdout, "{}", cost_row_json(provider, row))?;
+        }
+        return Ok(());
+    }
+    if rows.is_empty() {
         writeln!(
-            std::io::stdout(),
-            "no routing observations: this gateway keeps no ledger"
+            stdout,
+            "no routing observations in this window: nothing has been served through this gateway \
+             since the Unix second {since}"
+        )?;
+        return Ok(());
+    }
+    for (provider, row) in &rows {
+        let counts = match (row.input_tokens, row.output_tokens) {
+            (Some(input), Some(output)) => match row.cached_input_tokens {
+                Some(cached) => format!("{input} in ({cached} cached), {output} out"),
+                None => format!("{input} in, {output} out"),
+            },
+            // Unknown, never zero — the provider stated no usage, or its
+            // protocol has no spelling this gateway reads.
+            _ => "usage unstated".to_string(),
+        };
+        writeln!(
+            stdout,
+            "{observed}  {provider}  {model}  {counts}",
+            observed = row.observed_at_unix,
+            model = row.model
         )?;
     }
     Ok(())
+}
+
+/// One row as a client reads it — **the wire shape, and it is a contract**.
+///
+/// Pane's `gateway::served_by` parses these keys by name and ignores the rest,
+/// so a key renamed here is a figure silently lost there rather than an error
+/// anywhere. `cached_input_tokens` is the one that matters most: it is absent
+/// from every other path back to a client on an OpenAI-family route, whose
+/// body spells it `cached_tokens`.
+///
+/// A count the provider never stated stays `null` — absent, never zero.
+fn cost_row_json(
+    provider: &str,
+    row: &inference_gateway::provider::telemetry::TurnCost,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "model": row.model,
+        "route": row.route,
+        "quota_context": row.quota_context,
+        "purpose": row.purpose,
+        "observed_at": row.observed_at_unix,
+        "input_tokens": row.input_tokens,
+        "output_tokens": row.output_tokens,
+        "cached_input_tokens": row.cached_input_tokens,
+    })
 }
 
 /// The vendor login flow an account's `kind`/`vendor` selects, or `None` for
@@ -1375,6 +1484,109 @@ fn credential_present(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a served turn costs reaches disk, including the figure two
+    /// dogfooding sessions could never see.
+    ///
+    /// The sink is where the fix lives: every count below was already computed
+    /// by `gateway::usage` and folded into the observation by
+    /// `gateway::session`, and `null_sink()` dropped all of it.
+    #[test]
+    fn a_served_turn_is_kept_with_the_cached_figure_the_provider_stated() {
+        use inference_gateway::routing::evidence::NewObservation;
+
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let sink = turn_cost_sink(dir.path());
+        sink(gateway::Observation::Routed {
+            observation: Box::new(
+                NewObservation::new("chatgpt-subscription".to_owned(), "gpt-5.6-sol".to_owned())
+                    .with_route(Some("openai-responses"))
+                    .with_quota_context(Some("chatgpt-subscription"))
+                    .with_purpose(Some("harness-turn"))
+                    .with_tokens(Some(52_000), Some(900), Some(48_000)),
+            ),
+            observed_at_unix: 1_789_000_000,
+        });
+
+        let rows = inference_gateway::provider::telemetry::TurnCostLedger::new(dir.path())
+            .since(1_789_000_000);
+        assert_eq!(rows.len(), 1, "the sink kept the turn");
+        let (provider, row) = &rows[0];
+        assert_eq!(provider, "chatgpt-subscription");
+        assert_eq!(row.model, "gpt-5.6-sol");
+        assert_eq!(row.input_tokens, Some(52_000));
+        assert_eq!(row.output_tokens, Some(900));
+        assert_eq!(
+            row.cached_input_tokens,
+            Some(48_000),
+            "the cached figure is the one this whole path exists to carry"
+        );
+    }
+
+    /// The JSON Lines shape Pane parses, asserted key by key.
+    ///
+    /// `pane::gateway::served_by` reads these names off each line and ignores
+    /// everything else, so this test is the only thing standing between a
+    /// rename here and a figure that quietly stops arriving there.
+    #[test]
+    fn a_cost_row_carries_every_key_the_client_reads() {
+        let row = inference_gateway::provider::telemetry::TurnCost {
+            observed_at_unix: 1_789_000_000,
+            model: "gpt-5.6-sol".to_owned(),
+            route: Some("openai-responses".to_owned()),
+            quota_context: Some("chatgpt-subscription".to_owned()),
+            purpose: Some("harness-turn".to_owned()),
+            input_tokens: Some(52_000),
+            output_tokens: Some(900),
+            cached_input_tokens: Some(48_000),
+        };
+        let line = cost_row_json("chatgpt-subscription", &row);
+        assert_eq!(line["provider"], "chatgpt-subscription");
+        assert_eq!(line["model"], "gpt-5.6-sol");
+        assert_eq!(line["route"], "openai-responses");
+        assert_eq!(line["quota_context"], "chatgpt-subscription");
+        assert_eq!(line["input_tokens"], 52_000);
+        assert_eq!(line["output_tokens"], 900);
+        assert_eq!(
+            line["cached_input_tokens"], 48_000,
+            "the cached figure is why this ledger exists; a client that stops seeing it \
+             falls back to a body that does not spell it"
+        );
+    }
+
+    /// An unstated count reaches the client as `null`, never as a zero.
+    #[test]
+    fn an_unstated_count_is_null_on_the_wire() {
+        let row = inference_gateway::provider::telemetry::TurnCost {
+            observed_at_unix: 1_789_000_000,
+            model: "kimi-k3".to_owned(),
+            route: None,
+            quota_context: None,
+            purpose: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+        };
+        let line = cost_row_json("groq", &row);
+        assert!(line["input_tokens"].is_null());
+        assert!(line["cached_input_tokens"].is_null());
+    }
+
+    /// A degrade is not a served turn, and the ledger is not a log.
+    #[test]
+    fn an_observation_that_is_not_a_served_turn_keeps_nothing() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let sink = turn_cost_sink(dir.path());
+        sink(gateway::Observation::Degraded {
+            resource: "local-gateway".to_owned(),
+            reason: inference_gateway::gateway::DegradeReason::Unreachable,
+        });
+        assert!(
+            inference_gateway::provider::telemetry::TurnCostLedger::new(dir.path())
+                .since(0)
+                .is_empty()
+        );
+    }
 
     /// The ready line's shape, which is the whole interprocess contract:
     /// two keys, in this order, and the address is a loopback URL.

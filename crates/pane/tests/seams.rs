@@ -162,6 +162,38 @@ fn the_entitlement_comes_from_quota_context() {
     assert!(served.is_known());
 }
 
+/// The line a real `inference-gateway routing-cost --json` prints, parsed by
+/// the real reader — **copied verbatim from that binary's output**, keys in
+/// its own order, on 2026-09-17.
+///
+/// The two halves of this seam live in different crates and neither can
+/// reference the other's binary, so the thing that keeps them agreeing is this
+/// string. It matters because of what it carries: until the gateway kept these
+/// rows, `served_by` was always unknown and Pane fell back to reading the
+/// response body, where only the Anthropic spelling of the cached figure is
+/// understood — so a whole session on an OpenAI-family route reported
+/// `cache_read: 0` while saying nothing at all about caching.
+#[test]
+fn the_cached_figure_survives_the_trip_from_the_gateways_own_output() {
+    let dir = scratch_dir("served-by-cached");
+    let script = write_glasshouse_script(
+        &dir,
+        r#"{"cached_input_tokens":48000,"input_tokens":52000,"model":"gpt-5.6-sol","observed_at":1789000000,"output_tokens":900,"provider":"chatgpt-subscription","purpose":"harness-turn","quota_context":"chatgpt-subscription","route":"openai-responses"}"#,
+    );
+
+    let served = served_by(&Gateway::Command { gateway: script }, UNIX_EPOCH);
+
+    assert!(served.is_known());
+    assert_eq!(served.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(served.route.as_deref(), Some("openai-responses"));
+    assert_eq!(served.input_tokens, Some(52_000));
+    assert_eq!(
+        served.cached_input_tokens,
+        Some(48_000),
+        "the figure this whole path exists to carry"
+    );
+}
+
 #[test]
 fn local_firewall_bookkeeping_does_not_become_the_serving_model() {
     let dir = scratch_dir("ignore-firewall");
