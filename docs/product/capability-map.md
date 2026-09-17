@@ -2656,3 +2656,13 @@ network the user configured, each with its own permission and its own line in th
 ☐ Offer `fetch` as a host-run tool through the web broker: an HTTP GET to a domain the user allowed, a bounded body as a handle with a preview, every request recorded; refused until a domain is allowed.
 ☐ Offer `search` as a host-run tool: a search provider the user configured (endpoint and key in the gateway's store, never in argv or the rollout), results as bounded excerpts with their sources, every query recorded; refused until configured.
 ☐ Register a network tool only when its configuration exists, tell the model exactly which are available and to which hosts or domains, and keep `no_registered_tool_needs_the_network` true for every unconfigured session.
+
+Phase 71 — Pane: line-tagged edits (Phase 65's successor)
+
+The user's ruling of 2026-09-17 on oh-my-pi's hashline result: the one measured win in that
+harness worth copying, and only on a measured win in Pane's own ruler. Pane's `edit` already binds
+to the exact file version the model saw; the tags add the addressing half, so a cheap model stops
+retyping the text it replaces.
+
+☐ Tag every line `context` and `read` return with a short content hash, and let `edit` address lines by tag — replace, insert after, delete — checked against the current line's hash and the file version, refusing a stale tag by naming the current one; the `old`/`replacement` form stays.
+☐ Measure the tags before they become the model's default: one ruler set on a cheap model with tagged edits off and on, compared on output tokens per completed task, edit refusals and outcomes; no default changes without a win.

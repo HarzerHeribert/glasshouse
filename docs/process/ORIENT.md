@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1381 closed · 98 active committed open (93%)** — across 21 phases.
+**1381 closed · 100 active committed open (93%)** — across 22 phases.
 
 boundary 100 closed · 0 open
 gateway 391 closed · 11 open
 glasshouse 757 closed · 46 open
-pane 51 closed · 41 open
+pane 51 closed · 43 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -57,6 +57,7 @@ closures are usually at the top. Open the map at the line number given.
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 69 | Pane: request modes and the decision model's helpers | **1** | 9 | `2632` |
+| Phase 71 | Pane: line-tagged edits (Phase 65's successor) | **2** | 0 | `2660` |
 | Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **3** | 0 | `2618` |
 | Phase 70 | Pane: the network the user configures, and the Windows console | **4** | 1 | `2648` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
@@ -119,6 +120,11 @@ these unwrapped.
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
+
+### Phase 71 — Pane: line-tagged edits (Phase 65's successor)  (2 open, 0 closed)
+
+- **2667** ☐ Tag every line `context` and `read` return with a short content hash, and let `edit` address lines by tag — replace, insert after, delete — checked against the current line's hash and the file version, refusing a stale tag by naming the current one; the `old`/`replacement` form stays.
+- **2668** ☐ Measure the tags before they become the model's default: one ruler set on a cheap model with tagged edits off and on, compared on output tokens per completed task, edit refusals and outcomes; no default changes without a win.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
