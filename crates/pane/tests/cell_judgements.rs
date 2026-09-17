@@ -242,13 +242,18 @@ fn a_session_with_no_decision_model_binds_nothing_and_is_told_of_nothing() {
         "an unset `[decisions] model` binds no `decide`"
     );
 
+    // And it is told of nothing, which is the other half of this test's name:
+    // the Runtime block is rendered through the same predicate the binding
+    // answers to, so a session without a decision model sees no `decide`.
+    // (Until `Reach` carried `decisions`, this assertion read the other way
+    // and pinned the gap rather than the intent.)
     let block = pane::prompt::render_runtime_reaching(
         pane::runtime::bindings::HostGlobals::Every,
         pane::prompt::Reach::webbed(None),
     );
     assert!(
-        block.contains("declare const decide:"),
-        "the declaration table carries `decide`"
+        !block.contains("declare const decide:"),
+        "an unconfigured session was told about `decide`: {block}"
     );
 }
 

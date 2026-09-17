@@ -30,6 +30,15 @@ pub struct Limits {
     /// (`smarter-cheaper-roadmap.md`, *Evidence-gated completion*). On by
     /// default; off is an ablation switch, not a product mode.
     pub evidence_gate: bool,
+    /// The share of a **known** context window at which the conversation is
+    /// swept once, as a percentage (the user, 2026-09-17: *"should be done in
+    /// one deliberate sweep … because after that you pay less again per
+    /// call"*).
+    ///
+    /// Not a ceiling and never ends anything: over it, older cell results
+    /// lose the sections the newest one restates in full. An unknown window
+    /// sweeps nothing, because there is no fraction to be over.
+    pub compact_above_percent: u64,
 }
 
 impl Default for Limits {
@@ -40,6 +49,12 @@ impl Default for Limits {
             // No ceiling unless this person asks for one.
             cells: None,
             evidence_gate: true,
+            // High on purpose. The user, 2026-09-17: "Compression at 252k
+            // can be worth it but you pay with one call. 252k is not that
+            // much by today's model though. I start compression at around
+            // 800k in Claude code." A fraction carries that across models:
+            // 85% of a 922k window is 784k, and 85% of a small one is small.
+            compact_above_percent: 85,
         }
     }
 }
@@ -452,6 +467,13 @@ const CELLS: Range = Range {
     min: 1,
     max: 1000,
 };
+/// Below half a window a sweep removes little and rebuilds the cached prefix
+/// for it; at 100 there is no room left to sweep into.
+const COMPACT_ABOVE_PERCENT: Range = Range {
+    key: "compact_above_percent",
+    min: 50,
+    max: 99,
+};
 const CALLS_PER_CELL: Range = Range {
     key: "calls_per_cell",
     min: 1,
@@ -781,6 +803,7 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             "task_tokens",
             "cells",
             "evidence_gate",
+            "compact_above_percent",
         ]
         .contains(&key.as_str())
         {
@@ -807,6 +830,10 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
     {
         return Err("pane.toml: `task_tokens` must be an integer".into());
     }
+    let compact_above_percent = match int_field(table, "compact_above_percent")? {
+        Some(v) => u64::try_from(COMPACT_ABOVE_PERCENT.check(v)?).expect("range is non-negative"),
+        None => defaults.compact_above_percent,
+    };
     let cells = match int_field(table, "cells")? {
         // Zero is the explicit "no ceiling", as `[agents] deadline_minutes`
         // spells the same intent; absent leaves the default, which is none.
@@ -820,6 +847,7 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         response_bytes,
         cells,
         evidence_gate,
+        compact_above_percent,
     })
 }
 

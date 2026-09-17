@@ -15,6 +15,7 @@ use super::*;
 pub(super) fn build_system_prompt(
     web: &crate::web::WebConfig,
     agents: &crate::config::AgentsConfig,
+    decisions: &crate::config::DecisionsConfig,
     served: &[crate::models::RosterModel],
     profile: &Profile,
     interface: crate::abi::Interface,
@@ -41,6 +42,9 @@ pub(super) fn build_system_prompt(
         prompt::Reach {
             web: web.as_ref(),
             agents: Some(&agents),
+            // The same predicate the runtime binds `decide` on, so an
+            // unconfigured session is told of no global it does not have.
+            decisions: decisions.model.is_some(),
         },
     );
     if profile.os_sandbox_bypassed() {
@@ -58,6 +62,7 @@ pub(super) fn system_prompt_for(session: &Session<'_>) -> String {
     build_system_prompt(
         &session.config().web,
         &session.config().agents,
+        &session.config().decisions,
         &session.roster,
         session.profile,
         session.interface.get(),

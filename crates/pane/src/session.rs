@@ -36,7 +36,9 @@ use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
 use crate::sandbox::modes::{self, ModeOverlay, RequestMode};
 use crate::sandbox::profile::Profile;
-use crate::session::context::{context_cap, estimate_context, record_request};
+use crate::session::context::{
+    context_cap, estimate_context, record_request, send_task_turn_recovering, sweep_if_due,
+};
 use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
@@ -458,7 +460,7 @@ pub struct SessionArgs {
 
     /// This session's id: the value every `glasshouse hook --session`
     /// invocation carries, and the name `--resume` takes. Defaults to a
-    /// generated one -- [`resume`] is why it is no longer the process id.
+    /// generated one -- `--resume` is why it is no longer the process id.
     #[arg(long)]
     pub session: Option<String>,
 
@@ -785,6 +787,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                 system: build_system_prompt(
                     &config.borrow().web,
                     &config.borrow().agents,
+                    &config.borrow().decisions,
                     &roster,
                     &profile,
                     args.interface.unwrap_or_default(),
@@ -1368,6 +1371,13 @@ fn run_task_inner(
     let mut verdicts = 0u32;
     let mut verdict_criterion: Option<String> = None;
     let mut turns_without_a_program = 0u32;
+    // The deliberate sweep's two pieces of memory: where the conversation
+    // stood when it was last swept, so a session that sits above the
+    // fraction does not rewrite the provider's cached prefix every turn; and
+    // whether the last cell threw, which is the deterministic reading of
+    // whether this is a settled moment to take one.
+    let mut swept_at_messages: Option<usize> = None;
+    let mut last_cell_threw = false;
     let supervisor = Supervisor::new();
     let supervisor_active = crate::supervisor::active(&session.config());
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
@@ -1389,6 +1399,19 @@ fn run_task_inner(
             estimate_task_request_tokens(&transcript.conversation, &requested_model, task);
         let (cap, cap_source) = context_cap(session, &requested_model);
         estimate_context(&mut transcript.notebook, estimate, cap, cap_source);
+        // One deliberate sweep near the top of a known window, never a
+        // trickle and never mid-repair (the user, 2026-09-17).
+        if let Some(notice) = sweep_if_due(
+            &mut transcript.conversation,
+            estimate,
+            cap,
+            cap_source,
+            session.config().limits.compact_above_percent,
+            last_cell_threw,
+            &mut swept_at_messages,
+        ) {
+            session_println!("{notice}");
+        }
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
@@ -1627,6 +1650,7 @@ fn run_task_inner(
             if delivered_the_interrupt(&record) || helper_delivered_interrupt {
                 session.interrupt.consumed();
             }
+            last_cell_threw = record.outcome == crate::runtime::outcome::CellOutcomeKind::Threw;
             cells_since_look.push(record);
         } else if helper_delivered_interrupt {
             session.interrupt.consumed();
@@ -2271,7 +2295,7 @@ fn act_on(
         output: None,
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
-        budget: budget.line(),
+        budget: budget.line(&session.model.borrow()),
         plan: turn.plan.clone(),
     };
 
@@ -2477,68 +2501,6 @@ fn cell_error_text(outcome: &CellOutcome) -> String {
 fn unchanged_table(table: &str) -> String {
     let shown = if table.is_empty() { "(none)" } else { table };
     format!("## Handles\n{shown}\n\n{NO_PROGRAM}")
-}
-
-/// Normal requests already project superseded state out of history. If that
-/// request still overflows, checkpoint once while keeping the runtime alive.
-/// Do not mutate old feedback or retry an identical projected request. Other
-/// errors propagate without compaction or retry.
-fn send_task_turn_recovering(
-    transcript: &mut Transcript,
-    session: &Session<'_>,
-    runtime: &Runtime,
-    task: &str,
-    rollout: &mut Rollout,
-    cause: crate::abi::telemetry::RequestCause,
-) -> Result<(wire::Turn, u64), String> {
-    let provider_view = |transcript: &Transcript| {
-        if let Some(checkpoint) = &transcript.provider_checkpoint {
-            let mut checkpoint_message = Message::text(Role::User, checkpoint);
-            if let Some((index, message)) = transcript.conversation.messages.iter().enumerate().rev().find(|(_, message)| {
-                message.role == Role::User && matches!(message.content.first(), Some(Block::Text(text)) if text == task)
-            }) && index < transcript.provider_start {
-                checkpoint_message.content.extend(message.content.iter().filter(|block| matches!(block, Block::Image { .. })).cloned());
-            }
-            let mut messages = vec![checkpoint_message];
-            messages
-                .extend_from_slice(&transcript.conversation.messages[transcript.provider_start..]);
-            Conversation {
-                system: transcript.conversation.system.clone(),
-                messages,
-            }
-        } else {
-            transcript.conversation.clone()
-        }
-    };
-    let first_request = provider_view(transcript);
-    let first = match timed_send_task_turn(&first_request, session, task, cause) {
-        Ok(turn) => return Ok(turn),
-        Err(error) if error.is_context_overflow() => error,
-        Err(error) => return Err(format!("request failed: {error}")),
-    };
-
-    let checkpoint = prompt::checkpoint(
-        task,
-        &runtime.plan(),
-        &runtime.handle_names(),
-        Some(&first.to_string()),
-    );
-    transcript.provider_start = transcript.conversation.messages.len();
-    transcript.provider_checkpoint = Some(checkpoint.clone());
-    {
-        let _line = session.interrupt.writing();
-        rollout
-            .record_checkpoint(&checkpoint)
-            .map_err(|e| format!("could not record the checkpoint: {e}"))?;
-    }
-    session_println!(
-        "context: still did not fit, so provider context was replaced by a checkpoint; {} handle(s) \
-         are still live, visible history was preserved, and nothing was re-run",
-        runtime.handle_names().len()
-    );
-    let retry = provider_view(transcript);
-    timed_send_task_turn(&retry, session, task, cause)
-        .map_err(|error| format!("request failed after a checkpoint: {error}"))
 }
 
 // Measure only the successful request, excluding context recovery and UI work.

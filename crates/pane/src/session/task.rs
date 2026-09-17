@@ -182,9 +182,17 @@ impl TaskSpend {
     }
 
     /// §6's own line, for the result block the model reads next.
-    pub(super) fn line(&self) -> Budget {
+    ///
+    /// **The cap named here is the one the request actually carried.** It
+    /// used to be `wire::MAX_TOKENS` whatever the turn asked for, and once
+    /// per-model maxima landed the two parted company: a session on a model
+    /// publishing 128,000 sent 128,000 and told the model it had 8,192, so
+    /// the model would have cut its own work to a sixteenth of the room it
+    /// had. `the_usage_line_names_the_max_tokens_actually_sent` pins the
+    /// agreement rather than either figure.
+    pub(super) fn line(&self, model: &str) -> Budget {
         Budget {
-            turn_cap: u64::from(wire::MAX_TOKENS),
+            turn_cap: u64::from(wire::max_tokens_for(model)),
             task_used: self.used(),
             // Kept in the wire-facing value for API compatibility. The
             // renderer deliberately ignores it: task spend has no cap.

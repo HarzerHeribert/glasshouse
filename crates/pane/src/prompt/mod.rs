@@ -174,6 +174,27 @@ pub fn preamble_for(interface: abi::Interface) -> String {
 
 /// Request-only context; keeps user text and saved conversation unchanged.
 /// A new runtime is created per user request, not per inference turn.
+///
+/// **A request never edits a message an earlier request already sent.** That
+/// is what lets a provider serve the conversation from its prompt cache: the
+/// prefix is the same bytes it was last turn, so only the new tail is paid
+/// for. [`project_runtime_history`] honours it by construction (it changes
+/// only the message that just stopped being the newest), and this function
+/// used to break it: it appended a `[Pane task boundary: this is the current
+/// user request …]` block to the current task's message, so the *previous*
+/// task's message silently lost that block the moment a second task began.
+///
+/// Measured 2026-09-17 by rendering four turns across a task boundary: within
+/// one task the requests shared every message but the frontier (a prefix of 8
+/// of 11), and at the boundary they shared **nothing** — the first divergence
+/// was message 0, so the whole conversation was re-processed uncached. The
+/// block said what [`PREAMBLE`] already says in the cached system block
+/// ("Each new user request starts a fresh runtime. Earlier requests are
+/// history, not unfinished work. Work on the current request"), and after an
+/// overflow [`checkpoint`] names the task under *## The task* as well. A
+/// duplicate that costs the whole cache is not worth its bytes, so it is
+/// gone; `the_request_never_edits_a_message_it_already_sent` pins the
+/// guarantee that replaced it.
 pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
     let mut request = conversation.clone();
     let task_index = request.messages.iter().rposition(|message| {
@@ -191,17 +212,19 @@ pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -
         "\n\nYou are Pane, a coding assistant. Configured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
         serde_json::to_string(model).expect("model name serializes")
     ));
-    if let Some(message) = task_index.and_then(|index| request.messages.get_mut(index)) {
-        message.content.push(Block::Text(
-            "[Pane task boundary: this is the current user request. Its runtime started empty; variables, handles and jobs from earlier completed requests are not live. Bindings created while answering THIS request persist between its cells. A cell error does not reset completed bindings.]".into()
-        ));
-    }
     request
 }
 
 /// Request-only projection of trusted runtime state. Historical stdout,
 /// errors, yield reasons and repair hints were rendered separately from the
 /// snapshots, so text that resembles a section header is never reinterpreted.
+///
+/// **It changes only the message that just stopped being the newest**, and
+/// that is why it is cheap against a prompt cache: every earlier message was
+/// already projected by the previous request and comes back byte for byte.
+/// Measured over six turns, the common prefix between consecutive requests is
+/// every message but the last three — the projected frontier, the new
+/// assistant turn and its result, of which the last two are new text anyway.
 pub fn project_runtime_history(conversation: &mut Conversation, active_from: usize) {
     let latest = conversation
         .messages
@@ -445,13 +468,25 @@ pub struct Reach<'a> {
     /// `None` renders the table's generic `agent` text: no roster is claimed
     /// where the session has not resolved one.
     pub agents: Option<&'a declarations::AgentRoster>,
+    /// Whether `[decisions]` names a model, which is the one predicate
+    /// `decide` is bound on.
+    ///
+    /// **Declared exactly where it is bound.** The runtime installs `decide`
+    /// only for a session whose `[decisions]` names a model, so a session
+    /// without one must not be told the global exists — a promise the model
+    /// would spend a cell discovering is false.
+    pub decisions: bool,
 }
 
 impl<'a> Reach<'a> {
     /// The reach of a session that only configured `[web]`.
     #[must_use]
     pub fn webbed(web: Option<&'a declarations::WebReach>) -> Self {
-        Self { web, agents: None }
+        Self {
+            web,
+            agents: None,
+            decisions: false,
+        }
     }
 }
 
@@ -562,7 +597,9 @@ pub fn render_runtime_for(globals: HostGlobals) -> String {
 pub fn render_runtime_reaching(globals: HostGlobals, reach: Reach<'_>) -> String {
     declarations::RUNTIME
         .iter()
-        .filter(|binding| globals.installs_with(binding.global, reach.web.is_some()))
+        .filter(|binding| {
+            globals.installs_reaching(binding.global, reach.web.is_some(), reach.decisions)
+        })
         .map(|binding| match binding.global {
             "web" => reach.web.map_or_else(
                 || binding.declaration.to_string(),

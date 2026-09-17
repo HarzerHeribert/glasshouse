@@ -1499,6 +1499,7 @@ fn expected_system_block(root: &std::path::Path) -> String {
         pane::prompt::Reach {
             web: None,
             agents: Some(&agents),
+            decisions: false,
         },
     )
 }
@@ -1689,7 +1690,7 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1"),
+        result_block.contains("· task spent 120 · cells 1"),
         "the usage line must carry the gateway's own figures: {result_block}"
     );
 
@@ -2196,11 +2197,27 @@ fn the_usage_line_names_the_max_tokens_actually_sent() {
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
     let sent = request["max_tokens"].as_u64().unwrap();
-    assert_eq!(sent, u64::from(pane::wire::MAX_TOKENS));
-    assert_eq!(sent, 8_192);
-    let result_block = last_user_text(&bodies[1]);
+    // **Not a second constant.** Since per-model limits landed, a turn asks
+    // for what the gateway publishes as this model's own maximum output, so
+    // the figure depends on the shipped index and on which gateway answers —
+    // and `wire::MAX_TOKENS` is only the fallback for a model nothing
+    // publishes one for. What this test owns is the agreement: the usage
+    // line the model reads names the number the request actually carried.
     assert!(
-        result_block.contains("turn output cap 8,192 ·"),
+        sent >= u64::from(pane::wire::MAX_TOKENS),
+        "a published maximum below the fallback would make every turn smaller \
+         than it used to be: {sent}"
+    );
+    let result_block = last_user_text(&bodies[1]);
+    let named = result_block
+        .split("turn output cap ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .map(|figure| figure.replace(',', ""))
+        .and_then(|figure| figure.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("the usage line states a turn output cap: {result_block}"));
+    assert_eq!(
+        named, sent,
         "the usage line names the figure actually sent: {result_block}"
     );
 }
@@ -2242,8 +2259,12 @@ fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
 
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
+    // The cap is the model's own published maximum and belongs to
+    // `the_usage_line_names_the_max_tokens_actually_sent`; what this test
+    // owns is the spend beside it, which must be the figure the provider
+    // reported rather than an estimate.
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 30 · cells 1"),
+        result_block.contains("· task spent 30 · cells 1"),
         "the usage line must carry the response's own usage: {result_block}"
     );
 
@@ -2339,7 +2360,7 @@ fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn output cap 8,192 · task spent 120 · cells 1"),
+        result_block.contains("· task spent 120 · cells 1"),
         "the gateway's row (120) must win over the response's usage (30): {result_block}"
     );
 
@@ -4279,11 +4300,28 @@ fn an_overflow_checkpoints_the_already_projected_request_once() {
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 4, "expected a retry after the overflow");
+    // **What the checkpoint rung promises is that the conversation is
+    // replaced, not that the bytes always fall.** With two one-line cells the
+    // checkpoint — which names the task, the plan and every live handle — can
+    // be longer than the two tiny results it stands in for; this test used to
+    // read as a size win only because the request that overflowed carried a
+    // per-request "[Pane task boundary]" block that the retry did not, and
+    // that block is gone. So pin the mechanism: the retry says the
+    // conversation was dropped, and the dropped results are not in it.
     assert!(
-        bodies[3].len() < bodies[2].len(),
-        "the retry was not smaller than the request that overflowed: {} vs {}",
-        bodies[3].len(),
-        bodies[2].len()
+        bodies[3].contains("no longer fit"),
+        "the retry did not carry the checkpoint: {}",
+        bodies[3]
+    );
+    assert!(
+        bodies[2].contains("[cell 1 yielded"),
+        "the request that overflowed should still carry the older result: {}",
+        bodies[2]
+    );
+    assert!(
+        !bodies[3].contains("[cell 1 yielded"),
+        "the retry still carried the result the checkpoint replaced: {}",
+        bodies[3]
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
@@ -4473,16 +4511,26 @@ fn new_user_requests_get_truthful_model_and_runtime_boundaries() {
         let system = request["system"][0]["text"].as_str().unwrap();
         assert!(system.contains("You are Pane"));
         assert!(system.contains("Configured request model: \"deepseek-v4-flash\""));
-        assert_eq!(body.matches("Pane task boundary").count(), 1);
+        // The runtime boundary is stated once, in the system block every
+        // request shares, rather than appended to whichever user message is
+        // current. Saying it per request meant un-saying it on the previous
+        // one, which invalidated the whole cached prefix at every task
+        // boundary (`prompt::with_task_context`).
+        assert!(
+            system.contains("Each new user request starts a fresh runtime"),
+            "the boundary contract is in the system block: {system}"
+        );
+        assert!(
+            system.contains("Earlier requests are\nhistory, not unfinished work."),
+            "and it says what that means for earlier requests: {system}"
+        );
     }
     let last: serde_json::Value = serde_json::from_str(&bodies[2]).unwrap();
     let current = last["messages"].as_array().unwrap().last().unwrap();
     assert_eq!(current["content"][0]["text"], "what are you?");
     assert!(
-        current["content"][1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("earlier completed requests are not live")
+        current["content"].as_array().unwrap().len() == 1,
+        "the person's own message reaches the provider as they typed it: {current}"
     );
     let saved = std::fs::read_to_string(&rollout).unwrap();
     assert!(

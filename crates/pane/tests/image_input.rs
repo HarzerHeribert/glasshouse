@@ -55,10 +55,14 @@ fn wire_rollout_and_task_boundary_preserve_attached_image_bytes() {
     };
     let projected = prompt::with_task_context(&conversation, "vision-model", "describe this");
     assert_eq!(projected.messages[0].content[1], image);
-    assert!(
-        projected.messages[0].content[2]
-            .text()
-            .contains("Pane task boundary")
+    // The projection appends nothing to a message it has already sent — the
+    // "[Pane task boundary]" block that used to sit here took the whole
+    // prompt cache with it at every task boundary, and the preamble said the
+    // same thing anyway (`prompt::with_task_context`).
+    assert_eq!(
+        projected.messages[0].content.len(),
+        2,
+        "the request added a block to the person's own message"
     );
     assert_eq!(conversation.messages[0].content.len(), 2);
     let request: serde_json::Value =

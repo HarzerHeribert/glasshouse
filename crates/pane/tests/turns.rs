@@ -727,3 +727,65 @@ fn an_empty_system_has_no_invalid_empty_cache_block() {
         serde_json::json!({"type":"ephemeral"})
     );
 }
+
+/// The user, 2026-09-17: *"Try to not rebuild context due to caching … I
+/// would argue that rewriting cached tokens is dumb."*
+///
+/// A provider serves a conversation from its prompt cache only while the
+/// prefix arrives as the same bytes it saw last turn. So the rule this pins
+/// is the strong one: **a request never edits a message an earlier request
+/// already sent.** Within one task only the frontier moves; across a task
+/// boundary — where `with_task_context` used to append a "this is the
+/// current user request" block to the new task's message, and therefore take
+/// it off the previous one — the prefix used to collapse to nothing.
+#[test]
+fn the_request_never_edits_a_message_it_already_sent() {
+    let mut conversation = Conversation {
+        system: "Stable project instructions.\n\n".into(),
+        messages: vec![Message::text(Role::User, "first task")],
+    };
+    let mut previous: Option<Vec<String>> = None;
+    for cell in 0..6 {
+        // The third cell opens a second task in the same conversation, which
+        // is the case that used to invalidate every cached byte.
+        let task = if cell < 3 {
+            "first task"
+        } else {
+            "second task"
+        };
+        if cell == 3 {
+            conversation.messages.push(Message::text(Role::User, task));
+        }
+        let request = pane::prompt::with_task_context(&conversation, wire::MODEL, task);
+        let rendered: Vec<String> = request
+            .messages
+            .iter()
+            .map(|message| format!("{:?}", message.content))
+            .collect();
+        if let Some(previous) = &previous {
+            // Every message the previous request sent, except the frontier
+            // that `project_runtime_history` has just projected, comes back
+            // byte for byte.
+            let unchanged = previous.len().saturating_sub(1);
+            assert_eq!(
+                previous[..unchanged],
+                rendered[..unchanged],
+                "cell {cell} rewrote a message an earlier request had already sent"
+            );
+        }
+        previous = Some(rendered);
+        let mut assistant = Message::text(Role::Assistant, "");
+        assistant.content = vec![Block::ToolUse {
+            id: format!("cell-{cell}"),
+            name: "execute_cell".into(),
+            input: serde_json::json!({"code": "const hits = [];"}),
+        }];
+        conversation.messages.push(assistant);
+        conversation.messages.push(Message::runtime_tool_result(
+            format!("cell-{cell}"),
+            format!("[cell {cell} yielded]\n\n## Handles\nhits n={cell}\n\n## Usage\ncells {cell}"),
+            false,
+            format!("[cell {cell} yielded]"),
+        ));
+    }
+}

@@ -2105,6 +2105,7 @@ fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
         pane::prompt::Reach {
             web: None,
             agents: Some(&roster),
+            decisions: false,
         },
     );
     assert!(declared.contains("declare const agent: {"), "{declared}");
@@ -2125,5 +2126,41 @@ fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
         unresolved.contains("declare const agent: {")
             && !unresolved.contains("Models this session can name"),
         "a session with no roster claims none:\n{unresolved}"
+    );
+}
+
+/// `decide` is bound only for a session whose `[decisions]` names a model, so
+/// a session without one must not be told the global exists: a promise the
+/// model would spend a cell discovering is false costs more than the sentence
+/// saved. `every_host_global_is_declared_to_the_model` checks the other
+/// direction — that nothing bound goes undeclared — and this is its twin.
+#[test]
+fn an_unconfigured_session_is_not_told_about_the_decision_model() {
+    use pane::prompt::render_runtime_reaching;
+    use pane::runtime::bindings::HostGlobals;
+
+    let without = render_runtime_reaching(
+        HostGlobals::Every,
+        pane::prompt::Reach {
+            web: None,
+            agents: None,
+            decisions: false,
+        },
+    );
+    assert!(
+        !without.contains("declare const decide"),
+        "an unconfigured session declared `decide`: {without}"
+    );
+    let with = render_runtime_reaching(
+        HostGlobals::Every,
+        pane::prompt::Reach {
+            web: None,
+            agents: None,
+            decisions: true,
+        },
+    );
+    assert!(
+        with.contains("declare const decide"),
+        "a configured session must be told: {with}"
     );
 }
