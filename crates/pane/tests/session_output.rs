@@ -65,6 +65,7 @@ fn run(format: &str, status: u16, reply: Value) -> std::process::Output {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();
@@ -208,6 +209,7 @@ fn machine_telemetry_splits_preflight_helper_and_parent_usage_by_model() {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();
@@ -260,6 +262,7 @@ fn machine_telemetry_counts_failed_cells_and_tool_calls() {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();
@@ -277,10 +280,13 @@ fn machine_telemetry_counts_failed_cells_and_tool_calls() {
 
 #[test]
 fn machine_output_requires_a_single_task_without_starting_a_session() {
+    let root = root("no-task");
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .args(["--output-format", "json"])
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
     assert!(!output.status.success());
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["success"], false);
@@ -316,6 +322,7 @@ fn exec_json(root: &std::path::Path, endpoint: &str) -> Value {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();

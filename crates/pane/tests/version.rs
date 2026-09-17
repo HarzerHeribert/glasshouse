@@ -6,9 +6,11 @@ use std::process::Command;
 
 #[test]
 fn version_prints_the_crate_version_and_nothing_else() {
+    let root = std::env::temp_dir().join(format!("pane-version-{}", std::process::id()));
     for flag in ["--version", "-V"] {
         let output = Command::new(env!("CARGO_BIN_EXE_pane"))
             .arg(flag)
+            .env("XDG_CONFIG_HOME", root.join("global-config"))
             .output()
             .expect("the binary runs");
         assert!(output.status.success(), "{flag}: {:?}", output.status);

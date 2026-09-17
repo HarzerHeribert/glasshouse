@@ -134,6 +134,7 @@ fn cli_attachment_reaches_provider_and_survives_resume_without_base64_in_machine
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     assert!(
@@ -236,6 +237,7 @@ fn overflow_checkpoint_retains_current_image_once_and_drops_historic_images() {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     assert!(

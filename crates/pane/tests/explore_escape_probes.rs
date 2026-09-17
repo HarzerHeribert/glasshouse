@@ -145,6 +145,7 @@ fn run(root: &Path, args: &[&str], inputs: &[&str], base_url: &str) -> std::proc
         .arg(pane::wire::MODEL)
         .args(args)
         .env("ANTHROPIC_BASE_URL", base_url)
+        .env("XDG_CONFIG_HOME", scratch_dir("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::piped())

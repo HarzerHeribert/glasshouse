@@ -238,6 +238,7 @@ fn scripted_session_defers_a_same_cell_candidate_until_after_checker_observation
         .arg("--glasshouse")
         .arg(fixture.root.join("missing-glasshouse"))
         .env("ANTHROPIC_BASE_URL", base_url)
+        .env("XDG_CONFIG_HOME", fixture.root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .output()

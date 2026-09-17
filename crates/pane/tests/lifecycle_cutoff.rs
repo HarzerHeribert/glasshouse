@@ -57,6 +57,7 @@ impl Fixture {
             .arg("--glasshouse")
             .arg(self.root.join("absent"))
             .env("ANTHROPIC_BASE_URL", base)
+            .env("XDG_CONFIG_HOME", self.root.join("global-config"))
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("ANTHROPIC_API_KEY")
             .stdin(Stdio::null())
@@ -274,6 +275,7 @@ fn poisoned_runtime_ends_incomplete_before_another_model_or_supervisor_request()
     }
     actual
         .env("ANTHROPIC_BASE_URL", base)
+        .env("XDG_CONFIG_HOME", f.root.join("global-config"))
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .stdin(Stdio::null())

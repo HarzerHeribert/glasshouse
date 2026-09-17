@@ -633,6 +633,7 @@ fn the_profile_is_built_once_per_session() {
         // Attach, so no `inference-gateway` is started: nothing here is a
         // turn, and port 1 is never dialled.
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .env("XDG_CONFIG_HOME", fixture.root.join("global-config"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -694,6 +695,7 @@ fn a_refusal_reaches_the_binary_as_a_value_and_the_session_continues() {
         // Attach, so no `inference-gateway` is started: nothing here is a
         // turn, and port 1 is never dialled.
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .env("XDG_CONFIG_HOME", fixture.root.join("global-config"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -87,6 +87,7 @@ fn exec_json_task(root: &std::path::Path, endpoint: &str, task: &str) -> Value {
         .arg(root.join("absent-glasshouse"))
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .output()
         .unwrap();

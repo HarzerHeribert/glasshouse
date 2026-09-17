@@ -489,6 +489,7 @@ fn exec_bounded(root: &Path, endpoint: &str, task: &str, interface: Option<&str>
         .args(&args)
         .env("ANTHROPIC_BASE_URL", endpoint)
         .env("ANTHROPIC_API_KEY", "test-only")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .stdout(stdout_file)
         .stderr(Stdio::null())

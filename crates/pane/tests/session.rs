@@ -36,13 +36,29 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Guards [`a_poisoned_inherited_global_config_never_reaches_the_session`]'s
+/// own brief change of this test process's `XDG_CONFIG_HOME`, so no other
+/// thread can read it mid-poison.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// Most session fixtures are not about model selection, so they name the
 /// historical fixture model explicitly. A test that already persisted a
 /// parent omits the CLI flag, preserving the production precedence rule.
+///
+/// The check is scoped to **project and legacy only, never global** --
+/// every spawning helper in this file isolates the *child's* global scope to
+/// an empty directory (`GH-PANE-TEST-CONFIG-ISOLATION`), and this process's
+/// own ambient `XDG_CONFIG_HOME` is not that directory. Checking the real
+/// global here would let a developer's or a measurement's own
+/// `~/.config/pane/config.toml` decide `persisted`, while the isolated child
+/// sees no such thing -- exactly the mismatch that made a real global config
+/// turn `--model` into a silently skipped flag and the session into a
+/// "no parent model selected" refusal.
 fn supply_test_model(command: &mut Command, root: &Path) {
-    let persisted = pane::config::PaneConfig::load(root)
+    let persisted = pane::settings::Store::with_global(root, None)
+        .and_then(|store| store.load(None))
         .ok()
-        .and_then(|config| config.model.parent)
+        .and_then(|loaded| loaded.config.model.parent)
         .is_some();
     if !persisted {
         command.arg("--model").arg(pane::wire::MODEL);
@@ -458,6 +474,7 @@ fn run_session_with_gateway(
         .arg("--task")
         .arg(task)
         .env("ANTHROPIC_BASE_URL", base_url)
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY");
     supply_test_model(&mut command, root);
@@ -738,6 +755,7 @@ fn the_binary_with_no_arguments_starts_a_session_in_its_current_directory() {
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .current_dir(&root)
         .env("ANTHROPIC_BASE_URL", refused_base_url())
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         // A developer install must not receive this fixture's lifecycle
@@ -2993,6 +3011,7 @@ mod interrupts {
             .arg("--task")
             .arg(task)
             .env("ANTHROPIC_BASE_URL", base_url)
+            .env("XDG_CONFIG_HOME", root.join("global-config"))
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("ANTHROPIC_API_KEY")
             .stdin(Stdio::null())
@@ -3634,6 +3653,7 @@ fn run_session_stdin(
         .arg("--session")
         .arg(session_id)
         .env("ANTHROPIC_BASE_URL", base_url)
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::piped())
@@ -3801,6 +3821,7 @@ fn os_sandbox_bypass_requires_an_explicit_yolo_grant() {
         .arg("--task")
         .arg("go")
         .arg("--dangerously-bypass-os-sandbox")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -5344,6 +5365,7 @@ fn run_session_stdin_with_gateway(
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -5390,6 +5412,7 @@ fn run_session_stdin_hosted(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env("PATH", "/usr/bin:/bin")
         .env("INFERENCE_GATEWAY_BIN", gateway_bin)
         .stdin(Stdio::piped())
@@ -5449,6 +5472,7 @@ fn a_session_runs_standalone_against_a_gateway_it_started() {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         // No `glasshouse` is reachable, and none is passed: a session that
         // needed one could not finish from here.
         .env("PATH", "/usr/bin:/bin")
@@ -5543,6 +5567,7 @@ credential = {{ env = "PANE_E2E_PROVIDER_KEY" }}
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         // No `glasshouse` anywhere; the gateway reads this test's catalogue
         // and keeps its state under this test's root, never the user's.
         .env("PATH", "/usr/bin:/bin")
@@ -5983,6 +6008,7 @@ fn the_usage_rows_of_a_hosted_session_still_reach_glasshouse_scoped_to_the_proje
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env("PATH", "/usr/bin:/bin")
         .env("INFERENCE_GATEWAY_BIN", &gateway)
         .output()
@@ -6228,6 +6254,7 @@ fn a_gateway_that_refuses_to_serve_is_quoted_in_panes_refusal() {
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("PANE_E2E_UNSET_VAR")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env("PATH", "/usr/bin:/bin")
         .env("INFERENCE_GATEWAY_CONFIG", &config)
         .env("INFERENCE_GATEWAY_DATA_DIR", root.join("gateway-data"))
@@ -6275,6 +6302,7 @@ fn a_gateway_that_cannot_be_started_refuses_the_session_by_name() {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
 
@@ -6343,6 +6371,7 @@ credential_env = ["PANE_E2E_ENTERED_KEY"]
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("PANE_E2E_ENTERED_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .env("PATH", "/usr/bin:/bin")
         .env("INFERENCE_GATEWAY_CONFIG", &config)
         .env("INFERENCE_GATEWAY_DATA_DIR", &data_dir)
@@ -6437,6 +6466,7 @@ fn a_connected_subscription_silences_the_missing_credential_notice() {
             .env_remove("ANTHROPIC_BASE_URL")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("ANTHROPIC_API_KEY")
+            .env("XDG_CONFIG_HOME", root.join("global-config"))
             .env("FAKE_GATEWAY_AUTHENTICATED", authenticated)
             .stdin(std::process::Stdio::null())
             .output()
@@ -6483,6 +6513,7 @@ fn ending_a_session_lets_its_gateway_shut_down_before_it_is_killed() {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
@@ -6494,5 +6525,96 @@ fn ending_a_session_lets_its_gateway_shut_down_before_it_is_killed() {
     assert!(
         marker.exists(),
         "the gateway must have read EOF and exited on its own before pane killed it"
+    );
+}
+
+/// `GH-PANE-TEST-CONFIG-ISOLATION`: the developer's own
+/// `~/.config/pane/config.toml` is whatever `XDG_CONFIG_HOME` names in the
+/// *test process's own* environment, since nothing here is guaranteed to run
+/// in a container. `run_session_with_gateway`'s `.env("XDG_CONFIG_HOME", ...)`
+/// exists to keep a spawned session from ever seeing it; this proves that
+/// rather than assuming it, by planting a bogus parent model only at the
+/// *inherited* location and this test's own model only at the location the
+/// helper points the child to.
+///
+/// This does not go through [`run_session`]: that helper calls
+/// [`supply_test_model`], which takes [`ENV_LOCK`] itself, and this test must
+/// hold the lock across its own poisoning window -- a nested lock on the same
+/// thread would deadlock. Skipping it costs nothing here: a fresh scratch
+/// root has no project config and no CLI `--model` is passed, so resolution
+/// is left entirely to whichever global scope the spawned child reads --
+/// exactly what `supply_test_model` would have arranged anyway.
+#[test]
+fn a_poisoned_inherited_global_config_never_reaches_the_session() {
+    // Held for the whole poisoning window, so no concurrent
+    // `supply_test_model` call (which reads this same variable) can observe
+    // the poisoned value and wrongly conclude its own root has a persisted
+    // model.
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = scratch_dir("global-isolation");
+    let rollout = root.join("rollout.jsonl");
+
+    // What the developer's shell would already have exported, and so what
+    // this test's own process inherits -- the exact hazard the isolation
+    // helper exists to shut out.
+    let inherited = scratch_dir("global-isolation-inherited");
+    fs::create_dir_all(inherited.join("pane")).unwrap();
+    fs::write(
+        inherited.join("pane/config.toml"),
+        "[model]\nparent = \"bogus-model-that-must-not-be-used\"\n",
+    )
+    .unwrap();
+
+    // The location the fixture's own helper points the child's
+    // `XDG_CONFIG_HOME` at -- the correct global scope for this session,
+    // carrying this test's own model rather than the inherited one.
+    fs::create_dir_all(root.join("global-config/pane")).unwrap();
+    fs::write(
+        root.join("global-config/pane/config.toml"),
+        format!("[model]\nparent = {:?}\n", pane::wire::MODEL),
+    )
+    .unwrap();
+
+    let previous = std::env::var_os("XDG_CONFIG_HOME");
+    // Safety: `ENV_LOCK`, held for this whole function, serialises every
+    // access to this variable across the test binary.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &inherited) };
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(&rollout)
+        .arg("--session")
+        .arg("sess-global-isolation")
+        .arg("--task")
+        .arg("hi")
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        // The line under test: without it, the child inherits this
+        // process's own (poisoned) `XDG_CONFIG_HOME` instead.
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .output()
+        .unwrap();
+    match previous {
+        Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        request["model"],
+        pane::wire::MODEL,
+        "the session must use this fixture's own global config, never the one \
+         inherited from the process environment: {request}"
     );
 }

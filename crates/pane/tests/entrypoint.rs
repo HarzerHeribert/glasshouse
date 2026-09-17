@@ -47,10 +47,19 @@ impl Drop for Scratch {
 }
 
 fn pane() -> Command {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let config_home = std::env::temp_dir().join(format!(
+        "pane-entrypoint-config-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
     command
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
+        // Every spawn gets its own empty global-config root, never the
+        // developer's real `~/.config/pane/config.toml`.
+        .env("XDG_CONFIG_HOME", config_home)
         // **Set, so these tests stay about the entry point.** A session with
         // no base URL starts an `inference-gateway` and refuses when it
         // cannot (`gateway::start_or_attach`); a set URL is the attach half,

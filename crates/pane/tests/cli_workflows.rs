@@ -47,9 +47,14 @@ fn history_and_continue_route_to_existing_session_implementation() {
 
 #[test]
 fn exec_rejects_empty_stdin_instead_of_starting_an_interactive_session() {
+    let root = std::env::temp_dir().join(format!(
+        "pane-cli-workflows-empty-stdin-{}",
+        std::process::id()
+    ));
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .arg("exec")
         .stdin(Stdio::null())
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -76,6 +81,7 @@ fn doctor_json_reports_invalid_config_without_exposing_its_contents() {
         .args(["doctor", "--json", "--root"])
         .arg(&root)
         .env("ANTHROPIC_BASE_URL", "https://SECRET_ENDPOINT.invalid")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -100,6 +106,7 @@ fn doctor_missing_root_is_a_structured_failure() {
     let root = std::env::temp_dir().join(format!("pane-nonexistent-doctor-{}", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .args(["doctor", "--json", "--root"])
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
         .arg(root)
         .output()
         .unwrap();
