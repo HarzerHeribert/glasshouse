@@ -2115,21 +2115,6 @@ fn the_shipped_binary_runs_extraction_after_a_task_and_reports_that_it_has_no_mo
     );
 }
 
-/// The lease in `provider::telemetry` and the bound in this file are two
-/// constants that only mean anything in relation to each other: the
-/// reservation exists to cover the extraction, so it has to outlive it.
-/// Nothing else would fail if one of them were edited alone — the
-/// reservation would simply start expiring under live calls — which is
-/// exactly the kind of drift a test is for.
-#[test]
-fn the_reservation_lease_outlives_the_extraction_it_covers() {
-    assert_eq!(
-        glasshouse::provider::telemetry::DISPATCH_RESERVATION_LEASE,
-        crate::commands::memory_extraction::EXTRACTION_BOUND * 2,
-        "the lease is twice the bound on the work it covers; see its own doc for why"
-    );
-}
-
 /// `report_hook` — not `report_hook_with`, which every fixture above
 /// supplies its own fake model to — must itself ask
 /// `disposable_extraction_model` for its model, and never

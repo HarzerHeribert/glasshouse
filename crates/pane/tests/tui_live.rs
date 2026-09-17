@@ -457,6 +457,10 @@ fn live_approval_once_session_and_deny_gate_actual_writes() {
     );
     let mut app = App::start_with_flags(&base, false, None, &["--ask-approval"]);
     app.contains("fixture-model");
+    // The dialog prints the call's resolved path, and at 80 columns a long
+    // temp root (Windows: `\\?\C:\Users\<name>\AppData\Local\Temp\…`) wraps
+    // it mid-name, so `once.txt` is not on one line. Wide enough never to.
+    app.resize(160);
     app.send(b"proceed\r");
     app.contains("Approve exact tool call");
     app.contains("once.txt");
@@ -1334,8 +1338,17 @@ fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("fixture-model");
     app.resize(160);
-    let project = app.root.join(".pane/config.toml");
-    let global = app.root.join("global-config/pane/config.toml");
+    // The editor names the file the store will write, in the store's own
+    // spelling: on Windows that is the canonical long-name form of a temp
+    // root `temp_dir()` may hand out as an 8.3 short name, with native
+    // separators. Ask the store rather than join on the raw root.
+    let store = pane::settings::Store::with_global(
+        &app.root,
+        Some(app.root.join("global-config").join("pane")),
+    )
+    .unwrap();
+    let project = store.path(pane::settings::Scope::Local);
+    let global = store.path(pane::settings::Scope::Global);
 
     app.send(b"/settings\r");
     app.contains("Settings");

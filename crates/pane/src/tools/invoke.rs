@@ -2246,6 +2246,9 @@ fn truncate(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Where an applier exists, the explicit bypass spawns unconfined and
+    /// says so; the Windows arm is the test after this one.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn explicit_os_sandbox_bypass_is_never_an_implicit_fallback() {
         let root = std::env::temp_dir().join(format!(
@@ -2273,6 +2276,38 @@ mod tests {
                 .confinement
                 .as_str()
                 .contains("outer isolation required")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The same selection where no applier can hand back this module's own
+    /// child (`spawn_bypassed`'s Windows arm): the bypass refuses by name
+    /// and spawns nothing, rather than becoming the one unconfined path.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn explicit_os_sandbox_bypass_refuses_by_name_where_no_applier_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "pane-explicit-sandbox-bypass-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = serde_json::json!({"permissions":{"allow":["Bash"]}}).to_string();
+        let profile = Profile::compile(&root, Some(&settings)).with_os_sandbox_bypass();
+        let ctx = ToolContext {
+            profile: &profile,
+            glasshouse: &Glasshouse::None,
+            session: &SessionId::new("explicit-sandbox-bypass"),
+        };
+        let refusal = run(
+            &ctx,
+            "bash",
+            &Args::new().with("command", "printf bypass-ok"),
+        )
+        .unwrap_err();
+        let text = format!("{refusal:?}");
+        assert!(
+            text.contains("has no applier on this platform, so nothing was spawned"),
+            "the bypass must refuse by name where it cannot spawn its own child: {text}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
