@@ -865,14 +865,9 @@ fn run(args: SessionArgs) -> Result<(), String> {
                             profile.command_pattern_count(),
                             if args.yolo { " YOLO" } else { "" }
                         )),
-                        network: Some(
-                            if profile.grants_network() {
-                                "on"
-                            } else {
-                                "off"
-                            }
-                            .into(),
-                        ),
+                        // The shell never has a network; the field names the
+                        // host tools that do (map 2657, design §8).
+                        network: Some(config.borrow().web.posture().into()),
                         ..tui::ScreenState::default()
                     };
                     crate::settings_session::presentation(&mut state, &loaded_settings.values);

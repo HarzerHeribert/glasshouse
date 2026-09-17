@@ -11,6 +11,8 @@ use ureq::http::Uri;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
+pub mod search;
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WebConfig {
@@ -26,6 +28,14 @@ pub struct WebConfig {
     pub allow_http: bool,
     /// SearXNG-compatible JSON endpoint. No implicit search provider or credentials.
     pub search_endpoint: Option<String>,
+    /// Which search provider answers `web.search`: `brave` (keyed) or
+    /// `searxng` (the endpoint above, no key). Absent means `searxng` when an
+    /// endpoint is set and no search otherwise (map 2657).
+    pub search_provider: Option<String>,
+    /// The **name** of the variable a keyed provider's key is read from —
+    /// the process environment first, the gateway's credential file second.
+    /// Never a value: a value here would be a key in a project file.
+    pub search_key_var: Option<String>,
     pub max_response_bytes: usize,
     pub timeout_seconds: u64,
 }
@@ -38,6 +48,8 @@ impl Default for WebConfig {
             deny_domains: vec![],
             allow_http: false,
             search_endpoint: None,
+            search_provider: None,
+            search_key_var: None,
             max_response_bytes: 1_048_576,
             timeout_seconds: 20,
         }
@@ -50,9 +62,37 @@ impl WebConfig {
         self.enabled && !self.allow_domains.is_empty()
     }
 
-    /// Whether `web.search` reaches anything: enabled, with an endpoint.
+    /// Whether `web.search` reaches anything: enabled, with a provider that
+    /// has what it needs to be asked — an endpoint for `searxng`, a key
+    /// variable's name for `brave` (the key itself is resolved when a query
+    /// is made, and a missing key refuses by the variable's name).
     pub fn search_configured(&self) -> bool {
-        self.enabled && self.search_endpoint.is_some()
+        self.enabled && search::SearchProvider::from_config(self).is_ok_and(|p| p.is_some())
+    }
+
+    /// One line for `/config`: what `web.fetch` reaches and who answers
+    /// `web.search`, or `off`.
+    pub fn describe(&self) -> String {
+        if !self.configured() {
+            return "off".to_string();
+        }
+        let fetch = if self.allow_domains.is_empty() {
+            "fetch refused (no domain allowed)".to_string()
+        } else {
+            format!("fetch reaches {}", self.allow_domains.join(", "))
+        };
+        let search = match search::SearchProvider::from_config(self) {
+            Ok(Some(provider)) => format!("search via {}", provider.name()),
+            _ => "no search".to_string(),
+        };
+        format!("{fetch} · {search}")
+    }
+
+    /// One word for the sidebar's `net:` field: the cell's shell never has a
+    /// network, so the field names the host tools instead — `off` when none
+    /// is configured, `web` when fetch or search is.
+    pub fn posture(&self) -> &'static str {
+        if self.configured() { "web" } else { "off" }
     }
 
     /// Whether the `web` global exists at all for this configuration — the
@@ -62,15 +102,6 @@ impl WebConfig {
     pub fn configured(&self) -> bool {
         self.fetch_configured() || self.search_configured()
     }
-}
-
-/// Whose policy a request answers to: the model's `web.fetch`, which must
-/// name an allowed domain, or a destination the user configured — the search
-/// endpoint — which is reached by being configured.
-#[derive(Clone, Copy)]
-enum Destination {
-    Fetch,
-    Endpoint,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +125,9 @@ pub struct SearchHit {
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     pub query: String,
+    /// Which provider answered: `brave` or `searxng`. In the rollout line,
+    /// never the key.
+    pub provider: String,
     pub results: Vec<SearchHit>,
     pub citations: Vec<String>,
     pub untrusted_content: bool,
@@ -103,6 +137,22 @@ pub struct SearchResult {
 /// must bound reads, disable implicit redirects/proxies, and enforce DNS policy.
 pub trait WebTransport: Send + Sync {
     fn get(&self, url: &str, max_bytes: usize, timeout: Duration) -> Result<WebResponse, String>;
+    /// A GET carrying request headers — a keyed search provider's token.
+    /// Without headers it is [`Self::get`]; with them, a transport that does
+    /// not send headers refuses rather than sending the request bare, so a
+    /// key is never silently dropped on the floor.
+    fn get_with_headers(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<WebResponse, String> {
+        if headers.is_empty() {
+            return self.get(url, max_bytes, timeout);
+        }
+        Err("this transport sends no request headers".into())
+    }
     fn post(
         &self,
         _url: &str,
@@ -147,9 +197,7 @@ impl WebBroker {
         token: &CancellationToken,
     ) -> Result<FetchResult, String> {
         let url = url.to_owned();
-        self.on_worker(token, move |broker, token| {
-            broker.fetch_inner(&url, &token, Destination::Fetch)
-        })
+        self.on_worker(token, move |broker, token| broker.fetch_inner(&url, &token))
     }
 
     pub fn search_cancellable(
@@ -319,12 +367,27 @@ impl WebBroker {
             workers: Mutex::new(vec![]),
         };
         if let Some(endpoint) = &broker.config.search_endpoint {
-            broker.validate_url(endpoint)?;
+            broker.validate_destination(endpoint)?;
         }
+        search::SearchProvider::from_config(&broker.config)?;
         Ok(broker)
     }
 
+    /// The model's URL: scheme, host, private-address, deny-list and
+    /// allow-list checks.
     pub fn validate_url(&self, url: &str) -> Result<Uri, String> {
+        self.validate(url, true)
+    }
+
+    /// A destination the user configured — the search endpoint — which is
+    /// reached by being configured: every check but the allow list, which
+    /// is the model's fetch policy and not the user's. The deny list still
+    /// wins.
+    fn validate_destination(&self, url: &str) -> Result<Uri, String> {
+        self.validate(url, false)
+    }
+
+    fn validate(&self, url: &str, consult_allow_list: bool) -> Result<Uri, String> {
         if url.len() > 8192 || url.contains(['\\', '\r', '\n', '\t', '#']) {
             return Err("invalid web URL (use an absolute URL without a fragment)".into());
         }
@@ -358,7 +421,8 @@ impl WebBroker {
             .deny_domains
             .iter()
             .any(|p| domain_matches(p, &host))
-            || (!self.config.allow_domains.is_empty()
+            || (consult_allow_list
+                && !self.config.allow_domains.is_empty()
                 && !self
                     .config
                     .allow_domains
@@ -371,15 +435,13 @@ impl WebBroker {
     }
 
     pub fn fetch(&self, url: &str) -> Result<FetchResult, String> {
-        self.fetch_inner(url, &CancellationToken::new(), Destination::Fetch)
+        self.fetch_inner(url, &CancellationToken::new())
     }
 
-    fn fetch_inner(
-        &self,
-        url: &str,
-        token: &CancellationToken,
-        destination: Destination,
-    ) -> Result<FetchResult, String> {
+    /// The model's fetch, which answers to the allow list; a destination the
+    /// user configured — the search endpoint — is reached by
+    /// [`Self::get_endpoint`] instead and does not consult it.
+    fn fetch_inner(&self, url: &str, token: &CancellationToken) -> Result<FetchResult, String> {
         if !self.config.enabled {
             return Err(
                 "web tools are disabled; enable [web].enabled in host configuration".into(),
@@ -387,7 +449,7 @@ impl WebBroker {
         }
         // Refused until a domain is allowed (map 2656): the model's fetch
         // answers to the allow list, and an empty list is not "everything".
-        if matches!(destination, Destination::Fetch) && self.config.allow_domains.is_empty() {
+        if self.config.allow_domains.is_empty() {
             return Err(
                 "web.fetch refused: no domain is allowed; add the domain to [web] allow_domains"
                     .into(),
@@ -463,33 +525,39 @@ impl WebBroker {
         if query.trim().is_empty() || query.len() > 4096 {
             return Err("web search query must be 1..4096 bytes".into());
         }
-        let endpoint = self.config.search_endpoint.as_ref().ok_or("web search is not configured; set web.search_endpoint to a SearXNG-compatible JSON endpoint")?;
-        let sep = if endpoint.contains('?') { '&' } else { '?' };
-        let response = self.fetch_inner(
-            &format!("{endpoint}{sep}q={}&format=json", encode(query)),
-            token,
-            Destination::Endpoint,
-        )?;
-        #[derive(Deserialize)]
-        struct Payload {
-            results: Vec<SearchHit>,
+        search::run(self, query, token)
+    }
+
+    /// One GET to a destination the user configured, with request headers:
+    /// the URL validated like every other, the status and the byte bound
+    /// checked, no redirect followed — a search endpoint that redirects is a
+    /// misconfiguration, not a hop to take with a key in the headers.
+    fn get_endpoint(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        token: &CancellationToken,
+    ) -> Result<WebResponse, String> {
+        if token.is_cancelled() {
+            return Err("web request cancelled before dispatch".into());
         }
-        let parsed: Payload = serde_json::from_str(&response.content).map_err(|_| {
-            "search endpoint must return JSON {results:[{title,url,content}]}".to_string()
-        })?;
-        let results: Vec<_> = parsed
-            .results
-            .into_iter()
-            .filter(|r| self.validate_url(&r.url).is_ok())
-            .take(20)
-            .collect();
-        let citations = results.iter().map(|r| r.url.clone()).collect();
-        Ok(SearchResult {
-            query: query.into(),
-            results,
-            citations,
-            untrusted_content: true,
-        })
+        self.validate_destination(url)?;
+        let response = self.transport.get_with_headers(
+            url,
+            headers,
+            self.config.max_response_bytes,
+            Duration::from_secs(self.config.timeout_seconds),
+        )?;
+        if response.body.len() > self.config.max_response_bytes {
+            return Err("web response exceeds configured byte limit".into());
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "web search returned HTTP {}; redirects are not followed",
+                response.status
+            ));
+        }
+        Ok(response)
     }
 }
 
@@ -669,14 +737,23 @@ impl WebTransport for HttpTransport {
         })
     }
     fn get(&self, url: &str, max_bytes: usize, timeout: Duration) -> Result<WebResponse, String> {
-        let mut response = self
-            .0
-            .get(url)
-            .header("User-Agent", "Pane-Web/1.0")
-            .header(
-                "Accept",
-                "text/html, text/plain, application/json, application/xml",
-            )
+        self.get_with_headers(url, &BTreeMap::new(), max_bytes, timeout)
+    }
+    fn get_with_headers(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<WebResponse, String> {
+        let mut request = self.0.get(url).header("User-Agent", "Pane-Web/1.0").header(
+            "Accept",
+            "text/html, text/plain, application/json, application/xml",
+        );
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let mut response = request
             .config()
             .timeout_global(Some(timeout))
             .build()

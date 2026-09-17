@@ -84,7 +84,11 @@ fn disabled_and_unconfigured_search_do_not_touch_transport() {
     );
     assert!(urls.lock().unwrap().is_empty());
     let (web, urls) = broker(enabled(), vec![]);
-    assert!(web.search("rust").unwrap_err().contains("not configured"));
+    let refusal = web.search("rust").unwrap_err();
+    assert!(
+        refusal.contains("no search provider is configured"),
+        "{refusal}"
+    );
     assert!(urls.lock().unwrap().is_empty());
 }
 

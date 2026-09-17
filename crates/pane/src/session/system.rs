@@ -659,10 +659,10 @@ pub fn system_manifest(profile: &Profile, config: &PaneConfig) -> crate::manifes
         manifest
             .unavailable
             .push("web.fetch and web.search: the host web broker is disabled".into());
-    } else if config.web.search_endpoint.is_none() {
+    } else if !config.web.search_configured() {
         manifest
             .unavailable
-            .push("web.search: no search endpoint is configured".into());
+            .push("web.search: no search provider is configured".into());
     }
     if config.helpers.model.is_none() || !config.helpers.enabled {
         manifest

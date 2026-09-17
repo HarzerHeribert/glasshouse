@@ -2045,6 +2045,7 @@ fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its
     let reach = WebReach {
         domains: vec!["docs.rs".into(), "*.rust-lang.org".into()],
         search: false,
+        search_provider: None,
         max_response_bytes: 1_048_576,
         timeout_seconds: 20,
     };

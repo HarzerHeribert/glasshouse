@@ -827,13 +827,14 @@ pub(super) fn command(
                 Panel::text(
                     "Session configuration",
                     format!(
-                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .pane/config.toml (loaded at startup)\nPermissions: native global/project config (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
+                        "Model: {}\nMode: {}\nProject: {}\nSandbox: {} path rules · {} command patterns · network {}\nWeb: {}\nTask spend: tracked, uncapped\nCell limit: {} cells · {} seconds each · response {} bytes\nSupervisor: {}\nHelper effort: find {} · reduce {} · check {}\nLimits and helper effort: .pane/config.toml (loaded at startup)\nPermissions: native global/project config (loaded at startup)\nPresentation: /theme · /sidebar · /statusline · /fullscreen",
                         session.model.borrow(),
                         session.mode.get().name(),
                         session.project.root.display(),
                         session.profile.rule_count(),
                         session.profile.command_pattern_count(),
                         session.profile.grants_network(),
+                        session.config().web.describe(),
                         session.config().limits.cells,
                         session.config().limits.cell_wall_clock_s,
                         session.config().limits.response_bytes,

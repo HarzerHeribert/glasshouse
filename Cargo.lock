@@ -2001,6 +2001,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "crossterm",
+ "directories",
  "libc",
  "oxc",
  "portable-pty",

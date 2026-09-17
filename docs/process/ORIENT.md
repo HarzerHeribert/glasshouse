@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1384 closed · 104 active committed open (93%)** — across 24 phases.
+**1385 closed · 103 active committed open (93%)** — across 24 phases.
 
 boundary 100 closed · 0 open
 gateway 391 closed · 14 open
 glasshouse 757 closed · 46 open
-pane 54 closed · 44 open
+pane 55 closed · 43 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -58,8 +58,8 @@ closures are usually at the top. Open the map at the line number given.
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 69 | Pane: request modes and the decision model's helpers | **1** | 9 | `2632` |
+| Phase 70 | Pane: the network the user configures, and the Windows console | **1** | 4 | `2648` |
 | Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **2** | 1 | `2618` |
-| Phase 70 | Pane: the network the user configures, and the Windows console | **2** | 3 | `2648` |
 | Phase 71 | Pane: line-tagged edits (Phase 65's successor) | **2** | 0 | `2660` |
 | Phase 72 | Pane: what the cells and the decision model make cheap | **4** | 0 | `2670` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
@@ -118,6 +118,10 @@ these unwrapped.
 
 - **2640** ☐ Gate remote commands in `explore`: every `ssh` and `scp` cell is parsed, mutating verbs, redirections and remote scripts are refused statically, the rest is judged by the decision model ("this remote command only reads") above a threshold or refused with the reason, and every remote command is logged in the rollout.
 
+### Phase 70 — Pane: the network the user configures, and the Windows console  (1 open, 4 closed)
+
+- **2655** ☐ Offer `ssh` execution as a host-run tool outside the cell sandbox: hosts the user reaches with keys they configured themselves, every command and its exit recorded in the rollout, refused until a host is configured; in `execute` mode any command, in `explore` and `plan` only commands that read (the static parse of mutating verbs, redirections and remote scripts, then the decision model's "this only reads" above the configured confidence).
+
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
@@ -127,11 +131,6 @@ these unwrapped.
 
 - **2624** ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
 - **2625** ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
-
-### Phase 70 — Pane: the network the user configures, and the Windows console  (2 open, 3 closed)
-
-- **2655** ☐ Offer `ssh` execution as a host-run tool outside the cell sandbox: hosts the user reaches with keys they configured themselves, every command and its exit recorded in the rollout, refused until a host is configured; in `execute` mode any command, in `explore` and `plan` only commands that read (the static parse of mutating verbs, redirections and remote scripts, then the decision model's "this only reads" above the configured confidence).
-- **2657** ☐ Offer `search` as a host-run tool: a search provider the user configured (endpoint and key in the gateway's store, never in argv or the rollout), results as bounded excerpts with their sources, every query recorded; refused until configured.
 
 ### Phase 71 — Pane: line-tagged edits (Phase 65's successor)  (2 open, 0 closed)
 

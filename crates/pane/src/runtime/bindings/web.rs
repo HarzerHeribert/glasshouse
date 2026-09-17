@@ -85,6 +85,9 @@ fn web_callback(
         if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
             recorded.insert("results".to_string(), results.len().to_string());
         }
+        if let Some(provider) = json.get("provider").and_then(|p| p.as_str()) {
+            recorded.insert("provider".to_string(), provider.to_string());
+        }
     }
     trace(scope).record(CallRecord {
         tool: name.clone(),
