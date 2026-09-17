@@ -257,7 +257,15 @@ impl Snapshot {
         }
         if !notes.is_empty() {
             if out.is_empty() {
-                out.push_str("No observed changes; capture incomplete.\n");
+                // **Never a claim of absence from an incomplete scan.** The
+                // capture stops at its byte and path limits, so a file it
+                // never reached is invisible here rather than unchanged, and
+                // a reader told "no changes" would take the stronger of the
+                // two readings (2026-09-17, the dogfooding run).
+                out.push_str(
+                    "No change observed in what was captured; the capture is incomplete, \
+                     so a change outside it would not appear here.\n",
+                );
             }
             out.push_str("\n[change capture incomplete: ");
             out.push_str(&notes.join("; "));
@@ -714,7 +722,7 @@ mod tests {
         fs::write(root.join("b.txt"), "b").unwrap();
         let before = Snapshot::capture_with_limits(&profile, 1, 10, 10);
         let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
-        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(rendered.contains("No change observed in what was captured"));
         assert!(!rendered.contains("+++"), "{rendered}");
         assert!(!rendered.contains("added file"), "{rendered}");
         fs::remove_dir_all(root).unwrap();
@@ -732,7 +740,7 @@ mod tests {
         let after = Snapshot::capture(&profile);
 
         let rendered = before.diff(&after).unwrap();
-        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(rendered.contains("No change observed in what was captured"));
         assert!(rendered.contains("byte limit"), "{rendered}");
         assert!(!rendered.contains("changed file"), "{rendered}");
         assert!(!rendered.contains("+++"), "{rendered}");
@@ -750,7 +758,7 @@ mod tests {
         let after = Snapshot::capture_with_limits(&profile, 1, 100, 100);
 
         let rendered = before.diff(&after).unwrap();
-        assert!(rendered.contains("No observed changes; capture incomplete"));
+        assert!(rendered.contains("No change observed in what was captured"));
         assert!(!rendered.contains("+++"), "{rendered}");
         assert!(!rendered.contains("---"), "{rendered}");
         fs::remove_dir_all(root).unwrap();

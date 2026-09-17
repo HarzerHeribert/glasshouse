@@ -28,6 +28,24 @@ struct Listing {
 }
 
 /// The gateway's cached account listing; empty when there is no gateway.
+/// The startup line naming who is watching this session.
+///
+/// **Off is worth one line; on is worth one too.** A session that cannot say
+/// who is watching it reads exactly like a session nobody is watching --
+/// measured 2026-09-17 (session `tlitep-13fv`), where `supervisor: off (no
+/// model)` scrolled past at startup and sixty cells of reading without an
+/// edit then ran to the cell cap.
+pub(super) fn supervisor_line(supervisor: &crate::config::SupervisorConfig) -> String {
+    match (supervisor.enabled, supervisor.model.as_deref()) {
+        (true, Some(model)) => format!(
+            "supervisor: {model}, looking every {} cell(s)",
+            supervisor.every
+        ),
+        (false, _) => "supervisor: off (disabled)".to_string(),
+        (true, None) => "supervisor: off (no model)".to_string(),
+    }
+}
+
 pub(super) fn served_accounts(gateway: &Gateway) -> Vec<ServedAccount> {
     gateway
         .run(&["entitlements", "--json"], None)

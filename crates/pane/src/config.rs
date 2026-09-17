@@ -36,8 +36,15 @@ impl Default for Limits {
     }
 }
 
-/// `[supervisor]` -- the look's cadence, model and switch (§1, §3). `model`
-/// has no default: unset means the supervisor is off.
+/// `[supervisor]` -- the look's cadence, model and switch (§1, §3).
+///
+/// **`model` unset falls back to `[helpers] model`, and only a session with
+/// neither runs unwatched.** The look is one short request answered with one
+/// JSON object -- exactly the cheap tier's kind of work -- and a session that
+/// configured a helper model has already chosen that tier. Measured
+/// 2026-09-17 (session `tlitep-13fv`): the supervisor was off for want of a
+/// model it could have inherited, and the run it was built to interrupt --
+/// sixty cells of reading without an edit -- ran to the cell cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorConfig {
     pub every: u32,
@@ -584,6 +591,13 @@ impl PaneConfig {
         let modes = match table.get("modes") {
             Some(value) => parse_modes(value)?,
             None => ModesConfig::default(),
+        };
+
+        // The fallback above, applied once so every reader -- the session's
+        // own switch, `/supervisor`, the sidebar -- sees one effective model.
+        let supervisor = SupervisorConfig {
+            model: supervisor.model.or_else(|| helpers.model.clone()),
+            ..supervisor
         };
 
         Ok(Self {

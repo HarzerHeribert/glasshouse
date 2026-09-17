@@ -47,6 +47,32 @@ fn absent_pane_toml_means_the_defaults() {
     assert!(!config.helpers.preflight);
 }
 
+/// Measured 2026-09-17 (session `tlitep-13fv`): the supervisor sat off for
+/// want of a model the session had already configured for its helpers, and
+/// the run it exists to interrupt — sixty cells of reading without an edit —
+/// ran to the cell cap unwatched.
+#[test]
+fn the_supervisor_inherits_the_helper_model_when_it_names_none() {
+    let root = scratch_dir("supervisor-inherits-helper-model");
+    write_pane_toml(&root, "[helpers]\nmodel = \"helper-tier\"\n");
+    let config = PaneConfig::load(&root).unwrap();
+    assert_eq!(config.supervisor.model.as_deref(), Some("helper-tier"));
+
+    // Its own model still wins.
+    let root = scratch_dir("supervisor-keeps-its-own-model");
+    write_pane_toml(
+        &root,
+        "[supervisor]\nmodel = \"watcher\"\n\n[helpers]\nmodel = \"helper-tier\"\n",
+    );
+    let config = PaneConfig::load(&root).unwrap();
+    assert_eq!(config.supervisor.model.as_deref(), Some("watcher"));
+
+    // Neither configured is the one session that still runs unwatched.
+    let root = scratch_dir("supervisor-with-no-model-anywhere");
+    write_pane_toml(&root, "[limits]\ncells = 10\n");
+    assert_eq!(PaneConfig::load(&root).unwrap().supervisor.model, None);
+}
+
 #[test]
 fn helper_preflight_is_an_explicit_boolean_opt_in() {
     let root = scratch_dir("preflight-on");

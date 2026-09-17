@@ -328,6 +328,51 @@ fn a_subagent_that_never_returns_stops_at_its_turn_cap() {
     assert!(result.stdout.contains("without returning"), "{result:?}");
 }
 
+/// Measured 2026-09-17 (session `tlitep-13fv`): three subagents came back
+/// `{status: "cancelled", stdout: "", stderr: ""}`, so the parent could not
+/// tell an exhausted turn budget from a refusal and started the same doomed
+/// subagent twice more. A subagent that stops early now says what it did.
+#[test]
+fn a_subagent_that_stopped_early_reports_its_turns_and_trajectory() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("early");
+    let base_url = start_provider("```pane\nconst n = 1;\n```", 8);
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "loop forever",
+        &AgentOptions {
+            turns: 2,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let events = wait_for_event(&fixture.session, Duration::from_secs(20));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let done = events
+        .iter()
+        .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        .expect("a capped subagent still completes");
+    let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
+    assert_eq!(result.status, "turns", "{result:?}");
+    assert!(
+        result.stderr.contains("stopped at its turn cap"),
+        "the parent must be able to tell why it stopped: {result:?}"
+    );
+    assert!(
+        result.stderr.contains("2 of 2 turn(s)"),
+        "the parent must be able to see the budget it gave: {result:?}"
+    );
+}
+
 #[test]
 fn a_subagent_can_amend_its_parse_failed_cell() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -440,6 +440,54 @@ struct JobThread {
     watching: Option<WatchOptions>,
 }
 
+/// How many trajectory entries one note carries before it counts the rest.
+///
+/// A subagent's trajectory is one entry per tool call, so a 24-turn loop can
+/// leave hundreds. The first entries are the ones that say what it was doing;
+/// the tail is a number.
+const NOTED_TRAJECTORY: usize = 24;
+
+/// The line a subagent's `stderr` carries, or empty when it returned normally
+/// with an answer.
+///
+/// **Nothing here is a second shape.** It is prose for the parent to read,
+/// built only from what `AgentResult` already holds: the status, the turns
+/// taken against the turns allowed, and the tool names of the trajectory
+/// (never an argument, never a payload).
+fn note_for(answered: &crate::agent::AgentResult, allowed: u64) -> String {
+    if answered.status == "returned" && !answered.answer.is_empty() {
+        return String::new();
+    }
+    let stopped = match answered.status.as_str() {
+        "turns" => "stopped at its turn cap",
+        "cancelled" => "was cancelled",
+        "failed" => "failed",
+        other => other,
+    };
+    let mut note = format!(
+        "subagent {stopped} after {} of {allowed} turn(s)",
+        answered.turns
+    );
+    if answered.trajectory.is_empty() {
+        note.push_str("; it made no tool call");
+    } else {
+        let shown: Vec<&str> = answered
+            .trajectory
+            .iter()
+            .take(NOTED_TRAJECTORY)
+            .map(String::as_str)
+            .collect();
+        note.push_str("; it called: ");
+        note.push_str(&shown.join(", "));
+        let rest = answered.trajectory.len().saturating_sub(shown.len());
+        if rest > 0 {
+            note.push_str(&format!(", and {rest} more"));
+        }
+    }
+    note.push('\n');
+    note
+}
+
 impl JobThread {
     fn serve(self) {
         match &self.watching {
@@ -479,12 +527,23 @@ impl JobThread {
                 // The answer is the job's output, so a subagent's result is
                 // read exactly as a command's is — `stdout`, `stderr`,
                 // `status` — and nothing downstream learns a second shape.
+                //
+                // **A subagent that stopped without returning still says what
+                // it did.** `stderr` is where a command's diagnostics go, so
+                // it is where these belong: `stdout` stays the answer and
+                // nothing that prints it changes. Measured 2026-09-17
+                // (session `tlitep-13fv`): three subagents came back
+                // `{status: "cancelled", stdout: "", stderr: ""}`, the parent
+                // could not tell an exhausted turn budget from a refusal, and
+                // it spent about twenty cells starting the same doomed
+                // subagent again.
                 let status = answered.status.clone();
+                let stderr = note_for(&answered, options.turns);
                 self.emit(
                     &status,
                     Ok(JobResult {
                         stdout: answered.answer,
-                        stderr: String::new(),
+                        stderr,
                         status: answered.status,
                     }),
                 );
@@ -760,6 +819,58 @@ mod tests {
         .unwrap_err();
         assert_eq!(denied.path, "env");
         assert!(honourable(&RunOptions::default()).is_ok());
+    }
+
+    /// Measured 2026-09-17 (session `tlitep-13fv`): three cancelled
+    /// subagents answered `{status: "cancelled", stdout: "", stderr: ""}`, so
+    /// the parent could not tell an exhausted budget from a refusal and
+    /// started the same doomed subagent twice more.
+    #[test]
+    fn a_subagent_that_stopped_early_still_says_what_it_did() {
+        let cancelled = crate::agent::AgentResult {
+            answer: String::new(),
+            status: "cancelled".into(),
+            turns: 3,
+            tokens: 0,
+            trajectory: vec!["read".into(), "rg".into(), "context".into()],
+        };
+        let note = note_for(&cancelled, 8);
+        assert!(note.contains("was cancelled"), "{note}");
+        assert!(note.contains("3 of 8 turn(s)"), "{note}");
+        assert!(note.contains("read, rg, context"), "{note}");
+
+        let silent = crate::agent::AgentResult {
+            trajectory: Vec::new(),
+            ..cancelled.clone()
+        };
+        assert!(note_for(&silent, 8).contains("no tool call"));
+
+        // A subagent that returned an answer needs no note: the answer is the
+        // result, and a second line beside it is noise.
+        let returned = crate::agent::AgentResult {
+            answer: "done".into(),
+            status: "returned".into(),
+            ..cancelled.clone()
+        };
+        assert_eq!(note_for(&returned, 8), "");
+    }
+
+    /// A long trajectory is counted, not printed: a 24-turn loop can leave
+    /// hundreds of entries and the note is for reading.
+    #[test]
+    fn a_long_trajectory_is_bounded_and_the_rest_counted() {
+        let busy = crate::agent::AgentResult {
+            answer: String::new(),
+            status: "turns".into(),
+            turns: 24,
+            tokens: 0,
+            trajectory: (0..NOTED_TRAJECTORY + 5)
+                .map(|_| "read".to_string())
+                .collect(),
+        };
+        let note = note_for(&busy, 24);
+        assert!(note.contains("and 5 more"), "{note}");
+        assert_eq!(note.matches("read").count(), NOTED_TRAJECTORY);
     }
 
     /// §1's `bg.done` key is `bg/<handle> + emission`, so two identical

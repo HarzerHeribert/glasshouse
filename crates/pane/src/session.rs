@@ -731,8 +731,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // person did not select, so a terminal opens the picker instead.
     let requested = startup::requested_model(args.model.as_deref(), &config.borrow(), terminal)?;
     session_println!("{}", resume::resume_hint(&session_id));
-    if config.borrow().supervisor.model.is_none() && !terminal {
-        session_println!("supervisor: off (no model)");
+    if !terminal {
+        session_println!("{}", startup::supervisor_line(&config.borrow().supervisor));
     }
     if config.borrow().decisions.model.is_none() && !terminal {
         session_println!("decisions: off (no model)");
