@@ -153,10 +153,24 @@ def limits_index(raw):
     return index
 
 
+def whole(value):
+    """A token count as an integer, or `None`.
+
+    The source publishes a few of these as floats (`grok-4-1-fast` carries
+    `2000000.0`), and the gateway deserialises them into an integer field:
+    one float in the whole file makes serde reject the *catalogue*, not the
+    row, so every model silently loses every figure. Measured 2026-09-17.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = int(value)
+    return number if number == value and number > 0 else None
+
+
 def agreed(rows):
     """One window and one maximum, or `None` where the rows disagree."""
-    windows = {row.get("max_input_tokens") for row in rows if row.get("max_input_tokens")}
-    outputs = {row.get("max_output_tokens") for row in rows if row.get("max_output_tokens")}
+    windows = {w for w in (whole(row.get("max_input_tokens")) for row in rows) if w}
+    outputs = {o for o in (whole(row.get("max_output_tokens")) for row in rows) if o}
     if len(windows) > 1 or len(outputs) > 1:
         return None
     if not windows and not outputs:

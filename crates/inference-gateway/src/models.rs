@@ -165,7 +165,20 @@ pub fn normalise(model: &str) -> String {
 #[must_use]
 pub fn baked() -> &'static Measurements {
     static BAKED_ONCE: OnceLock<Measurements> = OnceLock::new();
-    BAKED_ONCE.get_or_init(|| serde_json::from_str(BAKED).unwrap_or_default())
+    BAKED_ONCE.get_or_init(|| match serde_json::from_str(BAKED) {
+        Ok(measurements) => measurements,
+        // **An empty catalogue is never silent.** One malformed value makes
+        // serde reject the whole file, not the row that carried it, so every
+        // model loses every figure at once -- measured 2026-09-17, when one
+        // float token count (`2000000.0` where the field is an integer) left
+        // 642 models with nothing and the only symptom was `window ?`.
+        Err(error) => {
+            eprintln!(
+                "inference-gateway: the baked model index did not parse ({error});                  no published figure is available. Regenerate it with                  scripts/bake-model-index.py."
+            );
+            Measurements::default()
+        }
+    })
 }
 
 /// Where a user's own fetched catalogue is kept, beside the model catalogues

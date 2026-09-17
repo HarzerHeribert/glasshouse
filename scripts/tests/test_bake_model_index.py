@@ -58,6 +58,40 @@ class BakeModelIndex(unittest.TestCase):
     # --- the field list, which is what stands between a source publishing a
     # --- figure and a session reading it ------------------------------------
 
+    def test_a_float_token_count_is_baked_as_an_integer(self):
+        """One float makes serde reject the whole catalogue, not the row.
+
+        Measured 2026-09-17: the source publishes `grok-4-1-fast` with
+        `2000000.0`, the gateway's field is an integer, and the shipped index
+        parsed to zero models -- 642 models lost every figure at once and the
+        only symptom was a session printing `window ?`.
+        """
+        row = self.bake(
+            {"models": {"floaty": {"name": "Floaty", "intelligence": 10.0}}},
+            {"floaty": {"max_input_tokens": 2000000.0, "max_output_tokens": 128000.0, "mode": "chat"}},
+        )["models"]["floaty"]
+        self.assertEqual(row["context_window_tokens"], 2000000)
+        self.assertEqual(row["max_output_tokens"], 128000)
+        self.assertIsInstance(row["context_window_tokens"], int)
+        self.assertIsInstance(row["max_output_tokens"], int)
+
+    def test_a_fractional_token_count_is_refused_rather_than_rounded(self):
+        row = self.bake(
+            {"models": {"odd": {"name": "Odd", "intelligence": 10.0}}},
+            {"odd": {"max_input_tokens": 1024.5, "mode": "chat"}},
+        )["models"]["odd"]
+        self.assertNotIn("context_window_tokens", row)
+
+    def test_every_shipped_limit_is_an_integer(self):
+        shipped = json.loads(
+            (ROOT / "crates" / "inference-gateway" / "data" / "model-index.json").read_text()
+        )
+        for name, facts in shipped["models"].items():
+            for field in ("context_window_tokens", "max_output_tokens"):
+                if field in facts:
+                    self.assertIsInstance(facts[field], int, f"{name}.{field}")
+                    self.assertNotIsInstance(facts[field], bool, f"{name}.{field}")
+
     def test_the_two_real_limits_survive_the_bake(self):
         baked = self.bake(
             {
