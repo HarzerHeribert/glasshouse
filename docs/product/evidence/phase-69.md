@@ -81,7 +81,7 @@ Five scripted `pane session --output-format json` runs against the scratch Pytho
 
 **Gates.** `cargo test -p pane --test request_modes`: 16 passed; `--test settings_store` 30; `--test config` 17; `--test session` 105; targeted blast radius exit 0 in the worktree and on the merged tree.
 
-**Limits.** The offer band (0.5 to `mode_above`) is a printed line, not a counted proposal. The threshold is a default (2646).
+**Limits.** The offer band (0.5 to `mode_above`) is a printed line, not a counted proposal. The threshold is a default (2646). **Interaction with the Phase 66 hold:** in `on` mode a confident `read_only` request now enters `explore`, where an effectful cell is refused by the profile before the hold could fire, so the hold (2613) applies only below `mode_above` or under a pin — the sweep on cf60020f caught this in `tests/decisions.rs`'s two hold tests (red on every platform), fixed forward by pinning `mode_above = 1.0` in that file's `DECISIONS_ON`.
 
 ## Line 2640 — remote commands gated in `explore`
 
