@@ -1622,6 +1622,11 @@ fn exchange(
         first_tool_call_ms: None,
         completed_ms: None,
         framing: None,
+        // The translated path decodes a response rather than relaying it, and
+        // nothing here reads a refusal's wording yet: a window observed on a
+        // translated exchange is the successor this field's own documentation
+        // in `ingress` describes, not something this helper may invent.
+        context_limit_tokens: None,
         tokens: None,
         // Migration 24's two: `None` here, because this helper serves the
         // refusals that happen *before* a request has decoded and there is

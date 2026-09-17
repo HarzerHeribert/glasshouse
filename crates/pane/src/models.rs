@@ -35,11 +35,22 @@ pub struct RosterModel {
     pub coding: Option<f64>,
 }
 
-/// The `models` half of `inference-gateway models --json`.
+/// The `models` half of `inference-gateway models --json`, and the
+/// `observed` half beside it.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Document {
     #[serde(default)]
     models: BTreeMap<String, Facts>,
+    /// Windows the gateway watched a route enforce. Absent from an older
+    /// gateway, which is why it defaults rather than being required.
+    #[serde(default)]
+    observed: BTreeMap<String, ObservedFacts>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ObservedFacts {
+    #[serde(default)]
+    context_window_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -106,8 +117,13 @@ pub fn measure(served: &[String], published: &BTreeMap<String, MeasuredFacts>) -
 pub struct MeasuredFacts {
     pub intelligence: Option<f64>,
     pub coding: Option<f64>,
-    /// The model's context window, when the gateway knows it.
+    /// The model's context window as a catalogue published it -- a prior,
+    /// true of the model as described, not necessarily of the route in use.
     pub context_window_tokens: Option<u64>,
+    /// The window the gateway watched a route actually enforce, when a
+    /// provider has refused an over-long request and said so. Outranks the
+    /// published figure because it is a measurement of the thing itself.
+    pub observed_context_window_tokens: Option<u64>,
     /// The most it may produce in one response, when the gateway knows it.
     pub max_output_tokens: Option<u64>,
 }
@@ -121,8 +137,10 @@ pub struct MeasuredFacts {
 /// substitute something.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModelLimits {
-    /// How much context the model accepts.
+    /// How much context the model accepts, as a catalogue published it.
     pub context_window_tokens: Option<u64>,
+    /// How much the route in use was watched accepting.
+    pub observed_context_window_tokens: Option<u64>,
     /// The most it may produce in one response.
     pub max_output_tokens: Option<u64>,
 }
@@ -148,6 +166,7 @@ pub fn remember(published: &BTreeMap<String, MeasuredFacts>) {
                     id.clone(),
                     ModelLimits {
                         context_window_tokens: facts.context_window_tokens,
+                        observed_context_window_tokens: facts.observed_context_window_tokens,
                         max_output_tokens: facts.max_output_tokens,
                     },
                 )
@@ -156,16 +175,73 @@ pub fn remember(published: &BTreeMap<String, MeasuredFacts>) {
     );
 }
 
-/// The window a session reports and compacts against: what the person
-/// configured with `--context-window-tokens`, else what the gateway
-/// published, else nothing -- and nothing is printed as `window ?` rather
-/// than filled in.
+/// Where a window came from, which decides how much the screen may claim for
+/// it.
+///
+/// **A percentage is a claim.** Drawn against a figure nobody measured, it
+/// tells the person how much room is left with a confidence the number does
+/// not have -- and being wrong about that is worse than admitting the figure
+/// came from a table (`docs/product/design-decisions.md`, *A context window
+/// is a property of the route, not of the model*).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WindowSource {
+    /// The person said so on the command line. Trusted: they know what their
+    /// route does, and they may be behind a proxy that narrows it.
+    Configured,
+    /// A provider refused an over-long request on this route and named the
+    /// limit. Trusted: the route answering for itself.
+    Observed,
+    /// A catalogue published it for the model. An estimate: a re-host caps
+    /// what it resells, and a subscription tier can narrow it again.
+    Published,
+    /// Nobody knows.
+    #[default]
+    Unknown,
+}
+
+impl WindowSource {
+    /// Whether a percentage drawn against this figure is a measurement rather
+    /// than a guess.
+    #[must_use]
+    pub fn is_trusted(self) -> bool {
+        matches!(self, Self::Configured | Self::Observed)
+    }
+}
+
+/// The window a session reports and compacts against, and where it came from.
+///
+/// Precedence, most authoritative first: what the person configured with
+/// `--context-window-tokens`; then what a provider was watched enforcing on
+/// this route; then what a catalogue published for the model; then nothing,
+/// which is printed as `window ?` rather than filled in.
 ///
 /// The person's own figure wins because they may be running behind a proxy
-/// that narrows it, and no published number can know that.
+/// that narrows it, and no other source can know that. An observation beats a
+/// published figure because a refusal is the route describing itself, while a
+/// catalogue describes a model -- and of 223 exact name matches between two
+/// published catalogues on 2026-09-17, 126 disagreed across providers.
+#[must_use]
+pub fn window_with_source(
+    configured: Option<u64>,
+    published: ModelLimits,
+) -> (Option<u64>, WindowSource) {
+    if let Some(configured) = configured {
+        return (Some(configured), WindowSource::Configured);
+    }
+    if let Some(observed) = published.observed_context_window_tokens {
+        return (Some(observed), WindowSource::Observed);
+    }
+    match published.context_window_tokens {
+        Some(published) => (Some(published), WindowSource::Published),
+        None => (None, WindowSource::Unknown),
+    }
+}
+
+/// [`window_with_source`]'s figure alone, for a caller that only has to fit a
+/// request inside the window rather than describe it to a person.
 #[must_use]
 pub fn window_from(configured: Option<u64>, published: ModelLimits) -> Option<u64> {
-    configured.or(published.context_window_tokens)
+    window_with_source(configured, published).0
 }
 
 /// [`window_from`] for the common caller: the model's name, and whatever the
@@ -173,6 +249,12 @@ pub fn window_from(configured: Option<u64>, published: ModelLimits) -> Option<u6
 #[must_use]
 pub fn window_for(model: &str, configured: Option<u64>) -> Option<u64> {
     window_from(configured, limits_for(model))
+}
+
+/// [`window_for`] with the provenance the meter needs.
+#[must_use]
+pub fn window_source_for(model: &str, configured: Option<u64>) -> (Option<u64>, WindowSource) {
+    window_with_source(configured, limits_for(model))
 }
 
 /// What the gateway said bounds `model`, or an empty answer when nothing was
@@ -195,21 +277,40 @@ pub fn published(gateway: &Gateway) -> BTreeMap<String, MeasuredFacts> {
     let Ok(document) = serde_json::from_slice::<Document>(&bytes) else {
         return BTreeMap::new();
     };
-    document
+    let observed = document.observed;
+    let mut measured: BTreeMap<String, MeasuredFacts> = document
         .models
         .into_iter()
         .map(|(id, facts)| {
+            let id = normalise(&id);
+            let seen = observed
+                .get(&id)
+                .and_then(|seen| seen.context_window_tokens);
             (
-                normalise(&id),
+                id,
                 MeasuredFacts {
                     intelligence: facts.intelligence,
                     coding: facts.coding,
                     context_window_tokens: facts.context_window_tokens,
+                    observed_context_window_tokens: seen,
                     max_output_tokens: facts.max_output_tokens,
                 },
             )
         })
-        .collect()
+        .collect();
+    // A route can be watched enforcing a window for a model no catalogue
+    // measured. That is still the most authoritative figure there is for it,
+    // so it is kept rather than dropped for want of a published sibling.
+    for (id, seen) in observed {
+        let Some(tokens) = seen.context_window_tokens else {
+            continue;
+        };
+        measured
+            .entry(normalise(&id))
+            .or_default()
+            .observed_context_window_tokens = Some(tokens);
+    }
+    measured
 }
 
 #[cfg(test)]
@@ -288,9 +389,61 @@ mod tests {
     }
 
     #[test]
+    fn a_window_the_route_was_watched_enforcing_outranks_the_one_a_catalogue_published() {
+        // The measurement behind this: of 223 exact name matches between two
+        // published catalogues on 2026-09-17, 126 disagreed across providers,
+        // because a re-host caps what it resells. The refusal is the route
+        // describing itself.
+        let limits = ModelLimits {
+            context_window_tokens: Some(1_000_000),
+            observed_context_window_tokens: Some(200_000),
+            max_output_tokens: None,
+        };
+        assert_eq!(
+            window_with_source(None, limits),
+            (Some(200_000), WindowSource::Observed),
+            "the re-host's own refusal beats the vendor's published figure"
+        );
+        assert_eq!(
+            window_with_source(Some(64_000), limits),
+            (Some(64_000), WindowSource::Configured),
+            "the person may be behind a proxy narrower than either"
+        );
+    }
+
+    #[test]
+    fn only_a_measured_window_is_trusted_enough_for_a_percentage() {
+        assert!(WindowSource::Configured.is_trusted());
+        assert!(WindowSource::Observed.is_trusted());
+        assert!(
+            !WindowSource::Published.is_trusted(),
+            "a catalogue describes the model, not the route serving it"
+        );
+        assert!(!WindowSource::Unknown.is_trusted());
+    }
+
+    #[test]
+    fn an_observed_window_is_read_from_the_gateways_own_document() {
+        let document = br#"{"models":{"gpt-5.6-sol":{"intelligence":47.1,"context_window_tokens":922000}},"observed":{"gpt-5-6-sol":{"context_window_tokens":128000,"route":"openrouter","observed_at_unix":1789000000}}}"#;
+        let parsed: Document = serde_json::from_slice(document).unwrap();
+        assert_eq!(
+            parsed.observed["gpt-5-6-sol"].context_window_tokens,
+            Some(128_000)
+        );
+        // An older gateway says nothing about observations, and that must
+        // parse as "none observed" rather than as a failure that loses the
+        // published figures too.
+        let older: Document =
+            serde_json::from_slice(br#"{"models":{"m":{"coding":1.0}}}"#).unwrap();
+        assert!(older.observed.is_empty());
+        assert!(older.models.contains_key("m"));
+    }
+
+    #[test]
     fn a_published_window_is_used_and_the_persons_own_figure_still_wins() {
         let published = ModelLimits {
             context_window_tokens: Some(400_000),
+            observed_context_window_tokens: None,
             max_output_tokens: None,
         };
         assert_eq!(window_from(None, published), Some(400_000));

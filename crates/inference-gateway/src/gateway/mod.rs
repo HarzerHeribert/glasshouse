@@ -22,6 +22,7 @@
 //! holds the whole crate to that, `rusqlite` included.
 // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/mod.rs module doc.
 
+mod context_limit;
 mod http;
 mod ingress;
 mod request_model;
@@ -939,6 +940,26 @@ fn accept_loop(
                         // knows that at the point a reading is captured.
                         if let Some(cache) = &quota_cache {
                             cache.store(&exchange.provider, &quota, now);
+                            // The route answering for itself. A provider
+                            // refusing an over-long request states the window
+                            // it enforces, and that figure belongs to this
+                            // account on this route rather than to the model
+                            // as some catalogue describes it
+                            // (`docs/product/design-decisions.md`, *A context
+                            // window is a property of the route, not of the
+                            // model*). Written beside the quota reading
+                            // because it is the same kind of fact, observed
+                            // at the same moment, by the same loop.
+                            if let Some(tokens) = exchange.context_limit_tokens
+                                && let Some(model) = exchange.requested_model.as_deref()
+                            {
+                                cache.context_limits().store(
+                                    &exchange.provider,
+                                    model,
+                                    tokens,
+                                    now,
+                                );
+                            }
                         }
                         routing.observe_quota_headers(quota, now);
                         // Capability map lines 1311/1321/1322/1324's gateway

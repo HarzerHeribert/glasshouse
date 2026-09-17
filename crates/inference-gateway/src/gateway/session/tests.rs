@@ -82,6 +82,7 @@ fn unreachable_exchange(provider: &str) -> Exchange {
         first_token_ms: None,
         first_tool_call_ms: None,
         completed_ms: None,
+        context_limit_tokens: None,
         framing: None,
         tokens: None,
         effort: None,
@@ -146,6 +147,7 @@ fn forwarded_exchange(
         first_token_ms: None,
         first_tool_call_ms: None,
         completed_ms: Some(900),
+        context_limit_tokens: None,
         framing: Some(Framing {
             declared,
             relayed,

@@ -318,6 +318,7 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         context: Some(ContextTokens {
             used: 44_584,
             cap: Some(1_048_576),
+            cap_source: pane::models::WindowSource::Observed,
             counted: Counted::Gateway,
         }),
         tokens: Some(pane::tui::TaskTokens {
@@ -459,6 +460,7 @@ fn statusline_separates_request_context_from_cumulative_spend() {
         context: Some(ContextTokens {
             used: 44_584,
             cap: Some(1_048_576),
+            cap_source: pane::models::WindowSource::Observed,
             counted: Counted::Gateway,
         }),
         tokens: Some(pane::tui::TaskTokens {
@@ -478,6 +480,8 @@ fn statusline_separates_request_context_from_cumulative_spend() {
         context: Some(ContextTokens {
             used: 44_584,
             cap: None,
+            cap_source: pane::models::WindowSource::Observed,
+
             counted: Counted::Gateway,
         }),
         ..notebook
@@ -493,6 +497,8 @@ fn context_fill_animates_while_busy_without_changing_its_measurement() {
         context: Some(ContextTokens {
             used: 600_000,
             cap: Some(1_000_000),
+            cap_source: pane::models::WindowSource::Observed,
+
             counted: Counted::Estimated,
         }),
         ..Notebook::default()
@@ -1549,6 +1555,8 @@ fn the_context_reading_outranks_the_mouse_marker_on_a_narrow_status_line() {
         context: Some(ContextTokens {
             used: 123_000,
             cap: Some(200_000),
+            cap_source: pane::models::WindowSource::Observed,
+
             counted: Counted::Gateway,
         }),
         ..Notebook::default()

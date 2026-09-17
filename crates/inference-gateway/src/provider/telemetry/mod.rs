@@ -1163,6 +1163,31 @@ impl GatewayQuotaCache {
         crate::provider::cache::provider_json_path(&self.root, provider)
     }
 
+    /// The observed-window cache that lives beside this one, under the same
+    /// data directory.
+    ///
+    /// **Why it is reached through here rather than passed separately.** Both
+    /// caches answer the same description -- what this process watched a
+    /// provider do, written down for its own next run -- and this one is
+    /// already threaded to the single place in the accept loop where a
+    /// provider name, a model name and a completed exchange are all in hand.
+    /// A second optional argument would have to travel the same path through
+    /// four start functions and an accept loop that is already
+    /// `too_many_arguments`, to arrive at the same line. The consequence is
+    /// stated rather than hidden: **a gateway told to keep no telemetry keeps
+    /// no observed windows either**, which is the same policy, not an
+    /// accident.
+    #[must_use]
+    pub fn context_limits(&self) -> ContextLimitCache {
+        match self.root.parent() {
+            Some(data_dir) => ContextLimitCache::new(data_dir),
+            // A root with no parent is a test rooting this cache at `/`;
+            // keeping the sibling inside it is the only answer that stays
+            // inside the caller's own directory.
+            None => ContextLimitCache::at(self.root.join("gateway-context-limits")),
+        }
+    }
+
     /// The provider's persisted reading, whole — absent, unreadable,
     /// truncated, another format version, or a provider name the file
     /// disagrees with are all `None`, [`Self::load`]'s own contract, one
@@ -2131,6 +2156,10 @@ impl DispatchReservationCache {
         )
     }
 }
+
+pub mod context_limits;
+
+pub use context_limits::{ContextLimitCache, ObservedWindow};
 
 #[cfg(test)]
 mod dispatch_reservation_cache_tests;

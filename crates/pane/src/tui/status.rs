@@ -66,11 +66,26 @@ pub(super) fn context_summary(
         );
     };
     let (bar, percent) = context_bar(tokens, width, tick, moving);
-    format!(
-        "ctx {bar} {}/{} {percent}%",
-        compact_tokens(tokens.used),
-        compact_tokens(cap)
-    )
+    // **A percentage is a claim, and it is only made against a measured
+    // figure.** A window a catalogue published describes the model, not the
+    // route serving it: a re-host caps what it resells and a subscription
+    // tier narrows it again, so the meter marks the cap as an estimate and
+    // says nothing about how much room is left
+    // (`docs/product/design-decisions.md`, *A context window is a property of
+    // the route, not of the model*).
+    if tokens.cap_source.is_trusted() {
+        format!(
+            "ctx {bar} {}/{} {percent}%",
+            compact_tokens(tokens.used),
+            compact_tokens(cap)
+        )
+    } else {
+        format!(
+            "ctx {bar} {}/~{}",
+            compact_tokens(tokens.used),
+            compact_tokens(cap)
+        )
+    }
 }
 
 pub(super) fn context_bar(
@@ -105,4 +120,54 @@ pub(super) fn context_bar(
         ((tokens.used.min(cap) as u128 * 100) / cap as u128) as u64
     };
     (bar, percent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::WindowSource;
+    use crate::tui::Counted;
+
+    fn meter(cap: Option<u64>, cap_source: WindowSource) -> String {
+        context_summary(
+            ContextTokens {
+                used: 7_400,
+                cap,
+                cap_source,
+                counted: Counted::Gateway,
+            },
+            8,
+            0,
+            false,
+        )
+    }
+
+    #[test]
+    fn a_measured_window_earns_a_percentage() {
+        for source in [WindowSource::Observed, WindowSource::Configured] {
+            let shown = meter(Some(922_000), source);
+            assert!(shown.contains("7.4k/922.0k"), "{shown}");
+            assert!(shown.contains('%'), "{shown}");
+            assert!(!shown.contains('~'), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_published_window_is_marked_an_estimate_and_claims_no_percentage() {
+        // The rule: being wrong about how much room is left is worse than
+        // admitting the number came from a table.
+        let shown = meter(Some(922_000), WindowSource::Published);
+        assert!(shown.contains("7.4k/~922.0k"), "{shown}");
+        assert!(
+            !shown.contains('%'),
+            "a percentage against an unmeasured cap is a claim the figure has not earned: {shown}"
+        );
+    }
+
+    #[test]
+    fn no_window_at_all_says_so_rather_than_drawing_a_bar() {
+        let shown = meter(None, WindowSource::Unknown);
+        assert!(shown.contains("window ?"), "{shown}");
+        assert!(!shown.contains('%'), "{shown}");
+    }
 }

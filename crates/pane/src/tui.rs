@@ -798,6 +798,9 @@ impl HelperModelTokens {
 pub struct ContextTokens {
     pub used: u64,
     pub cap: Option<u64>,
+    /// Where `cap` came from. The meter draws a percentage only against a
+    /// figure somebody measured -- see [`crate::models::WindowSource`].
+    pub cap_source: crate::models::WindowSource,
     pub counted: Counted,
 }
 

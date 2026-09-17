@@ -417,7 +417,14 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
             gateway::start_if_required_with_degrade_sink(
                 &[BackendDemand::LocalGateway],
                 || Ok(upstream),
-                None,
+                // What this process watches a provider do, written down for
+                // its own next run: rate-limit readings, and -- through
+                // `GatewayQuotaCache::context_limits` -- the context window a
+                // route states when it refuses an over-long request. Without
+                // a cache here both are observed and forgotten, and
+                // `models --json` could only ever answer with a catalogue's
+                // prior.
+                Some(inference_gateway::provider::telemetry::GatewayQuotaCache::new(data_dir)),
                 None,
                 // Nobody is listening, said out loud. A hosted gateway
                 // installs an emitter here; this one has no host and drops
@@ -569,6 +576,11 @@ fn models(data_dir: &Path, json: bool, filter: Option<&str>, import: Option<&Pat
             "captured": measurements.captured,
             "fetched_at": measurements.fetched_at,
             "models": measurements.models,
+            // What a route was watched enforcing, beside what a catalogue
+            // published. Two blocks rather than one merged figure, so a
+            // reader can always tell a measurement from a prior -- which is
+            // what lets a context meter say whether its percentage is one.
+            "observed": inference_gateway::models::observed(data_dir),
         }))?;
         writeln!(stdout, "{document}")?;
         return Ok(());

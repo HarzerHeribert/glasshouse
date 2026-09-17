@@ -239,9 +239,79 @@ pub fn import(data_dir: &Path, bytes: &[u8]) -> Result<usize, String> {
     Ok(normalised.models.len())
 }
 
+/// A window **watched a route enforce**, folded to one answer per model.
+///
+/// The observation itself is per provider and model
+/// (`crate::provider::telemetry::ContextLimitCache`), because that is the
+/// granularity a refusal describes. A caller asking `models --json` is asking
+/// about models, so the newest reading wins where two providers have both
+/// answered for one model -- and the route it came from is carried with it,
+/// so nobody reads the figure as a property of the model itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLimit {
+    /// What the route refused to exceed.
+    pub context_window_tokens: u64,
+    /// The provider whose refusal stated it -- the "where and how" half of
+    /// the figure, kept so a reader can tell a first-party window from a
+    /// re-host's cap.
+    pub route: String,
+    /// When it said so, in Unix seconds.
+    pub observed_at_unix: i64,
+}
+
+/// Every observed window this installation holds, keyed by [`normalise`]d
+/// model name. Empty when nothing has ever been refused for length.
+#[must_use]
+pub fn observed(data_dir: &Path) -> BTreeMap<String, ObservedLimit> {
+    let mut folded: BTreeMap<String, ObservedLimit> = BTreeMap::new();
+    for (provider, model, window) in
+        crate::provider::telemetry::ContextLimitCache::new(data_dir).all()
+    {
+        let candidate = ObservedLimit {
+            context_window_tokens: window.context_window_tokens,
+            route: provider,
+            observed_at_unix: window.observed_at_unix,
+        };
+        folded
+            .entry(normalise(&model))
+            .and_modify(|held| {
+                if candidate.observed_at_unix >= held.observed_at_unix {
+                    *held = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+    folded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_observed_window_is_folded_to_one_answer_per_model_carrying_its_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = crate::provider::telemetry::ContextLimitCache::new(dir.path());
+        cache.store("anthropic", "claude-sonnet-4.6", 1_000_000, 1_789_000_000);
+        cache.store("snowflake", "claude-sonnet-4.6", 200_000, 1_789_100_000);
+
+        let folded = observed(dir.path());
+        let seen = &folded["claude-sonnet-4-6"];
+        assert_eq!(
+            seen.context_window_tokens, 200_000,
+            "the newest reading answers, because a route can change"
+        );
+        assert_eq!(
+            seen.route, "snowflake",
+            "the route is carried so nobody reads the figure as the model's own"
+        );
+    }
+
+    #[test]
+    fn nothing_refused_for_length_is_nothing_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(observed(dir.path()).is_empty());
+    }
 
     #[test]
     fn the_shipped_snapshot_parses_and_carries_figures() {

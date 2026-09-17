@@ -642,6 +642,7 @@ fn test_finish(
             first_token_ms: first.first_token_ms,
             first_tool_call_ms: first.first_tool_call_ms,
             completed_ms: None,
+            context_limit_tokens: None,
             framing: Some(framing),
             tokens,
             effort: None,

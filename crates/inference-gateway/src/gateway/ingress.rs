@@ -147,6 +147,15 @@ pub(super) struct Exchange {
     /// `first_byte_at`. See this module's own "a fourth thing may now be
     /// recorded".
     pub(super) framing: Option<Framing>,
+    /// The context window the provider stated while refusing this request as
+    /// too long, in tokens -- [`super::context_limit`]. A count, never a
+    /// piece of the provider's sentence: what is kept is the number the route
+    /// enforces, which is the one figure a published catalogue cannot know
+    /// (`docs/product/design-decisions.md`, *A context window is a property
+    /// of the route, not of the model*). `None` on every exchange that was
+    /// not refused for length, and on every refusal whose wording this
+    /// gateway does not recognise.
+    pub(super) context_limit_tokens: Option<u64>,
     /// Token counts the provider stated — exact on a **translated** exchange
     /// because that response was parsed (the module's "narrowed and not
     /// repealed"), and exact on a **relayed** one whose protocol
@@ -284,6 +293,16 @@ struct Counted<R> {
     first_token: Option<(i64, i64)>,
     /// [`Self::first_token`]'s sibling for the first tool call.
     first_tool_call: Option<(i64, i64)>,
+    /// A bounded copy of a **refusal's** body, and only a refusal's.
+    ///
+    /// `Some` exactly when the provider answered with a client error, capped
+    /// at [`super::context_limit::SCAN_LIMIT_BYTES`]. It exists for one
+    /// question -- did the provider state the window it enforces
+    /// ([`super::context_limit`]) -- and nothing but the integer that
+    /// question yields outlives this struct: the buffer is read once after
+    /// the pump and dropped with the reader. A successful response is never
+    /// copied here at any size.
+    refusal: Option<Vec<u8>>,
 }
 
 impl<R: Read> Read for Counted<R> {
@@ -299,6 +318,12 @@ impl<R: Read> Read for Counted<R> {
                     if seen.first_tool_call && self.first_tool_call.is_none() {
                         self.first_tool_call = Some(self.now());
                     }
+                }
+                if let Some(refusal) = self.refusal.as_mut()
+                    && refusal.len() < super::context_limit::SCAN_LIMIT_BYTES
+                {
+                    let room = super::context_limit::SCAN_LIMIT_BYTES - refusal.len();
+                    refusal.extend_from_slice(&buf[..read.min(room)]);
                 }
                 Ok(read)
             }
@@ -758,6 +783,7 @@ fn forward(
                 first_byte_at,
                 first_byte_ms,
                 completed_ms: Some(millis_since(dispatch)),
+                context_limit_tokens: None,
                 framing: Some(framing),
                 purpose: purpose.clone(),
                 requested_model: requested_model.clone(),
@@ -775,6 +801,9 @@ fn forward(
     let mut tokens = None;
     let mut first_token = None;
     let mut first_tool_call = None;
+    // What the provider said it enforces, when it refused this request for
+    // being too long. `None` on every other exchange.
+    let mut context_limit_tokens = None;
     if carries_body {
         // `Counted` is the observer: it sees how many bytes each read
         // returned and whether the provider's side failed, and `pump` still
@@ -795,6 +824,10 @@ fn forward(
             dispatch,
             first_token: None,
             first_tool_call: None,
+            // Only a refusal is copied, and only far enough to read one
+            // integer out of it. A 2xx response is relayed without this
+            // struct retaining a byte of it, exactly as before.
+            refusal: status.is_client_error().then(Vec::new),
         };
         let pumped = http::pump(&mut counted, out, chunked);
         moved = counted.relayed;
@@ -830,6 +863,7 @@ fn forward(
                         first_byte_at,
                         first_byte_ms,
                         completed_ms: Some(millis_since(dispatch)),
+                        context_limit_tokens: None,
                         framing: Some(framing),
                         purpose: purpose.clone(),
                         requested_model: requested_model.clone(),
@@ -845,6 +879,14 @@ fn forward(
         // stopped, and pairing that with an output count the provider never
         // finished stating is the estimate the ruling forbids — so the row
         // says unknown, which is a different fact from zero.
+        // The route answering for itself. A refusal states the window it
+        // enforces, which no catalogue can know; the integer is taken here
+        // and the bytes it came from are dropped with `counted`.
+        context_limit_tokens = counted
+            .refusal
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(super::context_limit::stated_limit);
         if framing.ended == StreamEnd::Complete {
             tokens = counted
                 .usage
@@ -887,6 +929,7 @@ fn forward(
             first_tool_call_at: first_tool_call.map(|(at, _)| at),
             first_tool_call_ms: first_tool_call.map(|(_, ms)| ms),
             tokens,
+            context_limit_tokens,
             purpose,
             requested_model,
             ..exchange(
@@ -1291,6 +1334,10 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // `translate::serve` fills them on its path.
         first_token_at: None,
         first_tool_call_at: None,
+        // No response arrived on any path through this helper, so nothing
+        // was refused for length here; `forward`'s completed return
+        // overrides this via struct-update syntax.
+        context_limit_tokens: None,
         // Migration 25's four offsets, and the same rule one line up: every
         // caller of this helper returns before the upstream request was
         // sent or before an answer came back, so there is no monotonic zero
@@ -1485,6 +1532,7 @@ mod tests {
                 first_token_ms: Some(1_100),
                 first_tool_call_ms: Some(2_400),
                 completed_ms: Some(3_600),
+                context_limit_tokens: None,
                 framing: Some(Framing {
                     declared: Some(4096),
                     relayed: Some(4096),
@@ -1653,6 +1701,7 @@ mod tests {
             dispatch: Instant::now(),
             first_token: None,
             first_tool_call: None,
+            refusal: None,
         };
         let mut out = Vec::new();
         let pumped = http::pump(&mut counted, &mut out, false);
@@ -1677,12 +1726,63 @@ mod tests {
             dispatch: Instant::now(),
             first_token: None,
             first_tool_call: None,
+            refusal: None,
         };
         let mut out = Vec::new();
         let moved = http::pump(&mut counted, &mut out, true).expect("a clean stream pumps");
         assert_eq!(moved, 12);
         assert_eq!(counted.relayed, moved);
         assert!(!counted.upstream_failed);
+    }
+
+    /// The route answering for itself: a refusal passes the relay unchanged
+    /// and leaves behind one integer -- the window it enforces.
+    #[test]
+    fn a_refusal_is_relayed_whole_and_leaves_the_window_it_stated() {
+        let body = br#"{"error":{"message":"prompt is too long: 213000 tokens > 200000 maximum"}}"#;
+        let mut counted = Counted {
+            inner: &body[..],
+            relayed: 0,
+            upstream_failed: false,
+            usage: None,
+            dispatch: Instant::now(),
+            first_token: None,
+            first_tool_call: None,
+            // What `forward` passes for a client error.
+            refusal: Some(Vec::new()),
+        };
+        let mut out = Vec::new();
+        http::pump(&mut counted, &mut out, true).expect("a refusal relays like any body");
+        // Chunk framing belongs to this hop; the provider's own bytes cross
+        // it untouched, which is what "relayed whole" means here.
+        assert!(
+            out.windows(body.len()).any(|window| window == body),
+            "the harness is sent exactly what arrived"
+        );
+        let stated = counted
+            .refusal
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(super::super::context_limit::stated_limit);
+        assert_eq!(stated, Some(200_000));
+    }
+
+    /// A 2xx is never copied, at any size: the buffer exists for refusals.
+    #[test]
+    fn an_ordinary_response_is_not_copied_while_it_is_relayed() {
+        let mut counted = Counted {
+            inner: &b"a perfectly ordinary answer"[..],
+            relayed: 0,
+            upstream_failed: false,
+            usage: None,
+            dispatch: Instant::now(),
+            first_token: None,
+            first_tool_call: None,
+            refusal: None,
+        };
+        let mut out = Vec::new();
+        http::pump(&mut counted, &mut out, true).expect("a clean stream pumps");
+        assert!(counted.refusal.is_none(), "nothing of a 2xx is retained");
     }
 
     #[test]

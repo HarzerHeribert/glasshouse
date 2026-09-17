@@ -36,6 +36,7 @@ use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
 use crate::sandbox::modes::{self, ModeOverlay, RequestMode};
 use crate::sandbox::profile::Profile;
+use crate::session::context::{context_cap, estimate_context, record_request};
 use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
@@ -57,30 +58,7 @@ macro_rules! session_println {
     ($($arg:tt)*) => { ui::output(format!($($arg)*)) };
 }
 
-fn record_request(notebook: &mut Notebook, measurement: RequestMeasurement) {
-    output::parent_response(&measurement);
-    if let Some(used) = measurement.context_tokens() {
-        let cap = notebook.context.and_then(|context| context.cap);
-        notebook.context = Some(ContextTokens {
-            used,
-            cap,
-            counted: Counted::Gateway,
-        });
-    }
-    if notebook.requests.len() >= REQUEST_MEASUREMENT_CAP {
-        let remove = notebook.requests.len() + 1 - REQUEST_MEASUREMENT_CAP;
-        notebook.requests.drain(..remove);
-    }
-    notebook.requests.push(measurement);
-}
-
-fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
-    notebook.context = Some(ContextTokens {
-        used: estimate,
-        cap,
-        counted: Counted::Estimated,
-    });
-}
+mod context;
 mod controls;
 mod mode_proposal;
 mod native;
@@ -1047,16 +1025,6 @@ impl Session<'_> {
     }
 }
 
-fn context_cap(session: &Session<'_>, model: &str) -> Option<u64> {
-    let configured = session
-        .context_window
-        .as_ref()
-        .and_then(|(configured_model, cap)| (configured_model == model).then_some(*cap));
-    // `--context-window-tokens` first, then whatever the gateway published
-    // for this model; an unknown window stays unknown and the meter says so.
-    crate::models::window_for(model, configured)
-}
-
 struct RollbackCheckpoint {
     before: crate::changes::Snapshot,
     after: crate::changes::Snapshot,
@@ -1404,11 +1372,8 @@ fn run_task_inner(
         let requested_model = session.model.borrow().clone();
         let estimate =
             estimate_task_request_tokens(&transcript.conversation, &requested_model, task);
-        estimate_context(
-            &mut transcript.notebook,
-            estimate,
-            context_cap(session, &requested_model),
-        );
+        let (cap, cap_source) = context_cap(session, &requested_model);
+        estimate_context(&mut transcript.notebook, estimate, cap, cap_source);
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
@@ -3601,6 +3566,7 @@ mod tests {
             context: Some(ContextTokens {
                 used: 9,
                 cap: Some(1_048_576),
+                cap_source: crate::models::WindowSource::Observed,
                 counted: Counted::Estimated,
             }),
             ..Notebook::default()
@@ -3628,6 +3594,10 @@ mod tests {
             Some(ContextTokens {
                 used: 300,
                 cap: Some(1_048_576),
+                // The window's provenance survives a new request exactly as
+                // the figure does: a reading replaces the count, never what
+                // the meter is allowed to claim about the cap.
+                cap_source: crate::models::WindowSource::Observed,
                 counted: Counted::Gateway,
             })
         );
