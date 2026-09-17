@@ -8,6 +8,13 @@ call "C:\BuildTools\VC\Auxiliary\Build\vcvarsarm64.bat" >nul
 if errorlevel 1 exit /b %errorlevel%
 set "PATH=C:\BuildTools\VC\Tools\Llvm\ARM64\bin;C:\Program Files\Git\bin;%PATH%"
 set "CARGO_TARGET_DIR=C:\ci\target"
+rem The VM disk is 85 GB. A workspace build with full debug info wrote 27.6 GB
+rem of PDBs for 4.7 GB of test executables and 7 GB of incremental caches, and
+rem filled it twice on 2026-09-17. Line tables keep file:line in every panic
+rem and backtrace, which is what a red is read from; a fresh copy of the tree
+rem gains little from incremental caches. The GitHub cells keep the defaults.
+set "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+set "CARGO_INCREMENTAL=0"
 cd /d C:\ci\glasshouse
 
 if /i "%MODE%"=="all" goto all

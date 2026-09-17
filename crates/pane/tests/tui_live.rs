@@ -440,6 +440,17 @@ fn approval_provider(program: &'static str) -> String {
             "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        drop(stream);
+        // The turn after a denied write asks the model again, and this
+        // provider answers once: every later connection is accepted and
+        // dropped, so the refusal is explicit. Dropping the listener instead
+        // relied on the OS refusing a closed loopback port, which Windows
+        // does not do promptly — measured on the ARM64 VM, 2026-09-17: the
+        // connect hung past 40 s where macOS refused it at once, the turn
+        // stayed "thinking", and the queued `/exit` never ran.
+        while let Ok((later, _)) = listener.accept() {
+            drop(later);
+        }
     });
     base
 }

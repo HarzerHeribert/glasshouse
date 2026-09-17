@@ -13,6 +13,19 @@ use crossterm::event::{
 /// duration because waiting changes what a run *is* not at all.
 const MAX_TAIL: usize = 20;
 
+/// The markers a terminal wraps a paste in once `?2004h` has asked it to.
+const PASTE_OPEN: &str = "[200~";
+const PASTE_CLOSE: &str = "[201~";
+
+/// How much one paste may accumulate before it is delivered regardless.
+///
+/// A bound rather than trust, for [`MAX_TAIL`]'s reason: a closing marker
+/// that never arrives must not grow a buffer without end. It is far above
+/// anything a terminal sends in one paste, and reaching it delivers what was
+/// collected rather than dropping it — the rest then arrives as ordinary
+/// keys, which is visible instead of silent.
+const MAX_PASTE: usize = 1 << 20;
+
 /// How long an Escape with nothing after it yet waits before it is handed to
 /// the UI as a key press.
 ///
@@ -43,11 +56,22 @@ const ESCAPE_GRACE: Duration = Duration::from_millis(20);
 /// character, with a 200 ms ceiling, and a release into the editor when either
 /// expired. It was green on this machine and red on a loaded CI runner, which
 /// typed `[<65;101;28M` into the composer and sent it to a model.
-#[derive(Default)]
 pub(super) struct TerminalInput {
     /// Resolved events waiting to be handed to the caller, in arrival order.
     ready: VecDeque<Event>,
     hold: Hold,
+    /// Whether `ESC [ 200 ~ … ESC [ 201 ~` is reassembled here into an
+    /// `Event::Paste`: true only where crossterm reads console records and
+    /// so never produces one itself (Windows). Where it parses the bytes it
+    /// consumes the markers before this file is asked, and a run that merely
+    /// looks like an opener stays the text it is — see [`Self::accept`].
+    reassembles_pastes: bool,
+}
+
+impl Default for TerminalInput {
+    fn default() -> Self {
+        Self::new(cfg!(windows))
+    }
 }
 
 /// What may still be assembling. `Idle` cannot become a report; `Open` is a
@@ -63,9 +87,24 @@ enum Hold {
         escape: Option<Event>,
         tail: Vec<Event>,
     },
+    /// Between `ESC [ 200 ~` and `ESC [ 201 ~`: every character is payload.
+    /// `closing` holds the run after an Escape while it could still be the
+    /// closing marker.
+    Pasting {
+        text: String,
+        closing: Option<String>,
+    },
 }
 
 impl TerminalInput {
+    fn new(reassembles_pastes: bool) -> Self {
+        Self {
+            ready: VecDeque::new(),
+            hold: Hold::Idle,
+            reassembles_pastes,
+        }
+    }
+
     /// True while resolved events are waiting; the caller must drain them
     /// before it blocks on the terminal again.
     pub(super) fn queued(&self) -> bool {
@@ -105,6 +144,68 @@ impl TerminalInput {
         matches!(&self.hold, Hold::Open { escape: Some(_), tail } if tail.is_empty())
     }
 
+    /// One character of a paste payload, or the end of one.
+    ///
+    /// Returns `true` when the paste completed and was pushed to `ready`.
+    fn paste(&mut self, mut text: String, closing: Option<String>, event: Event) {
+        // A closing marker in progress: extend it while it can still become
+        // `ESC [ 201 ~`, and give its characters back to the payload when it
+        // cannot. The Escape that opened the run is dropped rather than
+        // typed — a terminal escapes an `ESC` inside a bracketed paste, so a
+        // run that reaches here and is not the marker is not payload a
+        // caller can act on, and typing it is the one outcome this file
+        // exists to prevent.
+        if let Some(run) = closing {
+            let extended = match paste_char(&event) {
+                Some(character) => format!("{run}{character}"),
+                None => {
+                    self.hold = Hold::Pasting {
+                        text,
+                        closing: Some(run),
+                    };
+                    return;
+                }
+            };
+            if extended == PASTE_CLOSE {
+                self.ready.push_back(Event::Paste(text));
+                self.hold = Hold::Idle;
+                return;
+            }
+            if PASTE_CLOSE.starts_with(&extended) {
+                self.hold = Hold::Pasting {
+                    text,
+                    closing: Some(extended),
+                };
+                return;
+            }
+            text.push_str(&extended);
+            self.hold = Hold::Pasting {
+                text,
+                closing: None,
+            };
+            return;
+        }
+        if is_plain_escape(&event) {
+            self.hold = Hold::Pasting {
+                text,
+                closing: Some(String::new()),
+            };
+            return;
+        }
+        if let Some(character) = paste_char(&event) {
+            text.push(character);
+        }
+        if text.len() >= MAX_PASTE {
+            self.ready.push_back(Event::Paste(text));
+            self.hold = Hold::Idle;
+            return;
+        }
+        self.hold = Hold::Pasting {
+            text,
+            closing: None,
+        };
+    }
+
     /// Offer one event to the state machine. Everything it resolves is pushed
     /// to `ready`, in order; anything still ambiguous stays in `hold`.
     fn accept(&mut self, event: Event) {
@@ -117,10 +218,18 @@ impl TerminalInput {
         // the composer — `[<0;10;5M[<0;10;5m` typed on screen. The caller
         // discards releases anyway (`ui.rs`'s `Event::Key` arm), so dropping
         // the ones that fall inside a run costs it nothing.
-        if is_key_release(&event) && matches!(self.hold, Hold::Open { .. }) {
+        if is_key_release(&event) && matches!(self.hold, Hold::Open { .. } | Hold::Pasting { .. }) {
             return;
         }
-        let Hold::Open { escape, mut tail } = std::mem::take(&mut self.hold) else {
+        // Taken **once**: a second `take` would replace the state this one
+        // just removed with `Idle` and drop an open run on the floor, which
+        // is every report typed into the draft one character at a time.
+        let held = std::mem::take(&mut self.hold);
+        if let Hold::Pasting { text, closing } = held {
+            self.paste(text, closing, event);
+            return;
+        }
+        let Hold::Open { escape, mut tail } = held else {
             if is_plain_escape(&event) {
                 self.hold = Hold::Open {
                     escape: Some(event),
@@ -148,7 +257,33 @@ impl TerminalInput {
             return;
         }
         tail.push(event);
-        match classify(&text(&tail)) {
+        let run = text(&tail);
+        // **Where crossterm produces no `Event::Paste` of its own, the
+        // markers a terminal wraps a paste in after `?2004h` arrive as keys,
+        // and this grammar is asked before the report's.** That is Windows:
+        // crossterm reads console records there and `EnableBracketedPaste`
+        // answers `Unsupported` (crossterm 0.29 `event/sys/windows/`), so
+        // without this the markers were typed into the draft and the
+        // payload's newline submitted a turn mid-paste — measured on the
+        // Windows ARM64 VM, 2026-09-11. Where crossterm parses the bytes it
+        // consumes the markers first, so there the grammar is off: an opener
+        // typed by hand with gaps would otherwise hold every keystroke until
+        // a closing marker that is not coming, and `[2` would be held where
+        // it used to be released (`GH-PANE-WINDOWS-VERIFY`, findings 7–8).
+        if self.reassembles_pastes {
+            if PASTE_OPEN == run {
+                self.hold = Hold::Pasting {
+                    text: String::new(),
+                    closing: None,
+                };
+                return;
+            }
+            if PASTE_OPEN.starts_with(&run) {
+                self.hold = Hold::Open { escape, tail };
+                return;
+            }
+        }
+        match classify(&run) {
             Sgr::Opening | Sgr::Body => self.hold = Hold::Open { escape, tail },
             Sgr::Report => {
                 if let Some(mouse) = sgr_mouse_event(&text(&tail)) {
@@ -251,17 +386,25 @@ fn is_key_release(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
 
-/// The character an event contributes to a run, or `None` if the event cannot
-/// be part of a report at all.
+/// Whether a key's modifiers name only how it was struck on this layout —
+/// nothing, Shift, or AltGr — and not a different meaning.
 ///
-/// **Shift is ignored, because it names the key struck and not the character
-/// produced, and which characters carry it is a platform and a layout
-/// decision.** Unix reports only `M` shifted, so the previous rule — Shift
-/// permitted for `M` alone — happened to hold there; the Windows console
-/// derives the modifier from `control_key_state`, where `<` is shifted too, so
-/// every report died on its second character. A digit is shifted on AZERTY.
-/// Control and Alt do change what a key press means, so they still disqualify
-/// one.
+/// **Shift is a layout fact everywhere** (`<` on US, `;` on German, a digit on
+/// AZERTY): the Windows console derives it from `control_key_state`, so a
+/// report that disqualified Shift died on its second character there. **AltGr
+/// is the console's Control-and-Alt together**, which is how a German layout
+/// types `[`, `]`, `~` and `@` — every one of them a character a report or a
+/// paste marker carries; measured on the ARM64 VM (German layout),
+/// 2026-09-17: a report's `[` arrived as `CONTROL | ALT`, the run was
+/// released as text and `<65;101;28M` reached the composer. Control or Alt
+/// alone does change what a key means, so either still disqualifies one.
+fn struck_plainly(modifiers: KeyModifiers) -> bool {
+    let beyond_shift = modifiers - KeyModifiers::SHIFT;
+    beyond_shift.is_empty() || beyond_shift == KeyModifiers::CONTROL | KeyModifiers::ALT
+}
+
+/// The character an event contributes to a run, or `None` if the event cannot
+/// be part of a report at all: a pressed character key [`struck_plainly`].
 fn report_char(event: &Event) -> Option<char> {
     let Event::Key(key) = event else { return None };
     if key.kind == KeyEventKind::Release {
@@ -270,14 +413,33 @@ fn report_char(event: &Event) -> Option<char> {
     let KeyCode::Char(character) = key.code else {
         return None;
     };
-    (key.modifiers - KeyModifiers::SHIFT)
-        .is_empty()
-        .then_some(character)
+    struck_plainly(key.modifiers).then_some(character)
 }
 
 /// Every element of a held tail came through `report_char`, so none is lost.
 fn text(tail: &[Event]) -> String {
     tail.iter().filter_map(report_char).collect()
+}
+
+/// The character an event contributes to a **paste payload**, which is a
+/// wider question than [`report_char`]'s: a paste carries the newlines and
+/// tabs of the text that was pasted, and a host that delivers it as key
+/// presses delivers those as `Enter` and `Tab`.
+///
+/// A key that produces no character — an arrow, a function key — contributes
+/// nothing rather than ending the paste: the terminal said where the paste
+/// ends, and only the closing marker is allowed to say so.
+fn paste_char(event: &Event) -> Option<char> {
+    let Event::Key(key) = event else { return None };
+    if key.kind == KeyEventKind::Release || !struck_plainly(key.modifiers) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(character) => Some(character),
+        KeyCode::Enter => Some('\n'),
+        KeyCode::Tab => Some('\t'),
+        _ => None,
+    }
 }
 
 /// Convert the report through the same bit layout crossterm uses on its
@@ -369,7 +531,14 @@ mod tests {
     /// on purpose — which is why the coverage lives here. Returns what the UI
     /// would receive, in order.
     fn drive(stream: &[Event], quiet_after: &[usize]) -> Vec<Event> {
-        let mut input = TerminalInput::default();
+        drive_on(cfg!(windows), stream, quiet_after)
+    }
+
+    /// [`drive`] with the paste grammar chosen explicitly, so both the
+    /// console-record path and the byte-parsing path are covered on every
+    /// host.
+    fn drive_on(reassembles_pastes: bool, stream: &[Event], quiet_after: &[usize]) -> Vec<Event> {
+        let mut input = TerminalInput::new(reassembles_pastes);
         let mut seen = Vec::new();
         for (index, event) in stream.iter().enumerate() {
             input.accept(event.clone());
@@ -675,6 +844,64 @@ mod tests {
         events
     }
 
+    /// The same report from a German-layout Windows console, which is what
+    /// the ARM64 VM has: `[` and `~` are AltGr keys and arrive as Control
+    /// and Alt together, `;` is shifted, `<` is not.
+    fn german_console_report(tail: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        let mut struck = |code: KeyCode, modifiers: KeyModifiers| {
+            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+                events.push(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)));
+            }
+        };
+        struck(KeyCode::Esc, KeyModifiers::NONE);
+        for character in tail.chars() {
+            let modifiers = match character {
+                '[' | '~' => KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ';' => KeyModifiers::SHIFT,
+                _ if character.is_uppercase() => KeyModifiers::SHIFT,
+                _ => KeyModifiers::NONE,
+            };
+            struck(KeyCode::Char(character), modifiers);
+        }
+        events
+    }
+
+    /// **The report the ARM64 VM typed into the composer as `<65;101;28M`**:
+    /// its `[` came as AltGr, which is Control and Alt together, and the old
+    /// rule released the run there. Every boundary, like the shapes above.
+    #[test]
+    fn a_report_in_the_german_console_shape_is_never_typed() {
+        for (tail, kind) in [
+            ("[<65;101;28M", MouseEventKind::ScrollDown),
+            ("[<0;10;5M", MouseEventKind::Down(MouseButton::Left)),
+            ("[<0;10;5m", MouseEventKind::Up(MouseButton::Left)),
+        ] {
+            let stream = german_console_report(tail);
+            for split in 0..stream.len() {
+                let quiet: &[usize] = if split == 0 { &[] } else { &[split] };
+                let seen = drive_on(true, &stream, quiet);
+                assert_eq!(typed(&seen), "", "{tail} split after {split}");
+                assert_eq!(mouse_kinds(&seen), vec![kind], "{tail} split after {split}");
+            }
+        }
+    }
+
+    /// And a paste's markers on that console: `~` is AltGr there too.
+    #[test]
+    fn a_paste_in_the_german_console_shape_arrives_whole() {
+        let mut stream = german_console_report("[200~");
+        stream.extend(chars("ab"));
+        stream.extend(german_console_report("[201~"));
+        // The marker's last release follows the paste, and the caller drops
+        // releases — exactly as the report shapes are asserted.
+        let seen: Vec<Event> = drive_on(true, &stream, &[])
+            .into_iter()
+            .filter(|event| !is_key_release(event))
+            .collect();
+        assert_eq!(seen, vec![Event::Paste("ab".into())]);
+    }
+
     /// **The report the Windows cell watched being typed into the composer.**
     /// Nothing in this file is platform-specific, so the platform's own event
     /// shape is covered here rather than on the one runner that can produce
@@ -724,6 +951,103 @@ mod tests {
             let held = Event::Key(KeyEvent::new(KeyCode::Char('<'), modifiers));
             assert_eq!(report_char(&held), None, "{modifiers:?}");
         }
+    }
+
+    /// The markers a terminal wraps a paste in become an `Event::Paste`, and
+    /// not one character of them reaches the UI.
+    ///
+    /// This is the Windows path made testable on every host: crossterm reads
+    /// console records there and produces no `Event::Paste` of its own, so
+    /// without this the draft received `[200~`, the payload's newline
+    /// submitted a turn in the middle of the paste, and `[201~` followed it.
+    #[test]
+    fn a_bracketed_paste_arrives_as_one_paste_event_however_it_is_split() {
+        let mut stream = report("[200~");
+        stream.extend(chars("first line"));
+        stream.push(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        stream.extend(chars("second line"));
+        stream.extend(report("[201~"));
+
+        // Every read boundary, including one inside each marker.
+        for quiet_after in [vec![], vec![0], vec![2], vec![4], vec![8, 20], vec![25, 27]] {
+            let seen = drive_on(true, &stream, &quiet_after);
+            assert_eq!(
+                seen,
+                vec![Event::Paste("first line\nsecond line".into())],
+                "{quiet_after:?}"
+            );
+        }
+    }
+
+    /// A key release falls between every two characters on Windows, and a
+    /// paste steps over them exactly as a report does.
+    #[test]
+    fn a_key_release_inside_a_paste_is_stepped_over() {
+        let mut stream = report("[200~");
+        stream.push(Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)
+        }));
+        stream.extend(chars("ab"));
+        stream.extend(report("[201~"));
+        assert_eq!(
+            drive_on(true, &stream, &[]),
+            vec![Event::Paste("ab".into())]
+        );
+    }
+
+    /// An Escape run that opens like a paste and then is not one is released
+    /// as the text it turned out to be, never held for a marker that is not
+    /// coming.
+    #[test]
+    fn an_escape_run_that_is_not_a_paste_is_released() {
+        let seen = drive_on(true, &report("[2J"), &[]);
+        assert_eq!(escapes(&seen), 1);
+        assert_eq!(
+            seen.iter().filter_map(report_char).collect::<String>(),
+            "[2J"
+        );
+    }
+
+    /// Inside a paste, an Escape that does not begin the closing marker is
+    /// payload's neighbour rather than a way out: the paste ends where the
+    /// terminal said it ends and nowhere else.
+    #[test]
+    fn only_the_closing_marker_ends_a_paste() {
+        let mut stream = report("[200~");
+        stream.extend(chars("a"));
+        stream.extend(report("[9z"));
+        stream.extend(chars("b"));
+        stream.extend(report("[201~"));
+        assert_eq!(
+            drive_on(true, &stream, &[]),
+            vec![Event::Paste("a[9zb".into())]
+        );
+    }
+
+    /// Where the terminal parses pastes itself the grammar is off, and an
+    /// opener typed by hand — Escape, then `[200~` with gaps — is text that
+    /// reaches the editor with everything typed after it: the dead keyboard
+    /// `GH-PANE-WINDOWS-VERIFY` reproduced (finding 7) cannot happen there.
+    #[test]
+    fn an_opener_typed_by_hand_is_text_where_the_terminal_parses_pastes() {
+        let mut stream = report("[200~");
+        stream.extend(chars("hello"));
+        let seen = drive_on(false, &stream, &[1, 3, 6]);
+        assert_eq!(escapes(&seen), 1);
+        assert_eq!(typed(&seen), "[200~hello");
+    }
+
+    /// And `[2` is released the instant the `2` arrives, as before the
+    /// grammar existed (finding 8): only a report prefix is ever held there.
+    #[test]
+    fn an_escape_bracket_two_is_released_at_once_where_the_grammar_is_off() {
+        let seen = drive_on(false, &report("[2"), &[]);
+        assert_eq!(escapes(&seen), 1);
+        assert_eq!(typed(&seen), "[2");
     }
 
     /// A paste carries no report character, so it can never be swallowed.

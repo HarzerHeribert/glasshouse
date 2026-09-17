@@ -578,16 +578,48 @@ fn a_profile_save_targets_the_overlay_and_leaves_the_base_alone() {
 
 // -- path safety ---------------------------------------------------------
 
+/// Plant a symbolic link, or say why this host cannot. Windows grants
+/// symlink creation only to an elevated or Developer-Mode account (error
+/// 1314, `ERROR_PRIVILEGE_NOT_HELD`), and a test that cannot plant the link
+/// has nothing to refuse: it prints `skipped:` and ends, and the privileged
+/// CI cell keeps the check. Any other failure is still a failure.
+fn plant_link(target: &std::path::Path, link: &std::path::Path, directory: bool) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = directory;
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+        true
+    }
+    #[cfg(windows)]
+    {
+        let made = if directory {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        match made {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                println!(
+                    "skipped: this account may not create symbolic links (os error 1314); \
+                     the privileged CI cell keeps the check"
+                );
+                false
+            }
+            Err(error) => panic!("symlink: {error}"),
+        }
+    }
+}
+
 #[test]
 fn a_symbolic_link_on_the_settings_path_is_refused() {
     let temp = Temp::new("symlink");
     let store = temp.store();
     let elsewhere = temp.path.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("elsewhere");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&elsewhere, temp.root().join(".pane")).expect("symlink");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&elsewhere, temp.root().join(".pane")).expect("symlink");
+    if !plant_link(&elsewhere, &temp.root().join(".pane"), true) {
+        return;
+    }
 
     let error = store.read(Scope::Local).expect_err("linked directory");
     assert!(error.contains("symbolic link"), "{error}");
@@ -601,10 +633,9 @@ fn a_symbolic_link_in_place_of_the_file_is_refused() {
     let target = temp.path.join("stolen.toml");
     write(&target, "[limits]\ncells = 3\n");
     std::fs::create_dir_all(temp.root().join(".pane")).expect("directory");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, store.path(Scope::Local)).expect("symlink");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&target, store.path(Scope::Local)).expect("symlink");
+    if !plant_link(&target, &store.path(Scope::Local), false) {
+        return;
+    }
 
     let error = store.read(Scope::Local).expect_err("linked file");
     assert!(error.contains("symbolic link"), "{error}");
