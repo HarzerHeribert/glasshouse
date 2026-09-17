@@ -2620,7 +2620,7 @@ Phase 67 — Pane: successors named by the 2026-09-16 cleanup
 Debts the cleanup round recorded once each (`design-decisions.md`, *Glasshouse does not route*; the
 Windows landing's and the matcher verifier's reports). Each is a product requirement, not a curiosity.
 
-☐ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
+☑ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
 ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
 ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
 

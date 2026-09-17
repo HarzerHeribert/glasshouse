@@ -3829,6 +3829,51 @@ fn os_sandbox_bypass_requires_an_explicit_yolo_grant() {
     assert!(stderr.contains("requires --yolo"), "stderr: {stderr}");
 }
 
+/// The platform gate on the bypass: Linux and Windows accept it with
+/// `--yolo` (an externally isolated container, VM or runner is the boundary
+/// there) and the session goes on to its ordinary startup; macOS refuses it
+/// by platform, with `--yolo` present, before anything else runs.
+#[test]
+fn os_sandbox_bypass_is_accepted_on_linux_and_windows_and_refused_on_macos() {
+    let root = scratch_dir("sandbox-bypass-platform");
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .arg("--model")
+        .arg("fixture-model")
+        .arg("--gateway")
+        .arg(root.join("no-gateway"))
+        .arg("--yolo")
+        .arg("--dangerously-bypass-os-sandbox")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"))
+        // A closed loopback port: the task fails at its first request, after
+        // startup has accepted the flags, and never reaches a real provider.
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("requires --yolo"),
+        "--yolo was given: {stderr}"
+    );
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
+        assert!(
+            !stderr.contains("supported only on"),
+            "the bypass is accepted on this platform: {stderr}"
+        );
+    } else {
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains("supported only on Linux and Windows"),
+            "the bypass is refused by platform here: {stderr}"
+        );
+    }
+}
+
 /// Without `--yolo` and without a settings document the sandbox grants
 /// nothing, and the system block must say that rather than leave the model to
 /// discover it one `PermissionDenied` at a time.

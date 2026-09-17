@@ -2032,7 +2032,7 @@ fn spawn_with_confinement_policy(
     line: LineShape,
 ) -> Result<(ConfinedChild, Confinement), SpawnRefusal> {
     if profile.os_sandbox_bypassed() {
-        let child = spawn_bypassed(tool, command, pipes)?;
+        let child = spawn_bypassed(profile, binary, tool, command, pipes, line)?;
         return Ok((child, Confinement::DangerouslyUnconfined));
     }
     confined_spawn_with_descendants(profile, binary, descendants, tool, command, pipes, line)
@@ -2040,29 +2040,58 @@ fn spawn_with_confinement_policy(
 
 /// The explicit host-selected bypass: a plain `std` spawn with the pipes
 /// installed, on the two platforms whose child is a `std::process::Child`.
+/// The program and the line shape are the `Command`'s own here.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn spawn_bypassed(
+    _profile: &Profile,
+    _binary: &Path,
     _tool: &str,
     mut command: Command,
     pipes: Pipes,
+    _line: LineShape,
 ) -> Result<ConfinedChild, SpawnRefusal> {
     apply_pipes(&mut command, pipes);
     let child = command.spawn().map_err(SpawnRefusal::Failed)?;
     Ok(ConfinedChild { inner: child })
 }
 
-/// **The invariant: where no applier can hand back this module's own child,
-/// the bypass refuses rather than spawning.** On Windows the child is the
-/// applier's `ContainedChild` (its own `CreateProcessW`, never a `std`
-/// `Child`), so an unconfined `std` spawn has nothing to become; a bypass
-/// that spawns anyway would be the one unconfined path this module exists
-/// not to have. A Windows bypass that builds the command line through
-/// `LineShape` is its own package (2026-09-16, the Windows landing's Limits).
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// The explicit host-selected bypass on Windows: the applier's own
+/// `CreateProcessW` — the same pipes, job and `LineShape` command line as the
+/// confined path — entered into no container. The child is still the
+/// applier's `ContainedChild`, so nothing about how it is read, waited on or
+/// killed differs from a confined one. A failure here is a spawn failure and
+/// never a permission decision, because no confinement was asked for.
+#[cfg(target_os = "windows")]
 fn spawn_bypassed(
+    profile: &Profile,
+    binary: &Path,
+    _tool: &str,
+    command: Command,
+    pipes: Pipes,
+    line: LineShape,
+) -> Result<ConfinedChild, SpawnRefusal> {
+    use crate::sandbox::windows::SpawnError;
+    match crate::sandbox::windows::spawn_unconfined(profile, binary, &command, pipes, line) {
+        Ok(child) => Ok(ConfinedChild { inner: child }),
+        Err(
+            SpawnError::NotConfinable(error)
+            | SpawnError::NotStarted(error)
+            | SpawnError::NotPrepared(error),
+        ) => Err(SpawnRefusal::Failed(error)),
+    }
+}
+
+/// **Where no applier can hand back this module's own child, the bypass
+/// refuses rather than spawning**: a bypass that spawned anyway would be the
+/// one unconfined path this module exists not to have.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn spawn_bypassed(
+    _profile: &Profile,
+    _binary: &Path,
     tool: &str,
     _command: Command,
     _pipes: Pipes,
+    _line: LineShape,
 ) -> Result<ConfinedChild, SpawnRefusal> {
     Err(SpawnRefusal::Denied(PermissionDenied {
         tool: tool.to_string(),
@@ -2169,7 +2198,11 @@ fn confined_spawn_with_descendants(
                 rule: refusal.to_string(),
             }))
         }
-        Err(SpawnError::NotStarted(error)) => Err(SpawnRefusal::Failed(error)),
+        // The bypass's own variant; `spawn` never returns it, and a match
+        // that named only two arms would stop compiling when it did.
+        Err(SpawnError::NotStarted(error) | SpawnError::NotPrepared(error)) => {
+            Err(SpawnRefusal::Failed(error))
+        }
     }
 }
 
@@ -2246,9 +2279,24 @@ fn truncate(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Where an applier exists, the explicit bypass spawns unconfined and
-    /// says so; the Windows arm is the test after this one.
+    /// The command the shell fixture runs to print `bypass-ok` exactly:
+    /// `printf` on the POSIX shell, `echo` on `cmd.exe`, whose trailing CRLF
+    /// the test trims.
+    #[cfg(windows)]
+    const BYPASS_ECHO: &str = "echo bypass-ok";
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    const BYPASS_ECHO: &str = "printf bypass-ok";
+
+    /// **The explicit bypass spawns a real unconfined child on every platform
+    /// that has an applier, and never becomes an implicit fallback.** It is
+    /// selected only by `Profile::os_sandbox_bypassed()`, and the child it
+    /// makes is this module's own — read, waited on and killed like a
+    /// confined one — so the result names the confinement `Dangerously
+    /// Unconfined` and nothing else changes. Before 2026-09-17 the Windows
+    /// arm refused by name, because the unconfined `CreateProcessW` had not
+    /// been written (`GH-PANE-WINDOWS-BYPASS`). Everywhere without an
+    /// applier, `spawn_bypassed` refuses by name — the test after the next.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[test]
     fn explicit_os_sandbox_bypass_is_never_an_implicit_fallback() {
         let root = std::env::temp_dir().join(format!(
@@ -2263,13 +2311,8 @@ mod tests {
             glasshouse: &Glasshouse::None,
             session: &SessionId::new("explicit-sandbox-bypass"),
         };
-        let result = run(
-            &ctx,
-            "bash",
-            &Args::new().with("command", "printf bypass-ok"),
-        )
-        .unwrap();
-        assert_eq!(result.stdout, "bypass-ok");
+        let result = run(&ctx, "bash", &Args::new().with("command", BYPASS_ECHO)).unwrap();
+        assert_eq!(result.stdout.trim_end(), "bypass-ok");
         assert_eq!(result.confinement, Confinement::DangerouslyUnconfined);
         assert!(
             result
@@ -2280,10 +2323,104 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// The same selection where no applier can hand back this module's own
-    /// child (`spawn_bypassed`'s Windows arm): the bypass refuses by name
-    /// and spawns nothing, rather than becoming the one unconfined path.
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// **The bypassed child reaches what the OS sandbox would refuse, and the
+    /// confined child does not** — the decisive difference the bypass exists
+    /// to make, exercised through a real spawn on **both** halves. A file is
+    /// planted outside the project root and `bash` reads it. Pane's own
+    /// pre-spawn check admits the read in both halves — the grant is the
+    /// same `Read(<outside>/**)` allow rule for both — so the one variable is
+    /// whether the OS sandbox was applied: under the bypass the read
+    /// succeeds; under confinement the seatbelt, Landlock or AppContainer
+    /// blocks it inside the child, which exits non-zero with the content
+    /// never on stdout. A pre-spawn refusal on the confined half would be a
+    /// test failure, not a pass: that half must spawn.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn a_bypassed_child_reads_what_the_sandbox_would_refuse() {
+        let base = std::env::temp_dir().join(format!(
+            "pane-bypass-reach-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("project");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "SANDBOX-BYPASS-REACHED").unwrap();
+
+        // The same admission for both halves: Pane's check grants the read.
+        let pattern = outside.to_string_lossy().replace('\\', "/");
+        let settings = serde_json::json!({
+            "permissions": {"allow": ["Bash", format!("Read({pattern}/**)")]}
+        })
+        .to_string();
+        #[cfg(windows)]
+        let command = format!("type \"{}\"", secret.display());
+        #[cfg(not(windows))]
+        let command = format!("cat {}", secret.display());
+
+        let read_under = |bypassed: bool| {
+            let profile = {
+                let p = Profile::compile(&root, Some(&settings));
+                if bypassed {
+                    p.with_os_sandbox_bypass()
+                } else {
+                    p
+                }
+            };
+            let ctx = ToolContext {
+                profile: &profile,
+                glasshouse: &Glasshouse::None,
+                session: &SessionId::new("bypass-reach"),
+            };
+            run(&ctx, "bash", &Args::new().with("command", &command))
+        };
+
+        let bypassed = read_under(true).expect("the unconfined child spawns");
+        assert_eq!(bypassed.confinement, Confinement::DangerouslyUnconfined);
+        assert!(
+            bypassed.stdout.contains("SANDBOX-BYPASS-REACHED"),
+            "the unconfined child must read the file outside the root: {:?} (exit {:?}, err {:?})",
+            bypassed.stdout,
+            bypassed.exit_code,
+            bypassed.stderr,
+        );
+
+        // The confined half spawns too — Pane admitted the read — and the
+        // OS sandbox refuses it inside the child.
+        let confined = read_under(false).expect(
+            "the confined child spawns: Pane admits the read and only the OS sandbox differs",
+        );
+        assert_ne!(confined.confinement, Confinement::DangerouslyUnconfined);
+        assert!(
+            !confined.stdout.contains("SANDBOX-BYPASS-REACHED"),
+            "the confined child must not read the file outside the root: {:?}",
+            confined.stdout
+        );
+        assert!(
+            matches!(confined.exit_code, Some(code) if code != 0),
+            "the confined child's read fails inside the child: exit {:?}, err {:?}",
+            confined.exit_code,
+            confined.stderr
+        );
+        #[cfg(windows)]
+        assert!(
+            confined.stderr.contains("Access is denied"),
+            "the AppContainer names the refusal: {:?}",
+            confined.stderr
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Where no applier can hand back this module's own child, the bypass
+    /// refuses by name and spawns nothing, rather than becoming the one
+    /// unconfined path — `spawn_bypassed`'s third arm.
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     #[test]
     fn explicit_os_sandbox_bypass_refuses_by_name_where_no_applier_exists() {
         let root = std::env::temp_dir().join(format!(

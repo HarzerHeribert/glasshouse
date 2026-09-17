@@ -11,9 +11,15 @@ files. `cargo_test` is what needs a sandbox, not `hits.filter(...)`.
 
 ## Current implementation addendum (2026-09-12)
 
-`--dangerously-bypass-os-sandbox` is an explicit Linux-only escape hatch for
-disposable benchmark and CI containers whose outer runtime is the intended
-security boundary. It is rejected unless `--yolo` is also present, cannot be
+`--dangerously-bypass-os-sandbox --yolo` is an explicit escape hatch for
+disposable benchmark and CI containers, VMs and runners whose outer runtime is
+the intended security boundary; it is accepted on Linux and Windows and
+refused by platform on macOS (2026-09-17: the GitHub runners lack the
+AppContainer isolation service). On Windows it spawns through the applier's
+own `CreateProcessW` with no AppContainer — the same pipes, job and
+`LineShape` command line as the confined path — reachable only from
+`Profile::os_sandbox_bypassed()`; a failure before the call is reported as the
+child not being prepared, never as a permission decision. It is rejected unless `--yolo` is also present, cannot be
 enabled by project/user configuration or environment variables, and is never
 selected as a fallback when Landlock/seccomp setup fails. Pane still performs
 its admission checks, strips credential variables from children, and preserves

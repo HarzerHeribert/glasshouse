@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1383 closed · 105 active committed open (93%)** — across 24 phases.
+**1384 closed · 104 active committed open (93%)** — across 24 phases.
 
 boundary 100 closed · 0 open
 gateway 391 closed · 14 open
 glasshouse 757 closed · 46 open
-pane 53 closed · 45 open
+pane 54 closed · 44 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -58,9 +58,9 @@ closures are usually at the top. Open the map at the line number given.
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 69 | Pane: request modes and the decision model's helpers | **1** | 9 | `2632` |
+| Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **2** | 1 | `2618` |
 | Phase 70 | Pane: the network the user configures, and the Windows console | **2** | 3 | `2648` |
 | Phase 71 | Pane: line-tagged edits (Phase 65's successor) | **2** | 0 | `2660` |
-| Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **3** | 0 | `2618` |
 | Phase 72 | Pane: what the cells and the decision model make cheap | **4** | 0 | `2670` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
@@ -123,6 +123,11 @@ these unwrapped.
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
+### Phase 67 — Pane: successors named by the 2026-09-16 cleanup  (2 open, 1 closed)
+
+- **2624** ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
+- **2625** ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
+
 ### Phase 70 — Pane: the network the user configures, and the Windows console  (2 open, 3 closed)
 
 - **2655** ☐ Offer `ssh` execution as a host-run tool outside the cell sandbox: hosts the user reaches with keys they configured themselves, every command and its exit recorded in the rollout, refused until a host is configured; in `execute` mode any command, in `explore` and `plan` only commands that read (the static parse of mutating verbs, redirections and remote scripts, then the decision model's "this only reads" above the configured confidence).
@@ -138,12 +143,6 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 67 — Pane: successors named by the 2026-09-16 cleanup  (3 open, 0 closed)
-
-- **2623** ☐ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
-- **2624** ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
-- **2625** ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
 
 ### Phase 73 — Gateway: any provider by configuration  (3 open, 0 closed)
 
@@ -242,7 +241,7 @@ the rest are context you probably do not need.
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-66.md  phase-68.md  phase-69.md  phase-7.md  phase-70.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-65.md  phase-66.md  phase-67.md  phase-68.md  phase-69.md  phase-7.md  phase-70.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 

@@ -665,8 +665,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
     if args.dangerously_bypass_os_sandbox && !args.yolo {
         return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit".into());
     }
-    if args.dangerously_bypass_os_sandbox && !cfg!(target_os = "linux") {
-        return Err("--dangerously-bypass-os-sandbox is supported only on Linux for externally isolated benchmark/CI containers".into());
+    // Linux and Windows: the platforms where an externally isolated
+    // container, VM or CI runner is the boundary (the GitHub runners lack
+    // the AppContainer isolation service; the user's ruling of 2026-09-17).
+    // macOS stays refused: nothing outside the seatbelt is the boundary
+    // there.
+    if args.dangerously_bypass_os_sandbox && !cfg!(any(target_os = "linux", target_os = "windows"))
+    {
+        return Err("--dangerously-bypass-os-sandbox is supported only on Linux and Windows, where an externally isolated container, VM or CI runner is the boundary".into());
     }
     // `little-helpers.md`: a malformed roster is a refusal with one sentence,
     // and it is made here because this is the last moment before anything a

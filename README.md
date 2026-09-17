@@ -138,7 +138,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1383 closed** · **105 active committed open** (92%)
+`█████████████████████████████████████░░░` **1384 closed** · **104 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -265,7 +265,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 37 — Basic session-aware router | 11/11 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 
-**pane** `█████████████████████░░░░░░░░░░░░░░░░░░░` 53/98
+**pane** `██████████████████████░░░░░░░░░░░░░░░░░░` 54/98
 
 | Phase | Done |
 |---|---|
@@ -275,7 +275,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 61H — Runtime resilience across models and scripting styles | 0/8 |
 | Phase 65 — Pane: smarter-and-cheaper execution | 17/17 ✅ |
 | Phase 66 — Pane: a decision model beside the task model | 4/4 ✅ |
-| Phase 67 — Pane: successors named by the 2026-09-16 cleanup | 0/3 |
+| Phase 67 — Pane: successors named by the 2026-09-16 cleanup | 1/3 |
 | Phase 69 — Pane: request modes and the decision model's helpers | 9/10 |
 | Phase 70 — Pane: the network the user configures, and the Windows console | 3/5 |
 | Phase 71 — Pane: line-tagged edits (Phase 65's successor) | 0/2 |

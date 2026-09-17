@@ -593,12 +593,19 @@ pub fn environment_block(
 /// operating system's answer and not a permission decision. Collapsing them
 /// would report a missing binary as a sandbox refusal.
 ///
-/// Neither leaves a child behind. `NotStarted` is the only one that reaches
-/// `CreateProcessW` at all, and it is the case where that call returned zero.
+/// None leaves a child behind. `NotStarted` is the only one that reaches
+/// `CreateProcessW` at all, and it is the case where that call returned zero;
+/// `NotPrepared` is the explicit bypass's failure before that call, where no
+/// container was asked for.
 #[derive(Debug)]
 pub enum SpawnError {
     NotConfinable(std::io::Error),
     NotStarted(std::io::Error),
+    /// The explicit bypass's own pre-`CreateProcessW` failure — a relative
+    /// program, a pipe, the job or the attribute list — where no container
+    /// was asked for, so "the AppContainer could not be entered" would be
+    /// false. Never a permission decision.
+    NotPrepared(std::io::Error),
 }
 
 impl fmt::Display for SpawnError {
@@ -610,10 +617,20 @@ impl fmt::Display for SpawnError {
                  (sandbox-grants.md section 3)"
             ),
             SpawnError::NotStarted(error) => error.fmt(f),
+            SpawnError::NotPrepared(error) => write!(
+                f,
+                "the unconfined child could not be prepared (its pipes, job or command line), \
+                 so nothing was spawned: {error}"
+            ),
         }
     }
 }
 
+/// Crate-private on purpose: the unconfined `CreateProcessW` is reachable
+/// only from `tools::invoke::spawn_bypassed`'s Windows arm, behind
+/// `Profile::os_sandbox_bypassed()`.
+#[cfg(target_os = "windows")]
+pub(crate) use platform::spawn_unconfined;
 #[cfg(target_os = "windows")]
 pub use platform::{
     Ace, AppContainer, ContainedChild, container_aces, container_masks, current_user_sid,
@@ -1868,13 +1885,7 @@ mod platform {
         // tool. `CreateProcessW` is given `lpApplicationName`, so it performs
         // no search of its own: an unresolved name could never start.
         if !binary.is_file() {
-            return Err(NotStarted(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "`{}` is not an executable file on this machine",
-                    binary.display()
-                ),
-            )));
+            return Err(NotStarted(not_an_executable(binary)));
         }
         let user = current_user_sid().map_err(NotConfinable)?;
         let container =
@@ -1883,7 +1894,71 @@ mod platform {
             return Err(NotConfinable(cannot_load(binary)));
         }
         grant_project_acl(profile, binary, &container).map_err(NotConfinable)?;
+        start(profile, binary, command, pipes, shape, Some(&container))
+    }
 
+    /// The explicit host-selected bypass: the same process, pipes, job and
+    /// command line as [`spawn`], entered into **no** container.
+    ///
+    /// **The invariant: this is reachable from exactly one place**,
+    /// `tools::invoke::spawn_bypassed`'s Windows arm behind
+    /// `Profile::os_sandbox_bypassed()`, which `--dangerously-bypass-os-sandbox
+    /// --yolo` sets and nothing else does; a confinement failure in [`spawn`]
+    /// never falls back here. The two questions the sandbox asks of a
+    /// program before it creates anything — a relative name, a writable
+    /// image — are the sandbox's and are not asked; the program must still
+    /// be absolute (`CreateProcessW` is given `lpApplicationName` and
+    /// searches nothing) and present, as on the confined path.
+    pub(crate) fn spawn_unconfined(
+        profile: &Profile,
+        binary: &Path,
+        command: &Command,
+        pipes: Pipes,
+        shape: LineShape,
+    ) -> Result<ContainedChild, SpawnError> {
+        use SpawnError::{NotPrepared, NotStarted};
+        if !binary.is_absolute() {
+            return Err(NotPrepared(relative_program(binary)));
+        }
+        if !binary.is_file() {
+            return Err(NotStarted(not_an_executable(binary)));
+        }
+        start(profile, binary, command, pipes, shape, None)
+    }
+
+    fn not_an_executable(binary: &Path) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "`{}` is not an executable file on this machine",
+                binary.display()
+            ),
+        )
+    }
+
+    /// Everything from the pipes to the resumed thread, shared by the
+    /// confined and the unconfined spawn. `container` is the one difference:
+    /// with it the child enters the AppContainer at `CreateProcessW`; without
+    /// it the attribute list carries only the handle list, and the report
+    /// names the absence.
+    fn start(
+        profile: &Profile,
+        binary: &Path,
+        command: &Command,
+        pipes: Pipes,
+        shape: LineShape,
+        container: Option<&AppContainer>,
+    ) -> Result<ContainedChild, SpawnError> {
+        use SpawnError::{NotConfinable, NotPrepared, NotStarted};
+        // A failure before `CreateProcessW` is the confinement's when a
+        // container was asked for, and the bypass's own when none was.
+        let prepare = |error: io::Error| {
+            if container.is_some() {
+                NotConfinable(error)
+            } else {
+                NotPrepared(error)
+            }
+        };
         // Inheritable by construction; the parent's own end of each pipe has
         // its inherit flag cleared below, so the child receives one end and
         // never the other.
@@ -1894,32 +1969,32 @@ mod platform {
         };
 
         let (stdin_child, stdin_parent) = if pipes.stdin {
-            let (read, write) = pipe(&inheritable).map_err(NotConfinable)?;
-            clear_inherit(write.raw()).map_err(NotConfinable)?;
+            let (read, write) = pipe(&inheritable).map_err(prepare)?;
+            clear_inherit(write.raw()).map_err(prepare)?;
             (read, Some(write))
         } else {
             (
-                null_device(&inheritable, GENERIC_READ).map_err(NotConfinable)?,
+                null_device(&inheritable, GENERIC_READ).map_err(prepare)?,
                 None,
             )
         };
         let (stdout_child, stdout_parent) = if pipes.stdout {
-            let (read, write) = pipe(&inheritable).map_err(NotConfinable)?;
-            clear_inherit(read.raw()).map_err(NotConfinable)?;
+            let (read, write) = pipe(&inheritable).map_err(prepare)?;
+            clear_inherit(read.raw()).map_err(prepare)?;
             (write, Some(read))
         } else {
             (
-                null_device(&inheritable, GENERIC_WRITE).map_err(NotConfinable)?,
+                null_device(&inheritable, GENERIC_WRITE).map_err(prepare)?,
                 None,
             )
         };
         let (stderr_child, stderr_parent) = if pipes.stderr {
-            let (read, write) = pipe(&inheritable).map_err(NotConfinable)?;
-            clear_inherit(read.raw()).map_err(NotConfinable)?;
+            let (read, write) = pipe(&inheritable).map_err(prepare)?;
+            clear_inherit(read.raw()).map_err(prepare)?;
             (write, Some(read))
         } else {
             (
-                null_device(&inheritable, GENERIC_WRITE).map_err(NotConfinable)?,
+                null_device(&inheritable, GENERIC_WRITE).map_err(prepare)?,
                 None,
             )
         };
@@ -1930,7 +2005,7 @@ mod platform {
         // SAFETY: both arguments are null, which asks for an unnamed job with
         // default security.
         let job = Owned::new(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })
-            .map_err(NotConfinable)?;
+            .map_err(prepare)?;
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         // SAFETY: the structure and its declared length agree.
@@ -1943,7 +2018,7 @@ mod platform {
             )
         };
         if limited == 0 {
-            return Err(NotConfinable(io::Error::last_os_error()));
+            return Err(prepare(io::Error::last_os_error()));
         }
 
         let application = wide_path(&conventional(binary));
@@ -1979,29 +2054,33 @@ mod platform {
         // Two attributes: the container the child enters, and the exact set
         // of handles it may inherit. The second is not tidiness — with
         // `bInheritHandles` true and no list, every inheritable handle this
-        // process holds would cross into a sandboxed child.
-        let mut capabilities = SECURITY_CAPABILITIES {
+        // process holds would cross into a sandboxed child — and it is set
+        // on the unconfined path too, for the same reason.
+        let mut capabilities = container.map(|container| SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
             Capabilities: std::ptr::null_mut(),
             CapabilityCount: 0,
             Reserved: 0,
-        };
+        });
         let mut handles = [stdin_child.raw(), stdout_child.raw(), stderr_child.raw()];
-        let mut attributes = AttributeList::new(2).map_err(NotConfinable)?;
-        attributes
-            .set(
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                (&raw mut capabilities).cast::<c_void>(),
-                std::mem::size_of::<SECURITY_CAPABILITIES>(),
-            )
-            .map_err(NotConfinable)?;
+        let mut attributes =
+            AttributeList::new(if capabilities.is_some() { 2 } else { 1 }).map_err(prepare)?;
+        if let Some(capabilities) = capabilities.as_mut() {
+            attributes
+                .set(
+                    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                    (&raw mut *capabilities).cast::<c_void>(),
+                    std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                )
+                .map_err(prepare)?;
+        }
         attributes
             .set(
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 handles.as_mut_ptr().cast::<c_void>(),
                 std::mem::size_of_val(&handles),
             )
-            .map_err(NotConfinable)?;
+            .map_err(prepare)?;
 
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -2064,7 +2143,7 @@ mod platform {
             // instruction of its own.
             // SAFETY: `process` is the handle `CreateProcessW` returned.
             unsafe { TerminateProcess(process.raw(), 1) };
-            return Err(NotConfinable(failure));
+            return Err(prepare(failure));
         }
         // SAFETY: `thread` is the child's suspended primary thread.
         if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
@@ -2073,14 +2152,17 @@ mod platform {
             // it could conceivably have started.
             // SAFETY: `job` is the job this call created and owns.
             unsafe { TerminateJobObject(job.raw(), 1) };
-            return Err(NotConfinable(failure));
+            return Err(prepare(failure));
         }
 
         Ok(ContainedChild {
             process: process.release(),
             job: job.release(),
             pid: information.dwProcessId,
-            container: container.name().to_string(),
+            container: container.map_or_else(
+                || "none (dangerously unconfined)".to_string(),
+                |container| container.name().to_string(),
+            ),
             // SAFETY: each handle is a pipe end this process owns and is
             // giving to the `File`, which closes it exactly once.
             stdin: stdin_parent.map(|end| unsafe { File::from_raw_handle(end.release().cast()) }),
