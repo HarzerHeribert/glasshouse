@@ -1,8 +1,28 @@
-//! Bounded, local observation of project files before and after a Pane cell.
+//! Local observation of project files before and after a Pane cell.
 //!
-//! Nothing produced here belongs in the model conversation. A snapshot is
-//! deliberately best-effort: unreadable or over-limit coverage is named, and
-//! an incomplete later scan never turns an unseen path into a deletion.
+//! Nothing produced here belongs in the model conversation.
+//!
+//! **Detecting a change and rendering it are two different jobs with two
+//! different costs, and only the second one needs the file's bytes.** A
+//! snapshot therefore records what every readable file *is* -- its length and
+//! its modification time -- and reads contents only for files small enough to
+//! diff and restore. Detection is complete for a tree of any size; a file too
+//! large to keep is still watched, and a change to it is reported by name and
+//! size rather than disappearing.
+//!
+//! Measured on 2026-09-17, before this split: the capture read every file's
+//! bytes under a 16 MiB total budget, and this repository is 929 files and
+//! 25.55 MiB with `.git`, `target` and `.pane` excluded -- so every capture
+//! here overran the budget and declared itself incomplete. In one 120-cell
+//! session, 112 of 123 views printed "capture incomplete" while files were
+//! being written throughout. A budget that an ordinary repository exceeds is
+//! not a guard, it is a blindfold.
+//!
+//! What remains best-effort is the *walk*: a directory that cannot be read, or
+//! a tree past [`MAX_FILES`] or [`MAX_DEPTH`], leaves paths unseen, and an
+//! incomplete walk never turns an unseen path into a creation or a deletion.
+//! Content that was not kept is a separate, quieter fact: it costs diff text
+//! and rollback for that one file, never detection.
 
 use crate::sandbox::profile::{Access, Profile};
 use sha2::{Digest, Sha256};
@@ -10,11 +30,27 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-const MAX_FILES: usize = 20_000;
+/// A guard against a pathological tree, not against an ordinary one: a source
+/// checkout is hundreds or thousands of files, and exceeding this says so.
+const MAX_FILES: usize = 200_000;
 const MAX_DEPTH: usize = 64;
-const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+/// The largest file whose bytes are kept, so it can be diffed and restored.
+/// A larger file is still watched by length and modification time.
+const MAX_DIFF_FILE_BYTES: u64 = 1024 * 1024;
+
+/// How many bytes of file content one snapshot keeps.
+///
+/// This bounds **memory**, which is the only thing keeping bytes costs, and
+/// the arithmetic is worth stating: `session.rs` clones the before and after
+/// snapshots to hold a rollback, and a task holds its starting snapshot, so
+/// roughly four copies can be alive at once. Exceeding it costs diff text for
+/// the files reached last -- each named at diff time -- and never costs
+/// detection, so the failure mode is verbosity, not blindness.
+const MAX_DIFF_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 const EXCLUDED: &[&str] = &[
@@ -29,17 +65,55 @@ const EXCLUDED: &[&str] = &[
     "__pycache__",
 ];
 
+mod git;
+
+/// What one path was, at the moment a snapshot was taken.
+///
+/// `bytes` is present only when the file was small enough to keep and the
+/// snapshot had a reason to keep it; its absence costs diff text for that one
+/// path and never costs detection, because `len` and `modified` are always
+/// recorded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileState {
     len: u64,
+    modified: Option<SystemTime>,
     digest: Option<[u8; 32]>,
     bytes: Option<Vec<u8>>,
 }
 
-/// A point-in-time, bounded view of readable regular files below the project root.
+/// One path a snapshot has something to say about: its state, or its absence,
+/// plus git's own two letters when git is what named it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Observed {
+    /// `None` means the path is not in the working tree.
+    state: Option<FileState>,
+    /// git's status letters, for the one question the filesystem cannot
+    /// answer: whether a path that differs from `HEAD` was ever in `HEAD`.
+    code: Option<[u8; 2]>,
+}
+
+/// Where a snapshot's knowledge comes from, which decides what its silence
+/// means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Origin {
+    /// Asked of git: `files` holds every path differing from `HEAD`, and a
+    /// path that is absent from it is identical to its `HEAD` blob.
+    Derived,
+    /// Walked: `files` holds every readable file, and a path absent from it
+    /// was not seen.
+    #[default]
+    Scanned,
+}
+
+/// A point-in-time view of the project's files.
+///
+/// Derived from git where the project is a repository, walked otherwise. In
+/// neither case are file contents read speculatively: see the module header.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
-    files: BTreeMap<PathBuf, FileState>,
+    root: PathBuf,
+    origin: Origin,
+    files: BTreeMap<PathBuf, Observed>,
     complete: bool,
     notes: Vec<String>,
 }
@@ -56,8 +130,8 @@ pub enum ChangeKind {
 /// A checked reversal of one observed cell change.
 ///
 /// The plan contains only paths whose state changed between the cell's
-/// before/after snapshots. Applying it captures the project again and refuses
-/// the whole reversal if any of those paths has changed since the cell ended.
+/// before/after snapshots. Applying it proves each of those paths still holds
+/// what the cell left there, and refuses the whole reversal otherwise.
 #[derive(Clone, Debug)]
 pub struct RollbackPlan {
     expected: BTreeMap<PathBuf, Option<FileState>>,
@@ -71,22 +145,99 @@ enum RollbackOperation {
 }
 
 impl Snapshot {
-    /// Captures readable project files without following symlinks.
+    /// Captures the project: from git where it can be, by walking where it
+    /// cannot.
     pub fn capture(profile: &Profile) -> Self {
-        Self::capture_with_limits(profile, MAX_FILES, MAX_TOTAL_BYTES, MAX_FILE_BYTES)
+        Self::capture_with_limits(
+            profile,
+            MAX_FILES,
+            MAX_DIFF_CACHE_BYTES,
+            MAX_DIFF_FILE_BYTES,
+        )
+    }
+
+    /// Captures by walking, whatever the project is.
+    ///
+    /// The tests reach for this to exercise the fallback and its limits on a
+    /// fixture that may well sit inside a repository.
+    #[cfg(test)]
+    fn capture_by_walking(profile: &Profile) -> Self {
+        Self::walk(
+            profile,
+            MAX_FILES,
+            MAX_DIFF_CACHE_BYTES,
+            MAX_DIFF_FILE_BYTES,
+        )
     }
 
     fn capture_with_limits(
         profile: &Profile,
         max_files: usize,
-        max_total_bytes: u64,
+        cache_budget: u64,
         max_file_bytes: u64,
     ) -> Self {
+        match Self::from_git(profile, max_file_bytes) {
+            Some(snapshot) => snapshot,
+            None => Self::walk(profile, max_files, cache_budget, max_file_bytes),
+        }
+    }
+
+    /// The derived capture: git names the paths, and only those paths are
+    /// touched.
+    ///
+    /// Bytes are kept for a path that already differed from `HEAD`, because
+    /// nothing else can reproduce what it held. A path git calls clean needs
+    /// no bytes kept at all -- its `HEAD` blob *is* its content, and
+    /// [`git::head_blob`] fetches it later if it turns out to have changed.
+    fn from_git(profile: &Profile, max_file_bytes: u64) -> Option<Self> {
+        let root = profile.root();
+        // One question, one subprocess: a project that is not a repository
+        // fails at `rev-parse` inside this call and falls through to the walk.
+        let entries = git::dirty(root)?;
         let mut snapshot = Self {
+            root: root.to_path_buf(),
+            origin: Origin::Derived,
             complete: true,
             ..Self::default()
         };
-        let mut remaining = max_total_bytes;
+        for entry in entries {
+            let observed = if entry.deleted() {
+                Observed {
+                    state: None,
+                    code: Some(entry.code),
+                }
+            } else {
+                let absolute = root.join(&entry.path);
+                let Ok(resolved) = profile.check("read", Access::Read, &absolute) else {
+                    continue;
+                };
+                match Self::state_of(&resolved, max_file_bytes, true) {
+                    Some(state) => Observed {
+                        state: Some(state),
+                        code: Some(entry.code),
+                    },
+                    None => Observed {
+                        state: None,
+                        code: Some(entry.code),
+                    },
+                }
+            };
+            snapshot.files.insert(entry.path, observed);
+        }
+        Some(snapshot)
+    }
+
+    /// The fallback capture: every readable file's length and modification
+    /// time, with no total-byte budget, because nothing is being read to find
+    /// out whether it changed.
+    fn walk(profile: &Profile, max_files: usize, cache_budget: u64, max_file_bytes: u64) -> Self {
+        let mut snapshot = Self {
+            root: profile.root().to_path_buf(),
+            origin: Origin::Scanned,
+            complete: true,
+            ..Self::default()
+        };
+        let mut remaining = cache_budget;
         let mut visited = 0usize;
         snapshot.visit(
             profile,
@@ -97,6 +248,51 @@ impl Snapshot {
             &mut visited,
         );
         snapshot
+    }
+
+    /// Reads one path's state. `keep` asks for its bytes as well, which is
+    /// refused above `max_file_bytes` -- the file is still stated, by length
+    /// and modification time, so a change to it is still seen.
+    fn state_of(resolved: &Path, max_file_bytes: u64, keep: bool) -> Option<FileState> {
+        let metadata = fs::metadata(resolved).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let len = metadata.len();
+        let modified = metadata.modified().ok();
+        if !keep || len > max_file_bytes {
+            return Some(FileState {
+                len,
+                modified,
+                digest: None,
+                bytes: None,
+            });
+        }
+        let read = fs::File::open(resolved).and_then(|file| {
+            let mut bytes = Vec::with_capacity(len as usize);
+            file.take(len + 1).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        match read {
+            Ok(bytes) if bytes.len() as u64 == len => {
+                let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                Some(FileState {
+                    len,
+                    modified,
+                    digest: Some(digest),
+                    bytes: Some(bytes),
+                })
+            }
+            // The file changed under the read, or could not be read: its
+            // metadata still stands, and the diff will say the content is
+            // unavailable rather than pretend it saw it.
+            _ => Some(FileState {
+                len,
+                modified,
+                digest: None,
+                bytes: None,
+            }),
+        }
     }
 
     fn visit(
@@ -169,56 +365,22 @@ impl Snapshot {
             let Ok(resolved) = profile.check("read", Access::Read, &path) else {
                 continue;
             };
-            let Ok(resolved_metadata) = fs::metadata(&resolved) else {
-                self.incomplete("a path changed while it was scanned");
+            // Bytes are kept while the cache allows; past it a file is still
+            // watched, which is the whole point of separating the two.
+            let keep = metadata.len() <= max_file_bytes && metadata.len() <= *remaining;
+            let Some(state) = Self::state_of(&resolved, max_file_bytes, keep) else {
                 continue;
             };
-            if !resolved_metadata.is_file() {
-                continue;
+            if let Some(bytes) = &state.bytes {
+                *remaining = remaining.saturating_sub(bytes.len() as u64);
             }
-            let len = resolved_metadata.len();
-            if len > max_file_bytes || len > *remaining {
-                self.files.insert(
-                    relative,
-                    FileState {
-                        len,
-                        digest: None,
-                        bytes: None,
-                    },
-                );
-                self.incomplete("one or more files exceeded the byte limit");
-                continue;
-            }
-            let limit = len.min(max_file_bytes).min(*remaining);
-            let read = fs::File::open(&resolved).and_then(|file| {
-                let mut bytes = Vec::with_capacity(limit as usize);
-                file.take(limit + 1).read_to_end(&mut bytes)?;
-                Ok(bytes)
-            });
-            match read {
-                Ok(bytes) if bytes.len() as u64 <= limit => {
-                    if fs::metadata(&resolved)
-                        .ok()
-                        .map(|now| (now.len(), now.modified().ok()))
-                        != Some((len, resolved_metadata.modified().ok()))
-                    {
-                        self.incomplete("a file changed while it was scanned");
-                        continue;
-                    }
-                    *remaining = remaining.saturating_sub(bytes.len() as u64);
-                    let digest: [u8; 32] = Sha256::digest(&bytes).into();
-                    self.files.insert(
-                        relative,
-                        FileState {
-                            len,
-                            digest: Some(digest),
-                            bytes: Some(bytes),
-                        },
-                    );
-                }
-                Ok(_) => self.incomplete("one or more files exceeded the byte limit"),
-                Err(_) => self.incomplete("a file could not be read"),
-            }
+            self.files.insert(
+                relative,
+                Observed {
+                    state: Some(state),
+                    code: None,
+                },
+            );
         }
     }
 
@@ -229,23 +391,136 @@ impl Snapshot {
         }
     }
 
-    /// Renders observed changes and incomplete coverage. `None` means the
-    /// snapshots were complete within the capture scope and observed no change.
-    pub fn diff(&self, after: &Self) -> Option<String> {
-        let mut out = String::new();
-        for (path, current) in &after.files {
-            match self.files.get(path) {
-                None if self.complete => render_addition(&mut out, path, current),
-                Some(previous) if changed(previous, current) => {
-                    render_change(&mut out, path, previous, current)
-                }
-                _ => {}
+    /// Whether a path this snapshot does not mention is known to be unchanged.
+    ///
+    /// True for a derived snapshot, where silence means "identical to `HEAD`";
+    /// false for a walked one that hit a limit, where silence means "not
+    /// seen".
+    fn silence_is_knowledge(&self) -> bool {
+        self.origin == Origin::Derived || self.complete
+    }
+
+    /// The paths whose state differs between `self` and `after`, relative to
+    /// the root, sorted.
+    ///
+    /// Only paths one of the two snapshots mentions are considered, which for
+    /// a derived snapshot is exactly the set git named and for a walked one is
+    /// every file it saw.
+    pub fn changed_paths(&self, after: &Self) -> Vec<(PathBuf, ChangeKind)> {
+        let mut paths: Vec<&PathBuf> = self.files.keys().chain(after.files.keys()).collect();
+        paths.sort();
+        paths.dedup();
+        let mut out = Vec::new();
+        for path in paths {
+            if let Some(kind) = self.kind_of(after, path) {
+                out.push((path.clone(), kind));
             }
         }
-        if after.complete {
-            for (path, previous) in &self.files {
-                if !after.files.contains_key(path) {
-                    render_deletion(&mut out, path, previous);
+        out
+    }
+
+    /// How `path` differs between the two snapshots, or `None`.
+    fn kind_of(&self, after: &Self, path: &Path) -> Option<ChangeKind> {
+        let before = self.files.get(path);
+        let now = after.files.get(path);
+        match (before, now) {
+            (Some(before), Some(now)) => match (&before.state, &now.state) {
+                (Some(a), Some(b)) if changed(a, b) => Some(ChangeKind::Modified),
+                (Some(_), Some(_)) => None,
+                (Some(_), None) => Some(ChangeKind::Deleted),
+                (None, Some(_)) => Some(ChangeKind::Created),
+                (None, None) => None,
+            },
+            // Mentioned after and not before: it now differs from what it was,
+            // and the only snapshot that can say what it *was* is the one that
+            // stayed silent -- which is knowledge only for a derived snapshot.
+            (None, Some(now)) => {
+                if !self.silence_is_knowledge() {
+                    return None;
+                }
+                match &now.state {
+                    None => Some(ChangeKind::Deleted),
+                    Some(_) if now.code.is_some_and(Observed::untracked) => {
+                        Some(ChangeKind::Created)
+                    }
+                    // A walked snapshot that saw everything and did not see
+                    // this path is watching it appear.
+                    Some(_) if self.origin == Origin::Scanned => Some(ChangeKind::Created),
+                    Some(_) => Some(ChangeKind::Modified),
+                }
+            }
+            // Mentioned before and not after: for a derived snapshot the cell
+            // put it back to `HEAD`, which is a change; for a walked one it is
+            // a deletion, and only a complete later walk may say so.
+            (Some(before), None) => {
+                if !after.silence_is_knowledge() {
+                    return None;
+                }
+                match after.origin {
+                    Origin::Derived => match before.state {
+                        Some(_) => Some(ChangeKind::Modified),
+                        None => Some(ChangeKind::Created),
+                    },
+                    Origin::Scanned => before.state.as_ref().map(|_| ChangeKind::Deleted),
+                }
+            }
+            (None, None) => None,
+        }
+    }
+
+    /// The file's state at this snapshot with its bytes filled in where they
+    /// can be had: from what was kept, or -- for a path git called clean --
+    /// from its `HEAD` blob, which is what that file held.
+    fn resolved(&self, path: &Path, limit: u64) -> Option<FileState> {
+        match self.files.get(path) {
+            // What was kept, and nothing else. **The file is never read
+            // now to fill in what a snapshot did not keep**: the disk holds
+            // the *current* bytes, and this may be a before-state, so doing
+            // so would render a file's diff against itself.
+            Some(observed) => observed.state.clone(),
+            None if self.origin == Origin::Derived => {
+                let bytes = git::head_blob(&self.root, path, limit)?;
+                Some(FileState {
+                    len: bytes.len() as u64,
+                    modified: None,
+                    digest: Some(Sha256::digest(&bytes).into()),
+                    bytes: Some(bytes),
+                })
+            }
+            None => None,
+        }
+    }
+
+    /// Renders observed changes and any coverage that was missing. `None`
+    /// means nothing changed and nothing was hidden.
+    pub fn diff(&self, after: &Self) -> Option<String> {
+        let mut out = String::new();
+        for (path, kind) in self.changed_paths(after) {
+            let before = self.resolved(&path, MAX_DIFF_FILE_BYTES);
+            let now = after.resolved(&path, MAX_DIFF_FILE_BYTES);
+            match (kind, before, now) {
+                (ChangeKind::Created, _, Some(state)) => render_addition(&mut out, &path, &state),
+                (ChangeKind::Deleted, Some(state), _) => render_deletion(&mut out, &path, &state),
+                (ChangeKind::Modified, Some(before), Some(now)) => {
+                    render_change(&mut out, &path, &before, &now)
+                }
+                // Named, with what is known about it, rather than dropped:
+                // the whole objection to a bound that decided what a person
+                // was allowed to hear about (2026-09-17).
+                (kind, before, now) => {
+                    let verb = match kind {
+                        ChangeKind::Created => "added",
+                        ChangeKind::Deleted => "deleted",
+                        ChangeKind::Modified => "changed",
+                    };
+                    let size = now
+                        .or(before)
+                        .map(|state| format!(" ({} bytes)", state.len))
+                        .unwrap_or_default();
+                    out.push_str(&format!(
+                        "Content unavailable for {verb} file: {}{size}\n",
+                        label(&path)
+                    ));
                 }
             }
         }
@@ -257,11 +532,11 @@ impl Snapshot {
         }
         if !notes.is_empty() {
             if out.is_empty() {
-                // **Never a claim of absence from an incomplete scan.** The
-                // capture stops at its byte and path limits, so a file it
-                // never reached is invisible here rather than unchanged, and
-                // a reader told "no changes" would take the stronger of the
-                // two readings (2026-09-17, the dogfooding run).
+                // **Never a claim of absence from an incomplete scan.** A file
+                // the walk never reached is invisible here rather than
+                // unchanged, and a reader told "no changes" would take the
+                // stronger of the two readings (2026-09-17, the dogfooding
+                // run).
                 out.push_str(
                     "No change observed in what was captured; the capture is incomplete, \
                      so a change outside it would not appear here.\n",
@@ -285,43 +560,24 @@ impl Snapshot {
         Some(out)
     }
 
-    /// The paths whose state differs between `self` and `after`, relative to
-    /// the root, sorted. The same completeness rules as [`Snapshot::diff`]
-    /// hold: an incomplete baseline invents no creation and an incomplete
-    /// later scan invents no deletion.
-    pub fn changed_paths(&self, after: &Self) -> Vec<(PathBuf, ChangeKind)> {
-        let mut out = Vec::new();
-        for (path, current) in &after.files {
-            match self.files.get(path) {
-                None if self.complete => out.push((path.clone(), ChangeKind::Created)),
-                Some(previous) if changed(previous, current) => {
-                    out.push((path.clone(), ChangeKind::Modified));
-                }
-                _ => {}
-            }
-        }
-        if after.complete {
-            for path in self.files.keys() {
-                if !after.files.contains_key(path) {
-                    out.push((path.clone(), ChangeKind::Deleted));
-                }
-            }
-        }
-        out.sort();
-        out
-    }
-
     /// SHA-256 over the sorted (path, content digest) pairs, as hex. Two
     /// snapshots with the same digest hold the same observed file set, so a
     /// later capture can be compared to a verified one without keeping it.
+    ///
+    /// Modification times are deliberately not hashed: a file restored to its
+    /// former contents is the same tree, and a digest that moved with its
+    /// timestamp would call that a change.
     pub fn digest(&self) -> String {
         let mut hash = Sha256::new();
-        for (path, state) in &self.files {
+        for (path, observed) in &self.files {
             hash.update(label(path).as_bytes());
             hash.update([0]);
-            match state.digest {
-                Some(digest) => hash.update(digest),
-                None => hash.update(state.len.to_le_bytes()),
+            match observed.state.as_ref() {
+                Some(state) => match state.digest {
+                    Some(digest) => hash.update(digest),
+                    None => hash.update(state.len.to_le_bytes()),
+                },
+                None => hash.update(b"absent"),
             }
             hash.update([0]);
         }
@@ -330,9 +586,9 @@ impl Snapshot {
 
     /// Builds an exact rollback for the transition from `self` to `after`.
     ///
-    /// Incomplete snapshots cannot prove which paths belong to the cell, and
-    /// an unavailable baseline body cannot be restored, so both conditions
-    /// refuse the plan instead of guessing.
+    /// A path whose former contents cannot be produced -- too large to have
+    /// been kept, and not recoverable from `HEAD` -- refuses the plan by name
+    /// rather than reversing part of a cell.
     pub fn rollback_plan(&self, after: &Self) -> Result<RollbackPlan, String> {
         if !self.complete || !after.complete {
             let mut notes = self.notes.clone();
@@ -351,24 +607,11 @@ impl Snapshot {
             ));
         }
 
-        let mut paths: Vec<PathBuf> = self
-            .files
-            .keys()
-            .chain(after.files.keys())
-            .cloned()
-            .collect();
-        paths.sort();
-        paths.dedup();
-
         let mut expected = BTreeMap::new();
         let mut operations = Vec::new();
-        for path in paths {
-            let before = self.files.get(&path);
-            let observed = after.files.get(&path);
-            if before == observed {
-                continue;
-            }
-            expected.insert(path.clone(), observed.cloned());
+        for (path, _) in self.changed_paths(after) {
+            let before = self.resolved(&path, MAX_DIFF_FILE_BYTES);
+            expected.insert(path.clone(), after.resolved(&path, MAX_DIFF_FILE_BYTES));
             match before {
                 Some(state) => {
                     let bytes = state
@@ -390,6 +633,13 @@ impl Snapshot {
     }
 }
 
+impl Observed {
+    /// git's letters for a path that is not in `HEAD`.
+    fn untracked(code: [u8; 2]) -> bool {
+        code == *b"??" || code[0] == b'A'
+    }
+}
+
 impl RollbackPlan {
     /// Exact affected paths, suitable for a confirmation panel.
     pub fn preview(&self) -> String {
@@ -405,21 +655,35 @@ impl RollbackPlan {
             .join("\n")
     }
 
-    /// Applies the plan after proving every affected path still has the
-    /// state observed when the cell ended.
+    /// Applies the plan after proving every affected path still holds what the
+    /// cell left there.
+    ///
+    /// The proof reads the paths themselves rather than re-capturing the
+    /// project: it is the same question asked of less of the disk, and it does
+    /// not depend on how the capture was sourced.
     pub fn apply(&self, profile: &Profile) -> Result<(), String> {
-        let current = Snapshot::capture(profile);
-        if !current.complete {
-            return Err("the current project snapshot is incomplete; nothing was changed".into());
-        }
         for (path, expected) in &self.expected {
-            if current.files.get(path) != expected.as_ref() {
-                return Err(format!(
-                    "{} changed after the checkpoint; nothing was changed",
-                    label(path)
-                ));
-            }
             let written = profile.root().join(path);
+            let current = profile
+                .check("read", Access::Read, &written)
+                .ok()
+                .and_then(|resolved| Snapshot::state_of(&resolved, MAX_DIFF_FILE_BYTES, true));
+            match (expected, &current) {
+                (Some(expected), Some(current)) if !changed(expected, current) => {}
+                (None, None) => {}
+                (None, Some(_)) => {
+                    return Err(format!(
+                        "{} appeared after the checkpoint; nothing was changed",
+                        label(path)
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "{} changed after the checkpoint; nothing was changed",
+                        label(path)
+                    ));
+                }
+            }
             if expected.is_none() && fs::symlink_metadata(&written).is_ok() {
                 return Err(format!(
                     "{} appeared after the checkpoint; nothing was changed",
@@ -480,8 +744,16 @@ impl RollbackPlan {
     }
 }
 
+/// Whether two states of one path differ.
+///
+/// A content digest decides it when both sides have one. Otherwise length and
+/// modification time do -- which is what a file watcher uses, and what lets a
+/// file too large to read still be watched.
 fn changed(before: &FileState, after: &FileState) -> bool {
-    before.len != after.len || matches!((before.digest, after.digest), (Some(a), Some(b)) if a != b)
+    match (before.digest, after.digest) {
+        (Some(a), Some(b)) => a != b,
+        _ => before.len != after.len || before.modified != after.modified,
+    }
 }
 
 fn label(path: &Path) -> String {
@@ -617,11 +889,13 @@ mod tests {
         fs::write(root.join("already-dirty.txt"), "held\n").unwrap();
         fs::write(root.join("changed.txt"), "before\n").unwrap();
         fs::write(root.join("deleted.txt"), "gone\n").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("changed.txt"), "after\n").unwrap();
         fs::write(root.join("added.txt"), "new\n").unwrap();
         fs::remove_file(root.join("deleted.txt")).unwrap();
-        let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
+        let rendered = before
+            .diff(&Snapshot::capture_by_walking(&profile))
+            .unwrap();
         assert!(rendered.contains("+++ b/added.txt"), "{rendered}");
         assert!(
             rendered.contains("-before") && rendered.contains("+after"),
@@ -638,14 +912,14 @@ mod tests {
         fs::write(root.join("held.txt"), "same\n").unwrap();
         fs::write(root.join("changed.txt"), "before\n").unwrap();
         fs::write(root.join("deleted.txt"), "gone\n").unwrap();
-        let before = Snapshot::capture(&profile);
-        let unchanged = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
+        let unchanged = Snapshot::capture_by_walking(&profile);
         assert_eq!(before.digest(), unchanged.digest());
         assert!(before.changed_paths(&unchanged).is_empty());
         fs::write(root.join("changed.txt"), "after\n").unwrap();
         fs::write(root.join("added.txt"), "new\n").unwrap();
         fs::remove_file(root.join("deleted.txt")).unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
         assert_eq!(
             before.changed_paths(&after),
             vec![
@@ -658,7 +932,10 @@ mod tests {
         fs::write(root.join("changed.txt"), "before\n").unwrap();
         fs::remove_file(root.join("added.txt")).unwrap();
         fs::write(root.join("deleted.txt"), "gone\n").unwrap();
-        assert_eq!(before.digest(), Snapshot::capture(&profile).digest());
+        assert_eq!(
+            before.digest(),
+            Snapshot::capture_by_walking(&profile).digest()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -674,7 +951,7 @@ mod tests {
         assert!(before.changed_paths(&after).is_empty());
         assert!(
             before
-                .changed_paths(&Snapshot::capture(&profile))
+                .changed_paths(&Snapshot::capture_by_walking(&profile))
                 .iter()
                 .all(|(_, kind)| *kind != ChangeKind::Created)
         );
@@ -690,11 +967,15 @@ mod tests {
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/passwd", root.join("escape")).unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         for directory in [".git", ".glasshouse", ".pane", "node_modules", "target"] {
             fs::write(root.join(directory).join("noise"), "after").unwrap();
         }
-        assert!(before.diff(&Snapshot::capture(&profile)).is_none());
+        assert!(
+            before
+                .diff(&Snapshot::capture_by_walking(&profile))
+                .is_none()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -721,7 +1002,9 @@ mod tests {
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
         let before = Snapshot::capture_with_limits(&profile, 1, 10, 10);
-        let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
+        let rendered = before
+            .diff(&Snapshot::capture_by_walking(&profile))
+            .unwrap();
         assert!(rendered.contains("No change observed in what was captured"));
         assert!(!rendered.contains("+++"), "{rendered}");
         assert!(!rendered.contains("added file"), "{rendered}");
@@ -729,22 +1012,36 @@ mod tests {
     }
 
     #[test]
-    fn same_length_oversized_mutation_discloses_missing_coverage() {
+    fn a_file_too_large_to_diff_is_still_watched_and_its_change_named() {
+        // Before this split the file was read or not read, and not reading it
+        // meant not seeing it: a same-length edit to an oversized file was
+        // invisible, disclosed only as "capture incomplete". It is now watched
+        // by length and modification time like any other file.
         let (root, profile) = fixture("oversized-mutation");
         let path = root.join("large.bin");
-        let mut bytes = vec![b'a'; MAX_FILE_BYTES as usize + 1];
+        let mut bytes = vec![b'a'; MAX_DIFF_FILE_BYTES as usize + 1];
         fs::write(&path, &bytes).unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         bytes[0] = b'b';
         fs::write(&path, bytes).unwrap();
-        let after = Snapshot::capture(&profile);
+        bump_mtime(&path);
+        let after = Snapshot::capture_by_walking(&profile);
 
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![(PathBuf::from("large.bin"), ChangeKind::Modified)]
+        );
         let rendered = before.diff(&after).unwrap();
-        assert!(rendered.contains("No change observed in what was captured"));
-        assert!(rendered.contains("byte limit"), "{rendered}");
-        assert!(!rendered.contains("changed file"), "{rendered}");
-        assert!(!rendered.contains("+++"), "{rendered}");
-        assert!(before.rollback_plan(&after).is_err());
+        assert!(
+            rendered.contains("Content unavailable for changed file: large.bin"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("bytes)"), "{rendered}");
+        assert!(!rendered.contains("capture incomplete"), "{rendered}");
+        // Its bytes were never kept, so reversing it is refused by name
+        // rather than half-done.
+        let error = before.rollback_plan(&after).unwrap_err();
+        assert!(error.contains("content was not captured"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -768,8 +1065,8 @@ mod tests {
     fn complete_unchanged_snapshots_remain_quiet() {
         let (root, profile) = fixture("unchanged");
         fs::write(root.join("held.txt"), "unchanged\n").unwrap();
-        let before = Snapshot::capture(&profile);
-        let after = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
         assert!(before.complete && after.complete);
         assert!(before.diff(&after).is_none());
         fs::remove_dir_all(root).unwrap();
@@ -779,9 +1076,11 @@ mod tests {
     fn binary_changes_are_summarized() {
         let (root, profile) = fixture("binary");
         fs::write(root.join("blob.bin"), [0, 1, 2]).unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("blob.bin"), [0, 1, 3]).unwrap();
-        let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
+        let rendered = before
+            .diff(&Snapshot::capture_by_walking(&profile))
+            .unwrap();
         assert!(
             rendered.contains("Binary file changed: blob.bin"),
             "{rendered}"
@@ -793,9 +1092,11 @@ mod tests {
     fn an_end_of_file_newline_change_is_visible() {
         let (root, profile) = fixture("newline");
         fs::write(root.join("line.txt"), "same").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("line.txt"), "same\n").unwrap();
-        let rendered = before.diff(&Snapshot::capture(&profile)).unwrap();
+        let rendered = before
+            .diff(&Snapshot::capture_by_walking(&profile))
+            .unwrap();
         assert!(rendered.contains("end-of-file newline"), "{rendered}");
         fs::remove_dir_all(root).unwrap();
     }
@@ -804,9 +1105,9 @@ mod tests {
     fn rollback_restores_a_modified_file() {
         let (root, profile) = fixture("rollback-modified");
         fs::write(root.join("changed.txt"), "before\n").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("changed.txt"), "after\n").unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
 
         let plan = before.rollback_plan(&after).unwrap();
         assert_eq!(plan.preview(), "restore changed.txt");
@@ -822,9 +1123,9 @@ mod tests {
     #[test]
     fn rollback_removes_a_file_created_by_the_cell() {
         let (root, profile) = fixture("rollback-created");
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("created.txt"), "cell\n").unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
 
         let plan = before.rollback_plan(&after).unwrap();
         assert_eq!(plan.preview(), "remove created.txt");
@@ -838,9 +1139,9 @@ mod tests {
     fn rollback_recreates_a_file_deleted_by_the_cell() {
         let (root, profile) = fixture("rollback-deleted");
         fs::write(root.join("deleted.txt"), "original\n").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::remove_file(root.join("deleted.txt")).unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
 
         before
             .rollback_plan(&after)
@@ -859,9 +1160,9 @@ mod tests {
     fn rollback_preserves_unrelated_files_and_refuses_later_edits() {
         let (root, profile) = fixture("rollback-unrelated");
         fs::write(root.join("changed.txt"), "before\n").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::write(root.join("changed.txt"), "after\n").unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
         let plan = before.rollback_plan(&after).unwrap();
 
         fs::write(root.join("unrelated.txt"), "user\n").unwrap();
@@ -881,15 +1182,208 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Moves a file's modification time forward so a test never depends on
+    /// the filesystem's timestamp granularity.
+    fn bump_mtime(path: &Path) {
+        let handle = fs::File::options().write(true).open(path).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(2);
+        handle
+            .set_times(fs::FileTimes::new().set_modified(later))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_tree_larger_than_any_content_budget_is_captured_completely() {
+        // 18 MiB over a 1 KiB content budget: the old capture read bytes to
+        // decide what changed, so a tree this size declared itself incomplete
+        // and said nothing about its own changes. Measured on the real repo
+        // that provoked this: 929 files, 25.55 MiB, incomplete every time.
+        let (root, profile) = fixture("large-tree");
+        for index in 0..20 {
+            fs::write(
+                root.join(format!("bulk-{index:02}.txt")),
+                vec![b'x'; 900 * 1024],
+            )
+            .unwrap();
+        }
+        let before = Snapshot::capture_with_limits(&profile, MAX_FILES, 1024, MAX_DIFF_FILE_BYTES);
+        assert!(
+            before.complete,
+            "a metadata walk has no byte budget to exceed"
+        );
+
+        fs::write(root.join("bulk-07.txt"), vec![b'y'; 900 * 1024]).unwrap();
+        bump_mtime(&root.join("bulk-07.txt"));
+        let after = Snapshot::capture_with_limits(&profile, MAX_FILES, 1024, MAX_DIFF_FILE_BYTES);
+        assert!(after.complete);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![(PathBuf::from("bulk-07.txt"), ChangeKind::Modified)]
+        );
+        let rendered = before.diff(&after).unwrap();
+        assert!(!rendered.contains("capture incomplete"), "{rendered}");
+        assert!(rendered.contains("bulk-07.txt"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_change_that_keeps_the_length_is_seen() {
+        let (root, profile) = fixture("same-length");
+        fs::write(root.join("same.txt"), "aaaa").unwrap();
+        let before = Snapshot::capture_by_walking(&profile);
+        fs::write(root.join("same.txt"), "bbbb").unwrap();
+        let after = Snapshot::capture_by_walking(&profile);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![(PathBuf::from("same.txt"), ChangeKind::Modified)]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn without_content_a_state_is_compared_by_length_and_time() {
+        // The decisive unit: a file too large to have been read is compared on
+        // what a snapshot always has. Dropping either half of this pair makes
+        // a same-length edit invisible again.
+        let epoch = SystemTime::UNIX_EPOCH;
+        let state = |len: u64, at: SystemTime| FileState {
+            len,
+            modified: Some(at),
+            digest: None,
+            bytes: None,
+        };
+        let later = epoch + std::time::Duration::from_secs(1);
+        assert!(!changed(&state(4, epoch), &state(4, epoch)));
+        assert!(changed(&state(4, epoch), &state(5, epoch)));
+        assert!(
+            changed(&state(4, epoch), &state(4, later)),
+            "a same-length edit moves the modification time and nothing else"
+        );
+    }
+
+    #[test]
+    fn nothing_changed_is_said_differently_from_nothing_seen() {
+        let (root, profile) = fixture("quiet-versus-blind");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        let complete = Snapshot::capture_by_walking(&profile);
+        assert!(
+            complete
+                .diff(&Snapshot::capture_by_walking(&profile))
+                .is_none()
+        );
+
+        let blind = Snapshot::capture_with_limits(&profile, 1, 1024, MAX_DIFF_FILE_BYTES);
+        let rendered = blind.diff(&Snapshot::capture_by_walking(&profile)).unwrap();
+        assert!(rendered.contains("capture is incomplete"), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A git fixture with one committed file, or `None` where git will not run.
+    fn repository(name: &str) -> Option<(PathBuf, Profile)> {
+        let (root, profile) = fixture(name);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .ok()
+                .is_some_and(|out| out.status.success())
+        };
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        let ready = git(&["init", "--quiet"])
+            && git(&["config", "user.email", "pane@example.invalid"])
+            && git(&["config", "user.name", "pane"])
+            && git(&["add", "tracked.txt"])
+            && git(&["commit", "--quiet", "-m", "base"]);
+        if !ready {
+            println!("skipped: git is not usable here");
+            let _ = fs::remove_dir_all(&root);
+            return None;
+        }
+        Some((root, profile))
+    }
+
+    #[test]
+    fn a_committed_file_is_diffed_against_head_without_having_been_read_first() {
+        // The point of deriving: the baseline held no bytes for this file --
+        // git called it clean -- and the diff is still exact, because a clean
+        // file's content is its HEAD blob.
+        let Some((root, profile)) = repository("git-clean-edit") else {
+            return;
+        };
+        let before = Snapshot::capture(&profile);
+        assert!(
+            !before.files.contains_key(Path::new("tracked.txt")),
+            "a clean file costs the baseline nothing"
+        );
+
+        fs::write(root.join("tracked.txt"), "edited by the cell\n").unwrap();
+        let after = Snapshot::capture(&profile);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![(PathBuf::from("tracked.txt"), ChangeKind::Modified)]
+        );
+        let rendered = before.diff(&after).unwrap();
+        assert!(rendered.contains("-committed"), "{rendered}");
+        assert!(rendered.contains("+edited by the cell"), "{rendered}");
+
+        before
+            .rollback_plan(&after)
+            .unwrap()
+            .apply(&profile)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "committed\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_created_file_and_a_deleted_one_are_told_apart_by_what_git_knows() {
+        let Some((root, profile)) = repository("git-kinds") else {
+            return;
+        };
+        let before = Snapshot::capture(&profile);
+        fs::write(root.join("new.txt"), "fresh\n").unwrap();
+        fs::remove_file(root.join("tracked.txt")).unwrap();
+        let after = Snapshot::capture(&profile);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![
+                (PathBuf::from("new.txt"), ChangeKind::Created),
+                (PathBuf::from("tracked.txt"), ChangeKind::Deleted),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_written_and_deleted_within_one_cell_is_not_seen() {
+        // The known gap of deriving from state rather than from actions: both
+        // snapshots agree the path does not exist. Closing it needs the cell's
+        // own tool records, which `session.rs` holds and does not yet pass in.
+        let Some((root, profile)) = repository("git-transient") else {
+            return;
+        };
+        let before = Snapshot::capture(&profile);
+        fs::write(root.join("scratch.tmp"), "transient\n").unwrap();
+        fs::remove_file(root.join("scratch.tmp")).unwrap();
+        let after = Snapshot::capture(&profile);
+        assert!(before.changed_paths(&after).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rollback_refuses_a_symlink_that_replaced_a_deleted_path() {
         let (root, profile) = fixture("rollback-symlink");
         fs::write(root.join("deleted.txt"), "original\n").unwrap();
         fs::write(root.join("unrelated.txt"), "user\n").unwrap();
-        let before = Snapshot::capture(&profile);
+        let before = Snapshot::capture_by_walking(&profile);
         fs::remove_file(root.join("deleted.txt")).unwrap();
-        let after = Snapshot::capture(&profile);
+        let after = Snapshot::capture_by_walking(&profile);
         let plan = before.rollback_plan(&after).unwrap();
         std::os::unix::fs::symlink("unrelated.txt", root.join("deleted.txt")).unwrap();
 
