@@ -24,7 +24,7 @@ fn normal_requests_advertise_one_native_cell_tool_and_keep_large_code_intact() {
     assert_eq!(body["tools"][0]["name"], "execute_cell");
     assert_eq!(
         body["tools"][0]["input_schema"]["required"],
-        serde_json::json!(["code"])
+        serde_json::json!(["code", "description"])
     );
     assert_eq!(body["messages"][0]["content"][0]["input"]["code"], code);
 }

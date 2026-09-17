@@ -1086,6 +1086,7 @@ mod tests {
         CellRecord {
             cell: 1,
             source: source.into(),
+            description: None,
             outcome,
             handles: Vec::new(),
             calls,

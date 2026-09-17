@@ -199,6 +199,7 @@ mod tests {
         CellRecord {
             cell,
             source: format!("cell {cell}"),
+            description: None,
             outcome: CellOutcomeKind::Yielded,
             handles: Vec::new(),
             calls: vec![CallRecord {

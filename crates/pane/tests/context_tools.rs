@@ -295,6 +295,7 @@ fn a_full_context_batch_preserves_whole_evidence_and_does_not_certify_overflow()
     let feedback = pane::prompt::CellResult {
         cell: 1,
         elapsed_ms: inspected.turn().elapsed_ms,
+        description: None,
         error: None,
         yield_reason: inspected.turn().yield_reason.clone(),
         output: None,

@@ -38,6 +38,7 @@ fn threw(class: &str) -> Ended {
 fn frame(calls: Vec<CallRecord>) -> CellRecord {
     CellRecord {
         cell: 1,
+        description: None,
         source: String::new(),
         outcome: CellOutcomeKind::Yielded,
         handles: Vec::new(),

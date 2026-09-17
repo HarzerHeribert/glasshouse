@@ -213,6 +213,18 @@ pub struct CellRecord {
     /// The model's own TypeScript, as it wrote it — never the erased or
     /// wrapped JavaScript, which is pane's spelling and not the model's.
     pub source: String,
+    /// The one line the model wrote about what this cell is for, in the
+    /// person's language — `docs/product/pane/legibility.md` §2.
+    ///
+    /// **It is the model's stated intention, not a record of what ran.**
+    /// `calls` is the record; when the two disagree the trajectory is the
+    /// truth, and that disagreement is exactly what the supervisor's question
+    /// is meant to see. Absent for a cell whose model said nothing and for
+    /// every rollout row written before this field existed, and absent is
+    /// never an error: the notebook falls back to the cell's first source
+    /// line, which is what it drew before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub outcome: CellOutcomeKind,
     pub handles: Vec<HandleRecord>,
     /// §9.4's trajectory: every call that actually ran in this cell, in
@@ -325,6 +337,7 @@ mod tests {
         let record = CellRecord {
             cell: 4,
             source: "const hits = await grep({});\n".into(),
+            description: None,
             outcome: CellOutcomeKind::Yielded,
             handles: vec![HandleRecord {
                 name: "hits".into(),
@@ -421,6 +434,7 @@ mod tests {
             record: CellRecord {
                 cell: 1,
                 source: String::new(),
+                description: None,
                 outcome: CellOutcomeKind::Yielded,
                 handles: Vec::new(),
                 calls: Vec::new(),

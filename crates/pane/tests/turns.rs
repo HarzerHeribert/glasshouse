@@ -422,6 +422,7 @@ fn a_terminal_response_is_one_assistant_turn_line_resume_rebuilds() {
     rollout
         .record_cell(&CellRecord {
             cell: 1,
+            description: None,
             source: "return \"three files\";\n".to_string(),
             outcome: CellOutcomeKind::Returned,
             handles: Vec::new(),
@@ -600,8 +601,15 @@ fn request_cache_breakpoints_have_the_exact_messages_shape() {
                 "name": "execute_cell",
                 "description": pane::prompt::declarations::EXECUTE_CELL_DESCRIPTION,
                 "input_schema": {
-                    "type": "object", "properties": {"code": {"type": "string"}},
-                    "required": ["code"], "additionalProperties": false
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "description": {
+                            "type": "string",
+                            "description": "One short line, in the person's language, saying what this cell is for. It is shown to the person above the cell and stays in your own context after compaction."
+                        }
+                    },
+                    "required": ["code", "description"], "additionalProperties": false
                 },
                 "cache_control": {"type": "ephemeral"}
             }]

@@ -622,9 +622,12 @@ fn the_masked_prompt_renders_bullets_and_never_the_key() {
 /// handle into text on its own.
 ///
 /// **The scan follows the file's successors.** The 2026-09-17 clickable-TUI
-/// move cut `scroll.rs`, `status.rs`, `composer.rs` and `hit.rs` out of
-/// `tui.rs` for the size ratchet; a rule that stopped at the original file
-/// would be a rule anything could step around by moving one function.
+/// move cut `scroll.rs`, `status.rs`, `composer.rs`, `hit.rs` and — with the
+/// cell descriptor, 2026-09-17 — `regions.rs` out of `tui.rs` for the size
+/// ratchet; a rule that stopped at the original file would be a rule anything
+/// could step around by moving one function. `regions.rs` is where every
+/// bounded region of the transcript is drawn, `push_output_region` included,
+/// so it is exactly the file this scan must follow.
 #[test]
 fn the_tui_renders_no_handle_itself() {
     let source = include_str!("../src/tui.rs");
@@ -640,6 +643,7 @@ fn the_tui_renders_no_handle_itself() {
         ("tui/status.rs", include_str!("../src/tui/status.rs")),
         ("tui/composer.rs", include_str!("../src/tui/composer.rs")),
         ("tui/hit.rs", include_str!("../src/tui/hit.rs")),
+        ("tui/regions.rs", include_str!("../src/tui/regions.rs")),
     ] {
         let cleaned = source
             .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")
@@ -718,6 +722,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
     notebook.set(
         1,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,
@@ -783,6 +788,7 @@ fn a_throw_renders_as_the_cells_error_region() {
     notebook.set(
         1,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,
@@ -849,6 +855,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
     notebook.set(
         1,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,
@@ -901,6 +908,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
     notebook.set(
         1,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,
@@ -957,6 +965,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         1,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,
@@ -977,6 +986,7 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         2,
         CellView {
+            description: None,
             helpers: Vec::new(),
             executed_source: None,
             origin: pane::abi::Origin::AuthoredCell,

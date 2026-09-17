@@ -1886,6 +1886,10 @@ impl Runtime {
         let record = CellRecord {
             cell,
             source: source.to_string(),
+            // The runtime never sees the model's message, only its program,
+            // so the descriptor is filled in by the layer that read the turn
+            // (`session::run_cell`). A runtime-only caller records none.
+            description: None,
             outcome: kind,
             handles: self
                 .state

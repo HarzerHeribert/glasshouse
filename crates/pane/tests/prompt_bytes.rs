@@ -115,6 +115,7 @@ fn the_worked_turn_renders_byte_for_byte() {
     let result = CellResult {
         cell: 1,
         elapsed_ms: 412,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -380,6 +381,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     let empty = CellResult {
         cell: 1,
         elapsed_ms: 5,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -403,6 +405,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     let with_stdout = CellResult {
         cell: 2,
         elapsed_ms: 5,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -424,6 +427,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     let with_error = CellResult {
         cell: 3,
         elapsed_ms: 5,
+        description: None,
         error: Some(ErrorSection {
             class: "TypeError".to_string(),
             message: "bad thing".to_string(),
@@ -462,6 +466,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     let below = CellResult {
         cell: 1,
         elapsed_ms: 1,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -481,6 +486,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     let at_ninety = CellResult {
         cell: 1,
         elapsed_ms: 1,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -561,6 +567,7 @@ fn an_unattributed_throw_omits_the_position_line() {
     let result = |position: Option<(u64, u64)>| CellResult {
         cell: 3,
         elapsed_ms: 5,
+        description: None,
         error: Some(ErrorSection {
             class: "RuntimeTimeout".to_string(),
             message: "the cell ran for 30,000 ms".to_string(),
@@ -605,6 +612,7 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
     let result = |error: Option<ErrorSection>| CellResult {
         cell: 3,
         elapsed_ms: 5,
+        description: None,
         error,
         yield_reason: Some("the tests did not run; the target is missing".to_string()),
         output: None,
@@ -668,6 +676,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
     let result = CellResult {
         cell: turn.record.cell,
         elapsed_ms: turn.elapsed_ms,
+        description: None,
         error: Some(ErrorSection {
             class: error.class.clone(),
             message: error.message.clone(),
@@ -717,6 +726,7 @@ fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> Stri
     prompt::render_result(&CellResult {
         cell,
         elapsed_ms: 12,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,
@@ -772,6 +782,7 @@ fn compaction_never_drops_an_error() {
     let rendered = prompt::render_result(&CellResult {
         cell: 1,
         elapsed_ms: 1,
+        description: None,
         error: Some(ErrorSection {
             class: "TypeError".to_string(),
             message: "hits.filter is not a function".to_string(),
@@ -894,5 +905,70 @@ fn repair_fences_are_data_and_cannot_mix_with_executable_code() {
     assert_eq!(
         prompt::extract_program("```json\n{}\n```"),
         Extracted::Prose
+    );
+}
+
+/// The user, 2026-09-17: *"Stays in context might be beneficial."* The
+/// descriptor is written into the result's head, which is exactly the part
+/// `compact_result` keeps — so after compaction the model still holds a line
+/// of account for every cell it ran, at a few tokens each, where today it
+/// holds a list of programs and nothing about why.
+#[test]
+fn every_descriptor_survives_compaction_when_the_handles_do_not() {
+    let described = |cell: u64, description: &str| {
+        prompt::render_result(&CellResult {
+            cell,
+            elapsed_ms: 12,
+            description: Some(description.to_string()),
+            error: None,
+            yield_reason: None,
+            output: None,
+            handle_table: "hits  Array  120 rows · preview 8 tok".to_string(),
+            stdout_tail: Some("the cell printed this".to_string()),
+            budget: Budget {
+                turn_cap: 8_000,
+                task_used: 3_412,
+                task_cap: 400_000,
+                cells_used: cell,
+                cells_cap: 40,
+            },
+            plan: Vec::new(),
+        })
+    };
+    let first = "Reading the ssh design to find what I have to change.";
+    let second = "Adding the ssh module and its escape probes.";
+    let mut conversation = Conversation {
+        system: "sys".to_string(),
+        messages: vec![
+            Message::text(Role::User, "implement ssh.run"),
+            Message::text(Role::Assistant, "```pane\nconst a = 1;\n```"),
+            Message::text(Role::User, described(1, first)),
+            Message::text(Role::Assistant, "```pane\nconst b = 2;\n```"),
+            Message::text(Role::User, described(2, second)),
+        ],
+    };
+    prompt::compact_conversation(&mut conversation);
+
+    let text = |index: usize| conversation.messages[index].content[0].text().to_string();
+    assert!(
+        !text(2).contains("## Handles"),
+        "the older result kept its table, so nothing was compacted"
+    );
+    assert!(
+        text(2).contains(first),
+        "the compacted result lost what the cell was for: {}",
+        text(2)
+    );
+    assert!(text(4).contains(second), "{}", text(4));
+}
+
+/// A cell whose model said nothing renders exactly as it did before the
+/// descriptor existed: absent is not an empty line, and not an error.
+#[test]
+fn a_result_without_a_descriptor_is_byte_identical_to_the_old_head() {
+    let rendered = sample_result(4, Vec::new());
+    assert!(
+        rendered.starts_with("[cell 4 yielded in 12 ms]\n\n## Handles"),
+        "{rendered}"
     );
 }

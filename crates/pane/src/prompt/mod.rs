@@ -22,6 +22,11 @@ pub const PREAMBLE: &str = concat!(
     "when useful; stop at the next decision that needs unseen evidence. After\n",
     "submitting a cell, wait for its correlated result. Never invent output or\n",
     "infer success: only that result is runtime evidence.\n\n",
+    "Every cell carries a description: one short line, in the person's language,\n",
+    "saying what it is for and why — not which functions it calls. It is the only\n",
+    "account of your work the person sees while you run, and you read it back after\n",
+    "compaction. Pass it as the `description` argument; in the fenced form it is the\n",
+    "line immediately before the fence.\n\n",
     "A cell is validated before it runs. A parse error runs nothing and may offer\n",
     "`pane-edit`; a return, yield, or throw stops later code. Tool results are live\n",
     "objects, but unseen fields are not model-visible. Use declared fields and\n",
@@ -75,6 +80,17 @@ struct Variant {
 /// `prompt::tests::every_variant_segment_occurs_exactly_once` fails when a
 /// segment stops matching.
 const VARIANTS: &[Variant] = &[
+    // A request that declares no `execute_cell` runs no cells, so the
+    // descriptor sentence would name an argument it has no call to put on.
+    Variant {
+        cells: "Every cell carries a description: one short line, in the person's language,\n\
+                saying what it is for and why — not which functions it calls. It is the only\n\
+                account of your work the person sees while you run, and you read it back after\n\
+                compaction. Pass it as the `description` argument; in the fenced form it is the\n\
+                line immediately before the fence.\n\n",
+        hybrid: None,
+        tools: Some(""),
+    },
     Variant {
         cells: "To act with tools, make exactly one `execute_cell` call in an assistant turn.\n\
                 Put every operation in that one TypeScript program; `execute_cell` is the only\n\
@@ -567,6 +583,12 @@ fn render_params(args: &[Arg]) -> String {
 pub struct CellResult {
     pub cell: u64,
     pub elapsed_ms: u64,
+    /// The one line the model wrote about what this cell was for, echoed back
+    /// to it in the result's head so it survives compaction
+    /// ([`compact_result`] keeps everything before the first section) and the
+    /// model keeps a running account of what it has already done. The user,
+    /// 2026-09-17: *"Stays in context might be beneficial."*
+    pub description: Option<String>,
     pub error: Option<ErrorSection>,
     /// Why the cell yielded on purpose — `runtime-contract.md` §9.3's one
     /// line under the cell line. Never rendered beside an error: a throw is
@@ -642,6 +664,14 @@ fn render_result_with_state(result: &CellResult, include_state: bool) -> String 
         "yielded"
     };
     let mut out = format!("[cell {} {verb} in {} ms]", result.cell, result.elapsed_ms);
+    // Before the first section header, so `compact_result` keeps it: what the
+    // model said this cell was for outlives the handles and the output it
+    // produced, and a compacted conversation still reads as an account of the
+    // work rather than a list of programs.
+    if let Some(description) = &result.description {
+        out.push('\n');
+        out.push_str(description);
+    }
     if result.error.is_none()
         && let Some(reason) = &result.yield_reason
     {
@@ -724,8 +754,8 @@ fn thousands(n: u64) -> String {
 
 mod protocol;
 pub use protocol::{
-    COMPLETE_MARKER, Extracted, MAX_PANE_BLOCKS, MAX_PROGRAM_BYTES, completion_text,
-    extract_program,
+    COMPLETE_MARKER, Extracted, MAX_DESCRIPTION_BYTES, MAX_PANE_BLOCKS, MAX_PROGRAM_BYTES,
+    bound_description, completion_text, descriptor_of, extract_program,
 };
 
 /// Feedback for a reply that announced work but supplied no action or completion.

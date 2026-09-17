@@ -7,6 +7,7 @@ use pane::runtime::outcome::{CallRecord, CellOutcomeKind, CellRecord, Ended};
 fn frame(cell: u64, command: &str) -> CellRecord {
     CellRecord {
         cell,
+        description: None,
         source: format!("await bash({{command: '{command}'}}) // cell {cell}"),
         outcome: CellOutcomeKind::Threw,
         handles: Vec::new(),

@@ -376,6 +376,7 @@ mod tests {
         CellRecord {
             cell: n,
             source: String::new(),
+            description: None,
             outcome: CellOutcomeKind::Yielded,
             handles: Vec::new(),
             calls,

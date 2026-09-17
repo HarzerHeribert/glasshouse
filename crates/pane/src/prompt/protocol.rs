@@ -16,6 +16,89 @@ pub const MAX_PROGRAM_BYTES: usize = 128 * 1024;
 /// unbounded number of tiny fences.
 pub const MAX_PANE_BLOCKS: usize = 32;
 
+/// The most a cell's descriptor may carry.
+///
+/// One line, because that is what it is for: the person reads it above the
+/// cell and the model reads it back after every compaction, and a descriptor
+/// that needs two lines is a descriptor that is wrong
+/// (`docs/product/pane/legibility.md` §8). 200 bytes is a full line at a
+/// wide terminal with room for multi-byte characters; beyond it the text is
+/// cut at a character boundary rather than refused, because a long
+/// description is a style problem and never a reason to run nothing.
+pub const MAX_DESCRIPTION_BYTES: usize = 200;
+
+/// The one line the model wrote about the cell it is about to run, from the
+/// fence channel: the last non-empty prose line before the first `pane`
+/// fence, bounded by [`MAX_DESCRIPTION_BYTES`].
+///
+/// **The last line, not the first.** A model that writes a paragraph before
+/// its program ends that paragraph with the sentence about what it is doing
+/// now; taking the first line would carry the preamble of the thought rather
+/// than its conclusion.
+///
+/// Prose *after* the fence is not a descriptor: the cell had already been
+/// written by then, so it cannot be what the cell is for. Text inside any
+/// fence is skipped, so an example in a ```ts block is never mistaken for a
+/// sentence about the cell.
+#[must_use]
+pub fn descriptor_of(assistant_text: &str) -> Option<String> {
+    let mut prose: Vec<&str> = Vec::new();
+    let lines: Vec<&str> = assistant_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(info) = lines[i].strip_prefix("```") {
+            if matches!(info.trim(), "pane" | "pane-edit") {
+                return last_sentence(&prose);
+            }
+            // Any other fence is an example: skip its body so nothing inside
+            // it reads as the model's own sentence.
+            let mut end = i + 1;
+            while end < lines.len() && lines[end] != "```" {
+                end += 1;
+            }
+            i = if end < lines.len() {
+                end + 1
+            } else {
+                lines.len()
+            };
+            continue;
+        }
+        prose.push(lines[i]);
+        i += 1;
+    }
+    None
+}
+
+/// The descriptor of a native call's `description` argument, bounded the same
+/// way, so both channels answer to one rule.
+#[must_use]
+pub fn bound_description(text: &str) -> Option<String> {
+    last_sentence(&[text])
+}
+
+/// The last non-empty line of `prose`, trimmed, flattened to one line and cut
+/// to [`MAX_DESCRIPTION_BYTES`] at a character boundary.
+fn last_sentence(prose: &[&str]) -> Option<String> {
+    let line = prose
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())?;
+    // A markdown bullet or heading marker is the model formatting a sentence,
+    // not part of what it said.
+    let line = line
+        .trim_start_matches(['#', '-', '*', '>'])
+        .trim_start_matches(char::is_whitespace);
+    if line.is_empty() {
+        return None;
+    }
+    let mut cut = line.len().min(MAX_DESCRIPTION_BYTES);
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(line[..cut].to_string())
+}
+
 /// What one assistant message contained.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Extracted {
@@ -216,4 +299,75 @@ fn malformed_xml_attempt(text: &str) -> bool {
             || line.starts_with("</pane")
             || (line.starts_with('<') && line.contains("-pane"))
     })
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn the_line_before_the_fence_is_what_the_cell_is_for() {
+        let text = "Reading the ssh design to find what I have to change.\n\
+                    ```pane\nconst design = await read({path: \"d.md\"});\n```\n";
+        assert_eq!(
+            descriptor_of(text).as_deref(),
+            Some("Reading the ssh design to find what I have to change.")
+        );
+    }
+
+    #[test]
+    fn a_paragraph_contributes_its_last_line_not_its_first() {
+        // The conclusion of the thought is the sentence about this cell; the
+        // opening is the preamble to it.
+        let text = "I have two candidates for where the refusal lives.\n\
+                    Searching both for the command-refusal grammar.\n\
+                    ```pane\nawait rg({pattern: \"refuse\"});\n```";
+        assert_eq!(
+            descriptor_of(text).as_deref(),
+            Some("Searching both for the command-refusal grammar.")
+        );
+    }
+
+    #[test]
+    fn an_example_in_another_fence_is_never_mistaken_for_the_sentence() {
+        let text = "Checking the shape first.\n\
+                    ```ts\nconst wrong = \"this is an example, not a descriptor\";\n```\n\
+                    ```pane\nreturn 1;\n```";
+        assert_eq!(
+            descriptor_of(text).as_deref(),
+            Some("Checking the shape first.")
+        );
+    }
+
+    #[test]
+    fn prose_after_the_fence_describes_nothing_the_cell_could_be_for() {
+        let text = "```pane\nreturn 1;\n```\nThat is what I will do next.";
+        assert_eq!(descriptor_of(text), None);
+    }
+
+    #[test]
+    fn a_bullet_is_formatting_and_not_part_of_what_was_said() {
+        let text = "- Formatting the changed files.\n```pane\nreturn 1;\n```";
+        assert_eq!(
+            descriptor_of(text).as_deref(),
+            Some("Formatting the changed files.")
+        );
+    }
+
+    #[test]
+    fn a_long_description_is_cut_at_a_character_boundary_and_never_refused() {
+        let long = "ä".repeat(400);
+        let bound = bound_description(&long).expect("a long line is cut, not dropped");
+        assert!(bound.len() <= MAX_DESCRIPTION_BYTES);
+        assert!(
+            bound.chars().all(|c| c == 'ä'),
+            "cut mid-character: {bound}"
+        );
+    }
+
+    #[test]
+    fn nothing_said_is_no_descriptor_rather_than_an_empty_one() {
+        assert_eq!(descriptor_of("```pane\nreturn 1;\n```"), None);
+        assert_eq!(bound_description("   "), None);
+    }
 }

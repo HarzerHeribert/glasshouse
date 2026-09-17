@@ -18,6 +18,7 @@
 //! Glasshouse cached, and this path does not disturb it.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
@@ -47,6 +48,10 @@ struct Facts {
     intelligence: Option<f64>,
     #[serde(default)]
     coding: Option<f64>,
+    #[serde(default)]
+    context_window_tokens: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
 }
 
 /// The name a model is looked up under: lower case, `.` and `_` as `-`.
@@ -96,11 +101,88 @@ pub fn measure(served: &[String], published: &BTreeMap<String, MeasuredFacts>) -
     models
 }
 
-/// The figures the roster reads.
+/// The figures the roster reads, and the two limits a session reads.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeasuredFacts {
     pub intelligence: Option<f64>,
     pub coding: Option<f64>,
+    /// The model's context window, when the gateway knows it.
+    pub context_window_tokens: Option<u64>,
+    /// The most it may produce in one response, when the gateway knows it.
+    pub max_output_tokens: Option<u64>,
+}
+
+/// The two figures a session cannot choose for itself.
+///
+/// **Absent is the honest answer, not a default.** A window Pane guessed is
+/// worse than a window it admits it does not know: compaction would run
+/// against a number nobody supplied, and the person would read it as fact.
+/// Every caller therefore treats `None` as "say so" rather than as a cue to
+/// substitute something.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelLimits {
+    /// How much context the model accepts.
+    pub context_window_tokens: Option<u64>,
+    /// The most it may produce in one response.
+    pub max_output_tokens: Option<u64>,
+}
+
+/// What the gateway published, remembered once for the whole process.
+///
+/// A `OnceLock` rather than a value threaded through every caller because the
+/// readers are a request builder (`wire`) and the context meter, neither of
+/// which has the session in hand, and because the answer cannot change inside
+/// one process: the gateway is asked at startup and a model the person
+/// switches to later was in the same document.
+static PUBLISHED: OnceLock<BTreeMap<String, ModelLimits>> = OnceLock::new();
+
+/// Remembers `published` for [`limits_for`]. The first call wins; a second is
+/// ignored rather than refused, because two sessions in one process (the
+/// tests) must not fight over it.
+pub fn remember(published: &BTreeMap<String, MeasuredFacts>) {
+    let _ = PUBLISHED.set(
+        published
+            .iter()
+            .map(|(id, facts)| {
+                (
+                    id.clone(),
+                    ModelLimits {
+                        context_window_tokens: facts.context_window_tokens,
+                        max_output_tokens: facts.max_output_tokens,
+                    },
+                )
+            })
+            .collect(),
+    );
+}
+
+/// The window a session reports and compacts against: what the person
+/// configured with `--context-window-tokens`, else what the gateway
+/// published, else nothing -- and nothing is printed as `window ?` rather
+/// than filled in.
+///
+/// The person's own figure wins because they may be running behind a proxy
+/// that narrows it, and no published number can know that.
+#[must_use]
+pub fn window_from(configured: Option<u64>, published: ModelLimits) -> Option<u64> {
+    configured.or(published.context_window_tokens)
+}
+
+/// [`window_from`] for the common caller: the model's name, and whatever the
+/// session was told on the command line.
+#[must_use]
+pub fn window_for(model: &str, configured: Option<u64>) -> Option<u64> {
+    window_from(configured, limits_for(model))
+}
+
+/// What the gateway said bounds `model`, or an empty answer when nothing was
+/// published for it -- including when no gateway was ever asked.
+#[must_use]
+pub fn limits_for(model: &str) -> ModelLimits {
+    PUBLISHED
+        .get()
+        .and_then(|published| published.get(&normalise(model)).copied())
+        .unwrap_or_default()
 }
 
 /// The gateway's measurements, keyed by [`normalise`]d name; empty whenever
@@ -122,6 +204,8 @@ pub fn published(gateway: &Gateway) -> BTreeMap<String, MeasuredFacts> {
                 MeasuredFacts {
                     intelligence: facts.intelligence,
                     coding: facts.coding,
+                    context_window_tokens: facts.context_window_tokens,
+                    max_output_tokens: facts.max_output_tokens,
                 },
             )
         })
@@ -136,6 +220,7 @@ mod tests {
         MeasuredFacts {
             intelligence,
             coding,
+            ..Default::default()
         }
     }
 
@@ -178,5 +263,46 @@ mod tests {
     #[test]
     fn an_unreachable_gateway_publishes_nothing_rather_than_failing() {
         assert!(published(&Gateway::None).is_empty());
+    }
+
+    #[test]
+    fn a_published_document_carries_the_two_limits_a_session_cannot_choose() {
+        let document = br#"{"models":{"gpt-5.6-sol":{"intelligence":47.1,"context_window_tokens":400000,"max_output_tokens":128000},"quiet":{"coding":1.0}}}"#;
+        let parsed: Document = serde_json::from_slice(document).unwrap();
+        let facts = &parsed.models["gpt-5.6-sol"];
+        assert_eq!(facts.context_window_tokens, Some(400_000));
+        assert_eq!(facts.max_output_tokens, Some(128_000));
+        let quiet = &parsed.models["quiet"];
+        assert_eq!(quiet.context_window_tokens, None, "absent stays absent");
+        assert_eq!(quiet.max_output_tokens, None);
+    }
+
+    #[test]
+    fn an_unremembered_model_has_no_limits_rather_than_invented_ones() {
+        // `remember` may already hold another test's map; either way a model
+        // nobody published must answer with absences.
+        assert_eq!(
+            limits_for("a-model-nobody-published"),
+            ModelLimits::default()
+        );
+    }
+
+    #[test]
+    fn a_published_window_is_used_and_the_persons_own_figure_still_wins() {
+        let published = ModelLimits {
+            context_window_tokens: Some(400_000),
+            max_output_tokens: None,
+        };
+        assert_eq!(window_from(None, published), Some(400_000));
+        assert_eq!(
+            window_from(Some(64_000), published),
+            Some(64_000),
+            "the person may be behind a proxy that narrows it"
+        );
+        assert_eq!(
+            window_from(None, ModelLimits::default()),
+            None,
+            "unknown stays unknown"
+        );
     }
 }

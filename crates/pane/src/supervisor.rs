@@ -305,6 +305,16 @@ pub fn compress(cells: &[CellRecord]) -> String {
 
 fn compress_one(cell: &CellRecord) -> String {
     let head = cell.source.lines().next().unwrap_or("").trim();
+    // What the model *said* it was doing, beside what it did. The gap between
+    // the two is the sharpest loop signal the question can be given — five
+    // cells running that say "implementing the parser" while every call is a
+    // read — and it costs nothing, because the line was already written
+    // (`legibility.md` §2, `runtime::outcome::CellRecord::description`).
+    let said = cell
+        .description
+        .as_deref()
+        .map(|said| format!("said: {said} · "))
+        .unwrap_or_default();
     let outcome = match cell.outcome {
         CellOutcomeKind::Yielded => "yielded",
         CellOutcomeKind::Returned => "returned",
@@ -319,7 +329,10 @@ fn compress_one(cell: &CellRecord) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    format!("cell {} {outcome} · {head} · calls: {calls}", cell.cell)
+    format!(
+        "cell {} {outcome} · {said}{head} · calls: {calls}",
+        cell.cell
+    )
 }
 
 fn render_call(call: &CallRecord) -> String {
@@ -347,6 +360,7 @@ mod tests {
         let cell = CellRecord {
             cell: 1,
             source: "const hits = await grep({ pattern: \"x\" });\nconst n = hits.length;".into(),
+            description: None,
             outcome: CellOutcomeKind::Yielded,
             handles: Vec::new(),
             calls: vec![CallRecord {
@@ -365,6 +379,36 @@ mod tests {
             line,
             "cell 1 yielded · const hits = await grep({ pattern: \"x\" }); · calls: \
              grep(pattern=x)→ended"
+        );
+    }
+
+    /// The trajectory carries what the model *said* beside what it did, so the
+    /// question can see the gap between them — five cells saying "implementing
+    /// the parser" while every call is a read. Still no payload and still no
+    /// preview bytes: the sentence is the model's own, already in the rollout.
+    #[test]
+    fn the_trajectory_says_what_the_model_said_it_was_doing() {
+        let cell = CellRecord {
+            cell: 7,
+            source: "await rg({ pattern: \"refuse\" });".into(),
+            description: Some("Searching for the command-refusal grammar.".into()),
+            outcome: CellOutcomeKind::Yielded,
+            handles: Vec::new(),
+            calls: vec![CallRecord {
+                tool: "rg".into(),
+                args: BTreeMap::from([("pattern".to_string(), "refuse".to_string())]),
+                evidence: None,
+                lifted_from: None,
+                exit_code: None,
+                repeat_of: None,
+                error: None,
+                ended: Ended::Ok,
+            }],
+        };
+        assert_eq!(
+            compress(&[cell]),
+            "cell 7 yielded · said: Searching for the command-refusal grammar. · \
+             await rg({ pattern: \"refuse\" }); · calls: rg(pattern=refuse)→ended"
         );
     }
 

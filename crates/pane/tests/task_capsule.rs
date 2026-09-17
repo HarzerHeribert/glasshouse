@@ -24,6 +24,7 @@ fn call(tool: &str, args: &[(&str, &str)], ended: Ended, exit_code: Option<i32>)
 fn cell(n: u64, calls: Vec<CallRecord>) -> CellRecord {
     CellRecord {
         cell: n,
+        description: None,
         source: String::new(),
         outcome: CellOutcomeKind::Yielded,
         handles: Vec::new(),

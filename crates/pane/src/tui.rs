@@ -4,6 +4,7 @@ mod controls;
 mod history;
 pub use history::HistoryNote;
 mod composer;
+mod regions;
 pub(crate) use composer::composer_offset;
 use composer::{composer_cursor, wrapped_input};
 mod hit;
@@ -18,6 +19,9 @@ mod scroll;
 pub use scroll::SCROLL_INDICATOR_LINGER;
 use scroll::render_scrollbar;
 mod status;
+use regions::{
+    push_changes, push_error_region, push_folded_region, push_output_region, push_text_region,
+};
 use status::{compact_tokens, context_summary, footer_right_span, footer_row};
 mod telemetry;
 pub(crate) use controls::PanelHit;
@@ -630,6 +634,12 @@ pub struct CellView {
     pub helpers: Vec<crate::helpers::HelperRecord>,
     /// Corrected source for an executed pane-edit; display only, never another model message.
     pub executed_source: Option<String>,
+    /// The one line the model wrote about what this cell is for, drawn above
+    /// the cell (`docs/product/pane/legibility.md` §2). `None` for a cell
+    /// whose model said nothing and for every rollout row written before the
+    /// field existed; the screen then falls back to what it drew before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Who authored the frame this view shows.
     ///
     /// The screen may not imply that a direct provider call was written as
@@ -1833,6 +1843,21 @@ fn notebook_lines(
                                     ),
                                     cell,
                                 ));
+                                // The one line the model wrote about what this
+                                // cell is for, directly under its header and
+                                // above the record of what ran — the order is
+                                // the claim: intention first, evidence below
+                                // (`legibility.md` §2, §8 rule 2).
+                                if let Some(description) = view
+                                    .and_then(|v| v.description.as_deref())
+                                    .map(str::trim)
+                                    .filter(|description| !description.is_empty())
+                                {
+                                    lines.push(Line::styled(
+                                        description.to_string(),
+                                        Style::default().fg(Color::White),
+                                    ));
+                                }
                                 push_helper_lane(&mut lines, view, tick, width);
                                 let none_ran = view
                                     .and_then(|v| v.execution.as_deref())
@@ -1871,6 +1896,18 @@ fn notebook_lines(
                                             ));
                                         }
                                     }
+                                }
+                                // The model's own sentence about why it
+                                // stopped here. It exists on 40 of the 123
+                                // views of the corpus behind `legibility.md`
+                                // and the default screen drew none of them:
+                                // the expanded path had it, the compact path
+                                // returned before reaching it.
+                                if let Some(reason) = view.and_then(|v| v.yield_reason.as_deref()) {
+                                    lines.push(Line::styled(
+                                        format!("yielded: {reason}"),
+                                        Style::default().fg(MUTED),
+                                    ));
                                 }
                                 lines.push(Line::styled(
                                     format!(
@@ -2229,37 +2266,6 @@ fn possible_tool_calls(source: &str) -> Vec<String> {
     calls.0
 }
 
-/// Display only. The conversation and executable source remain byte-for-byte intact.
-/// Expanded view (Ctrl-O) shows original code, as do cells with source-position errors.
-fn push_changes(lines: &mut Vec<Line<'static>>, changes: &str, compact: bool) {
-    turn_header(lines, "CHANGES OBSERVED".into(), Color::LightCyan);
-    let limit = if compact { 18 } else { usize::MAX };
-    for line in changes.lines().take(limit) {
-        let color = if line.starts_with("+++") || line.starts_with("---") {
-            Color::LightCyan
-        } else if line.starts_with('+') {
-            Color::LightGreen
-        } else if line.starts_with('-') {
-            Color::LightRed
-        } else {
-            MUTED
-        };
-        // A diff is data: terminal controls must never affect rendering.
-        let text: String = line
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect();
-        lines.push(Line::styled(text, Style::default().fg(color)));
-    }
-    let remaining = changes.lines().count().saturating_sub(limit);
-    if remaining > 0 {
-        lines.push(Line::styled(
-            format!("… {remaining} more diff lines · Ctrl-O expands"),
-            Style::default().fg(MUTED),
-        ));
-    }
-}
-
 fn pretty_code(source: &str) -> String {
     use oxc::{
         allocator::Allocator,
@@ -2336,57 +2342,6 @@ fn input_region(message: &Message) -> String {
         Extracted::Program(source) | Extracted::Edit(source) => source,
         Extracted::Prose | Extracted::TwoBlocks | Extracted::Invalid(_) => text,
     }
-}
-
-/// A throw's own region: the class and message, then the position when the
-/// runtime attributed one. An unattributed throw gets no position line rather
-/// than a zero -- the sidebar's rule about absent figures, applied here.
-fn push_error_region(lines: &mut Vec<Line<'static>>, error: &CellError) {
-    lines.push(Line::from(format!("{}: {}", error.class, error.message)));
-    if let (Some(line), Some(column)) = (error.line, error.column) {
-        lines.push(Line::from(format!("line {line}, column {column}")));
-    }
-}
-
-/// Pushes `text` one line per line, so a program or a multi-line preview is
-/// as many rows as it has lines rather than one row carrying its newlines.
-/// Empty text still pushes one empty row, so a region never disappears.
-fn push_text_region(lines: &mut Vec<Line<'static>>, text: &str) {
-    if text.is_empty() {
-        lines.push(Line::from(String::new()));
-        return;
-    }
-    for line in text.lines() {
-        lines.push(Line::from(line.to_string()));
-    }
-}
-
-/// Draws `table` -- `render_table`'s own return value, line for line -- or
-/// `NO_OUTPUTS` when it is empty. The only place a handle's rendering enters
-/// the conversation column; nothing else here previews a value on its own.
-fn push_output_region(lines: &mut Vec<Line<'static>>, table: String, compact: bool) {
-    if table.is_empty() {
-        lines.push(Line::from(NO_OUTPUTS));
-        return;
-    }
-    push_folded_region(lines, &table, 6, compact);
-}
-
-fn push_folded_region(lines: &mut Vec<Line<'static>>, text: &str, limit: usize, compact: bool) {
-    if !compact || text.lines().count() <= limit {
-        push_text_region(lines, text);
-        return;
-    }
-    for line in text.lines().take(limit) {
-        lines.push(Line::from(line.to_string()));
-    }
-    lines.push(Line::styled(
-        format!(
-            "… {} more lines · Ctrl-O expands",
-            text.lines().count() - limit
-        ),
-        Style::default().fg(MUTED),
-    ));
 }
 
 /// Hide framing even when its last line arrives over several stream chunks.

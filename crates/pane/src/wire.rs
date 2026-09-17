@@ -77,16 +77,56 @@ impl Effort {
     }
 }
 
-/// The model pane asks for absent an explicit choice and a remembered one.
+/// A compiled-in model name, and the last one in this binary.
 ///
-/// A frontier model, deliberately. The parent tier is the one a person is
-/// talking to and the one whose mistakes cost a whole task; the cheap tiers
-/// are `[helpers]` and `[agents]`, and they are chosen on purpose rather than
-/// inherited from a timid default.
+/// **It is not a routing default and must never become one.** Startup already
+/// refuses to spend anything against a model nobody chose: `--model`, then
+/// `[model] parent`, then the picker on a terminal and a refusal in a script
+/// (`session/startup.rs`). Nothing here is consulted on that path.
+///
+/// What it is today: the placeholder `RuntimeState` holds before the first
+/// turn (`runtime/state.rs`, overwritten by `set_task_context` on every turn),
+/// and the model this crate's own tests run a session on. The first of those
+/// is a latent hazard rather than a working default -- `RuntimeState::
+/// agent_model` falls back to this field, so a subagent started before a turn
+/// set it would inherit a name the person never chose.
+///
+/// The successor, which belongs to whoever next edits `runtime/state.rs`:
+/// initialise that field empty, have `agent_model` refuse rather than invent
+/// when it is empty, and let this constant be what it already is in practice --
+/// a test fixture, moved to the tests that use it. Phase 73's direction is
+/// that no model name is compiled in, and this is the one that remains.
 pub const MODEL: &str = "claude-opus-5";
 
-/// The `max_tokens` pane asks for on every turn.
+/// The `max_tokens` pane asks for when nothing published says otherwise.
+///
+/// **A documented fallback, not a policy.** It bounds what the model may say
+/// *and* write in one turn, so a large file plus its reasoning has to fit in
+/// it, and a truncated program then fails to parse and costs the whole turn.
+/// The right figure is the model's own, which [`max_tokens_for`] uses when
+/// the gateway publishes one; no catalogue we consume publishes it today, so
+/// this number is what every turn still gets.
 pub const MAX_TOKENS: u32 = 8192;
+
+/// What one turn of `model` may produce: the model's own published maximum,
+/// or [`MAX_TOKENS`].
+#[must_use]
+pub fn max_tokens_for(model: &str) -> u32 {
+    max_tokens_from(crate::models::limits_for(model))
+}
+
+/// [`max_tokens_for`]'s decision, with the lookup already done -- the seam a
+/// test drives, because the published figures are a process-wide answer.
+///
+/// A published figure larger than `u32` is the provider's, not ours, and is
+/// clamped rather than refused: asking for more than the wire can express is
+/// a request nobody can serve.
+#[must_use]
+pub fn max_tokens_from(limits: crate::models::ModelLimits) -> u32 {
+    limits.max_output_tokens.map_or(MAX_TOKENS, |published| {
+        u32::try_from(published).unwrap_or(u32::MAX)
+    })
+}
 
 /// The base URL a turn's request goes to: `ANTHROPIC_BASE_URL` if it is set
 /// to a non-empty value, [`DEFAULT_BASE_URL`] otherwise. This is the entire
@@ -260,7 +300,21 @@ impl Surface {
             tools.push(serde_json::json!({
                 "name": crate::prompt::declarations::EXECUTE_CELL_NAME,
                 "description": crate::prompt::declarations::execute_cell_description(interface),
-                "input_schema": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "description": {
+                            "type": "string",
+                            "description": "One short line, in the person's language, saying what this cell is for. It is shown to the person above the cell and stays in your own context after compaction.",
+                        },
+                    },
+                    // Both are required so the model writes the line every
+                    // time; the parser accepts its absence regardless, so a
+                    // model that omits it still runs (`legibility.md` §2).
+                    "required": ["code", "description"],
+                    "additionalProperties": false,
+                },
             }));
         }
         if interface.declares_direct_tools() {
@@ -302,11 +356,12 @@ pub fn request_body_for_surface(
     effort: Effort,
     surface: Surface,
 ) -> Vec<u8> {
+    let max_tokens = max_tokens_for(model);
     configure_effort(
-        build_request_body(model, MAX_TOKENS, conversation, surface),
+        build_request_body(model, max_tokens, conversation, surface),
         model,
         effort,
-        MAX_TOKENS,
+        max_tokens,
     )
 }
 
@@ -1815,6 +1870,32 @@ mod effort_tests {
         assert_eq!(
             ascending, budgets,
             "a higher level must not buy less: {budgets:?}"
+        );
+    }
+
+    #[test]
+    fn a_published_output_maximum_replaces_the_fallback_and_absence_keeps_it() {
+        use crate::models::ModelLimits;
+        assert_eq!(
+            max_tokens_from(ModelLimits::default()),
+            MAX_TOKENS,
+            "nothing published keeps the documented fallback"
+        );
+        assert_eq!(
+            max_tokens_from(ModelLimits {
+                context_window_tokens: Some(400_000),
+                max_output_tokens: Some(64_000),
+            }),
+            64_000,
+            "the model's own maximum is the right figure, not ours"
+        );
+        assert_eq!(
+            max_tokens_from(ModelLimits {
+                context_window_tokens: None,
+                max_output_tokens: Some(u64::from(u32::MAX) + 1),
+            }),
+            u32::MAX,
+            "a figure wider than the wire is clamped, not refused"
         );
     }
 }

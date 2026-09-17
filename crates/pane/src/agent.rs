@@ -516,10 +516,30 @@ pub(crate) fn run_narrowed_metered(
             });
             continue;
         }
+        // A subagent is declared the same tool as its parent, so it may send
+        // the same `description` argument; it is accepted here and carried on
+        // the record for the same two readers (`legibility.md` §2).
+        let described = native.as_ref().and_then(|(_, _, input)| {
+            input
+                .as_object()
+                .and_then(|object| object.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::prompt::bound_description)
+        });
+        let described = described.or_else(|| {
+            native
+                .is_none()
+                .then(|| crate::prompt::descriptor_of(&text))
+                .flatten()
+        });
         let program = if let Some((id, _, input)) = &native {
             match input
                 .as_object()
-                .filter(|object| object.len() == 1)
+                .filter(|object| {
+                    object
+                        .keys()
+                        .all(|key| key == "code" || key == "description")
+                })
                 .and_then(|object| object.get("code"))
                 .and_then(serde_json::Value::as_str)
             {
@@ -527,7 +547,7 @@ pub(crate) fn run_narrowed_metered(
                 None => {
                     conversation.messages.push(Message::tool_result(
                         id.clone(),
-                        "ProtocolError: execute_cell input must be exactly {\"code\": string}; nothing ran.",
+                        "ProtocolError: execute_cell input must be {\"code\": string, \"description\": string}; nothing ran.",
                         true,
                     ));
                     continue;
@@ -585,7 +605,11 @@ pub(crate) fn run_narrowed_metered(
         };
 
         let outcome = runtime.run_cell(&program);
-        journal.cell(&outcome.turn().record);
+        // The runtime records the program; this loop saw the message, so the
+        // descriptor is attached here — before the journal writes the record.
+        let mut cell_record = outcome.turn().record.clone();
+        cell_record.description = described.clone();
+        journal.cell(&cell_record);
         // What this turn actually reached for, in order. Tool names only.
         trajectory.extend(
             outcome
@@ -616,7 +640,7 @@ pub(crate) fn run_narrowed_metered(
                 // decide what the evidence means. The checker prose is data:
                 // no verdict spelling is parsed and no outcome is promoted to
                 // approval by the host.
-                let result = result_message(&outcome, turn);
+                let result = result_message(&outcome, turn, described.clone());
                 let mut full = prompt::render_result(&result);
                 full.push_str(&handoff);
                 let mut historical = prompt::render_result_history(&result);
@@ -644,7 +668,7 @@ pub(crate) fn run_narrowed_metered(
                 continue;
             }
             if let Some((id, _, _)) = &native {
-                let result = result_message(&outcome, turn);
+                let result = result_message(&outcome, turn, described.clone());
                 let mut feedback = prompt::render_result(&result);
                 feedback.push_str("\n\n## Return\n");
                 feedback.push_str(&answer);
@@ -656,7 +680,7 @@ pub(crate) fn run_narrowed_metered(
             journal.write(&conversation);
             return finish(&answer, "returned", turn, tokens, trajectory);
         }
-        let result = result_message(&outcome, turn);
+        let result = result_message(&outcome, turn, described.clone());
         let mut full = prompt::render_result(&result);
         let mut historical = prompt::render_result_history(&result);
         if let Some(failed) = runtime.syntax_failure() {
@@ -932,7 +956,7 @@ fn message_text(message: &Message) -> String {
 /// The subagent's own result message, which is the parent's renderer with no
 /// usage line: a subagent has no token budget of its own, and a figure it
 /// cannot act on is prompt it pays for.
-fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
+fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>) -> CellResult {
     let turn = outcome.turn();
     let error = match outcome {
         CellOutcome::Threw { error, .. } => Some(ErrorSection {
@@ -949,6 +973,10 @@ fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
     CellResult {
         cell,
         elapsed_ms: turn.elapsed_ms,
+        // A subagent's own result carries the descriptor its turn supplied,
+        // so a subagent that said what it was doing reads the same way its
+        // parent does after compaction.
+        description,
         error,
         yield_reason: turn.yield_reason.clone(),
         output: match outcome {

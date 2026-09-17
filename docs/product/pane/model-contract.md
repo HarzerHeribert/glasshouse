@@ -41,6 +41,12 @@ the byte-for-byte text below remains the compatibility contract.
     submitting a cell, wait for its correlated result. Never invent output or
     infer success: only that result is runtime evidence.
 
+    Every cell carries a description: one short line, in the person's language,
+    saying what it is for and why — not which functions it calls. It is the only
+    account of your work the person sees while you run, and you read it back after
+    compaction. Pass it as the `description` argument; in the fenced form it is the
+    line immediately before the fence.
+
     A cell is validated before it runs. A parse error runs nothing and may offer
     `pane-edit`; a return, yield, or throw stops later code. Tool results are live
     objects, but unseen fields are not model-visible. Use declared fields and
@@ -125,6 +131,10 @@ evidence.*) becomes:
     Stop at the next decision that needs unseen evidence. After each call, wait
     for its correlated result. Never invent output or infer success: only that
     result is runtime evidence.
+
+The descriptor paragraph (*Every cell carries a description … before the
+fence.*) is **dropped entirely**: a request that declares no `execute_cell`
+runs no cell, so there is no call for the argument to sit on.
 
 The second paragraph (*A cell is validated … `exit_code` says so.*) describes
 cell mechanics a request without `execute_cell` cannot use, and becomes:

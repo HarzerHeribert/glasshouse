@@ -59,6 +59,17 @@ pub struct ModelFacts {
     pub input_usd_per_million: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_usd_per_million: Option<f64>,
+    /// How much context the model accepts, in tokens -- the one limit a
+    /// harness cannot choose and must not guess. A harness that does not know
+    /// it compacts against a figure nobody supplied, so an absent figure is
+    /// reported as absent and the harness says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    /// The most the model may produce in one response. The same rule: absent
+    /// means the caller keeps its own documented fallback rather than
+    /// inheriting a number invented here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ModelFacts {
@@ -79,6 +90,8 @@ impl ModelFacts {
             cost_per_task_usd: other.cost_per_task_usd.or(self.cost_per_task_usd),
             input_usd_per_million: other.input_usd_per_million.or(self.input_usd_per_million),
             output_usd_per_million: other.output_usd_per_million.or(self.output_usd_per_million),
+            context_window_tokens: other.context_window_tokens.or(self.context_window_tokens),
+            max_output_tokens: other.max_output_tokens.or(self.max_output_tokens),
         }
     }
 
@@ -313,5 +326,46 @@ mod tests {
         assert!(import(&dir, b"[]").is_err());
         assert!(import(&dir, br#"{"models":{}}"#).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_two_real_limits_round_trip_and_an_overlay_may_add_them_later() {
+        // The figures a harness cannot choose: they travel in the same
+        // document as the indices, so a catalogue that starts publishing them
+        // reaches a session with no code change.
+        let parsed: Measurements = serde_json::from_str(
+            r#"{"models":{"m":{"intelligence":1.0,"context_window_tokens":400000,"max_output_tokens":128000}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.models["m"].context_window_tokens, Some(400_000));
+        assert_eq!(parsed.models["m"].max_output_tokens, Some(128_000));
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            json.contains("context_window_tokens"),
+            "served to a harness"
+        );
+
+        let baked = Measurements {
+            models: BTreeMap::from([(
+                "m".to_string(),
+                ModelFacts {
+                    intelligence: Some(1.0),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let merged = baked.overlaid_with(&parsed);
+        assert_eq!(
+            merged.models["m"].context_window_tokens,
+            Some(400_000),
+            "an overlay that learns a window teaches the baked copy"
+        );
+        let quiet: Measurements =
+            serde_json::from_str(r#"{"models":{"m":{"intelligence":1.0}}}"#).unwrap();
+        assert_eq!(
+            quiet.models["m"].context_window_tokens, None,
+            "no catalogue we consume publishes it yet, and absent stays absent"
+        );
     }
 }

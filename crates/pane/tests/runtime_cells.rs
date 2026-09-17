@@ -3369,6 +3369,7 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
     let base = |plan: Vec<PlanItem>| CellResult {
         cell: 1,
         elapsed_ms: 1,
+        description: None,
         error: None,
         yield_reason: None,
         output: None,

@@ -5,6 +5,7 @@ fn result(cell: u64, table: &str) -> CellResult {
     CellResult {
         cell,
         elapsed_ms: 1,
+        description: None,
         handle_table: table.into(),
         error: Some(ErrorSection {
             class: "Error".into(),

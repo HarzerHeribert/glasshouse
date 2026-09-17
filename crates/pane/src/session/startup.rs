@@ -87,7 +87,13 @@ pub(super) fn subagent_roster(
     gateway: &Gateway,
     accounts: &[ServedAccount],
 ) -> Vec<crate::models::RosterModel> {
-    crate::models::roster(gateway, &served_models(accounts))
+    // One ask, two readers: the roster in the system block, and the two real
+    // limits -- the context window and the model's own output maximum --
+    // which `wire` and the context meter read through
+    // `crate::models::limits_for` rather than by holding the session.
+    let published = crate::models::published(gateway);
+    crate::models::remember(&published);
+    crate::models::measure(&served_models(accounts), &published)
 }
 
 /// The project's folder name as a person knows it; a relative root such as

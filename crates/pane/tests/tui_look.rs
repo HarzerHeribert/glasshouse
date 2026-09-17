@@ -1564,3 +1564,74 @@ fn the_context_reading_outranks_the_mouse_marker_on_a_narrow_status_line() {
         "and the marker stands down rather than crowding it out:\n{rendered}"
     );
 }
+
+/// The user, 2026-09-17: *"Cells are pretty tough to read."* The compact
+/// screen is the default one, and before this it drew the program's own first
+/// line and nothing a person had written. Now it draws the model's sentence
+/// under the cell header, and the sentence the model wrote when it yielded —
+/// which existed on 40 of the 123 views of the dogfooding corpus and was drawn
+/// on none of them, because the compact path returned before reaching it.
+#[test]
+fn the_compact_cell_shows_what_it_was_for_and_why_it_stopped() {
+    let mut state = state();
+    state.compact = true;
+    let c = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "implement ssh.run"),
+            Message::text(
+                Role::Assistant,
+                "```pane\nconst design = await read({path: \"d.md\"});\n```",
+            ),
+        ],
+    };
+    let n = Notebook {
+        cells: vec![CellView {
+            description: Some("Reading the ssh design to find what I have to change.".into()),
+            execution: Some("└─ read d.md · returned".into()),
+            yield_reason: Some("waiting for the design before I touch the config".into()),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    };
+    let shown = text(&draw(120, 35, &state, &c, &n));
+    assert!(
+        shown.contains("Reading the ssh design to find what I have to change."),
+        "the descriptor is not on the default screen:\n{shown}"
+    );
+    assert!(
+        shown.contains("yielded: waiting for the design before I touch the config"),
+        "the yield reason is still hidden in compact:\n{shown}"
+    );
+}
+
+/// Absent, nothing is drawn in its place: the change degrades to exactly the
+/// screen this cell had before the descriptor existed.
+#[test]
+fn a_cell_whose_model_said_nothing_draws_no_empty_descriptor_row() {
+    let mut state = state();
+    state.compact = true;
+    let c = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "implement ssh.run"),
+            Message::text(Role::Assistant, "```pane\nreturn 1;\n```"),
+        ],
+    };
+    let described = |description: Option<String>| {
+        let n = Notebook {
+            cells: vec![CellView {
+                description,
+                execution: Some("└─ read d.md · returned".into()),
+                ..CellView::default()
+            }],
+            ..Notebook::default()
+        };
+        text(&draw(120, 35, &state, &c, &n))
+    };
+    assert_eq!(
+        described(None),
+        described(Some(String::new())),
+        "an empty descriptor drew a row the absent one did not"
+    );
+}

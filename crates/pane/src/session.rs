@@ -83,6 +83,7 @@ fn estimate_context(notebook: &mut Notebook, estimate: u64, cap: Option<u64>) {
 }
 mod controls;
 mod mode_proposal;
+mod native;
 mod resume;
 mod startup;
 mod system;
@@ -1047,10 +1048,13 @@ impl Session<'_> {
 }
 
 fn context_cap(session: &Session<'_>, model: &str) -> Option<u64> {
-    session
+    let configured = session
         .context_window
         .as_ref()
-        .and_then(|(configured_model, cap)| (configured_model == model).then_some(*cap))
+        .and_then(|(configured_model, cap)| (configured_model == model).then_some(*cap));
+    // `--context-window-tokens` first, then whatever the gateway published
+    // for this model; an unknown window stays unknown and the meter says so.
+    crate::models::window_for(model, configured)
 }
 
 struct RollbackCheckpoint {
@@ -1993,16 +1997,12 @@ fn act_on(
         });
     }
     let native = lowered.is_none().then(|| calls.first().copied()).flatten();
+    let description = native::descriptor(lowered.is_some(), native, &assistant_text);
     let (source, repaired_from) = if let Some(lowered) = &lowered {
         (lowered.source.clone(), None)
     } else if let Some((id, _, input)) = native {
-        let source = input
-            .as_object()
-            .filter(|object| object.len() == 1)
-            .and_then(|object| object.get("code"))
-            .and_then(serde_json::Value::as_str);
-        let Some(source) = source else {
-            let explanation = "ProtocolError: execute_cell input must be exactly {\"code\": string}; nothing ran.";
+        let Some(source) = native::cell_source(input) else {
+            let explanation = native::MALFORMED_CELL_INPUT;
             return Ok(Step {
                 answer: Some(explanation.into()),
                 historical: None,
@@ -2152,7 +2152,13 @@ fn act_on(
     let rollback = changes.is_some().then(|| (before.clone(), after.clone()));
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
-    let record = turn.record.clone();
+    // The runtime records the program; only this layer saw the message the
+    // program came in, so the descriptor is attached here and everything
+    // downstream — the rollout, the view, the result, the supervisor's
+    // trajectory — reads it from the one record.
+    let mut record = turn.record.clone();
+    record.description = description.clone();
+    let record = record;
     let origin = if lowered.is_some() {
         crate::abi::Origin::DirectTool
     } else {
@@ -2166,16 +2172,13 @@ fn act_on(
     write_cell(
         interrupt,
         rollout,
-        &turn.record,
+        &record,
         origin,
         thrown,
         turn.observation,
         reduction,
         lowered.is_none()
-            && crate::abi::telemetry::is_single_intent_cell(
-                &turn.record.source,
-                &turn.record.calls,
-            ),
+            && crate::abi::telemetry::is_single_intent_cell(&record.source, &record.calls),
     )
     .map_err(|e| format!("could not record the cell: {e}"))?;
 
@@ -2184,6 +2187,7 @@ fn act_on(
         // carries what came back and how long it took, which is what the
         // lane and the `HELPERS` inspector section both draw.
         helpers: runtime.helper_records(),
+        description: description.clone(),
         executed_source: (native.is_some() || repaired_from.is_some() || lowered.is_some())
             .then(|| source.clone()),
         origin: if lowered.is_some() {
@@ -2258,6 +2262,7 @@ fn act_on(
     let mut result = CellResult {
         cell: turn.record.cell,
         elapsed_ms: turn.elapsed_ms,
+        description: description.clone(),
         error: None,
         yield_reason: None,
         output: None,
@@ -3239,6 +3244,68 @@ mod tests {
         assert_eq!(step.view.origin, crate::abi::Origin::AuthoredCell);
     }
 
+    /// Both channels land in one field, and the rollout carries it.
+    ///
+    /// The user, 2026-09-17: *"A model should deliver a descriptor for a cell
+    /// to make user facing communication of inner working and thought process
+    /// visible."* Measured behind it: 121 `tool_use` blocks and 2 text blocks
+    /// across the 123 assistant turns of session `tlitep-13fv`.
+    #[test]
+    fn a_cells_descriptor_reaches_its_record_from_either_channel() {
+        let (root, profile) = abi_fixture("described-native");
+        let native = direct_call(
+            "call-1",
+            "execute_cell",
+            serde_json::json!({
+                "code": "return \"done\";",
+                "description": "Answering from what I already read.",
+            }),
+        );
+        let step = act(&native, &root, &profile, crate::abi::Dialect::Anthropic);
+        assert_eq!(
+            step.record
+                .as_ref()
+                .and_then(|record| record.description.as_deref()),
+            Some("Answering from what I already read.")
+        );
+        assert_eq!(
+            step.view.description.as_deref(),
+            Some("Answering from what I already read."),
+            "the screen reads the same field the rollout does"
+        );
+
+        let (root, profile) = abi_fixture("described-fence");
+        let fenced = Message::text(
+            Role::Assistant,
+            "Answering from what I already read.\n```pane\nreturn \"done\";\n```",
+        );
+        let step = act(&fenced, &root, &profile, crate::abi::Dialect::Anthropic);
+        assert_eq!(
+            step.record
+                .as_ref()
+                .and_then(|record| record.description.as_deref()),
+            Some("Answering from what I already read."),
+            "the fence channel's line is the same field"
+        );
+    }
+
+    /// A model that says nothing still runs: the schema asks for the line,
+    /// the parser does not require it, and nothing downstream reports an
+    /// error where a sentence would have been.
+    #[test]
+    fn a_native_call_without_a_description_still_runs() {
+        let (root, profile) = abi_fixture("undescribed");
+        let assistant = direct_call(
+            "call-1",
+            "execute_cell",
+            serde_json::json!({"code": "return \"done\";"}),
+        );
+        let step = act(&assistant, &root, &profile, crate::abi::Dialect::Anthropic);
+        let record = step.record.expect("the cell ran");
+        assert_eq!(record.description, None);
+        assert!(step.view.error.is_none(), "{:?}", step.view.error);
+    }
+
     /// Several independent familiar calls in one turn become one frame, and
     /// each still gets its own correlated answer.
     #[test]
@@ -3682,6 +3749,7 @@ mod tests {
         let record = CellRecord {
             cell: 3,
             source: String::new(),
+            description: None,
             outcome: CellOutcomeKind::Threw,
             handles: Vec::new(),
             calls: vec![
