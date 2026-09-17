@@ -5588,3 +5588,32 @@ The supervisor's authority is unchanged and deliberately small: it sees the comp
 the rollout already records — each cell's first line, its outcome, its calls — never a preview's
 bytes or a payload, and its one decision becomes a nudge line in the next request. It interrupts
 nothing and grants nothing.
+
+## A context window is a property of the route, not of the model — the user, 2026-09-17
+
+The user, on the published figure Pane now ships: *"there is a difference in context window and it
+depends from where and how model is used. Codex even subscription tier matters but codex can show %
+of used window. So tier of subscription and source of model does matter. I just don't know how we
+would get that consistently."*
+
+Agreed, and the bake proved it at a smaller scale the same day: of 223 exact name matches between
+our catalogue and LiteLLM's, **126 disagreed across providers**, because re-hosts cap —
+`claude-sonnet-4-6` reads 1,000,000 from Anthropic and 200,000 through Snowflake. Tier is the same
+problem one layer down, and nothing publishes it.
+
+So the window resolves from three sources of decreasing confidence, and the most authoritative is
+the one the route itself reports:
+
+1. **Observed from the provider's own refusal.** A request over the window is refused with the limit
+   named ("maximum context length is N tokens"). That is ground truth for this account, this tier,
+   this route, learned once and remembered per account and model.
+2. **Observed from headers the gateway already receives.** `provider/telemetry/mod.rs` already parses
+   IETF `ratelimit-*` and `x-ratelimit-*`; tier shows up there in practice, and nothing reads it.
+3. **The baked published figure as a prior**, with `--context-window-tokens` overriding everything.
+
+The gateway holds 1 and 2 because it is the only component that sees every request and every
+response, and it already has `provider/quota`'s `Capacity` with its four distinct kinds of unknown.
+
+**And the display rule that follows: show a percentage only when the figure is trusted** — observed
+or configured. On a published prior the meter says so rather than implying a measurement. Being
+wrong about how much room is left is worse than admitting the number came from a table.
