@@ -2644,3 +2644,15 @@ the sandbox profile and the person decide. Nothing here is a capability the mode
 ☑ Rank the Scout's candidate files by one relevance question per file and read the relevant ones first.
 ☑ Check a helper's result against what was asked before it reaches the main model, and say so in one line when it does not.
 ☑ Measure the decision model's effect: one request set run with decisions off, shadow and on, compared on checker findings, verified claims, spared checker runs, holds and false holds, tokens and time — recorded before any threshold becomes a default.
+
+Phase 70 — Pane: the network the user configures, and the Windows console
+
+The user's rulings of 2026-09-17 (design-decisions.md, *Pane first, and Pane gets a network*). The
+premise that the shell has no network stands for the cell sandbox; named host-run tools get a
+network the user configured, each with its own permission and its own line in the rollout.
+
+☐ Read the Windows console as raw terminal input (`ENABLE_VIRTUAL_TERMINAL_INPUT`) and parse keys, mouse reports and bracketed pastes in Pane, so a paste arrives as one paste and a mouse report never depends on the keyboard layout; the console-record reader remains the fallback where the flag is refused.
+☐ Offer `ssh` execution as a host-run tool outside the cell sandbox: hosts the user reaches with keys they configured themselves, every command and its exit recorded in the rollout, refused until a host is configured; in `execute` mode any command, in `explore` and `plan` only commands that read (the static parse of mutating verbs, redirections and remote scripts, then the decision model's "this only reads" above the configured confidence).
+☐ Offer `fetch` as a host-run tool through the web broker: an HTTP GET to a domain the user allowed, a bounded body as a handle with a preview, every request recorded; refused until a domain is allowed.
+☐ Offer `search` as a host-run tool: a search provider the user configured (endpoint and key in the gateway's store, never in argv or the rollout), results as bounded excerpts with their sources, every query recorded; refused until configured.
+☐ Register a network tool only when its configuration exists, tell the model exactly which are available and to which hosts or domains, and keep `no_registered_tool_needs_the_network` true for every unconfigured session.
