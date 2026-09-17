@@ -443,6 +443,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "decisions.supervision_above",
+        label: "Supervision confidence",
+        description: "Confidence at or above which the supervision question's answer is a reason to nudge the working model.",
+        kind: Kind::Float,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "modes.explore.writable",
         label: "Explore writable globs",
         description: "Project-relative globs, beside the scratchpad, that a write or edit may reach in `explore`.",

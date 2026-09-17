@@ -90,6 +90,17 @@ pub struct JobResult {
     pub status: String,
 }
 
+/// What one look at a running subagent says: the turns it has taken, the
+/// tools it has called in order, how long it has been working, and whether it
+/// still is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobProgress {
+    pub turns: u64,
+    pub calls: Vec<String>,
+    pub elapsed_ms: u64,
+    pub running: bool,
+}
+
 /// `bg.run`'s options object.
 ///
 /// `cwd` and `env` are **refused rather than ignored**: `invoke` runs every
@@ -122,6 +133,12 @@ struct JobEntry {
     cancelled: bool,
     finished: bool,
     thread: Option<JoinHandle<()>>,
+    /// When the job was put on the board, so a parent looking in is told how
+    /// long its subagent has been working rather than having to time it.
+    started: Instant,
+    /// The other end of a running subagent's [`crate::agent::ProgressSink`],
+    /// or `None` for a command job, which has no turns to report.
+    progress: Option<crate::agent::ProgressSink>,
 }
 
 /// One session's jobs, the events they have raised and the payloads those
@@ -290,6 +307,14 @@ pub fn agent_with_config(
     options: &crate::agent::AgentOptions,
     config: Option<&crate::config::PaneConfig>,
 ) -> String {
+    // **The wall clock is the bound, and it is armed once.** `arm_deadline`
+    // is what stops a provider call that hangs, because it cancels the token
+    // from outside the loop; `AgentOptions::deadline` is the same duration
+    // read by the loop itself, so an expiry is reported as `deadline` rather
+    // than as a bare cancellation. One value, two enforcement points.
+    let deadline_ms = options
+        .deadline
+        .map(|deadline| u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX));
     start(
         profile,
         glasshouse,
@@ -299,7 +324,7 @@ pub fn agent_with_config(
             options: options.clone(),
             config: config.cloned().map(Box::new),
         },
-        None,
+        deadline_ms,
         None,
     )
 }
@@ -313,6 +338,10 @@ fn start(
     watching: Option<WatchOptions>,
 ) -> String {
     let token = CancellationToken::new();
+    // Only a turn loop has progress to report. Minted here rather than on the
+    // job's thread so a parent that looks in during the first turn reads an
+    // honest zero instead of finding nothing at all.
+    let progress = matches!(work, Work::Agent { .. }).then(crate::agent::ProgressSink::default);
     let handle = with_board(session, |board| {
         board.next += 1;
         let handle = format!("job{}", board.next);
@@ -323,6 +352,8 @@ fn start(
                 cancelled: false,
                 finished: false,
                 thread: None,
+                started: Instant::now(),
+                progress: progress.clone(),
             },
         );
         handle
@@ -336,6 +367,7 @@ fn start(
         work,
         token: token.clone(),
         watching,
+        progress,
     };
     let thread = std::thread::spawn(move || job.serve());
 
@@ -438,13 +470,14 @@ struct JobThread {
     work: Work,
     token: CancellationToken,
     watching: Option<WatchOptions>,
+    progress: Option<crate::agent::ProgressSink>,
 }
 
 /// How many trajectory entries one note carries before it counts the rest.
 ///
-/// A subagent's trajectory is one entry per tool call, so a 24-turn loop can
-/// leave hundreds. The first entries are the ones that say what it was doing;
-/// the tail is a number.
+/// A subagent's trajectory is one entry per tool call, and nothing caps its
+/// turns, so a long loop leaves hundreds. The first entries are the ones that
+/// say what it was doing; the tail is a number.
 const NOTED_TRAJECTORY: usize = 24;
 
 /// The line a subagent's `stderr` carries, or empty when it returned normally
@@ -452,22 +485,21 @@ const NOTED_TRAJECTORY: usize = 24;
 ///
 /// **Nothing here is a second shape.** It is prose for the parent to read,
 /// built only from what `AgentResult` already holds: the status, the turns
-/// taken against the turns allowed, and the tool names of the trajectory
-/// (never an argument, never a payload).
-fn note_for(answered: &crate::agent::AgentResult, allowed: u64) -> String {
+/// taken, and the tool names of the trajectory (never an argument, never a
+/// payload). `stdout` still carries the subagent's own last words, so this
+/// says why it stopped and never replaces what it produced.
+fn note_for(answered: &crate::agent::AgentResult) -> String {
     if answered.status == "returned" && !answered.answer.is_empty() {
         return String::new();
     }
     let stopped = match answered.status.as_str() {
-        "turns" => "stopped at its turn cap",
+        "deadline" => "ran out of time",
+        "turns" => "reached the turn hint it was given",
         "cancelled" => "was cancelled",
         "failed" => "failed",
         other => other,
     };
-    let mut note = format!(
-        "subagent {stopped} after {} of {allowed} turn(s)",
-        answered.turns
-    );
+    let mut note = format!("subagent {stopped} after {} turn(s)", answered.turns);
     if answered.trajectory.is_empty() {
         note.push_str("; it made no tool call");
     } else {
@@ -515,7 +547,7 @@ impl JobThread {
                 options,
                 config,
             } => {
-                let answered = crate::agent::run_with_config(
+                let answered = crate::agent::run_watched(
                     &self.profile,
                     &self.glasshouse,
                     &self.session,
@@ -523,6 +555,7 @@ impl JobThread {
                     options,
                     &self.token,
                     config.as_deref(),
+                    self.progress.as_ref(),
                 );
                 // The answer is the job's output, so a subagent's result is
                 // read exactly as a command's is — `stdout`, `stderr`,
@@ -538,7 +571,7 @@ impl JobThread {
                 // it spent about twenty cells starting the same doomed
                 // subagent again.
                 let status = answered.status.clone();
-                let stderr = note_for(&answered, options.turns);
+                let stderr = note_for(&answered);
                 self.emit(
                     &status,
                     Ok(JobResult {
@@ -737,6 +770,27 @@ pub fn payload(session: &SessionId, id: &str) -> Option<JobResult> {
     with_board(session, |board| board.payloads.get(id).cloned())
 }
 
+/// What a running subagent has done so far, or `None` for a handle that is
+/// not a subagent's.
+///
+/// **A look, not a wait.** It reads the board and the sink and returns; it
+/// makes no provider request, starts nothing, and cannot block on the job's
+/// thread. The user, 2026-09-17: *"A parent model should check on a subagent
+/// from some time. But even Claude Code does not do that."*
+pub fn progress(session: &SessionId, handle: &str) -> Option<JobProgress> {
+    with_board(session, |board| {
+        let job = board.jobs.get(handle)?;
+        let sink = job.progress.as_ref()?;
+        let held = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(JobProgress {
+            turns: held.turns,
+            calls: held.calls.clone(),
+            elapsed_ms: u64::try_from(job.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            running: !job.finished,
+        })
+    })
+}
+
 /// How many of this session's jobs have not finished.
 pub fn live(session: &SessionId) -> usize {
     with_board(session, |board| {
@@ -834,16 +888,30 @@ mod tests {
             tokens: 0,
             trajectory: vec!["read".into(), "rg".into(), "context".into()],
         };
-        let note = note_for(&cancelled, 8);
+        let note = note_for(&cancelled);
         assert!(note.contains("was cancelled"), "{note}");
-        assert!(note.contains("3 of 8 turn(s)"), "{note}");
+        assert!(note.contains("3 turn(s)"), "{note}");
         assert!(note.contains("read, rg, context"), "{note}");
+
+        // The wall clock and the turn hint are different stops and say so:
+        // a parent that reads "ran out of time" knows to give the next one
+        // longer, where "cancelled" would have told it nothing.
+        let timed_out = crate::agent::AgentResult {
+            status: "deadline".into(),
+            ..cancelled.clone()
+        };
+        assert!(note_for(&timed_out).contains("ran out of time"));
+        let hinted = crate::agent::AgentResult {
+            status: "turns".into(),
+            ..cancelled.clone()
+        };
+        assert!(note_for(&hinted).contains("turn hint"));
 
         let silent = crate::agent::AgentResult {
             trajectory: Vec::new(),
             ..cancelled.clone()
         };
-        assert!(note_for(&silent, 8).contains("no tool call"));
+        assert!(note_for(&silent).contains("no tool call"));
 
         // A subagent that returned an answer needs no note: the answer is the
         // result, and a second line beside it is noise.
@@ -852,11 +920,12 @@ mod tests {
             status: "returned".into(),
             ..cancelled.clone()
         };
-        assert_eq!(note_for(&returned, 8), "");
+        assert_eq!(note_for(&returned), "");
     }
 
-    /// A long trajectory is counted, not printed: a 24-turn loop can leave
-    /// hundreds of entries and the note is for reading.
+    /// A long trajectory is counted, not printed: nothing caps a subagent's
+    /// turns, so a long loop leaves hundreds of entries and the note is for
+    /// reading.
     #[test]
     fn a_long_trajectory_is_bounded_and_the_rest_counted() {
         let busy = crate::agent::AgentResult {
@@ -868,7 +937,7 @@ mod tests {
                 .map(|_| "read".to_string())
                 .collect(),
         };
-        let note = note_for(&busy, 24);
+        let note = note_for(&busy);
         assert!(note.contains("and 5 more"), "{note}");
         assert_eq!(note.matches("read").count(), NOTED_TRAJECTORY);
     }
@@ -908,6 +977,8 @@ mod tests {
                     cancelled: false,
                     finished: false,
                     thread: Some(stuck),
+                    started: Instant::now(),
+                    progress: None,
                 },
             );
         });

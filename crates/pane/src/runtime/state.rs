@@ -518,6 +518,12 @@ impl RuntimeState {
         }
     }
 
+    /// The wall clock one subagent of this session gets, from `[agents]
+    /// deadline_minutes`. `None` is no deadline.
+    pub(crate) fn agent_deadline(&self) -> Option<std::time::Duration> {
+        self.agents.borrow().deadline
+    }
+
     pub(crate) fn set_agents(&self, agents: crate::config::AgentsConfig) {
         *self.agents.borrow_mut() = agents;
     }
@@ -923,6 +929,7 @@ mod tests {
         state.set_agents(crate::config::AgentsConfig {
             mode: crate::config::AgentsMode::Pinned,
             model: Some("pinned-model".into()),
+            deadline: None,
         });
         assert_eq!(state.agent_model(None).unwrap(), "pinned-model");
         assert_eq!(
@@ -934,6 +941,7 @@ mod tests {
         state.set_agents(crate::config::AgentsConfig {
             mode: crate::config::AgentsMode::Off,
             model: None,
+            deadline: None,
         });
         assert!(state.agent_model(None).is_err());
         assert!(

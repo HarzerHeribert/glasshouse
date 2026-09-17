@@ -143,6 +143,10 @@ pub struct DecisionsConfig {
     /// floor for the preflight Scout's own result and the completion gate's
     /// fresh checker. `0.0..=0.5`.
     pub helper_no_below: f64,
+    /// Confidence at or above which the supervision question's answer is a
+    /// reason to nudge -- any criterion but `making_progress`
+    /// (`supervisor.md` §3). `0.5..=1.0`.
+    pub supervision_above: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -162,6 +166,7 @@ impl Default for DecisionsConfig {
             mode_above: 0.85,
             scout_relevance_below: 0.10,
             helper_no_below: 0.10,
+            supervision_above: 0.85,
         }
     }
 }
@@ -402,6 +407,18 @@ impl AgentsMode {
 pub struct AgentsConfig {
     pub mode: AgentsMode,
     pub model: Option<String>,
+    /// A wall clock for one subagent, and **absent by default**.
+    ///
+    /// The user, 2026-09-17, first ruling out the turn cap — *"Limits are
+    /// dumb for abstract tasks"* — and then ruling out a defaulted clock in
+    /// its place: *"A subagent can run for an hour if it does work which is
+    /// correct. Supervisor should handle it."* So nothing here interrupts a
+    /// subagent by default: it ends when it answers, when its context fills,
+    /// when the provider or the subscription refuses, when it is cancelled,
+    /// or when **this person** set `deadline_minutes` and it expired.
+    /// Governing one that is working badly is the supervisor's job, which
+    /// reads what it is doing, not a counter's, which cannot.
+    pub deadline: Option<std::time::Duration>,
 }
 
 /// One integer key's valid range, spelled once so the refusal sentence and
@@ -635,12 +652,31 @@ fn merge_tables(base: &mut toml::Value, overlay: &toml::Value) {
 fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
     let table = table_of(value, "agents")?;
     for key in table.keys() {
-        if !["mode", "model"].contains(&key.as_str()) {
+        if !["mode", "model", "deadline_minutes"].contains(&key.as_str()) {
             return Err(format!(
-                "pane.toml: unknown key `{key}` in [agents]; only `mode` and `model` are recognised"
+                "pane.toml: unknown key `{key}` in [agents]; only `mode`, `model` and \
+                 `deadline_minutes` are recognised"
             ));
         }
     }
+    let deadline = match table.get("deadline_minutes") {
+        // Absent is no deadline, not a default one.
+        None => None,
+        Some(value) => {
+            let minutes = value.as_integer().ok_or_else(|| {
+                "pane.toml: `[agents] deadline_minutes` must be a whole number of minutes, or 0 \
+                 for no deadline"
+                    .to_string()
+            })?;
+            let minutes = u64::try_from(minutes).map_err(|_| {
+                "pane.toml: `[agents] deadline_minutes` cannot be negative; 0 means no deadline"
+                    .to_string()
+            })?;
+            // Zero is the explicit "no deadline", not a zero-length one: a
+            // subagent that is dead on arrival is nobody's intent.
+            (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
+        }
+    };
     let model = match table.get("model") {
         None => None,
         Some(value) => {
@@ -676,7 +712,11 @@ fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
         }
         _ => {}
     }
-    Ok(AgentsConfig { mode, model })
+    Ok(AgentsConfig {
+        mode,
+        model,
+        deadline,
+    })
 }
 
 /// `[model] parent` -- one optional key, refused the same way the other two
@@ -834,6 +874,8 @@ const SCOUT_RELEVANCE_BELOW_MIN: f64 = 0.0;
 const SCOUT_RELEVANCE_BELOW_MAX: f64 = 0.5;
 const HELPER_NO_BELOW_MIN: f64 = 0.0;
 const HELPER_NO_BELOW_MAX: f64 = 0.5;
+const SUPERVISION_ABOVE_MIN: f64 = 0.5;
+const SUPERVISION_ABOVE_MAX: f64 = 1.0;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -855,6 +897,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "mode_above",
             "scout_relevance_below",
             "helper_no_below",
+            "supervision_above",
         ]
         .contains(&key.as_str())
         {
@@ -1066,6 +1109,22 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let supervision_above = match table.get("supervision_above") {
+        None => defaults.supervision_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `supervision_above` must be a number".to_string())?;
+            if !(SUPERVISION_ABOVE_MIN..=SUPERVISION_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `supervision_above` must be between {SUPERVISION_ABOVE_MIN} and {SUPERVISION_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -1081,6 +1140,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         mode_above,
         scout_relevance_below,
         helper_no_below,
+        supervision_above,
     })
 }
 

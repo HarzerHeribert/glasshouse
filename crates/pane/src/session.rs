@@ -732,7 +732,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let requested = startup::requested_model(args.model.as_deref(), &config.borrow(), terminal)?;
     session_println!("{}", resume::resume_hint(&session_id));
     if !terminal {
-        session_println!("{}", startup::supervisor_line(&config.borrow().supervisor));
+        session_println!(
+            "{}",
+            startup::supervisor_line(&config.borrow().supervisor, &config.borrow().decisions)
+        );
     }
     if config.borrow().decisions.model.is_none() && !terminal {
         session_println!("decisions: off (no model)");
@@ -1379,8 +1382,7 @@ fn run_task_inner(
     let mut incomplete;
     let mut prose_turns = 0u32;
     let supervisor = Supervisor::new();
-    let supervisor_active =
-        session.config().supervisor.enabled && session.config().supervisor.model.is_some();
+    let supervisor_active = crate::supervisor::active(&session.config());
     let mut cells_since_look: Vec<CellRecord> = Vec::new();
     let mut task_state = TaskState::new(task, &request_profile, &session.config())
         .with_acceptance(acceptance_items)
@@ -1670,26 +1672,20 @@ fn run_task_inner(
             } else if cells_since_look.len() as u32 >= session.config().supervisor.every {
                 let trajectory = crate::supervisor::compress(&cells_since_look);
                 cells_since_look.clear();
-                // `supervisor_active` already established `model.is_some()`.
-                let model = session
-                    .config()
-                    .supervisor
-                    .model
-                    .clone()
-                    .expect("supervisor_active implies a configured model");
-                let decision = supervisor.look(&model, &trajectory);
-                if decision.intervene {
-                    nudge_reason = Some(decision.reason.clone());
-                    transcript.notebook.supervisor =
-                        Some(SupervisorStatus::Nudged(decision.reason));
-                } else if decision.ok {
-                    transcript.notebook.supervisor = Some(SupervisorStatus::LookedNoNudge);
-                } else {
-                    // §3: an unanswered look is *not intervene* and is
-                    // recorded as such -- never as a healthy look.
-                    transcript.notebook.supervisor =
-                        Some(SupervisorStatus::LookFailed(decision.reason));
-                }
+                // The stall counter goes in as evidence, not as a gate: see
+                // `supervisor.rs`'s module doc for why a tree-watching counter
+                // cannot be trusted to decide when the question is worth
+                // asking.
+                let config = session.config();
+                let decision = supervisor.consider(
+                    &config.supervisor,
+                    &config.decisions,
+                    &trajectory,
+                    task_state.stall.since_progress(),
+                );
+                let (nudge, status) = crate::supervisor::outcome(decision);
+                nudge_reason = nudge;
+                transcript.notebook.supervisor = Some(status);
             }
         }
 
@@ -1720,13 +1716,13 @@ fn run_task_inner(
         // `supervisor.md` §4: the nudge is the very head of the next user
         // message -- applied last, so a look that coincides with the
         // exhausted preamble puts the nudge first, ahead of it.
-        if let Some(reason) = nudge_reason
-            && let Some(answer) = step.answer.take()
-        {
-            step.answer = Some(format!("supervisor: {reason}\n{answer}"));
-            step.historical = step
-                .historical
-                .map(|history| format!("supervisor: {reason}\n{history}"));
+        if let Some(reason) = nudge_reason {
+            use crate::supervisor::{head_tool_result, headed};
+            step.answer = step.answer.take().map(|answer| headed(&reason, &answer));
+            step.historical = step.historical.map(|history| headed(&reason, &history));
+            if let Some(result) = &mut step.native_result {
+                head_tool_result(result, &reason);
+            }
         }
 
         step.view.answered = step.answer.is_some();

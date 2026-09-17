@@ -3527,6 +3527,46 @@ fn a_subagent_may_not_start_a_subagent() {
     assert!(text.contains("may not start a subagent"), "{text}");
 }
 
+/// **A parent can look in on a running subagent**, which nothing let it do
+/// before (user, 2026-09-17: *"A parent model should check on a subagent from
+/// some time. But even Claude Code does not do that."*). The look is a board
+/// read: no provider request, no waiting, and `null` for a handle that has
+/// none.
+#[test]
+fn a_parent_can_look_in_on_a_running_subagent() {
+    let fixture = Fixture::new("agent-progress");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("agent-progress-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    runtime.set_task_context(400_000, "claude-sonnet-5");
+
+    let looked = runtime.run_cell(
+        "const job = agent.run(\"anything\");\n\
+         const seen = job.progress();\n\
+         return JSON.stringify({\n\
+           turns: typeof seen.turns,\n\
+           calls: Array.isArray(seen.calls),\n\
+           elapsed: typeof seen.elapsed_ms,\n\
+           running: seen.running,\n\
+         });\n",
+    );
+    let seen = returned_string(&looked);
+    assert!(seen.contains("\"turns\":\"number\""), "{seen}");
+    assert!(seen.contains("\"calls\":true"), "{seen}");
+    assert!(seen.contains("\"elapsed\":\"number\""), "{seen}");
+    assert!(seen.contains("\"running\":true"), "{seen}");
+
+    // A command job is not a subagent and has no turns to report.
+    let none = runtime.run_cell(
+        "const job = agent.run(\"another\");\n\
+         bg.cancel(job);\n\
+         return typeof job.progress();\n",
+    );
+    assert_eq!(returned_string(&none), "object");
+
+    pane::bg::shutdown(&session);
+}
+
 /// A task that cannot pay for a subagent is refused one, rather than starting
 /// one it would have to kill halfway — which spends the tokens and produces
 /// nothing.
@@ -3553,19 +3593,24 @@ fn a_budget_that_cannot_pay_refuses_the_subagent_before_it_starts() {
 
 /// A subagent inherits the parent's model unless the cell names one, so a
 /// session that switched model does not silently fan out on the default.
+///
+/// The turn half of this test is gone with the cap it pinned (user ruling,
+/// 2026-09-17): `turns` is a hint a cell may leave unset, and `None` means
+/// the subagent works until it answers or its wall clock runs out.
 #[test]
 fn a_subagent_inherits_the_parents_model() {
-    use pane::agent::{AgentOptions, DEFAULT_TURNS, MAX_TURNS};
-    // The clamp is the part worth pinning: `turns` is written by the model,
-    // and an unbounded one would spend the parent's whole budget in a call it
-    // does not watch.
+    use pane::agent::AgentOptions;
     let asked = AgentOptions {
-        turns: 10_000,
+        turns: None,
         model: "inherited-model".to_string(),
         effort: pane::wire::Effort::default(),
+        deadline: None,
     };
-    assert_eq!(asked.turns.clamp(1, MAX_TURNS), MAX_TURNS);
-    const { assert!(DEFAULT_TURNS <= MAX_TURNS) };
+    assert_eq!(asked.model, "inherited-model");
+    assert!(
+        asked.turns.is_none(),
+        "a subagent with no turn hint runs until it answers"
+    );
 }
 
 // --- `web` exists only when configured, and a fetch is one rollout line

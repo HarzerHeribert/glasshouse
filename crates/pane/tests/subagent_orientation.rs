@@ -118,7 +118,8 @@ fn child_receives_root_orientation_and_nested_policy_before_nested_write() {
         &fixture.session,
         "write nested/result.txt after following every applicable instruction",
         &AgentOptions {
-            turns: 4,
+            turns: Some(4),
+            deadline: None,
             model: "test-model".into(),
             effort: pane::wire::Effort::Default,
         },

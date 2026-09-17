@@ -63,6 +63,8 @@ fn question_key(body_text: &str) -> String {
     let questions = value["questions"].as_object().cloned().unwrap_or_default();
     if questions.contains_key("satisfied") {
         "satisfied".to_string()
+    } else if questions.contains_key("supervision") {
+        "supervision".to_string()
     } else if questions.contains_key("drift") {
         "drift".to_string()
     } else if questions.contains_key("judge") {
@@ -93,7 +95,19 @@ fn providers(
     intent: Vec<Decision>,
     completion: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
-    providers_full(cells, intent, completion, vec![], vec![], vec![])
+    providers_full(cells, intent, completion, vec![], vec![], vec![], vec![])
+}
+
+/// [`providers`] plus a scripted queue for the supervision question
+/// (`supervisor.md` §3): the decision model's own answer about a trajectory.
+/// A `/v1/messages` request carrying the supervisor's preamble is answered
+/// with one canned line and never consumes a scripted cell, so a test can
+/// count prose looks without its cell script shifting under it.
+fn providers_with_supervision(
+    cells: Vec<Value>,
+    supervision: Vec<Decision>,
+) -> (String, Recorded, Recorded, Recorded) {
+    providers_full(cells, vec![], vec![], vec![], vec![], vec![], supervision)
 }
 
 /// [`providers`] plus a fourth scripted queue for the drift question's own
@@ -105,7 +119,7 @@ fn providers_with_drift(
     completion: Vec<Decision>,
     drift: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
-    providers_full(cells, intent, completion, drift, vec![], vec![])
+    providers_full(cells, intent, completion, drift, vec![], vec![], vec![])
 }
 
 /// [`providers`] plus scripted queues for the Scout's own ranking question
@@ -121,9 +135,10 @@ fn providers_with_rank_and_judge(
     rank: Vec<Decision>,
     judge: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
-    providers_full(cells, intent, completion, vec![], judge, rank)
+    providers_full(cells, intent, completion, vec![], judge, rank, vec![])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn providers_full(
     cells: Vec<Value>,
     intent: Vec<Decision>,
@@ -131,6 +146,7 @@ fn providers_full(
     drift: Vec<Decision>,
     judge: Vec<Decision>,
     rank: Vec<Decision>,
+    supervision: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -147,6 +163,8 @@ fn providers_full(
         let mut drift: std::collections::VecDeque<Decision> = drift.into_iter().collect();
         let mut judge: std::collections::VecDeque<Decision> = judge.into_iter().collect();
         let mut rank: std::collections::VecDeque<Decision> = rank.into_iter().collect();
+        let mut supervision: std::collections::VecDeque<Decision> =
+            supervision.into_iter().collect();
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -203,6 +221,9 @@ fn providers_full(
                     "rank" => rank
                         .pop_front()
                         .unwrap_or_else(|| Decision::Answer(rank_answer(&[("0", 0.94)]))),
+                    "supervision" => supervision.pop_front().unwrap_or_else(|| {
+                        Decision::Answer(supervision_answer("making_progress", 0.94))
+                    }),
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
@@ -236,9 +257,16 @@ fn providers_full(
                     }
                 }
             } else {
+                let is_look = body_text.contains(SUPERVISOR_MARKER);
                 seen_messages.lock().unwrap().push(body_text);
-                let Some(response) = cells.next() else {
-                    return;
+                let response = if is_look {
+                    json!({"role": "assistant", "content": [{"type": "text", "text": LOOK_LINE}],
+                        "usage": {"input_tokens": 20, "output_tokens": 7}})
+                } else {
+                    let Some(response) = cells.next() else {
+                        return;
+                    };
+                    response
                 };
                 let response = response.to_string();
                 let _ = write!(
@@ -312,6 +340,36 @@ fn decision_answer_with_complexity(
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// The first words of `supervisor.rs`'s prose preambles -- both the old
+/// deciding one and the phrasing one start with it, which is exactly what a
+/// test counting *prose looks* wants to match.
+const SUPERVISOR_MARKER: &str = "You watch a coding agent's trajectory";
+
+/// What the scripted supervisor model writes when it is asked for a line.
+const LOOK_LINE: &str = "you are re-reading the same files; make the edit";
+
+/// The supervision question's answer alone (`supervisor.md` §3): one choice
+/// over the four criteria, with the confidence the threshold is read against.
+fn supervision_answer(choice: &str, confidence: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "supervision": {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": {
+                    "making_progress": 0.0,
+                    "repeating_a_failing_call": 0.0,
+                    "looping_over_the_same_reads": 0.0,
+                    "stopped_without_returning": 0.0,
+                },
+                "confidence": confidence,
+            }
+        },
+        "usage": {"input_tokens": 30, "output_tokens": 8},
     })
 }
 
@@ -1839,5 +1897,141 @@ fn shadow_records_judged_and_changes_nothing() {
     );
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["judged"]["yes"], 1, "{telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// --- supervisor.md §3: the decision model decides, the LLM phrases --------
+
+/// Both models configured, a look after every cell.
+const SUPERVISED_BY_BOTH: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
+     [supervisor]\nevery = 1\nmodel = \"helper-tier\"\n";
+
+/// The decision model alone: nothing is configured that could write a
+/// sentence, so a nudge must carry the criterion's own words.
+const SUPERVISED_BY_THE_DECISION_MODEL: &str =
+    "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n[supervisor]\nevery = 1\n";
+
+/// One cell that yields (so a look has a next turn to head) and one that
+/// ends the task.
+fn looping_then_done() -> Vec<Value> {
+    vec![cell("c1", "const x = 1;"), cell("c2", "return \"done\";")]
+}
+
+fn prose_looks(messages: &[String]) -> usize {
+    messages
+        .iter()
+        .filter(|body| body.contains(SUPERVISOR_MARKER))
+        .count()
+}
+
+/// The saving this layering exists for: a trajectory the decision model
+/// calls progress costs one typed question and **no prose request at all**.
+#[test]
+fn a_progress_answer_buys_no_prose_look() {
+    let root = root("supervision-progress");
+    write_config(&root, SUPERVISED_BY_BOTH);
+    let (endpoint, messages, decisions, _headers) = providers_with_supervision(
+        looping_then_done(),
+        vec![Decision::Answer(supervision_answer(
+            "making_progress",
+            0.99,
+        ))],
+    );
+    let result =
+        exec_bounded(&root, &endpoint, "keep going", None).expect("the task finishes normally");
+    assert_eq!(result["answer"], "done");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        prose_looks(&messages),
+        0,
+        "a confident `making_progress` buys no sentence: {messages:?}"
+    );
+    assert!(
+        decisions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body.contains("\"supervision\"")),
+        "the question was asked"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// And the other half: a confident loop buys exactly one sentence, and that
+/// sentence heads the next turn.
+#[test]
+fn a_confident_loop_buys_exactly_one_line_and_nudges_with_it() {
+    let root = root("supervision-loop");
+    write_config(&root, SUPERVISED_BY_BOTH);
+    let (endpoint, messages, _decisions, _headers) = providers_with_supervision(
+        looping_then_done(),
+        vec![Decision::Answer(supervision_answer(
+            "looping_over_the_same_reads",
+            0.95,
+        ))],
+    );
+    let result =
+        exec_bounded(&root, &endpoint, "keep going", None).expect("a nudge never ends a task");
+    assert_eq!(result["answer"], "done");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        prose_looks(&messages),
+        1,
+        "one sentence, bought only after the decision model said yes: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|body| !body.contains(SUPERVISOR_MARKER) && body.contains(LOOK_LINE)),
+        "the written line heads the next task turn: {messages:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// No model configured that could write a sentence: the nudge still fires,
+/// carrying the criterion's own words. A worse sentence, never a lost
+/// intervention.
+#[test]
+fn without_a_supervisor_model_the_criterion_is_the_nudge() {
+    let root = root("supervision-criterion");
+    write_config(&root, SUPERVISED_BY_THE_DECISION_MODEL);
+    let (endpoint, messages, _decisions, _headers) = providers_with_supervision(
+        looping_then_done(),
+        vec![Decision::Answer(supervision_answer(
+            "looping_over_the_same_reads",
+            0.95,
+        ))],
+    );
+    let result = exec_bounded(&root, &endpoint, "keep going", None).expect("the task finishes");
+    assert_eq!(result["answer"], "done");
+    let messages = messages.lock().unwrap();
+    assert_eq!(prose_looks(&messages), 0, "there is no model to ask");
+    assert!(
+        messages
+            .iter()
+            .any(|body| body.contains("the same files are being read again")),
+        "the criterion's own words nudge instead: {messages:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// §3's rule, unchanged by the layering: a question that could not be
+/// answered is a failed look — never a nudge, and never a prose request
+/// bought on a guess.
+#[test]
+fn an_unanswerable_supervision_question_never_nudges() {
+    let root = root("supervision-failed");
+    write_config(&root, SUPERVISED_BY_BOTH);
+    let (endpoint, messages, _decisions, _headers) =
+        providers_with_supervision(looping_then_done(), vec![Decision::Status(500)]);
+    let result = exec_bounded(&root, &endpoint, "keep going", None)
+        .expect("a failed look leaves the task running");
+    assert_eq!(result["answer"], "done");
+    let messages = messages.lock().unwrap();
+    assert_eq!(prose_looks(&messages), 0, "{messages:?}");
+    assert!(
+        !messages.iter().any(|body| body.contains("supervisor: ")),
+        "a look that could not be made says nothing to the model: {messages:?}"
+    );
     let _ = std::fs::remove_dir_all(root);
 }

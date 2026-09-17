@@ -262,7 +262,10 @@ helper's `preamble`:
 - **Evidence, never conclusions.** A Scout holding only `read` and `grep` can
   still answer *"the bug is X"*. It must not. A wrong diagnosis the caller
   trusts is worse than no diagnosis.
-- **Say what you did not look at.** A helper that ran out of turns says so.
+- **Say what you did not look at.** A helper names the patterns it did not run and the
+  directories it skipped. It is never told a turn budget and nothing stops it on one
+  (user ruling, 2026-09-17), so it cannot and does not report having exhausted one;
+  what it does report is what it could not reach and why.
 
 ## How to add a helper
 

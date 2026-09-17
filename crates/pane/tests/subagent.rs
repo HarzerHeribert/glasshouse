@@ -158,7 +158,8 @@ fn subagent_uses_native_cell_handoff_across_turns() {
         &fixture.session,
         "compute",
         &AgentOptions {
-            turns: 4,
+            turns: Some(4),
+            deadline: None,
             model: "test-model".into(),
             effort: pane::wire::Effort::default(),
         },
@@ -202,7 +203,8 @@ fn subagent_continues_after_structured_notebook_output() {
         &fixture.session,
         "recommend changes",
         &AgentOptions {
-            turns: 4,
+            turns: Some(4),
+            deadline: None,
             model: "test-model".into(),
             effort: pane::wire::Effort::default(),
         },
@@ -253,7 +255,8 @@ fn a_subagent_answers_in_a_later_event_and_never_blocks_the_caller() {
         &fixture.session,
         "what is six times seven",
         &AgentOptions {
-            turns: 4,
+            turns: Some(4),
+            deadline: None,
             model: "test-model".to_string(),
             effort: pane::wire::Effort::default(),
         },
@@ -294,11 +297,16 @@ fn a_subagent_answers_in_a_later_event_and_never_blocks_the_caller() {
 /// A subagent that never returns is stopped by its own turn cap, and says so
 /// rather than reporting an answer it does not have.
 #[test]
-fn a_subagent_that_never_returns_stops_at_its_turn_cap() {
+fn a_subagent_that_never_returns_stops_at_its_turn_hint_and_keeps_its_work() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("cap");
     // A program that always yields: it binds a name and runs off the end.
-    let base_url = start_provider("```pane\nconst n = 1;\n```", 8);
+    // The prose beside it is the subagent's own last words, which are what
+    // the parent must receive when the hint runs out.
+    let base_url = start_provider(
+        "Still narrowing it down; the parser is in config.rs.\n```pane\nconst n = 1;\n```",
+        8,
+    );
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
@@ -309,7 +317,8 @@ fn a_subagent_that_never_returns_stops_at_its_turn_cap() {
         &fixture.session,
         "loop forever",
         &AgentOptions {
-            turns: 2,
+            turns: Some(2),
+            deadline: None,
             model: "test-model".to_string(),
             effort: pane::wire::Effort::default(),
         },
@@ -325,7 +334,109 @@ fn a_subagent_that_never_returns_stops_at_its_turn_cap() {
         .expect("a capped subagent still completes");
     let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
     assert_eq!(result.status, "turns", "{result:?}");
-    assert!(result.stdout.contains("without returning"), "{result:?}");
+    // **The work survives the stop.** Until 2026-09-17 this answered "the
+    // subagent used every turn it was given without returning" and dropped
+    // everything the subagent had produced.
+    assert!(
+        result.stdout.contains("the parser is in config.rs"),
+        "a subagent that stops early returns its own last words: {result:?}"
+    );
+    assert!(
+        !result.stdout.contains("without returning"),
+        "no placeholder may stand in for the work: {result:?}"
+    );
+}
+
+/// No turn cap and no turn default: a subagent given no hint works past the
+/// eight turns it used to be handed and the twenty-four it could never
+/// exceed. The user, 2026-09-17: *"Limits are dumb for abstract tasks … what
+/// if it needed 9 or 25. all for nothing?"*
+#[test]
+fn a_subagent_with_no_turn_hint_works_until_it_answers() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("uncapped");
+    let mut replies = vec!["```pane\nconst n = 1;\n```"; 25];
+    replies.push("```pane\nreturn 'the twenty-sixth turn answered';\n```");
+    let base_url = start_provider_sequence(replies);
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "take as long as it takes",
+        &AgentOptions {
+            turns: None,
+            deadline: None,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let events = wait_for_event(&fixture.session, Duration::from_secs(60));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let done = events
+        .iter()
+        .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        .expect("an uncapped subagent completes when it answers");
+    let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
+    assert_eq!(result.status, "returned", "{result:?}");
+    assert!(
+        result.stdout.contains("twenty-sixth turn answered"),
+        "{result:?}"
+    );
+}
+
+/// The wall clock the person configured is what stops a subagent that never
+/// answers — and it too keeps the work. `[agents] deadline_minutes` is absent
+/// by default, so nothing here fires unless someone asked for it.
+#[test]
+fn a_configured_deadline_stops_a_subagent_and_keeps_its_work() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("deadline");
+    let base_url = start_provider(
+        "Reading the config parser now.\n```pane\nconst n = 1;\n```",
+        200,
+    );
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "loop forever",
+        &AgentOptions {
+            turns: None,
+            deadline: Some(Duration::from_millis(400)),
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let events = wait_for_event(&fixture.session, Duration::from_secs(30));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let done = events
+        .iter()
+        .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        .expect("a subagent out of time still completes");
+    let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
+    assert_eq!(
+        result.status, "deadline",
+        "time running out is its own stop, not a bare cancellation: {result:?}"
+    );
+    assert!(
+        result.stdout.contains("Reading the config parser"),
+        "{result:?}"
+    );
+    assert!(result.stderr.contains("ran out of time"), "{result:?}");
 }
 
 /// Measured 2026-09-17 (session `tlitep-13fv`): three subagents came back
@@ -347,7 +458,8 @@ fn a_subagent_that_stopped_early_reports_its_turns_and_trajectory() {
         &fixture.session,
         "loop forever",
         &AgentOptions {
-            turns: 2,
+            turns: Some(2),
+            deadline: None,
             model: "test-model".to_string(),
             effort: pane::wire::Effort::default(),
         },
@@ -364,12 +476,12 @@ fn a_subagent_that_stopped_early_reports_its_turns_and_trajectory() {
     let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
     assert_eq!(result.status, "turns", "{result:?}");
     assert!(
-        result.stderr.contains("stopped at its turn cap"),
+        result.stderr.contains("turn hint"),
         "the parent must be able to tell why it stopped: {result:?}"
     );
     assert!(
-        result.stderr.contains("2 of 2 turn(s)"),
-        "the parent must be able to see the budget it gave: {result:?}"
+        result.stderr.contains("2 turn(s)"),
+        "the parent must be able to see how far it got: {result:?}"
     );
 }
 
@@ -391,7 +503,8 @@ fn a_subagent_can_amend_its_parse_failed_cell() {
         &fixture.session,
         "answer",
         &AgentOptions {
-            turns: 2,
+            turns: Some(2),
+            deadline: None,
             model: "test-model".into(),
             effort: pane::wire::Effort::default(),
         },
@@ -423,7 +536,8 @@ fn subagent_plain_prose_is_its_result_without_a_marker_round_trip() {
         &fixture.session,
         "Answer the question",
         &AgentOptions {
-            turns: 2,
+            turns: Some(2),
+            deadline: None,
             model: "test-model".into(),
             effort: pane::wire::Effort::default(),
         },

@@ -1,15 +1,41 @@
 //! The look -- `docs/product/pane/supervisor.md` §2 and §3: a compressed
-//! trajectory, one metered request through the wire, and one decision.
+//! trajectory, one decision about it, and a sentence only when that decision
+//! says something is wrong.
 //!
 //! **Never a preview's bytes and never a payload.** [`compress`] renders only
 //! a program's first line, its outcome and its call trajectory -- the same
 //! three things `runtime-contract.md` §9.4 already puts in the rollout -- so
 //! the supervisor sees exactly what the rollout records and nothing a program
 //! read or wrote.
+//!
+//! **Three layers, cheapest first, and each may be absent** (the user, 2026-09-17:
+//! "Could supervisor be jev? ... Don't hardcode Luna I meant LLM and jev").
+//! No model id is named here; every layer is whichever model its own
+//! configuration points at.
+//!
+//! 1. The deterministic stall counter (`progress::Stall`) costs nothing and
+//!    runs anyway. It is handed to layer 2 **as evidence, not as a gate**: a
+//!    model that keeps writing files while repeating a failing call reads as
+//!    progress to a counter that watches the tree, so gating the question on
+//!    it would hide the loop most worth catching.
+//! 2. The decision model (`[decisions] model`) answers one typed `Choice`
+//!    question about the trajectory -- a couple of hundred tokens, bounded to
+//!    two seconds, no prose. This is what decides *whether* to intervene.
+//! 3. The supervisor model (`[supervisor] model`, itself falling back to
+//!    `[helpers] model`) is asked for the nudge's one line **only when layer 2
+//!    already said yes**, and only to phrase it.
+//!
+//! Measured 2026-09-17 (session `tlitep-13fv`, 247 turns, 120 cells, 11.8M
+//! tokens): every look was a prose request whether anything was wrong or not,
+//! so that run would have bought about thirty of them to hear "no" twenty-nine
+//! times. With no decision model configured, layer 3 keeps deciding on its own
+//! exactly as it did before -- the old path, not a lost one.
 
 use serde::Deserialize;
 
+use crate::config::{DecisionsConfig, SupervisorConfig};
 use crate::contract::{Conversation, Message, Role};
+use crate::decide;
 use crate::runtime::outcome::{CallRecord, CellOutcomeKind, CellRecord, Ended};
 use crate::wire;
 
@@ -18,8 +44,16 @@ const PREAMBLE: &str = "You watch a coding agent's trajectory. Answer with one J
     {\"intervene\": bool, \"reason\": \"<one line>\"}: intervene only when the agent is looping, \
     repeating a failing call, or has stopped making progress toward the task.";
 
+/// The phrasing preamble: used only after the decision model has already
+/// decided to intervene, so it asks for the sentence and never for the
+/// judgement. A model asked to re-decide here could quietly overturn layer 2,
+/// which is the one thing this layer must not do.
+const PHRASE_PREAMBLE: &str = "You watch a coding agent's trajectory. It has been judged to be \
+    off track for the stated reason. Answer with one line, under twenty words, telling the agent \
+    what it is doing and what to do instead. No preamble, no JSON, no apology.";
+
 /// The look's `max_tokens` -- small, because the only valid answer is one
-/// short JSON object.
+/// short JSON object, or one short line.
 const LOOK_MAX_TOKENS: u32 = 200;
 
 /// The header that lets the ledger tell a look apart from a task turn before
@@ -78,6 +112,157 @@ impl Supervisor {
             Err(err) => Decision::not_intervene(format!("request failed: {err}")),
         }
     }
+
+    /// Layer 3: one line for a nudge layer 2 has already decided on. `None`
+    /// on any failure -- a nudge whose sentence could not be written is still
+    /// a nudge, and [`consider`](Self::consider) falls back to
+    /// [`criterion_reason`].
+    pub fn phrase(&self, model: &str, trajectory: &str, criterion: &str) -> Option<String> {
+        let conversation = Conversation {
+            system: PHRASE_PREAMBLE.to_string(),
+            messages: vec![Message::text(
+                Role::User,
+                format!("Reason: {criterion}\n\nTrajectory:\n{trajectory}"),
+            )],
+        };
+        let message =
+            wire::send_turn_with(&conversation, model, LOOK_MAX_TOKENS, Some(PURPOSE_HEADER))
+                .ok()?;
+        let text: String = message
+            .content
+            .iter()
+            .map(crate::contract::Block::text)
+            .collect::<Vec<_>>()
+            .join("");
+        let line = text.trim().lines().next().unwrap_or("").trim().to_string();
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// One look, layered: the decision model decides, the supervisor model
+    /// phrases, and either may be absent.
+    ///
+    /// * A decision model configured (and `[decisions] mode` not `off`) is
+    ///   asked first. Its refusal or silence is a **failed look** -- recorded
+    ///   as such, never a nudge, exactly as `supervisor.md` §3 requires of an
+    ///   unanswerable look.
+    /// * With no decision model, the supervisor model decides on its own
+    ///   through [`look`](Self::look): the path this session had before the
+    ///   question existed.
+    /// * With neither, there is nothing to ask and nothing is nudged.
+    ///
+    /// `cells_without_change` is `progress::Stall::since_progress` -- evidence
+    /// for the question, never a gate on asking it.
+    pub fn consider(
+        &self,
+        supervisor: &SupervisorConfig,
+        decisions: &DecisionsConfig,
+        trajectory: &str,
+        cells_without_change: u32,
+    ) -> Decision {
+        let classifier = decisions
+            .model
+            .as_deref()
+            .filter(|_| decisions.mode != crate::config::DecisionMode::Off);
+        let Some(classifier) = classifier else {
+            return match supervisor.model.as_deref() {
+                Some(model) => self.look(model, trajectory),
+                None => Decision::not_intervene("no supervisor model and no decision model"),
+            };
+        };
+        let answered = match decide::supervision(classifier, trajectory, cells_without_change) {
+            Ok(answer) => answer,
+            Err(err) => return Decision::not_intervene(format!("decision model: {err}")),
+        };
+        let Some(criterion) =
+            decide::supervision_for(decisions.mode, Some(&answered), decisions.supervision_above)
+        else {
+            return Decision {
+                intervene: false,
+                reason: answered.choice,
+                ok: true,
+            };
+        };
+        let reason = supervisor
+            .model
+            .as_deref()
+            .and_then(|model| self.phrase(model, trajectory, &criterion))
+            .unwrap_or_else(|| criterion_reason(&criterion));
+        Decision {
+            intervene: true,
+            reason,
+            ok: true,
+        }
+    }
+}
+
+/// Whether this session has anything to look with: the switch, and at least
+/// one of the two models [`Supervisor::consider`] can ask.
+#[must_use]
+pub fn active(config: &crate::config::PaneConfig) -> bool {
+    config.supervisor.enabled
+        && (config.supervisor.model.is_some()
+            || (config.decisions.model.is_some()
+                && config.decisions.mode != crate::config::DecisionMode::Off))
+}
+
+/// One look's two results: the nudge to head the next message, if any, and
+/// what the sidebar and transcript show for it.
+///
+/// A failed look is recorded **as such** rather than as a healthy one -- §3 --
+/// so a permanently broken supervisor cannot read as a quiet one.
+#[must_use]
+pub fn outcome(decision: Decision) -> (Option<String>, crate::tui::SupervisorStatus) {
+    use crate::tui::SupervisorStatus;
+    if decision.intervene {
+        let reason = decision.reason;
+        (Some(reason.clone()), SupervisorStatus::Nudged(reason))
+    } else if decision.ok {
+        (None, SupervisorStatus::LookedNoNudge)
+    } else {
+        (None, SupervisorStatus::LookFailed(decision.reason))
+    }
+}
+
+/// §4: a nudge is the head of the next message, whichever carrier that
+/// message uses.
+#[must_use]
+pub fn headed(reason: &str, text: &str) -> String {
+    format!("supervisor: {reason}\n{text}")
+}
+
+/// The native dialect's carrier. A model answering with `execute_cell` as a
+/// provider-native call gets its feedback as a `tool_result`, not as the text
+/// answer, so a nudge written only into the text answer reached exactly the
+/// sessions a tool-calling model does not run (found 2026-09-17 by
+/// `tests/decisions.rs`).
+pub fn head_tool_result(result: &mut Message, reason: &str) {
+    for block in &mut result.content {
+        if let crate::contract::Block::ToolResult { content, .. } = block {
+            *content = headed(reason, content);
+        }
+    }
+}
+
+/// The nudge when no model wrote one: the criterion itself, in words. Worse
+/// than a sentence written about this trajectory, and never a lost
+/// intervention -- which is the trade this function exists to make.
+#[must_use]
+pub fn criterion_reason(criterion: &str) -> String {
+    match criterion {
+        "repeating_a_failing_call" => {
+            "the same call keeps failing the same way; change the approach or say what blocks it"
+        }
+        "looping_over_the_same_reads" => {
+            "the same files are being read again without a change following from them; \
+             act on what you have or say what is missing"
+        }
+        "stopped_without_returning" => {
+            "these cells are not advancing the task and not ending it; \
+             do the next real step or finish with what holds"
+        }
+        _ => "this trajectory is not making progress; change the approach or say what blocks it",
+    }
+    .to_string()
 }
 
 impl Default for Supervisor {
@@ -181,6 +366,31 @@ mod tests {
             "cell 1 yielded · const hits = await grep({ pattern: \"x\" }); · calls: \
              grep(pattern=x)→ended"
         );
+    }
+
+    #[test]
+    fn with_neither_model_nothing_is_asked_and_nothing_is_nudged() {
+        let supervisor = Supervisor::new();
+        let decision = supervisor.consider(
+            &SupervisorConfig {
+                model: None,
+                ..SupervisorConfig::default()
+            },
+            &DecisionsConfig::default(),
+            "cell 1 yielded · const x = 1; · calls: (none)",
+            3,
+        );
+        assert!(!decision.intervene);
+        assert!(!decision.ok, "nothing was asked, so no look succeeded");
+    }
+
+    #[test]
+    fn an_unknown_criterion_still_says_something_a_model_can_act_on() {
+        assert_eq!(
+            criterion_reason("something_new_the_question_grew"),
+            "this trajectory is not making progress; change the approach or say what blocks it"
+        );
+        assert!(criterion_reason("repeating_a_failing_call").contains("same call keeps failing"));
     }
 
     #[test]

@@ -29,8 +29,19 @@ use crate::wire;
 /// than a rule it might disregard.
 pub const FORBIDDEN_TOOLS: [&str; 3] = ["write", "edit", "bash"];
 
-/// The most turns any helper may take inside one call, whatever its spec says.
-pub const HELPER_MAX_TURNS: u32 = 8;
+/// What every helper is told on top of its own preamble.
+///
+/// **A helper is told to be quick; nothing caps it at being quick.** The
+/// user's ruling of 2026-09-17: *"A little helper should be instructed to move
+/// quick, but also not capped"*, and then *"if a helper returns nonsense that
+/// can do more harm than good. So it should run as long as it needs."* A
+/// global ceiling used to sit over every spec's own `max_turns`, and the loop
+/// stopped a helper on that count **without ever telling it** — so the
+/// roster's own preambles asked the model to report having "run out of
+/// turns", which it had no way to observe. Both are gone; this replaced them,
+/// and its second half is the part that matters: a helper that cannot answer
+/// says so rather than inventing one.
+pub const HELPER_HASTE: &str = "Answer in one pass if you can, and stop as soon as you have the answer. You are a side errand inside someone else's turn: they are waiting on you, so do not explore beyond the question you were asked.\n\nNothing counts your turns and nothing will cut you off mid-answer, so take the looks the question needs — and if you cannot answer it from what you can reach, say so plainly and name what is missing. Never guess to fill the gap: an answer the caller trusts and acts on is worse than no answer, and \"I could not determine X because Y\" is a useful result.";
 
 /// Lets the ledger tell a helper's request from a task turn before the gateway
 /// reads the body -- the same seam `supervisor.rs` uses for its look.
@@ -97,7 +108,14 @@ pub struct HelperSpec {
     pub tools: &'static [&'static str],
     /// Small on purpose: a helper answers, it does not compose.
     pub max_tokens: u32,
-    /// Turns inside one call. `1` is one-shot and needs no agent loop.
+    /// How many turns this errand is shaped to take. `1` means one-shot,
+    /// which is [`one_shot`]'s dispatch and needs no agent loop at all.
+    ///
+    /// **It bounds nothing.** Nothing passes it to the loop and nothing stops
+    /// a helper on it: a helper is never told a budget, so a spec that asked
+    /// the model to report having exhausted one was asking it to observe
+    /// something it cannot see. It stays as the roster's own description of
+    /// an errand's shape and as the one-shot dispatch.
     pub max_turns: u32,
     pub input: InputKind,
     pub output: OutputKind,
@@ -107,8 +125,8 @@ pub struct HelperSpec {
 /// Find where something lives in this project, as spans the caller can open.
 ///
 /// It holds the four reading tools and nothing else, so the worst it can do
-/// is look in the wrong place -- and `max_turns` is what stops it looking
-/// forever.
+/// is look in the wrong place -- and it looks for as long as the question
+/// needs, because a scout that stops mid-search reports a hole as an absence.
 pub const SCOUT: HelperSpec = HelperSpec {
     name: "find",
     summary: "Find where something lives in this project and answer with file:line spans, never a diagnosis.",
@@ -133,8 +151,7 @@ pub const SCOUT: HelperSpec = HelperSpec {
         — you are returning evidence, and a wrong diagnosis the caller trusts is worse than no \
         diagnosis. Prose is never a substitute for a span: a caller who asked where something is \
         cannot open a paragraph about it. Name what you did not look at — the patterns you did \
-        not run, the directories you skipped, and whether you ran out of turns — as your last \
-        line.",
+        not run and the directories you skipped — as your last line.",
     // `rg` and `fd` rather than `grep` and `glob`: same purity, sharper search,
     // and a Scout's whole job is finding things. `grep` stays for the plain
     // regex case the model may already know.
@@ -214,7 +231,7 @@ pub const CHECKER: HelperSpec = HelperSpec {
         Never propose a fix, never write the corrected code, and never report anything the \
         supplied evidence or the files do not say — you are returning evidence, and a wrong \
         verdict the caller trusts is worse than no verdict. Name the material evidence gaps, \
-        unread files, and whether you ran out of turns as your last line.",
+        and the unread files as your last line.",
     tools: &["read", "grep"],
     max_tokens: 2048,
     max_turns: 3,
@@ -282,10 +299,11 @@ pub fn check_spec(spec: &HelperSpec) -> Result<(), String> {
     if spec.call_sites.is_empty() {
         return Err(format!("helper `{}` can never be invoked", spec.name));
     }
-    if spec.max_turns == 0 || spec.max_turns > HELPER_MAX_TURNS {
+    if spec.max_turns == 0 {
         return Err(format!(
-            "helper `{}` asks for {} turns; the range is 1..={HELPER_MAX_TURNS}",
-            spec.name, spec.max_turns
+            "helper `{}` asks for no turns at all; a helper that cannot take one turn \
+             cannot answer",
+            spec.name
         ));
     }
     for tool in spec.tools {
@@ -767,8 +785,10 @@ fn run_once_metered(
 ///
 /// The invariant: **only a returned answer is an answer.** The loop can also
 /// end out of turns, cancelled or failed, and every one of those is `ok:
-/// false` with the reason in the text -- a helper that ran out of turns
-/// having said nothing must not read as a healthy short answer.
+/// false` with the reason in the text -- a helper that stopped without an
+/// answer must not read as a healthy short one. This is the invariant that
+/// preserves the signal now that nothing counts a helper's turns: only a
+/// `returned` status with non-empty text is an answer.
 pub fn run_with_tools(
     spec: &HelperSpec,
     route: HelperRoute<'_>,
@@ -780,9 +800,17 @@ pub fn run_with_tools(
 ) -> HelperCall {
     let started = Instant::now();
     let options = crate::agent::AgentOptions {
-        turns: u64::from(spec.max_turns.min(HELPER_MAX_TURNS)),
+        // **Nothing terminates a helper on a count.** The user, 2026-09-17:
+        // *"how does it know if it runs out of turns? And if a helper returns
+        // nonsense that can do more harm than good. So it should run as long
+        // as it needs."* What bounds this call is real: every provider
+        // request carries `wire::SIDE_ERRAND_TIMEOUT`, and the caller's
+        // cancellation token — the person's `/stop` — ends the wait. See
+        // `spec.max_turns`, which is now a declaration and not a limit.
+        turns: None,
         model: route.model.to_string(),
         effort: route.effort,
+        deadline: None,
     };
     let narrowed = crate::agent::Narrowed {
         tools: spec.tools,
@@ -1449,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn a_spec_with_no_call_site_or_too_many_turns_is_refused() {
+    fn a_spec_with_no_call_site_or_no_turn_at_all_is_refused() {
         let unreachable = HelperSpec {
             call_sites: &[],
             ..REDUCER
@@ -1460,14 +1488,25 @@ mod tests {
                 .contains("never be invoked")
         );
 
-        let greedy = HelperSpec {
-            max_turns: HELPER_MAX_TURNS + 1,
+        // Zero turns is the only turn count a spec cannot have: it is
+        // incoherent, not merely large. Nothing refuses a spec for asking
+        // for many — the user's ruling of 2026-09-17.
+        let silent = HelperSpec {
+            max_turns: 0,
             ..REDUCER
         };
         assert!(
-            check_spec(&greedy)
-                .expect_err("a helper over the turn ceiling must be refused")
-                .contains("the range is")
+            check_spec(&silent)
+                .expect_err("a helper that cannot take a turn must be refused")
+                .contains("no turns at all")
+        );
+        let patient = HelperSpec {
+            max_turns: 64,
+            ..REDUCER
+        };
+        assert!(
+            check_spec(&patient).is_ok(),
+            "a helper spec may declare as many turns as its errand needs"
         );
     }
 

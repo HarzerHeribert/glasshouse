@@ -32,6 +32,7 @@ use crate::sandbox::profile::PermissionDenied;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError, ToolResult};
 use crate::tools::registry::{self, Tool};
 
+mod agent;
 mod console;
 mod web;
 use console::console_callback;
@@ -2459,7 +2460,10 @@ fn agent_run_callback(
         throw_tool_error(scope, "agent.run needs a task to work on");
         return;
     }
-    let turns = read_millis(scope, args.get(1), "turns").unwrap_or(crate::agent::DEFAULT_TURNS);
+    // No default and no ceiling: absent `turns` means "until the work is
+    // done" (`agent::AgentOptions`), and the wall clock is what ends a
+    // subagent that never gets there.
+    let turns = read_millis(scope, args.get(1), "turns");
     let asked_model = read_option(scope, args.get(1), "model");
     let asked_profile = read_option(scope, args.get(1), "profile");
     let asked_effort = read_option(scope, args.get(1), "effort");
@@ -2540,9 +2544,10 @@ fn agent_run_callback(
     }
 
     let options = crate::agent::AgentOptions {
-        turns: turns.clamp(1, crate::agent::MAX_TURNS),
+        turns,
         model,
         effort,
+        deadline: state.agent_deadline(),
     };
     let handle = crate::bg::agent_with_config(
         &state.profile,
@@ -2564,7 +2569,7 @@ fn agent_run_callback(
         error: None,
         ended: Ended::Ok,
     });
-    let object = agent_object(scope, &handle);
+    let object = agent::agent_object(scope, &handle);
     retval.set(object);
 }
 
@@ -2704,15 +2709,6 @@ fn asked_summary(input: &str) -> String {
 /// turn's ceiling, which is the smallest amount that could produce an answer
 /// rather than a truncation.
 const MINIMUM_AGENT_BUDGET: u64 = crate::wire::MAX_TOKENS as u64;
-
-fn agent_object<'s>(scope: &mut v8::PinScope<'s, '_>, handle: &str) -> v8::Local<'s, v8::Value> {
-    let object = v8::Object::new(scope);
-    let id = js_string(scope, handle);
-    set_fixed_key(scope, object, "id", id);
-    let source = js_string(scope, &format!("agent/{handle}"));
-    set_fixed_key(scope, object, "source", source);
-    object.into()
-}
 
 // --- todo.write, todo.read ---------------------------------------------
 

@@ -141,7 +141,8 @@ fn checker_and_candidate_are_handed_to_a_later_parent_turn() {
         &SessionId::new("checker-handoff"),
         "Implement and verify the requested change.",
         &AgentOptions {
-            turns: 3,
+            turns: Some(3),
+            deadline: None,
             model: "parent-model".into(),
             effort: pane::wire::Effort::default(),
         },

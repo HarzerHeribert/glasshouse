@@ -35,14 +35,27 @@ struct Listing {
 /// measured 2026-09-17 (session `tlitep-13fv`), where `supervisor: off (no
 /// model)` scrolled past at startup and sixty cells of reading without an
 /// edit then ran to the cell cap.
-pub(super) fn supervisor_line(supervisor: &crate::config::SupervisorConfig) -> String {
-    match (supervisor.enabled, supervisor.model.as_deref()) {
-        (true, Some(model)) => format!(
-            "supervisor: {model}, looking every {} cell(s)",
-            supervisor.every
+pub(super) fn supervisor_line(
+    supervisor: &crate::config::SupervisorConfig,
+    decisions: &crate::config::DecisionsConfig,
+) -> String {
+    if !supervisor.enabled {
+        return "supervisor: off (disabled)".to_string();
+    }
+    let classifier = decisions
+        .model
+        .as_deref()
+        .filter(|_| decisions.mode != crate::config::DecisionMode::Off);
+    let every = supervisor.every;
+    match (classifier, supervisor.model.as_deref()) {
+        (Some(classifier), Some(model)) => format!(
+            "supervisor: {classifier} decides, {model} writes the nudge, looking every {every} cell(s)"
         ),
-        (false, _) => "supervisor: off (disabled)".to_string(),
-        (true, None) => "supervisor: off (no model)".to_string(),
+        (Some(classifier), None) => {
+            format!("supervisor: {classifier} decides, looking every {every} cell(s)")
+        }
+        (None, Some(model)) => format!("supervisor: {model}, looking every {every} cell(s)"),
+        (None, None) => "supervisor: off (no model)".to_string(),
     }
 }
 

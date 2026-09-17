@@ -651,6 +651,123 @@ fn a_historical_helper_record_deserializes_with_unknown_usage_coverage() {
 
 /// A helper that could not answer is a throw, never a reduction that looks
 /// healthy — `supervisor.rs` shipped for weeks rendering the opposite.
+/// **Nothing stops a helper on a count.** Its spec says `max_turns: 2`, the
+/// old global ceiling was 8, and this one takes twelve turns and answers.
+/// The user, 2026-09-17: *"if a helper returns nonsense that can do more harm
+/// than good. So it should run as long as it needs."*
+#[test]
+fn a_helper_runs_past_every_former_ceiling_and_answers() {
+    const PATIENT: HelperSpec = HelperSpec {
+        name: "patient_test",
+        summary: "test helper",
+        verb: "testing",
+        // The spec's own number is a description of the errand's shape now,
+        // not a budget: twelve turns run under a spec that says two.
+        preamble: "Use a cell, then return.",
+        tools: &[],
+        max_tokens: 128,
+        max_turns: 2,
+        input: pane::helpers::InputKind::Text,
+        output: pane::helpers::OutputKind::Reduction,
+        call_sites: &[CallSite::Cell],
+    };
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("patient");
+    let mut payloads: Vec<serde_json::Value> = (0..11)
+        .map(|n| {
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": format!("cell-{n}"), "name": "execute_cell",
+                    "input": {"code": "const looked = 1;"}
+                }]
+            })
+        })
+        .collect();
+    payloads.push(serde_json::json!({
+        "role": "assistant",
+        "content": [{
+            "type": "tool_use", "id": "cell-last", "name": "execute_cell",
+            "input": {"code": "return \"the twelfth turn answered\";"}
+        }]
+    }));
+    let provider = scripted_provider(payloads);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let call = pane::helpers::run(
+        &PATIENT,
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Medium,
+        },
+        "take as long as you need",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-patient"),
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(call.outcome.ok, "{call:?}");
+    assert_eq!(call.outcome.text, "the twelfth turn answered");
+    assert_eq!(call.turns, 12, "twelve turns under a spec that says two");
+}
+
+/// **Only a returned answer is an answer.** A helper that stops without
+/// returning is `ok: false` with the reason in its text, which is what keeps
+/// a silent stop from reading as a healthy short answer — the invariant that
+/// carries the signal now that no count does.
+#[test]
+fn a_helper_that_stops_without_returning_is_not_a_healthy_answer() {
+    const YIELDING: HelperSpec = HelperSpec {
+        name: "yielding_test",
+        summary: "test helper",
+        verb: "testing",
+        preamble: "Use a cell, then return.",
+        tools: &[],
+        max_tokens: 128,
+        max_turns: 2,
+        input: pane::helpers::InputKind::Text,
+        output: pane::helpers::OutputKind::Reduction,
+        call_sites: &[CallSite::Cell],
+    };
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("yielding");
+    // One reply, then the provider is spent: the next request fails, which is
+    // a stop the helper did not choose.
+    let provider = scripted_provider(vec![serde_json::json!({
+        "role": "assistant",
+        "content": [{
+            "type": "tool_use", "id": "cell-1", "name": "execute_cell",
+            "input": {"code": "const partial = 1;"}
+        }]
+    })]);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let call = pane::helpers::run(
+        &YIELDING,
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Medium,
+        },
+        "answer this",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-yielding"),
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(
+        !call.outcome.ok,
+        "a helper that never returned must not read as answered: {call:?}"
+    );
+    assert!(
+        call.outcome.text.contains("the call ended"),
+        "the caller is told how it ended: {call:?}"
+    );
+}
+
 #[test]
 fn a_failed_helper_call_throws_and_is_recorded_as_failed() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());

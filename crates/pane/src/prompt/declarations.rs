@@ -322,6 +322,7 @@ pub fn web_declaration(reach: &WebReach) -> String {
 pub const AGENT_DECLARATION: &str = "declare const agent: {\n  \
      run(task: string, options?: {turns?: number; model?: string; effort?: string; profile?: string}): Job;\n\
      };\n\
+     type Job = {id: string; source: string; progress(): {turns: number; calls: string[]; elapsed_ms: number; running: boolean} | null};\n\
      // Start a subagent on one self-contained question. It returns a handle\n\
      // at once and never blocks; its answer arrives later as an `agent.done`\n\
      // event whose payload carries status and output. Launch, then yield;\n\
@@ -330,6 +331,12 @@ pub const AGENT_DECLARATION: &str = "declare const agent: {\n  \
      // grant, spends this task's budget, and cannot start a subagent of its\n\
      // own. Use it only when the question is separable and its working would\n\
      // otherwise fill your context. `bg.cancel` stops one.\n\
+     // It runs until it answers or its wall clock runs out — nothing counts its\n\
+     // turns, so leave `turns` unset unless you want a deliberately short errand.\n\
+     // Stopped early, it still returns what it had, with why it stopped.\n\
+     // `job.progress()` looks in on a running one (turns taken, tools called,\n\
+     // elapsed) without waiting: read it when a later cell has reason to check,\n\
+     // never in a cell that does nothing else.\n\
      // Optional profile selects .pane/agents/NAME.toml instructions/model/effort.\n\
      // Explicit model/effort override the template; templates grant no permissions.";
 
@@ -647,14 +654,16 @@ mod agent_roster_tests {
         assert_eq!(
             AgentsPosture::from_config(&AgentsConfig {
                 mode: AgentsMode::Off,
-                model: None
+                model: None,
+                deadline: None,
             }),
             AgentsPosture::Off
         );
         assert_eq!(
             AgentsPosture::from_config(&AgentsConfig {
                 mode: AgentsMode::Pinned,
-                model: Some("cheap".into())
+                model: Some("cheap".into()),
+                deadline: None,
             }),
             AgentsPosture::Pinned("cheap".into())
         );

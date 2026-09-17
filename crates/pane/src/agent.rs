@@ -28,23 +28,27 @@ use crate::tools::invoke::CancellationToken;
 use crate::tools::registry;
 use crate::wire::{self, Effort};
 
-/// The most turns a subagent may take whatever it was asked for.
+/// The most of a salvaged answer one early stop carries.
 ///
-/// `agent.run({turns})` is written by the model, so a local turn cap keeps one
-/// background worker finite even though the parent task's token spend is
-/// uncapped.
-pub const MAX_TURNS: u64 = 24;
+/// A subagent that is cancelled, times out or exhausts a turn hint still
+/// returns **its own last words** rather than a sentence about having none
+/// ([`run_narrowed_metered`]). That text is prose written for the parent, so
+/// it is bounded the way a plan section is -- enough for a substantive draft,
+/// small enough that an answer nobody reads costs about one screen.
+const SALVAGED_ANSWER_BYTES: usize = 8 * 1024;
 
-/// The turns a subagent takes when the cell named none.
-pub const DEFAULT_TURNS: u64 = 8;
+/// How far into a conversation the salvage looks for the subagent's last
+/// words. The tail is where they are; a scan of a long conversation is not.
+const SALVAGE_DEPTH: usize = 8;
 
 /// What a subagent produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentResult {
     /// The subagent's own answer — its top-level `return`, rendered.
     pub answer: String,
-    /// Why it stopped, in one word: `returned`, `turns`, `cancelled`,
-    /// `failed`.
+    /// Why it stopped, in one word: `returned`, `deadline`, `turns`,
+    /// `cancelled`, `failed`. Only `returned` means the answer is the
+    /// subagent's own `return`; the others carry its last words instead.
     pub status: String,
     /// Turns actually taken, reported with the parent's cumulative spend.
     pub turns: u64,
@@ -60,12 +64,54 @@ pub struct AgentResult {
 }
 
 /// How a subagent is asked for.
+///
+/// **Nothing here caps the work itself.** The user's ruling of 2026-09-17:
+/// *"Limits are dumb for abstract tasks … it should be wall clock. Things like
+/// context length or subscription / key capacity these are real things which
+/// should limit, because pane can't change them."* So a subagent ends when it
+/// returns, when [`AgentOptions::deadline`] passes, when the conversation no
+/// longer fits the model's context, when the provider or the subscription
+/// refuses, or when it is cancelled -- and in every one of those cases it
+/// returns what it actually produced.
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
-    pub turns: u64,
+    /// An optional turn hint for a deliberately short errand -- a helper's
+    /// own `max_turns`, or a cell that wants one look and no more.
+    ///
+    /// `None` means *until the work is done*, which is the ordinary case: a
+    /// subagent that must read before it edits cannot know in advance how
+    /// many turns that takes, and a number guessed for it is the cap that
+    /// threw away three subagents' work on 2026-09-17.
+    pub turns: Option<u64>,
     pub model: String,
     pub effort: Effort,
+    /// Wall clock, from the first turn. `None` is no deadline.
+    ///
+    /// This is the bound that replaces the turn cap: a person waiting is a
+    /// real thing, a turn count is not. `bg` arms the same duration as the
+    /// job's own deadline, so a provider call that hangs cannot outlive it;
+    /// this copy is what lets the loop stop between turns and *say* that time
+    /// ran out rather than reporting a bare cancellation.
+    pub deadline: Option<std::time::Duration>,
 }
+
+/// What a running subagent has done so far, for a parent that looks in.
+///
+/// The user, 2026-09-17: *"A parent model should check on a subagent from
+/// some time. But even Claude Code does not do that."* This is the cheapest
+/// honest version -- turns taken and tool names, written as the loop goes, so
+/// `agent.run(...).progress()` costs a lock and no provider request. Tool
+/// names only, never an argument and never a payload, which is the shape
+/// [`AgentResult::trajectory`] already is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProgress {
+    pub turns: u64,
+    pub calls: Vec<String>,
+}
+
+/// Where a running subagent writes [`AgentProgress`]; `bg` holds the other
+/// end and reads it without waiting for the job.
+pub type ProgressSink = std::sync::Arc<std::sync::Mutex<AgentProgress>>;
 
 /// A nested loop narrowed from a subagent to a helper.
 ///
@@ -87,6 +133,7 @@ pub(crate) struct NarrowedRun<'a> {
     narrowed: Option<&'a Narrowed>,
     helper_usage: Option<&'a crate::helpers::HelperUsageTracker>,
     config: Option<&'a crate::config::PaneConfig>,
+    progress: Option<&'a ProgressSink>,
 }
 
 impl<'a> NarrowedRun<'a> {
@@ -95,6 +142,7 @@ impl<'a> NarrowedRun<'a> {
             narrowed,
             helper_usage: None,
             config: None,
+            progress: None,
         }
     }
 
@@ -106,6 +154,7 @@ impl<'a> NarrowedRun<'a> {
             narrowed: Some(narrowed),
             helper_usage: Some(usage),
             config: None,
+            progress: None,
         }
     }
 }
@@ -133,6 +182,24 @@ pub fn run_with_config(
     token: &CancellationToken,
     config: Option<&crate::config::PaneConfig>,
 ) -> AgentResult {
+    run_watched(
+        profile, glasshouse, session, task, options, token, config, None,
+    )
+}
+
+/// [`run_with_config`] writing its progress where a parent can read it while
+/// it is still running. `bg` is the caller that holds the other end.
+#[allow(clippy::too_many_arguments)]
+pub fn run_watched(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &AgentOptions,
+    token: &CancellationToken,
+    config: Option<&crate::config::PaneConfig>,
+    progress: Option<&ProgressSink>,
+) -> AgentResult {
     run_narrowed_metered(
         profile,
         glasshouse,
@@ -144,6 +211,7 @@ pub fn run_with_config(
             narrowed: None,
             helper_usage: None,
             config,
+            progress,
         },
     )
 }
@@ -191,15 +259,12 @@ pub(crate) fn run_narrowed_metered(
         narrowed,
         helper_usage,
         config,
+        progress,
     } = narrowed_run;
     let tools = toolset(narrowed);
     let mut facts = crate::session::session_facts(profile);
     facts.interface = crate::abi::Interface::Cells;
-    let instructions = format!(
-        "{}\n\n{}",
-        narrowed.map_or(SUBAGENT_INSTRUCTIONS, |narrowed| narrowed.instructions),
-        crate::project::instructions::root(profile)
-    );
+    let instructions = instructions_for(narrowed, &crate::project::instructions::root(profile));
     // One value decides both what the context binds and what it is told it
     // binds: a helper never receives `bg`, `send` or `mcp`, because none of
     // the three is a tool and narrowing `spec.tools` therefore left every one
@@ -240,12 +305,37 @@ pub(crate) fn run_narrowed_metered(
     }
     let mut tokens = 0u64;
     let mut trajectory: Vec<String> = Vec::new();
-    let turns_allowed = options.turns.clamp(1, MAX_TURNS);
+    let started = std::time::Instant::now();
+    let mut turn = 0u64;
 
-    for turn in 1..=turns_allowed {
-        if token.is_cancelled() {
-            return finish("", "cancelled", turn - 1, tokens, trajectory);
+    loop {
+        turn += 1;
+        // The three ways this loop ends without an answer of its own, asked
+        // before the turn is paid for. Each salvages the subagent's last
+        // words: work it did is never thrown away for the sake of a number.
+        if let Some(allowed) = options.turns
+            && turn > allowed
+        {
+            runtime.end_task();
+            return finish(
+                &salvage(&conversation),
+                "turns",
+                turn - 1,
+                tokens,
+                trajectory,
+            );
         }
+        if let Some(reason) = stopped_by(options, started, token) {
+            runtime.end_task();
+            return finish(
+                &salvage(&conversation),
+                reason,
+                turn - 1,
+                tokens,
+                trajectory,
+            );
+        }
+        note_progress(progress, turn, &trajectory);
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
         // A narrowed loop is a helper: its provider request can outlive the
@@ -269,9 +359,17 @@ pub(crate) fn run_narrowed_metered(
             usage.record_response(sent.usage);
         }
         // A provider response can race the caller's cancellation. Do not let
-        // that late response start one of the helper's read tools.
-        if token.is_cancelled() {
-            return finish("", "cancelled", turn - 1, tokens, trajectory);
+        // that late response start one of the helper's read tools. The turn's
+        // own message is already in hand, so the salvage includes it.
+        if let Some(reason) = stopped_by(options, started, token) {
+            conversation.messages.push(sent.message);
+            return finish(
+                &salvage(&conversation),
+                reason,
+                turn - 1,
+                tokens,
+                trajectory,
+            );
         }
         if let Some(usage) = &sent.usage {
             tokens = tokens.saturating_add(usage.total_tokens());
@@ -397,6 +495,7 @@ pub(crate) fn run_narrowed_metered(
                 .iter()
                 .map(|call| call.tool.clone()),
         );
+        note_progress(progress, turn, &trajectory);
         let instruction_boundary = runtime.pending_instructions();
         if let Some(pending) = &instruction_boundary {
             conversation.system.push_str("\n\n");
@@ -485,15 +584,6 @@ pub(crate) fn run_narrowed_metered(
             runtime.acknowledge_instructions();
         }
     }
-
-    runtime.end_task();
-    finish(
-        "the subagent used every turn it was given without returning",
-        "turns",
-        turns_allowed,
-        tokens,
-        trajectory,
-    )
 }
 
 /// The deterministic boundary between a checker call and accepting a parent
@@ -550,6 +640,99 @@ fn toolset(narrowed: Option<&Narrowed>) -> Vec<&'static registry::Tool> {
     }
 }
 
+/// What this loop opens with: a helper's own preamble and the roster's shared
+/// haste line, or the subagent instructions, then the project's own.
+///
+/// **"Be quick" is an instruction here, not a ceiling elsewhere.** The user's
+/// ruling of 2026-09-17 removed the global cap that used to enforce it, so
+/// this line is what remains of it — and it is the half that can say *why*.
+fn instructions_for(narrowed: Option<&Narrowed>, project: &str) -> String {
+    match narrowed {
+        Some(narrowed) => format!(
+            "{}\n\n{}\n\n{project}",
+            narrowed.instructions,
+            crate::helpers::HELPER_HASTE
+        ),
+        None => format!("{SUBAGENT_INSTRUCTIONS}\n\n{project}"),
+    }
+}
+
+/// Publishes what the loop has done so far, for a parent that looks in.
+///
+/// A poisoned lock is recovered from rather than propagated: progress is a
+/// convenience for the parent and must never be able to end the subagent
+/// whose work it reports.
+fn note_progress(progress: Option<&ProgressSink>, turn: u64, trajectory: &[String]) {
+    let Some(sink) = progress else { return };
+    let mut held = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    held.turns = turn;
+    held.calls = trajectory.to_vec();
+}
+
+/// Whether the wall clock this subagent was given has run out.
+///
+/// `bg` arms the same duration as the job's deadline, which is what stops a
+/// hung provider call; this is the half the loop can see, so the parent is
+/// told *time ran out* rather than *cancelled*.
+fn ran_out_of_time(options: &AgentOptions, started: std::time::Instant) -> bool {
+    options
+        .deadline
+        .is_some_and(|deadline| started.elapsed() >= deadline)
+}
+
+/// Why this loop must stop now, or `None` to take another turn.
+///
+/// **The deadline is asked first, and that ordering is the attribution.**
+/// `bg::arm_deadline` enforces a deadline by cancelling the job's token, so
+/// an expiry and a `/stop` arrive at this loop as the same flag; asking the
+/// clock first is what lets the parent read *ran out of time* instead of a
+/// bare cancellation it cannot act on. Both call sites ask through here so
+/// the two cannot answer differently.
+fn stopped_by(
+    options: &AgentOptions,
+    started: std::time::Instant,
+    token: &CancellationToken,
+) -> Option<&'static str> {
+    if ran_out_of_time(options, started) {
+        return Some("deadline");
+    }
+    token.is_cancelled().then_some("cancelled")
+}
+
+/// The subagent's own last words, for a stop it did not choose.
+///
+/// **A subagent that stops early returns what it produced.** Until
+/// 2026-09-17 every early exit answered `"the subagent used every turn it was
+/// given without returning"` and dropped the work: measured that day, three
+/// subagents came back with an empty answer and the parent started the same
+/// doomed delegation twice more. The prose of each turn is already in the
+/// conversation; this is where it is read back out.
+fn salvage(conversation: &Conversation) -> String {
+    let words = conversation
+        .messages
+        .iter()
+        .rev()
+        .take(SALVAGE_DEPTH)
+        .find(|message| message.role == Role::Assistant)
+        .map(message_text)
+        .unwrap_or_default();
+    bound(words.trim())
+}
+
+/// [`SALVAGED_ANSWER_BYTES`] of `text`, cut at a character boundary and said
+/// to be cut. The head, not the tail: prose answers state their finding
+/// first, and a reader who needs the rest can ask the subagent again.
+fn bound(text: &str) -> String {
+    if text.len() <= SALVAGED_ANSWER_BYTES {
+        return text.to_string();
+    }
+    let mut cut = SALVAGED_ANSWER_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… [truncated]", &text[..cut])
+}
+
 fn finish(
     answer: &str,
     status: &str,
@@ -579,7 +762,7 @@ fn message_text(message: &Message) -> String {
 }
 
 /// The subagent's own result message, which is the parent's renderer with no
-/// usage line: a subagent is bounded by its turn count, and a token figure it
+/// usage line: a subagent has no token budget of its own, and a figure it
 /// cannot act on is prompt it pays for.
 fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
     let turn = outcome.turn();
@@ -625,10 +808,14 @@ fn result_message(outcome: &CellOutcome, cell: u64) -> CellResult {
 const SUBAGENT_INSTRUCTIONS: &str = "You are a subagent. Another session asked you one question and is waiting \
 for the answer; there is no person here to ask for more.\n\n\
 Return the answer as a string with a top-level `return`, and return as soon as \
-you have it — your turns are counted against the session that started you. You \
+you have it — the session that started you is waiting and pays for your work. \
+Nothing counts your turns, so take the ones the work needs and no more. You \
 have no inbox, no messages, and you cannot start a subagent of your own. If the \
 question cannot be answered with the grant you have, return that plainly \
-instead of working around it.";
+instead of working around it.\n\n\
+If you are stopped before you return — time runs out, or the session cancels \
+you — your last message is what reaches the parent, so keep it worth reading: \
+say what you have established and what is left.";
 
 #[cfg(test)]
 mod tests {
@@ -662,5 +849,122 @@ mod tests {
                 "a narrowed loop must not be declared `{forbidden}`"
             );
         }
+    }
+
+    /// A helper is *told* to move quickly now that nothing caps it, and a
+    /// subagent is told the opposite thing about its turns: take what the
+    /// work needs. Both sentences are load-bearing, so both are pinned.
+    #[test]
+    fn a_helper_is_instructed_to_be_quick_and_a_subagent_is_not_counted() {
+        let spec = Narrowed {
+            tools: &["read"],
+            instructions: "You find things.",
+        };
+        let helper = instructions_for(Some(&spec), "PROJECT");
+        assert!(helper.starts_with("You find things."), "{helper}");
+        assert!(helper.contains(crate::helpers::HELPER_HASTE), "{helper}");
+        assert!(helper.ends_with("PROJECT"), "{helper}");
+
+        let subagent = instructions_for(None, "PROJECT");
+        assert!(subagent.contains("Nothing counts your turns"), "{subagent}");
+        assert!(
+            !subagent.contains(crate::helpers::HELPER_HASTE),
+            "a subagent owns a goal, not a question: {subagent}"
+        );
+    }
+
+    /// The salvage is the whole of the user's objection to a cap: whatever
+    /// stops a subagent, its own last words are the answer. Before
+    /// 2026-09-17 every early exit answered with a sentence about having
+    /// returned nothing and dropped the work.
+    #[test]
+    fn an_early_stop_answers_with_the_subagents_own_last_words() {
+        let conversation = Conversation {
+            system: String::new(),
+            messages: vec![
+                Message::text(Role::User, "the task"),
+                Message::text(Role::Assistant, "I found the parser in config.rs."),
+                Message::runtime("a cell result", "a cell result"),
+            ],
+        };
+        assert_eq!(salvage(&conversation), "I found the parser in config.rs.");
+
+        // Nothing said yet is empty, not a sentence claiming there was
+        // nothing: the note on `stderr` is what says why it stopped.
+        let silent = Conversation {
+            system: String::new(),
+            messages: vec![Message::text(Role::User, "the task")],
+        };
+        assert_eq!(salvage(&silent), "");
+    }
+
+    /// A long draft is cut and says so, rather than being dropped whole.
+    #[test]
+    fn a_long_last_message_is_bounded_and_marked() {
+        let long = "x".repeat(SALVAGED_ANSWER_BYTES + 500);
+        let bounded = bound(&long);
+        assert!(bounded.len() < long.len());
+        assert!(bounded.ends_with("… [truncated]"), "{}", &bounded[..40]);
+        assert_eq!(bound("short"), "short");
+    }
+
+    /// The wall clock is the person's to set, and absent by default: a
+    /// subagent doing correct work for an hour is not interrupted by a
+    /// number nobody chose (user, 2026-09-17).
+    #[test]
+    fn a_subagent_with_no_configured_deadline_is_not_time_bounded() {
+        let unbounded = AgentOptions {
+            turns: None,
+            model: "m".into(),
+            effort: Effort::default(),
+            deadline: None,
+        };
+        let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        assert!(
+            !ran_out_of_time(&unbounded, long_ago),
+            "an hour of correct work is not a reason to stop"
+        );
+        assert_eq!(crate::config::AgentsConfig::default().deadline, None);
+
+        let bounded = AgentOptions {
+            deadline: Some(std::time::Duration::from_millis(1)),
+            ..unbounded
+        };
+        assert!(ran_out_of_time(&bounded, long_ago));
+    }
+
+    /// **A deadline arrives as a cancellation, and must not read as one.**
+    /// `bg::arm_deadline` enforces the clock by cancelling the job's token,
+    /// so by the time the loop looks, both are true; asking the clock first
+    /// is what tells the parent to give the next subagent longer instead of
+    /// leaving it to guess. The ordering is invisible to an end-to-end test
+    /// -- the loop usually notices its own clock before the deadline thread
+    /// fires -- so it is pinned here, where both can be true at once.
+    #[test]
+    fn a_deadline_that_cancelled_the_token_still_reads_as_the_deadline() {
+        let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let timed = AgentOptions {
+            turns: None,
+            model: "m".into(),
+            effort: Effort::default(),
+            deadline: Some(std::time::Duration::from_millis(1)),
+        };
+        let token = CancellationToken::new();
+        token.cancel();
+        assert_eq!(stopped_by(&timed, long_ago, &token), Some("deadline"));
+
+        // With no clock configured, the same cancelled token is what it is.
+        let untimed = AgentOptions {
+            deadline: None,
+            ..timed
+        };
+        assert_eq!(stopped_by(&untimed, long_ago, &token), Some("cancelled"));
+
+        // And a healthy loop is stopped by neither.
+        let fresh = CancellationToken::new();
+        assert_eq!(
+            stopped_by(&untimed, std::time::Instant::now(), &fresh),
+            None
+        );
     }
 }
