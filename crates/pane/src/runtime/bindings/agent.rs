@@ -30,13 +30,19 @@ pub(super) fn agent_object<'s>(
     object.into()
 }
 
-/// `job.progress()` — what a running subagent has done so far.
+/// `job.progress()` — what a running subagent has done so far, and the way in
+/// to it.
 ///
 /// **A look, never a wait.** It reads the board and returns; it makes no
 /// provider request and cannot block on the subagent's thread, which is what
 /// makes it safe to offer to a model that must not spin. `null` for a handle
 /// with no progress to report — a job that is not a subagent, or one whose
 /// session has already been shut down.
+///
+/// `rollout` names the subagent's own record, which is written as it works,
+/// and `takes_messages` says whether anything would still hear a message sent
+/// to it (the user, 2026-09-17: *"In Claude code user can talk to subagent by
+/// selecting and jumping into its session in and out"*).
 pub(super) fn agent_progress_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -61,5 +67,12 @@ pub(super) fn agent_progress_callback(
         calls.set_index(scope, index as u32, name);
     }
     set_key(scope, object, "calls", calls.into());
+    let rollout: v8::Local<v8::Value> = match &progress.rollout {
+        Some(path) => js_string(scope, &path.display().to_string()),
+        None => v8::null(scope).into(),
+    };
+    set_key(scope, object, "rollout", rollout);
+    let takes = v8::Boolean::new(scope, progress.takes_messages);
+    set_key(scope, object, "takes_messages", takes.into());
     retval.set(object.into());
 }

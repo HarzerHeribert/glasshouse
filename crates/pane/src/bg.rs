@@ -22,6 +22,7 @@
 //! in one process never see each other's jobs.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -91,14 +92,38 @@ pub struct JobResult {
 }
 
 /// What one look at a running subagent says: the turns it has taken, the
-/// tools it has called in order, how long it has been working, and whether it
-/// still is.
+/// tools it has called in order, how long it has been working, whether it
+/// still is, where its own record is being written, and whether it can still
+/// be told something.
+///
+/// The last two are the way in: a person who wants to read a subagent needs
+/// the path, and one who wants to speak to it needs to know whether anything
+/// would hear it ([`tell`] is honest about a job that has already finished,
+/// and this is the same answer asked in advance).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobProgress {
     pub turns: u64,
     pub calls: Vec<String>,
     pub elapsed_ms: u64,
     pub running: bool,
+    /// The subagent's own rollout file, or `None` for a job that writes none.
+    pub rollout: Option<PathBuf>,
+    /// Whether a message sent now would be delivered.
+    pub takes_messages: bool,
+}
+
+/// What became of a message sent to a job.
+///
+/// **A message to a job that has finished is not an error.** `bg::cancel` is
+/// idempotent for the same reason: the caller raced the work and lost, which
+/// is an ordinary outcome and not a mistake it could have avoided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Queued for the subagent's next turn boundary.
+    Queued,
+    /// Nothing will read it: the job has finished, never existed, or is a
+    /// command rather than a turn loop.
+    Undelivered,
 }
 
 /// `bg.run`'s options object.
@@ -139,6 +164,11 @@ struct JobEntry {
     /// The other end of a running subagent's [`crate::agent::ProgressSink`],
     /// or `None` for a command job, which has no turns to report.
     progress: Option<crate::agent::ProgressSink>,
+    /// Where [`tell`] leaves what a person said, or `None` for a command job,
+    /// which has no turn boundary to read it at.
+    inbox: Option<crate::agent::InboxSink>,
+    /// Where the subagent writes its own rollout, so a look can name it.
+    record: Option<crate::agent::AgentRollout>,
 }
 
 /// One session's jobs, the events they have raised and the payloads those
@@ -338,13 +368,18 @@ fn start(
     watching: Option<WatchOptions>,
 ) -> String {
     let token = CancellationToken::new();
-    // Only a turn loop has progress to report. Minted here rather than on the
-    // job's thread so a parent that looks in during the first turn reads an
-    // honest zero instead of finding nothing at all.
-    let progress = matches!(work, Work::Agent { .. }).then(crate::agent::ProgressSink::default);
-    let handle = with_board(session, |board| {
+    // Only a turn loop has progress to report, an inbox to read or a record
+    // to write. All three are minted here rather than on the job's thread, so
+    // a person who looks in during the first turn reads an honest zero and
+    // finds the path rather than finding nothing at all.
+    let is_agent = matches!(work, Work::Agent { .. });
+    let progress = is_agent.then(crate::agent::ProgressSink::default);
+    let inbox = is_agent.then(crate::agent::InboxSink::default);
+    let root = profile.root().to_path_buf();
+    let (handle, record) = with_board(session, |board| {
         board.next += 1;
         let handle = format!("job{}", board.next);
+        let record = is_agent.then(|| crate::agent::AgentRollout::for_job(&root, session, &handle));
         board.jobs.insert(
             handle.clone(),
             JobEntry {
@@ -354,9 +389,11 @@ fn start(
                 thread: None,
                 started: Instant::now(),
                 progress: progress.clone(),
+                inbox: inbox.clone(),
+                record: record.clone(),
             },
         );
-        handle
+        (handle, record)
     });
 
     let job = JobThread {
@@ -368,6 +405,8 @@ fn start(
         token: token.clone(),
         watching,
         progress,
+        inbox,
+        record,
     };
     let thread = std::thread::spawn(move || job.serve());
 
@@ -471,6 +510,8 @@ struct JobThread {
     token: CancellationToken,
     watching: Option<WatchOptions>,
     progress: Option<crate::agent::ProgressSink>,
+    inbox: Option<crate::agent::InboxSink>,
+    record: Option<crate::agent::AgentRollout>,
 }
 
 /// How many trajectory entries one note carries before it counts the rest.
@@ -555,7 +596,11 @@ impl JobThread {
                     options,
                     &self.token,
                     config.as_deref(),
-                    self.progress.as_ref(),
+                    crate::agent::Watch {
+                        progress: self.progress.as_ref(),
+                        inbox: self.inbox.as_ref(),
+                        record: self.record.as_ref(),
+                    },
                 );
                 // The answer is the job's output, so a subagent's result is
                 // read exactly as a command's is — `stdout`, `stderr`,
@@ -787,8 +832,51 @@ pub fn progress(session: &SessionId, handle: &str) -> Option<JobProgress> {
             calls: held.calls.clone(),
             elapsed_ms: u64::try_from(job.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             running: !job.finished,
+            rollout: job.record.as_ref().map(|record| record.path.clone()),
+            takes_messages: !job.finished && job.inbox.is_some(),
         })
     })
+}
+
+/// Says `text` to a running subagent, for its next turn boundary.
+///
+/// **It queues; it does not interrupt.** A subagent inside a provider call
+/// finishes that call first: cutting a request short spends the tokens and
+/// throws the answer away, and the message is worth more delivered to a
+/// subagent that can see its own last result than to one that cannot.
+///
+/// The message becomes an ordinary user turn in the subagent's conversation
+/// and is written to its rollout, so the record shows what it was told. It
+/// changes nothing about what the parent receives: the parent asked a
+/// question through `agent.run` and still gets that question's answer through
+/// `agent.done`.
+///
+/// **The job is the same job.** No new handle, no second token, no restart:
+/// `cancel`, `progress` and the pending `agent.done` all continue to mean
+/// what they meant, which is what makes attaching to a subagent a look at the
+/// work rather than a fork of it.
+pub fn tell(session: &SessionId, handle: &str, text: &str) -> Result<Delivery, &'static str> {
+    // The parent's own inbox bound, not a second one: a message is a message,
+    // and two limits for one idea is how they drift.
+    if text.is_empty() || text.len() > crate::events::inbox::MESSAGE_BYTES {
+        return Err("a message to a subagent must be 1–65536 UTF-8 bytes");
+    }
+    Ok(with_board(session, |board| {
+        let Some(job) = board.jobs.get(handle) else {
+            return Delivery::Undelivered;
+        };
+        if job.finished {
+            return Delivery::Undelivered;
+        }
+        let Some(inbox) = job.inbox.as_ref() else {
+            return Delivery::Undelivered;
+        };
+        inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(text.to_string());
+        Delivery::Queued
+    }))
 }
 
 /// How many of this session's jobs have not finished.
@@ -979,6 +1067,8 @@ mod tests {
                     thread: Some(stuck),
                     started: Instant::now(),
                     progress: None,
+                    inbox: None,
+                    record: None,
                 },
             );
         });

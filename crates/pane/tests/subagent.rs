@@ -550,3 +550,331 @@ fn subagent_plain_prose_is_its_result_without_a_marker_round_trip() {
     assert_eq!(result.answer, "I will calculate the answer next.");
     assert_eq!(result.turns, 1);
 }
+
+// --- A subagent is a session you can read and address ----------------------
+//
+// The user, 2026-09-17: *"Subagent behavior should also be like Claude code.
+// In Claude code user can talk to subagent by selecting and jumping into its
+// session in and out."* These four are the substance that an attach UI needs:
+// a record written as the work happens, a message that reaches a running
+// subagent, an honest answer for one that has already finished, and a look
+// that names the way in.
+
+/// A provider that answers slowly, so a test can watch a subagent *while* it
+/// is working rather than racing its completion. Every request is recorded,
+/// which is how the inbox test proves a message reached the conversation the
+/// subagent actually sent.
+fn start_recording_provider(
+    replies: Vec<&'static str>,
+    pause: Duration,
+) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let recorded = std::sync::Arc::clone(&seen);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for reply in replies {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = rest.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            recorded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(String::from_utf8_lossy(&body).into_owned());
+            std::thread::sleep(pause);
+            let payload = serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": reply}],
+                "usage": {"input_tokens": 11, "output_tokens": 7}
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(payload.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), seen)
+}
+
+/// Waits until `f` holds, or panics with `what`.
+fn until(within: Duration, what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn rollout_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+#[test]
+fn a_running_subagents_rollout_is_readable_while_it_works() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("record");
+    let mut replies = vec!["Reading the parser.\n```pane\nconst n = 1;\n```"; 5];
+    replies.push("```pane\nreturn 'done reading';\n```");
+    let (base_url, _seen) = start_recording_provider(replies, Duration::from_millis(150));
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "read the parser",
+        &AgentOptions {
+            turns: None,
+            deadline: None,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let record = pane::agent::AgentRollout::for_job(&fixture.root, &fixture.session, &handle);
+    // Beside the parent's file, in a folder named for it -- and out of the
+    // folder `--sessions` lists, because nothing resumes a subagent.
+    assert!(
+        record.path.ends_with(format!(
+            "{}.agents/{handle}.jsonl",
+            fixture.session.as_str()
+        )),
+        "{:?}",
+        record.path
+    );
+
+    // **Mid-run, not after.** The subagent is still working here: the
+    // provider pauses between replies and the run is not drained yet.
+    until(
+        Duration::from_secs(20),
+        "the record to carry two turns",
+        || {
+            rollout_lines(&record.path)
+                .iter()
+                .filter(|line| line["kind"] == "turn")
+                .count()
+                >= 2
+        },
+    );
+    let mid = rollout_lines(&record.path);
+    assert_eq!(mid[0]["kind"], "system", "the system block comes first");
+    let turns: Vec<&serde_json::Value> = mid.iter().filter(|l| l["kind"] == "turn").collect();
+    assert_eq!(turns[0]["role"], "user");
+    assert!(
+        turns[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("read the parser"),
+        "the task the cell asked for is the first turn: {:?}",
+        turns[0]
+    );
+    assert_eq!(turns[1]["role"], "assistant");
+    assert!(
+        bg::progress(&fixture.session, &handle)
+            .expect("a subagent reports progress")
+            .running,
+        "this assertion is the point of the test: the record was readable while it ran"
+    );
+
+    let _ = wait_for_event(&fixture.session, Duration::from_secs(30));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    let done = rollout_lines(&record.path);
+    let numbers: Vec<u64> = done
+        .iter()
+        .filter(|line| line["kind"] == "turn")
+        .map(|line| line["turn"].as_u64().unwrap())
+        .collect();
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] < pair[1]),
+        "turns are recorded in order: {numbers:?}"
+    );
+    assert!(
+        done.iter().any(|line| line["kind"] == "cell"),
+        "the cells it ran are in the record too"
+    );
+}
+
+#[test]
+fn a_person_can_tell_a_running_subagent_something() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("tell");
+    let mut replies = vec!["Still reading.\n```pane\nconst n = 1;\n```"; 6];
+    replies.push("```pane\nreturn 'stopped reading';\n```");
+    let (base_url, seen) = start_recording_provider(replies, Duration::from_millis(150));
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "read everything",
+        &AgentOptions {
+            turns: None,
+            deadline: None,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    until(Duration::from_secs(20), "the subagent's first turn", || {
+        bg::progress(&fixture.session, &handle).is_some_and(|look| look.turns >= 1)
+    });
+    assert_eq!(
+        bg::tell(&fixture.session, &handle, "stop reading and summarise"),
+        Ok(pane::bg::Delivery::Queued),
+    );
+
+    let _ = wait_for_event(&fixture.session, Duration::from_secs(30));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    let record = pane::agent::AgentRollout::for_job(&fixture.root, &fixture.session, &handle);
+    let said: Vec<String> = rollout_lines(&record.path)
+        .iter()
+        .filter(|line| line["kind"] == "turn" && line["role"] == "user")
+        .filter_map(|line| line["text"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        said.iter()
+            .any(|text| text.contains("stop reading and summarise")),
+        "what the person said is part of the subagent's record: {said:?}"
+    );
+    // **It reached the conversation, not just the file.** The provider saw
+    // it, which is the only proof that the subagent was actually told.
+    let requests = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        requests
+            .iter()
+            .any(|body| body.contains("stop reading and summarise")),
+        "the message is in the request the subagent sent next"
+    );
+}
+
+#[test]
+fn a_message_to_a_finished_subagent_is_undelivered_rather_than_an_error() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("late");
+    let base_url = start_provider("```pane\nreturn 'answered at once';\n```", 1);
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "answer",
+        &AgentOptions {
+            turns: None,
+            deadline: None,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let _ = wait_for_event(&fixture.session, Duration::from_secs(20));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    until(Duration::from_secs(10), "the job to be finished", || {
+        bg::progress(&fixture.session, &handle).is_some_and(|look| !look.running)
+    });
+    assert_eq!(
+        bg::tell(&fixture.session, &handle, "one more thing"),
+        Ok(pane::bg::Delivery::Undelivered),
+        "racing the work and losing is an outcome, not a mistake"
+    );
+    assert_eq!(
+        bg::tell(&fixture.session, "job404", "anyone there?"),
+        Ok(pane::bg::Delivery::Undelivered),
+    );
+    assert!(
+        bg::tell(&fixture.session, &handle, "").is_err(),
+        "an empty message is refused rather than queued"
+    );
+}
+
+#[test]
+fn a_look_names_the_record_and_whether_it_still_listens() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("wayin");
+    let (base_url, _seen) = start_recording_provider(
+        vec!["```pane\nreturn 'answered';\n```"],
+        Duration::from_millis(250),
+    );
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let handle = bg::agent(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "answer",
+        &AgentOptions {
+            turns: None,
+            deadline: None,
+            model: "test-model".to_string(),
+            effort: pane::wire::Effort::default(),
+        },
+    );
+    let running = bg::progress(&fixture.session, &handle).expect("a subagent reports progress");
+    // The record hangs off the *profile's* root, which `Profile::compile`
+    // canonicalises -- on macOS `/var` is a symlink to `/private/var`, so an
+    // expectation built from the raw temp path names the same file by another
+    // name.
+    let root = std::fs::canonicalize(&fixture.root).unwrap();
+    assert_eq!(
+        running.rollout,
+        Some(pane::agent::AgentRollout::for_job(&root, &fixture.session, &handle).path),
+        "the look names the record a person would open"
+    );
+    assert!(
+        running.takes_messages,
+        "a running subagent can be told things"
+    );
+
+    let _ = wait_for_event(&fixture.session, Duration::from_secs(20));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    until(Duration::from_secs(10), "the job to be finished", || {
+        bg::progress(&fixture.session, &handle).is_some_and(|look| !look.running)
+    });
+    let ended = bg::progress(&fixture.session, &handle).expect("progress outlives the work");
+    assert!(
+        !ended.takes_messages,
+        "a finished subagent is honest that nothing would hear a message"
+    );
+    assert!(ended.rollout.is_some(), "its record is still there to read");
+}

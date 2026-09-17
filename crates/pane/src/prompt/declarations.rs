@@ -322,7 +322,7 @@ pub fn web_declaration(reach: &WebReach) -> String {
 pub const AGENT_DECLARATION: &str = "declare const agent: {\n  \
      run(task: string, options?: {turns?: number; model?: string; effort?: string; profile?: string}): Job;\n\
      };\n\
-     type Job = {id: string; source: string; progress(): {turns: number; calls: string[]; elapsed_ms: number; running: boolean} | null};\n\
+     type Job = {id: string; source: string; progress(): {turns: number; calls: string[]; elapsed_ms: number; running: boolean; rollout: string | null; takes_messages: boolean} | null};\n\
      // Start a subagent on one self-contained question. It returns a handle\n\
      // at once and never blocks; its answer arrives later as an `agent.done`\n\
      // event whose payload carries status and output. Launch, then yield;\n\

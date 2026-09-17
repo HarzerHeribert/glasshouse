@@ -12,10 +12,21 @@
 //! deadline, the payload store, batching and dedup are all `bg`'s and are not
 //! reimplemented here.
 //!
-//! **What a subagent deliberately is not**: it has no rollout of its own, no
-//! supervisor, no TUI, no inbox, no row in Glasshouse's session list, and it
-//! cannot start a subagent of its own. It is a task with a budget, not a
-//! session.
+//! **A subagent is a session you can read and address** (the user,
+//! 2026-09-17: *"In Claude code user can talk to subagent by selecting and
+//! jumping into its session in and out"*). It writes its own rollout as it
+//! goes, in the same format and beside the parent's, so a person can read
+//! what it is doing while it does it; and it has an inbox, so a person can
+//! say something to it, delivered at its next turn boundary. The supervisor
+//! may watch it on the same evidence.
+//!
+//! **What a subagent still is not**: it cannot start a subagent of its own,
+//! it is started and owned by a cell rather than by a person, and its rollout
+//! is a record to read rather than a session to restart -- nothing resumes a
+//! subagent, and [`AgentRollout::for_job`] keeps the file out of the folder
+//! `--sessions` lists for exactly that reason.
+
+use std::path::{Path, PathBuf};
 
 use crate::contract::{Conversation, Message, Role, SessionId};
 use crate::glasshouse::Glasshouse;
@@ -113,6 +124,62 @@ pub struct AgentProgress {
 /// end and reads it without waiting for the job.
 pub type ProgressSink = std::sync::Arc<std::sync::Mutex<AgentProgress>>;
 
+/// What a person has said to a running subagent and the loop has not read
+/// yet; `bg::tell` holds the other end.
+///
+/// **A queue, not an interrupt.** A message arriving while the subagent is
+/// inside a provider call waits for the turn boundary: cutting a request
+/// short buys nothing -- the tokens are already spent and the answer would be
+/// thrown away -- and a message delivered between turns is a message the
+/// subagent reads with its work in front of it.
+pub type InboxSink = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Where a subagent's own rollout is written, and the id its lines carry.
+///
+/// **In a folder beside the parent's file, not next to it.** `.pane/sessions/`
+/// is what `session::resume` lists and resumes, and every `*.jsonl` in it is
+/// offered to a person as a session to go back to. A subagent's record is not
+/// one: nothing resumes a subagent. Putting it under
+/// `<parent id>.agents/<handle>.jsonl` keeps the pair obvious to a person
+/// reading the folder while keeping it out of that listing by construction --
+/// the listing filters on the `jsonl` extension, and a directory named
+/// `<parent id>.agents` does not have it -- rather than by a name filter that
+/// a later reader could drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRollout {
+    pub path: PathBuf,
+    pub id: SessionId,
+}
+
+impl AgentRollout {
+    /// The record for `handle`, a job of the session `parent` in `root`.
+    pub fn for_job(root: &Path, parent: &SessionId, handle: &str) -> Self {
+        let dir = root
+            .join(".pane")
+            .join("sessions")
+            .join(format!("{}.agents", parent.as_str()));
+        Self {
+            path: dir.join(format!("{handle}.jsonl")),
+            id: SessionId::new(format!("{}-{handle}", parent.as_str())),
+        }
+    }
+}
+
+/// What `bg` holds the other end of while a subagent runs: where it publishes
+/// progress, where it reads what a person said, and where it writes its own
+/// record.
+///
+/// One value rather than three parameters, because every one of them is
+/// `None` for a helper's narrowed loop and `Some` for a subagent `bg`
+/// started, and a caller that had to pass three `None`s would eventually pass
+/// two.
+#[derive(Default, Clone, Copy)]
+pub struct Watch<'a> {
+    pub progress: Option<&'a ProgressSink>,
+    pub inbox: Option<&'a InboxSink>,
+    pub record: Option<&'a AgentRollout>,
+}
+
 /// A nested loop narrowed from a subagent to a helper.
 ///
 /// The invariant: **a helper holds only what its spec names, and is a leaf.**
@@ -133,7 +200,7 @@ pub(crate) struct NarrowedRun<'a> {
     narrowed: Option<&'a Narrowed>,
     helper_usage: Option<&'a crate::helpers::HelperUsageTracker>,
     config: Option<&'a crate::config::PaneConfig>,
-    progress: Option<&'a ProgressSink>,
+    watch: Watch<'a>,
 }
 
 impl<'a> NarrowedRun<'a> {
@@ -142,7 +209,7 @@ impl<'a> NarrowedRun<'a> {
             narrowed,
             helper_usage: None,
             config: None,
-            progress: None,
+            watch: Watch::default(),
         }
     }
 
@@ -154,7 +221,7 @@ impl<'a> NarrowedRun<'a> {
             narrowed: Some(narrowed),
             helper_usage: Some(usage),
             config: None,
-            progress: None,
+            watch: Watch::default(),
         }
     }
 }
@@ -183,12 +250,20 @@ pub fn run_with_config(
     config: Option<&crate::config::PaneConfig>,
 ) -> AgentResult {
     run_watched(
-        profile, glasshouse, session, task, options, token, config, None,
+        profile,
+        glasshouse,
+        session,
+        task,
+        options,
+        token,
+        config,
+        Watch::default(),
     )
 }
 
-/// [`run_with_config`] writing its progress where a parent can read it while
-/// it is still running. `bg` is the caller that holds the other end.
+/// [`run_with_config`] watched: publishing its progress, writing its own
+/// rollout, and reading what a person says to it. `bg` is the caller that
+/// holds the other end of all three.
 #[allow(clippy::too_many_arguments)]
 pub fn run_watched(
     profile: &Profile,
@@ -198,7 +273,7 @@ pub fn run_watched(
     options: &AgentOptions,
     token: &CancellationToken,
     config: Option<&crate::config::PaneConfig>,
-    progress: Option<&ProgressSink>,
+    watch: Watch<'_>,
 ) -> AgentResult {
     run_narrowed_metered(
         profile,
@@ -211,7 +286,7 @@ pub fn run_watched(
             narrowed: None,
             helper_usage: None,
             config,
-            progress,
+            watch,
         },
     )
 }
@@ -259,8 +334,13 @@ pub(crate) fn run_narrowed_metered(
         narrowed,
         helper_usage,
         config,
-        progress,
+        watch,
     } = narrowed_run;
+    let Watch {
+        progress,
+        inbox,
+        record,
+    } = watch;
     let tools = toolset(narrowed);
     let mut facts = crate::session::session_facts(profile);
     facts.interface = crate::abi::Interface::Cells;
@@ -280,6 +360,9 @@ pub(crate) fn run_narrowed_metered(
         system,
         messages: vec![Message::text(Role::User, task)],
     };
+    // Opened before the first request so a person who attaches during turn
+    // one finds the system block and the task already written.
+    let mut journal = Journal::open(record, &conversation.system);
 
     let mut runtime = match globals {
         HostGlobals::Helper(tools) => Runtime::for_helper(profile, glasshouse, session, tools),
@@ -317,6 +400,7 @@ pub(crate) fn run_narrowed_metered(
             && turn > allowed
         {
             runtime.end_task();
+            journal.write(&conversation);
             return finish(
                 &salvage(&conversation),
                 "turns",
@@ -327,6 +411,7 @@ pub(crate) fn run_narrowed_metered(
         }
         if let Some(reason) = stopped_by(options, started, token) {
             runtime.end_task();
+            journal.write(&conversation);
             return finish(
                 &salvage(&conversation),
                 reason,
@@ -335,6 +420,14 @@ pub(crate) fn run_narrowed_metered(
                 trajectory,
             );
         }
+        // **The turn boundary is where a person reaches it.** Anything said
+        // while the last turn ran becomes an ordinary user message here, so
+        // the subagent reads it with its own work in front of it and the
+        // record shows what it was told and when.
+        for told in take_told(inbox) {
+            conversation.messages.push(Message::text(Role::User, told));
+        }
+        journal.write(&conversation);
         note_progress(progress, turn, &trajectory);
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
@@ -353,7 +446,10 @@ pub(crate) fn run_narrowed_metered(
             purpose,
         ) {
             Ok(sent) => sent,
-            Err(error) => return finish(&error.to_string(), "failed", turn, tokens, trajectory),
+            Err(error) => {
+                journal.write(&conversation);
+                return finish(&error.to_string(), "failed", turn, tokens, trajectory);
+            }
         };
         if let Some(usage) = helper_usage {
             usage.record_response(sent.usage);
@@ -363,6 +459,7 @@ pub(crate) fn run_narrowed_metered(
         // own message is already in hand, so the salvage includes it.
         if let Some(reason) = stopped_by(options, started, token) {
             conversation.messages.push(sent.message);
+            journal.write(&conversation);
             return finish(
                 &salvage(&conversation),
                 reason,
@@ -387,6 +484,7 @@ pub(crate) fn run_narrowed_metered(
             })
             .collect();
         if text.trim().is_empty() && calls.is_empty() {
+            journal.write(&conversation);
             return finish(
                 "the model returned an empty reply",
                 "failed",
@@ -463,6 +561,7 @@ pub(crate) fn run_narrowed_metered(
                 Extracted::Prose => {
                     if let Some(answer) = prompt::completion_text(&text) {
                         runtime.end_task();
+                        journal.write(&conversation);
                         return finish(&answer, "returned", turn, tokens, trajectory);
                     }
                     conversation
@@ -486,6 +585,7 @@ pub(crate) fn run_narrowed_metered(
         };
 
         let outcome = runtime.run_cell(&program);
+        journal.cell(&outcome.turn().record);
         // What this turn actually reached for, in order. Tool names only.
         trajectory.extend(
             outcome
@@ -536,6 +636,7 @@ pub(crate) fn run_narrowed_metered(
                 if let Some(pending) = instruction_boundary {
                     if pending.fatal {
                         runtime.end_task();
+                        journal.write(&conversation);
                         return finish(&pending.text, "failed", turn, tokens, trajectory);
                     }
                     runtime.acknowledge_instructions();
@@ -552,6 +653,7 @@ pub(crate) fn run_narrowed_metered(
                     .push(Message::tool_result(id.clone(), feedback, false));
             }
             runtime.end_task();
+            journal.write(&conversation);
             return finish(&answer, "returned", turn, tokens, trajectory);
         }
         let result = result_message(&outcome, turn);
@@ -579,6 +681,7 @@ pub(crate) fn run_narrowed_metered(
         if let Some(pending) = instruction_boundary {
             if pending.fatal {
                 runtime.end_task();
+                journal.write(&conversation);
                 return finish(&pending.text, "failed", turn, tokens, trajectory);
             }
             runtime.acknowledge_instructions();
@@ -655,6 +758,71 @@ fn instructions_for(narrowed: Option<&Narrowed>, project: &str) -> String {
         ),
         None => format!("{SUBAGENT_INSTRUCTIONS}\n\n{project}"),
     }
+}
+
+/// A subagent's own rollout, written as the loop goes.
+///
+/// **The record is written at the turn boundary, not at the end.** The whole
+/// point is that a person can read a subagent while it works, so every
+/// message the conversation gained since the last look is appended before the
+/// next request leaves -- and again before the loop returns, so a subagent
+/// that stopped early has its last words on disk as well as in its answer.
+///
+/// **A broken record never stops the work.** Every failure here -- a
+/// directory that cannot be created, a disk that is full, a line that will
+/// not serialise -- leaves `file` as `None` and the loop runs on. A subagent
+/// interrupted because nobody could write down what it was doing would be a
+/// worse trade than a missing record.
+struct Journal {
+    file: Option<crate::rollout::Rollout>,
+    /// How many of the conversation's messages are already on disk.
+    written: usize,
+}
+
+impl Journal {
+    fn open(record: Option<&AgentRollout>, system: &str) -> Self {
+        let file = record.and_then(|record| {
+            let parent = record.path.parent()?;
+            std::fs::create_dir_all(parent).ok()?;
+            crate::rollout::Rollout::create(&record.path, record.id.clone(), system).ok()
+        });
+        Self { file, written: 0 }
+    }
+
+    /// Appends every message the conversation has gained since the last call.
+    fn write(&mut self, conversation: &Conversation) {
+        let Some(file) = self.file.as_mut() else {
+            self.written = conversation.messages.len();
+            return;
+        };
+        for message in conversation.messages.iter().skip(self.written) {
+            let _ = file.record_message(message);
+        }
+        self.written = conversation.messages.len();
+    }
+
+    /// Appends one cell's record, which advances no turn number.
+    fn cell(&mut self, record: &crate::runtime::outcome::CellRecord) {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.record_cell(record);
+        }
+    }
+}
+
+/// What a person has said to this subagent since the last turn, taken from
+/// the inbox so nothing is delivered twice.
+///
+/// A poisoned lock is recovered from rather than propagated, for
+/// [`note_progress`]'s reason: a message must never be able to end the
+/// subagent it was meant for.
+fn take_told(inbox: Option<&InboxSink>) -> Vec<String> {
+    let Some(inbox) = inbox else {
+        return Vec::new();
+    };
+    let mut held = inbox
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *held)
 }
 
 /// Publishes what the loop has done so far, for a parent that looks in.
