@@ -60,17 +60,44 @@ pub(super) struct TerminalInput {
     /// Resolved events waiting to be handed to the caller, in arrival order.
     ready: VecDeque<Event>,
     hold: Hold,
-    /// Whether `ESC [ 200 ~ … ESC [ 201 ~` is reassembled here into an
-    /// `Event::Paste`: true only where crossterm reads console records and
-    /// so never produces one itself (Windows). Where it parses the bytes it
-    /// consumes the markers before this file is asked, and a run that merely
-    /// looks like an opener stays the text it is — see [`Self::accept`].
-    reassembles_pastes: bool,
+    /// Which console this input comes through, which decides what this
+    /// file may still have to assemble — see [`Console`].
+    console: Console,
+}
+
+/// How the bytes a terminal sends reach this file, and so what is left for
+/// it to assemble.
+///
+/// Where crossterm parses the bytes itself (`Unix`) it consumes a paste's
+/// markers before this file is asked, and a run that merely looks like an
+/// opener stays the text it is. Where crossterm reads console records
+/// (`Records`, Windows without raw terminal input) the console has already
+/// parsed the input on Pane's behalf: a paste's markers never arrive, and a
+/// report's characters carry the keyboard layout's modifiers, so this file
+/// reassembles what it can. Where the console grants raw terminal input
+/// (`VtInput`, Windows with `ENABLE_VIRTUAL_TERMINAL_INPUT`) the terminal's
+/// own bytes arrive as characters, and this file parses them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Console {
+    Unix,
+    Records,
+    VtInput,
+}
+
+impl Console {
+    /// The console this host reads without asking for anything.
+    pub(super) fn host() -> Self {
+        if cfg!(windows) {
+            Self::Records
+        } else {
+            Self::Unix
+        }
+    }
 }
 
 impl Default for TerminalInput {
     fn default() -> Self {
-        Self::new(cfg!(windows))
+        Self::new(Console::host())
     }
 }
 
@@ -97,12 +124,18 @@ enum Hold {
 }
 
 impl TerminalInput {
-    fn new(reassembles_pastes: bool) -> Self {
+    pub(super) fn new(console: Console) -> Self {
         Self {
             ready: VecDeque::new(),
             hold: Hold::Idle,
-            reassembles_pastes,
+            console,
         }
+    }
+
+    /// Whether `ESC [ 200 ~ … ESC [ 201 ~` is reassembled here into an
+    /// `Event::Paste`: everywhere crossterm does not parse the bytes itself.
+    fn reassembles_pastes(&self) -> bool {
+        self.console != Console::Unix
     }
 
     /// True while resolved events are waiting; the caller must drain them
@@ -270,7 +303,7 @@ impl TerminalInput {
         // typed by hand with gaps would otherwise hold every keystroke until
         // a closing marker that is not coming, and `[2` would be held where
         // it used to be released (`GH-PANE-WINDOWS-VERIFY`, findings 7–8).
-        if self.reassembles_pastes {
+        if self.reassembles_pastes() {
             if PASTE_OPEN == run {
                 self.hold = Hold::Pasting {
                     text: String::new(),
@@ -538,7 +571,11 @@ mod tests {
     /// console-record path and the byte-parsing path are covered on every
     /// host.
     fn drive_on(reassembles_pastes: bool, stream: &[Event], quiet_after: &[usize]) -> Vec<Event> {
-        let mut input = TerminalInput::new(reassembles_pastes);
+        let mut input = TerminalInput::new(if reassembles_pastes {
+            Console::Records
+        } else {
+            Console::Unix
+        });
         let mut seen = Vec::new();
         for (index, event) in stream.iter().enumerate() {
             input.accept(event.clone());
@@ -1025,6 +1062,23 @@ mod tests {
         assert_eq!(
             drive_on(true, &stream, &[]),
             vec![Event::Paste("a[9zb".into())]
+        );
+    }
+
+    /// Raw terminal input on Windows delivers the markers as characters, so
+    /// that console reassembles a paste exactly as the record path does.
+    #[test]
+    fn raw_terminal_input_reassembles_a_paste_too() {
+        let mut input = TerminalInput::new(Console::VtInput);
+        let mut stream = report("[200~");
+        stream.extend(chars("ab"));
+        stream.extend(report("[201~"));
+        for event in stream {
+            input.accept(event);
+        }
+        assert_eq!(
+            input.ready.drain(..).collect::<Vec<_>>(),
+            vec![Event::Paste("ab".into())]
         );
     }
 

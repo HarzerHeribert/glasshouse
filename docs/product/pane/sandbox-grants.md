@@ -21,6 +21,13 @@ cancellation/process-group cleanup, but it truthfully reports every child as
 dangerously unconfined and warns that the outer container or VM is the only OS
 boundary. Ordinary sessions remain fail-closed.
 
+On Windows, Pane asks the console for raw terminal input after raw mode
+(`ENABLE_VIRTUAL_TERMINAL_INPUT`), so keys and mouse reports arrive as the
+console's translated events independent of the keyboard layout; where the
+console refuses, its own reading of the input is used, with the AltGr rule.
+Bracketed-paste markers do not reach Pane through ConPTY in either mode
+(design-decisions.md, 2026-09-17).
+
 The historical platform evidence below remains applicable to its recorded
 regime. Current configuration and invocation examples are in
 [competitive workflows](competitive-workflows.md). This addendum records

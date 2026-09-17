@@ -19,6 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+mod console_mode;
 mod links;
 mod terminal_input;
 
@@ -124,6 +125,7 @@ pub(super) fn restore_terminal() {
     let _guard = super::lock(&DRAWING);
     if ACTIVE.swap(false, Ordering::SeqCst) {
         disable_mouse_reporting();
+        console_mode::disable();
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
@@ -592,26 +594,27 @@ fn run(
     ready: mpsc::SyncSender<Result<(), String>>,
     handler_cancellations: Arc<Mutex<Vec<String>>>,
 ) -> io::Result<()> {
-    let mut input = terminal_input::TerminalInput::default();
     let setup = (|| {
         let _guard = super::lock(&DRAWING);
         enable_raw_mode()?;
+        let console = console_mode::select();
         ACTIVE.store(true, Ordering::SeqCst);
         execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
         enable_mouse_reporting()?;
-        Terminal::new(CrosstermBackend::new(io::stdout()))
+        Terminal::new(CrosstermBackend::new(io::stdout())).map(|terminal| (terminal, console))
     })();
     let _restore = Restore;
-    let mut terminal = match setup {
-        Ok(terminal) => {
+    let (mut terminal, console) = match setup {
+        Ok(ready_terminal) => {
             let _ = ready.send(Ok(()));
-            terminal
+            ready_terminal
         }
         Err(error) => {
             let _ = ready.send(Err(error.to_string()));
             return Err(error);
         }
     };
+    let mut input = terminal_input::TerminalInput::new(console);
     let mut editor = Editor::default();
     let mut served = ServedBy::default();
     let mut busy = false;
