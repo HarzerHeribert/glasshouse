@@ -1136,11 +1136,18 @@ fn typed_result<'s>(
             let (value, preview) = build_file(scope, args, result);
             (value, preview, "File")
         }
-        "grep" => {
+        // **A pure search tool is typed as what it prints.** `rg` is spawned
+        // with `--line-number --no-heading --color=never` (`invoke`'s
+        // `Argv::SearchIn`), so its stdout is `path:line:text` — `grep -r
+        // -n`'s own shape — and `fd` prints one path per line as `glob` does.
+        // `abi::Router::present` already routes all four to `present_items`,
+        // which needs an array and fell back to "not an array" for the two
+        // that arrived as a process result.
+        "grep" | "rg" => {
             let (value, preview) = build_grep(scope, args, result);
             (value, preview, "Grep.Match[]")
         }
-        "glob" => {
+        "glob" | "fd" => {
             let (value, preview) = build_glob(scope, result);
             (value, preview, "string[]")
         }
@@ -1152,8 +1159,22 @@ fn typed_result<'s>(
             let (value, preview) = build_structured_result(scope, result);
             (value, preview, "Code.Edit")
         }
+        // `jq`, `write` and `bash` keep the process shape: JSON, a path and a
+        // command's output are none of them matches.
+        //
+        // **The failure reducer only ever sees a command line's output.**
+        // `bash` is the only tool that runs one, and `REDUCER` reads build
+        // and test output for its distinct failures; handed anything else it
+        // spends a cheap model's tokens to answer that source text contains
+        // no failures. Measured 2026-09-17 in a real session: four such
+        // calls over `rg` results, 23,098 input tokens, 15.8 s, four answers
+        // of "No failures."
         _ => {
-            let reduction = reduce_oversized(result, state);
+            let reduction = if tool.name() == "bash" {
+                reduce_oversized(result, state)
+            } else {
+                Reduction::NotAttempted
+            };
             let (value, preview) = build_bash(scope, result, &reduction);
             (value, preview, "Bash.Result")
         }

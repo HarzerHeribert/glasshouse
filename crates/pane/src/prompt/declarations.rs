@@ -71,13 +71,13 @@ pub const ENTRIES: &[Entry] = &[
     },
     Entry {
         name: "rg",
-        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
-        summary: "Search the project with ripgrep: `file:line:text` on stdout, one match per line. Faster than `grep` and it skips ignored files. `exit_code` is 1 when nothing matched, which is not a failure.",
+        return_type: "Grep.Match[]",
+        summary: "Search the project with ripgrep: the same `{path, line, text}` matches `grep` returns, and an empty array when nothing matched. Faster than `grep` and it skips ignored files.",
     },
     Entry {
         name: "fd",
-        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
-        summary: "List paths beneath `path` whose name matches a regular expression, one per line on stdout. Prefer it to `glob` when you are matching a name rather than a shape.",
+        return_type: "string[]",
+        summary: "List paths beneath `path` whose name matches a regular expression. Prefer it to `glob` when you are matching a name rather than a shape.",
     },
     Entry {
         name: "jq",

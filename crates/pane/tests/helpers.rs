@@ -1344,6 +1344,83 @@ fn an_oversized_result_is_untouched_when_helpers_are_unconfigured() {
     );
 }
 
+/// **The failure reducer only ever sees a command line's output** — the
+/// defect a real session measured on 2026-09-17.
+///
+/// `REDUCER` reads build and test output for its distinct failures. Handed a
+/// pure search tool's results it answers that there were none, truthfully and
+/// uselessly: four such calls in one session, over `rg` results, cost 23,098
+/// input tokens and 15.8 s for four answers of "No failures." `bash` is the
+/// only tool that runs a command line, so it is the only one whose result
+/// reaches the reducer; `jq` prints JSON and is the tool that still lands in
+/// the process arm beside it (`rg` and `fd` are typed as matches and paths
+/// now, and never arrive here at all).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn only_a_command_results_output_is_ever_reduced() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-jq");
+    let provider = provider("3 distinct failures");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    // Comfortably over `[helpers] reduce_above_tokens` once jq pretty-prints
+    // it, so the trigger is the reduction's own and not a number chosen here.
+    let document = fixture.root.join("big.json");
+    let items: Vec<String> = (0..4000).map(|n| format!("error: boom {n}")).collect();
+    std::fs::write(
+        &document,
+        serde_json::to_string(&items).expect("an array of strings serialises"),
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-jq"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+
+    let command = oversized_command("error: boom");
+    let outcome = runtime.run_cell(&format!(
+        "const j = await jq({{ filter: \".\", path: {document:?} }});\n\
+         const b = await bash({{ command: {command:?} }});\n\
+         return (j.stdout.length > 12000) + \"|\" + (j.reduced === undefined) + \"|\" + \
+         (b.reduced === undefined ? \"none\" : b.reduced);\n",
+        document = document.to_string_lossy()
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let CellOutcome::Returned { value, .. } = &outcome else {
+        panic!("expected a return, got {outcome:?}");
+    };
+    let pane::runtime::preview::Value::String(text) = value else {
+        panic!("expected a string, got {value:?}");
+    };
+    assert_eq!(
+        text.head(),
+        "true|true|3 distinct failures",
+        "jq's output is oversized and carries no reduction, while bash's still does: {outcome:?}"
+    );
+
+    let records = runtime.helper_records();
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one reduction, and it is the command's: {records:?}"
+    );
+    assert_eq!(records[0].asked, "4,000 lines", "{records:?}");
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        1,
+        "the cheap model is asked once, about the command's output"
+    );
+}
+
 /// **The per-cell ceiling still applies, and reaching it degrades rather
 /// than throwing.**
 ///

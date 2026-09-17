@@ -2344,6 +2344,86 @@ fn grep_with_no_match_is_an_empty_array_and_a_bad_pattern_throws() {
     );
 }
 
+/// Whether `name`'s binary resolves on this host, so a test that needs a
+/// real `rg` or `fd` reports its absence instead of failing for it —
+/// `tools.rs::installed`'s rule, spelled here because that helper is private
+/// to its own file.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn resolves(name: &str) -> bool {
+    let tool = pane::tools::registry::lookup(name).unwrap_or_else(|| panic!("`{name}` registered"));
+    let executable = tool
+        .executable()
+        .unwrap_or_else(|| panic!("`{name}` is a program"));
+    !pane::tools::invoke::exec_grant(executable).fell_back_to_roots
+}
+
+/// **A pure search tool is typed as what it prints.** `rg` prints
+/// `path:line:text` — `grep -r -n`'s own shape — so it returns `grep`'s
+/// matches and not a process result the program has to parse out of
+/// `stdout`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn ripgrep_returns_the_matches_grep_returns() {
+    if !resolves("rg") {
+        eprintln!("skipped: ripgrep is not installed here");
+        return;
+    }
+    let fixture = Fixture::new("rg-typed");
+    fixture.write(&fixture.root.join("hit.txt"), "alpha\nNEEDLE here\nomega\n");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("rg-typed-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let found = runtime.run_cell(&format!(
+        "const hits = await rg({{ pattern: \"NEEDLE\", path: {path:?} }});\n\
+         return hits.length + \"|\" + typeof hits[0].path + \"|\" + hits[0].line + \"|\" + \
+         hits[0].text + \"|\" + (hits[0].stdout === undefined);\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    assert_eq!(
+        returned_string(&found),
+        "1|string|2|NEEDLE here|true",
+        "an rg result is a Grep.Match[], not a process result: {found:?}"
+    );
+
+    // Exit 1 is "no matches" for `rg` exactly as for `grep`: an empty array,
+    // not a throw (`bindings.rs::call_failure`).
+    let empty = runtime.run_cell(&format!(
+        "const none = await rg({{ pattern: \"NOTHINGMATCHESTHIS\", path: {path:?} }});\n\
+         return none.length;\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    assert_eq!(returned(&empty), &Value::Number(0.0), "{empty:?}");
+}
+
+/// `fd` prints one path per line, which is `glob`'s shape, so it returns a
+/// string array.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn fd_returns_a_string_array_of_paths() {
+    if !resolves("fd") {
+        eprintln!("skipped: fd is not installed here");
+        return;
+    }
+    let fixture = Fixture::new("fd-typed");
+    fixture.write(&fixture.root.join("marker-one.txt"), "a\n");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("fd-typed-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let found = runtime.run_cell(&format!(
+        "const paths = await fd({{ pattern: \"marker-one\", path: {path:?} }});\n\
+         return Array.isArray(paths) + \"|\" + paths.length + \"|\" + \
+         paths[0].endsWith(\"marker-one.txt\");\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    assert_eq!(
+        returned_string(&found),
+        "true|1|true",
+        "an fd result is a string[], not a process result: {found:?}"
+    );
+}
+
 // --- the epilogue: the model's own code, after `execute` ----------------
 
 /// §2's wall clock covers the **whole** of `run_cell`, not only `execute`.
