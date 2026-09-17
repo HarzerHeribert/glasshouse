@@ -219,3 +219,55 @@ Scratch project `.worktrees/dogfood-20260906c` (detached at `2507deb`), `main`'s
 - **Third turn, live model: the call completed.** With the consent pointed at `openai/gpt-oss-20b`, row 25 read *asked as groq/openai/gpt-oss-20b via openai-chat: recorded 0, lowered 0, speculative 0, duplicates 0, rejected 0; 422 ms* — the hook's request went out with the Keychain key, the model answered inside the bound, and a three-line documentation fold yielded nothing worth storing. `memories` stayed at 0 for that reason, not for a failure; the next session's task should be one that produces a durable fact (a design decision, an invariant) so the store side is exercised too.
 
 Session closed 08:00 after the third turn; findings packaged by risk above.
+
+
+### 2026-09-17 — two runs at the same hard task, with the harness rebuilt in between
+
+The shipped binary, driven non-interactively (`pane session --root <worktree> --task … --yolo`) on one
+brief: *implement the `ssh` tool from `docs/product/pane/network-tools.md` §5, with the ≥60 escape
+probes, verified by the gate*. Models: `gpt-5.6-sol` as the task model, `gpt-5.6-luna` as the helper
+tier, `jev-latest` deciding. Subscriptions only. Run 1 is session `tlitep-13fv`; run 2, after a day of
+fixes, is `tlj14m-24r` on the same brief from a fresh worktree.
+
+| | run 1 | run 2 |
+|---|---|---|
+| first `write`/`edit` | cell 67 | **cell 1** |
+| cells · turns | 120 · 247 | 120 · 249 |
+| tool calls per cell | 1.6 | 1.98 |
+| spend | 11.8M | 20.2M |
+| subagents | 3, each killed at an 8-turn default, each returning `""` | 3, ran to 12 turns, records on disk, `progress()` read by the parent |
+| descriptors | none existed | 120 of 120 cells |
+| outcome | 217 lines, **did not compile** (`no method named is_err_or`, a borrow-check move error) | compiles clean `--all-targets`; its own probes 3/3; `tests/tools.rs` 37/37 |
+
+**What the first run found, all of it fixed the same day:** the failure-reducer summarising `rg`
+results ("No failures." × 4, 23,098 cheap-model tokens for nothing); subagents dying at an
+undocumented 8-turn default and returning an empty string; the supervisor off by default *and* its
+nudge silently dropped for every tool-calling session; a change summary that read `No observed
+changes` in 112 of 123 views because the capture read file contents against a 16 MiB budget in a
+25.55 MiB repository; 121 `tool_use` blocks against 2 text blocks in 123 turns — the harness never
+spoke; and the `cells = 120` cap ending the task mid-implementation.
+
+**What the second run found, and these are the open ones:**
+
+- **The sandbox forbids a Rust build.** *"Normal Cargo is blocked from reading
+  `/Users/eneas/.rustup/settings.toml`."* The grant covers the project root; rustup's toolchain
+  resolution and the crate registry do not live there, so `cargo test` cannot run under `--yolo` at
+  all. The model spent a large share of 20.2M tokens working around it — copying `settings.toml`
+  into `.pane/scratch/`, then trying a standalone Homebrew compiler — instead of finishing the
+  feature. Run 1's `cancelled-no-result` test was the same wall, unrecognised.
+- **The gate refuses a git worktree.** `blast-radius: refusing -- … is not a git worktree`: a
+  worktree's `.git` is a file pointing into the main repository's `.git/worktrees/…`, outside the
+  granted root, so the script cannot see the metadata that proves what it is.
+- **A cell is meant to be a program and nothing says so.** 1.98 calls per cell, and 20 cells made no
+  call at all. Pane's premise is that one cell batches several calls into one turn; the preamble
+  never says it, so the model uses cells as single tool calls and pays two turns for each.
+- **The edit gate is a hard gate and is unpriced.** `runtime/bindings.rs:775` terminates a cell whose
+  `edit` has no correlated `context` result from the previous turn — sound protection against a stale
+  anchor, but it costs two turns per edit and fired 5 times here. The model is told the rule only
+  after it trips it.
+- **The cell cap ended the task again**, at 120 of 120, while it was verifying.
+
+**What did not go wrong, in either run:** the sandbox held, every refusal was precise, Jev classified
+the request identically both times (`intent modify 0.98`), and both runs reported their own
+incompleteness honestly rather than claiming success — run 2 naming exactly which parts of the §5
+contract it had not satisfied.
