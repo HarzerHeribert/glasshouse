@@ -1428,3 +1428,139 @@ fn the_inspector_names_a_failed_helper_as_failed() {
         "and never rendered as an answer:\n{rendered}"
     );
 }
+
+/// A long transcript, so the transcript region has more rows than it can show.
+fn long_conversation() -> Conversation {
+    let mut messages = Vec::new();
+    for turn in 0..40 {
+        messages.push(Message::text(Role::User, format!("question {turn}")));
+        messages.push(Message::text(Role::Assistant, format!("answer {turn}")));
+    }
+    Conversation {
+        system: String::new(),
+        messages,
+    }
+}
+
+/// The column the scroll overlay may use: the transcript's own last column.
+fn indicator_column(width: u16, height: u16, state: &ScreenState) -> u16 {
+    screen_regions(Rect::new(0, 0, width, height), state)
+        .transcript
+        .right()
+        - 1
+}
+
+fn column_symbols(buffer: &Buffer, column: u16) -> String {
+    (buffer.area.y..buffer.area.bottom())
+        .map(|y| buffer[(column, y)].symbol())
+        .collect()
+}
+
+#[test]
+fn nothing_marks_the_scroll_at_the_live_edge() {
+    let state = state();
+    let buffer = draw(80, 30, &state, &long_conversation(), &Notebook::default());
+    let column = column_symbols(&buffer, indicator_column(80, 30, &state));
+    assert!(
+        !column.contains('↓') && !column.contains('▐'),
+        "the resting screen draws no scroll furniture, got {column:?}"
+    );
+}
+
+#[test]
+fn a_scrolled_transcript_says_there_is_more_below() {
+    let state = ScreenState {
+        scrollback: 12,
+        ..state()
+    };
+    let buffer = draw(80, 30, &state, &long_conversation(), &Notebook::default());
+    let column = column_symbols(&buffer, indicator_column(80, 30, &state));
+    assert!(
+        column.contains('↓'),
+        "scrolled away from the live edge, the hidden content below is marked, got {column:?}"
+    );
+    assert!(
+        !column.contains('▐'),
+        "the position indicator belongs to an active scroll only, got {column:?}"
+    );
+}
+
+#[test]
+fn the_scroll_indicator_is_one_column_over_the_transcript_never_beside_the_sidebar() {
+    let state = ScreenState {
+        scrollback: 12,
+        scrolling: true,
+        sidebar: SidebarVisibility::Shown,
+        ..state()
+    };
+    // Wide enough that the sidebar is drawn beside the transcript.
+    let regions = screen_regions(Rect::new(0, 0, 160, 30), &state);
+    assert!(regions.details.width > 0, "this case needs the sidebar");
+    let buffer = draw(160, 30, &state, &long_conversation(), &Notebook::default());
+    let column = indicator_column(160, 30, &state);
+    assert!(
+        column < regions.details.x,
+        "the indicator's column {column} must lie inside the transcript, \
+         left of the sidebar at {}",
+        regions.details.x
+    );
+    assert!(
+        column_symbols(&buffer, column).contains('▐'),
+        "an active scroll shows the position indicator"
+    );
+    for x in regions.details.x..regions.details.right() {
+        let drawn = column_symbols(&buffer, x);
+        assert!(
+            !drawn.contains('▐') && !drawn.contains('↓'),
+            "no scroll mark may be drawn in the sidebar's columns, column {x} has {drawn:?}"
+        );
+    }
+}
+
+#[test]
+fn only_a_released_mouse_is_marked_on_the_status_line() {
+    let captured = draw(120, 30, &state(), &conversation(), &Notebook::default());
+    assert!(
+        !text(&captured).contains("mouse off"),
+        "captured is the default and needs no permanent marker"
+    );
+    assert!(
+        text(&captured).contains("/mouse"),
+        "but the idle hint still says how to free the pointer for selection"
+    );
+    let released = ScreenState {
+        mouse_off: true,
+        ..state()
+    };
+    let buffer = draw(120, 30, &released, &conversation(), &Notebook::default());
+    assert!(
+        text(&buffer).contains("mouse off"),
+        "a released pointer must be visible, or dead clicks read as a broken TUI"
+    );
+}
+
+#[test]
+fn the_context_reading_outranks_the_mouse_marker_on_a_narrow_status_line() {
+    let released = ScreenState {
+        mouse_off: true,
+        ..state()
+    };
+    let notebook = Notebook {
+        context: Some(ContextTokens {
+            used: 123_000,
+            cap: Some(200_000),
+            counted: Counted::Gateway,
+        }),
+        ..Notebook::default()
+    };
+    let narrow = draw(80, 30, &released, &conversation(), &notebook);
+    let rendered = text(&narrow);
+    assert!(
+        rendered.contains("ctx "),
+        "the context reading owns the right edge at every width:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("mouse off"),
+        "and the marker stands down rather than crowding it out:\n{rendered}"
+    );
+}

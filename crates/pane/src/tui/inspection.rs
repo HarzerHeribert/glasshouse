@@ -310,7 +310,10 @@ pub(super) fn render(
         ),
         body,
     );
-    render_scrollbar(frame, body, count, start);
+    // The inspector states its position in words on the hint line below, so
+    // it never needs the thumb: the quiet marker for "there is more under
+    // this" is the whole of what the overlay adds here.
+    super::scroll::render_scrollbar(frame, body, count, start, false);
     let hint = if area.width >= 100 {
         format!(
             "←/→ cell · ↑/↓ or wheel scroll · Home/End · Esc chat   rows {}–{} / {count}",

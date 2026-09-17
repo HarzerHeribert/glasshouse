@@ -620,6 +620,11 @@ fn the_masked_prompt_renders_bullets_and_never_the_key() {
 /// A source scan, not a behavioral test: `tui.rs` may call `render_table`
 /// and name the two token caps, and nothing else that would let it turn a
 /// handle into text on its own.
+///
+/// **The scan follows the file's successors.** The 2026-09-17 clickable-TUI
+/// move cut `scroll.rs`, `status.rs`, `composer.rs` and `hit.rs` out of
+/// `tui.rs` for the size ratchet; a rule that stopped at the original file
+/// would be a rule anything could step around by moving one function.
 #[test]
 fn the_tui_renders_no_handle_itself() {
     let source = include_str!("../src/tui.rs");
@@ -629,21 +634,29 @@ fn the_tui_renders_no_handle_itself() {
         "tui.rs must draw a handle only through the one renderer, render_table:\n{source}"
     );
 
-    let cleaned = source
-        .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")
-        .replace("crate::runtime::preview::TABLE_TOKEN_CAP", "");
-    assert!(
-        !cleaned.contains("runtime::preview::"),
-        "tui.rs must not reach into runtime::preview beyond the two token caps:\n{source}"
-    );
-    assert!(
-        !source.contains("render_preview"),
-        "tui.rs must not call render_preview itself -- render_table is the one renderer"
-    );
-    assert!(
-        !source.contains("Value::"),
-        "tui.rs must not match on a handle's Value itself"
-    );
+    for (name, source) in [
+        ("tui.rs", include_str!("../src/tui.rs")),
+        ("tui/scroll.rs", include_str!("../src/tui/scroll.rs")),
+        ("tui/status.rs", include_str!("../src/tui/status.rs")),
+        ("tui/composer.rs", include_str!("../src/tui/composer.rs")),
+        ("tui/hit.rs", include_str!("../src/tui/hit.rs")),
+    ] {
+        let cleaned = source
+            .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")
+            .replace("crate::runtime::preview::TABLE_TOKEN_CAP", "");
+        assert!(
+            !cleaned.contains("runtime::preview::"),
+            "{name} must not reach into runtime::preview beyond the two token caps:\n{source}"
+        );
+        assert!(
+            !source.contains("render_preview"),
+            "{name} must not call render_preview itself -- render_table is the one renderer"
+        );
+        assert!(
+            !source.contains("Value::"),
+            "{name} must not match on a handle's Value itself"
+        );
+    }
 }
 
 /// The helper lane lives in `tui/lane.rs` since the Phase 59 ratchet move of

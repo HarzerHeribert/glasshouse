@@ -3,14 +3,25 @@
 mod controls;
 mod history;
 pub use history::HistoryNote;
+mod composer;
+pub(crate) use composer::composer_offset;
+use composer::{composer_cursor, wrapped_input};
+mod hit;
+pub(crate) use hit::{Hit, ScreenGeometry, StatusField};
+
 mod inspection;
 pub use inspection::Inspection;
 mod lane;
 mod markdown;
 mod ribbon;
+mod scroll;
+pub use scroll::SCROLL_INDICATOR_LINGER;
+use scroll::render_scrollbar;
+mod status;
+use status::{compact_tokens, context_summary, footer_right_span, footer_row};
 mod telemetry;
+pub(crate) use controls::PanelHit;
 pub use controls::{Assignment, Mode, ModelGroup, Panel, PanelRow, StatusLine, TierModels};
-pub(crate) use controls::{PanelGeometry, PanelHit};
 pub(crate) use lane::helper_in_flight;
 use lane::{helper_fold, helper_lane, push_helper_lane};
 pub use telemetry::Pulse;
@@ -160,6 +171,16 @@ pub struct ScreenState {
     /// The composer is never part of the hide-set: a screen that cannot be
     /// typed into has taken something away rather than given room back.
     pub fullscreen: bool,
+    /// A scroll happened recently, so the position indicator is up. The
+    /// caller owns the clock and clears this after
+    /// [`SCROLL_INDICATOR_LINGER`]; the renderer only obeys it, which keeps
+    /// the drawing pure and testable.
+    pub scrolling: bool,
+    /// Mouse reporting is released to the terminal, so the person can select
+    /// and copy with a drag. Clicks do not land while this is set, which is
+    /// why the status line says so (the user, 2026-09-17: click-and-drag
+    /// selection must stay available).
+    pub mouse_off: bool,
     pub theme: Theme,
     pub settings_root: Option<std::path::PathBuf>,
     pub settings_profile: Option<String>,
@@ -895,8 +916,8 @@ pub(crate) fn render_screen_with_geometry(
     handles: &HandleTable,
     notebook: &Notebook,
     state: &ScreenState,
-) -> PanelGeometry {
-    let mut panel_geometry = PanelGeometry::default();
+) -> ScreenGeometry {
+    let mut geometry = ScreenGeometry::default();
     let regions = screen_regions(frame.area(), state);
     // An explicit canvas also paints blank cells when the caller creates a
     // fresh Terminal over pre-existing stdout; default blank cells do not.
@@ -966,6 +987,7 @@ pub(crate) fn render_screen_with_geometry(
             handles,
             notebook,
             state,
+            &mut geometry,
         );
     }
     if regions.details.width > 0 {
@@ -1001,7 +1023,7 @@ pub(crate) fn render_screen_with_geometry(
             Block::default().style(Style::default().fg(Color::White).bg(Color::Reset)),
             regions.transcript,
         );
-        panel_geometry = controls::render_panel(frame, regions.transcript, panel, state.theme);
+        geometry.panel = controls::render_panel(frame, regions.transcript, panel, state.theme);
     }
     ribbon::activity(frame, regions.activity, state);
     if let Some(notice) = &state.notice {
@@ -1090,6 +1112,18 @@ pub(crate) fn render_screen_with_geometry(
         }
     }
     if regions.input.height > 2 {
+        // Text column 0 sits two cells in, where the cursor is placed below;
+        // recorded from the same arithmetic so a click lands on the character
+        // the caret would.
+        geometry.record_composer(
+            Rect::new(
+                regions.input.x + 2,
+                regions.input.y + 1,
+                regions.input.width.saturating_sub(3),
+                regions.input.height - 2,
+            ),
+            skip,
+        );
         frame.render_widget(
             Paragraph::new(input_lines.into_iter().skip(skip).collect::<Vec<_>>())
                 .style(Style::default().bg(state.theme.dock())),
@@ -1127,11 +1161,24 @@ pub(crate) fn render_screen_with_geometry(
     let width = usize::from(regions.status.width);
     let mode = format!("{} · effort {}", state.mode.name(), state.effort.name());
     let identity = format!(" {} · {}", abbreviate(model, 28), abbreviate(project, 24));
-    let posture = format!(
+    let posture_head = format!(
         " sandbox {} · net:{}",
         abbreviate(sandbox, 16),
         abbreviate(network, 8)
     );
+    // **Only the released state is news.** Captured is the default and a
+    // permanent "· mouse" would be furniture, the same objection the scroll
+    // indicator answers. Released must be visible, or dead clicks read as a
+    // broken TUI -- and it is withheld below 90 columns because the context
+    // reading owns that row's right edge and a longer left half would collapse
+    // it away (`tui_live::telemetry_and_motion_are_local_controls_with_real_
+    // response_usage` pins that priority).
+    let mouse_mark = if state.mouse_off && width >= 90 {
+        " · mouse off"
+    } else {
+        ""
+    };
+    let posture = format!("{posture_head}{mouse_mark}");
     let spent = notebook
         .tokens
         .as_ref()
@@ -1162,8 +1209,32 @@ pub(crate) fn render_screen_with_geometry(
             matches!(state.activity, Activity::Thinking | Activity::Streaming),
         )
     });
+    // Which status row carries the mode as its right half, if any: the field
+    // is clickable only where it is actually drawn, and these three branches
+    // draw it in different places (`hit.rs`).
+    let mode_at: Option<usize> = if state.status_line == StatusLine::Compact {
+        context.is_none().then_some(0)
+    } else if width < 140 {
+        if width >= 100 {
+            Some(0)
+        } else {
+            context.is_none().then_some(1)
+        }
+    } else {
+        Some(0)
+    };
+    let identity_model = abbreviate(model, 28);
+    // Cloned before the rows consume them: the recorder below needs the same
+    // left halves the rows were laid out with.
+    let identity_for_width = identity.clone();
+    let posture_for_width = posture.clone();
     let status = if state.status_line == StatusLine::Compact {
-        vec![footer_row(identity, context.unwrap_or(mode), width, ACCENT)]
+        vec![footer_row(
+            identity,
+            context.unwrap_or(mode.clone()),
+            width,
+            ACCENT,
+        )]
     } else if width < 140 {
         vec![
             footer_row(
@@ -1178,35 +1249,74 @@ pub(crate) fn render_screen_with_geometry(
             ),
             footer_row(
                 posture,
-                context
-                    .clone()
-                    .unwrap_or_else(|| if width < 100 { mode } else { String::new() }),
+                context.clone().unwrap_or_else(|| {
+                    if width < 100 {
+                        mode.clone()
+                    } else {
+                        String::new()
+                    }
+                }),
                 width,
                 ACCENT,
             ),
             footer_row(
                 format!(" {connection}"),
-                spent.unwrap_or_else(|| "PgUp/PgDn chat · /cells inspect".into()),
+                spent.unwrap_or_else(|| {
+                    "PgUp/PgDn chat · /cells inspect · /mouse frees drag-select".into()
+                }),
                 width,
                 MUTED,
             ),
         ]
     } else {
         vec![
-            footer_row(identity, mode, width, ACCENT),
+            footer_row(identity, mode.clone(), width, ACCENT),
             footer_row(
                 format!("{posture} · {connection}"),
                 match (context, spent) {
                     (Some(context), Some(spent)) => format!("{context} · {spent}"),
                     (Some(context), None) => context,
                     (None, Some(spent)) => spent,
-                    (None, None) => "PgUp/PgDn chat · /cells inspect".into(),
+                    (None, None) => {
+                        "PgUp/PgDn chat · /cells inspect · /mouse frees drag-select".into()
+                    }
                 },
                 width,
                 ACCENT,
             ),
         ]
     };
+    // Recorded from the same strings and the same arithmetic `footer_row`
+    // lays the row out with, so what is clickable is what is on screen.
+    if regions.status.height > 0 && !identity_model.is_empty() {
+        let model_width = Line::from(identity_model.as_str())
+            .width()
+            .min(width.saturating_sub(1));
+        geometry.record_status(
+            Rect::new(
+                regions.status.x + 1,
+                regions.status.y,
+                model_width as u16,
+                1,
+            ),
+            StatusField::Model,
+        );
+    }
+    if let Some(row) =
+        mode_at.filter(|row| u16::try_from(*row).is_ok_and(|row| row < regions.status.height))
+    {
+        let left = match (state.status_line == StatusLine::Compact, width < 140, row) {
+            (true, _, _) => identity_for_width.clone(),
+            (false, true, 1) => posture_for_width.clone(),
+            _ => identity_for_width.clone(),
+        };
+        if let Some((x, span)) = footer_right_span(&left, &mode, width) {
+            geometry.record_status(
+                Rect::new(regions.status.x + x, regions.status.y + row as u16, span, 1),
+                StatusField::Mode,
+            );
+        }
+    }
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(MUTED)),
         regions.status,
@@ -1223,78 +1333,7 @@ pub(crate) fn render_screen_with_geometry(
             cell.set_bg(state.theme.accent());
         }
     }
-    panel_geometry
-}
-
-fn compact_tokens(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
-    }
-}
-
-/// A truthful, fixed-width occupancy trace. Motion changes only the marker at
-/// the measured boundary; it never changes how many cells appear filled.
-fn context_summary(tokens: ContextTokens, width: usize, tick: usize, moving: bool) -> String {
-    let Some(cap) = tokens.cap else {
-        return format!(
-            "ctx {} / window ? · {}",
-            compact_tokens(tokens.used),
-            tokens.counted.as_str()
-        );
-    };
-    let (bar, percent) = context_bar(tokens, width, tick, moving);
-    format!(
-        "ctx {bar} {}/{} {percent}%",
-        compact_tokens(tokens.used),
-        compact_tokens(cap)
-    )
-}
-
-fn context_bar(tokens: ContextTokens, width: usize, tick: usize, moving: bool) -> (String, u64) {
-    let cap = tokens.cap.unwrap_or(0);
-    let eighths = if cap == 0 {
-        0
-    } else {
-        ((tokens.used.min(cap) as u128 * (width * 8) as u128) / cap as u128) as usize
-    };
-    let full = eighths / 8;
-    let partial = eighths % 8;
-    let parts = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-    let mut bar = String::with_capacity(width);
-    for index in 0..width {
-        if index < full {
-            let glint = moving && full > 1 && index == tick % full;
-            bar.push(if glint { '◆' } else { '━' });
-        } else if index == full && partial > 0 {
-            bar.push(parts[partial]);
-        } else {
-            bar.push('─');
-        }
-    }
-    let percent = if cap == 0 {
-        0
-    } else {
-        ((tokens.used.min(cap) as u128 * 100) / cap as u128) as u64
-    };
-    (bar, percent)
-}
-
-/// Keep controls at the edge; omit optional hints when metadata fills the row.
-fn footer_row(left: String, right: String, width: usize, right_color: Color) -> Line<'static> {
-    let occupied = Line::from(left.as_str()).width() + Line::from(right.as_str()).width() + 2;
-    if right.is_empty() || occupied > width {
-        return Line::styled(abbreviate(&left, width), Style::default().fg(MUTED));
-    }
-    Line::from(vec![
-        Span::styled(left, Style::default().fg(MUTED)),
-        Span::raw(" ".repeat(width - occupied + 1)),
-        Span::styled(right, Style::default().fg(right_color)),
-        Span::raw(" "),
-    ])
+    geometry
 }
 
 /// Startup is caller-driven and immediately replaced by any real transcript.
@@ -1327,59 +1366,6 @@ fn abbreviate(text: &str, width: usize) -> String {
         out.push('…');
     }
     out
-}
-
-fn composer_cursor(input: &str, offset: usize, width: u16) -> (usize, usize) {
-    let mut offset = offset.min(input.len());
-    while !input.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let prefix = format!("{} ", &input[..offset]);
-    let rows = wrap_lines(
-        prefix
-            .split('\n')
-            .map(|line| Line::from(line.to_string()))
-            .collect(),
-        width,
-    );
-    (
-        rows.len().saturating_sub(1),
-        rows.last()
-            .map(|line| line.width().saturating_sub(1))
-            .unwrap_or(0),
-    )
-}
-
-fn wrapped_input(state: &ScreenState, width: u16) -> Vec<Line<'static>> {
-    // The masked prompt's arm is the whole reason this function takes the
-    // state rather than the text: `mask()` is the only spelling of an entered
-    // secret that exists outside the prompt itself.
-    let text = match state.secret_prompt.as_ref() {
-        Some(prompt) if prompt.is_empty() => "the key is not shown as you type".to_string(),
-        Some(prompt) => prompt.mask(),
-        None if state.input.is_empty() => "message or / for commands".to_string(),
-        None if state.cursor == Some(state.input.len()) => format!("{} ", state.input),
-        None => state.input.clone(),
-    };
-    wrap_lines(
-        text.split('\n')
-            .map(|line| Line::from(line.to_string()))
-            .collect(),
-        width.saturating_sub(2),
-    )
-    .into_iter()
-    .enumerate()
-    .map(|(i, mut line)| {
-        line.spans.insert(
-            0,
-            Span::styled(
-                if i == 0 { "› " } else { "│ " },
-                Style::default().fg(ACCENT),
-            ),
-        );
-        line
-    })
-    .collect()
 }
 
 /// Wrap graphemes before viewport slicing: newest rows cannot be lost to a
@@ -1422,7 +1408,18 @@ pub fn notebook_height(
     handles: &HandleTable,
     notebook: &Notebook,
 ) -> usize {
-    notebook_lines(conversation, handles, notebook, &[], false, false, 98, 0).len()
+    notebook_lines(
+        conversation,
+        handles,
+        notebook,
+        &[],
+        false,
+        false,
+        98,
+        0,
+        &mut Vec::new(),
+    )
+    .len()
 }
 
 /// One line with nothing to show. Never collapses to no line at all -- the
@@ -1462,7 +1459,15 @@ pub fn conversation_rows(
     state: &ScreenState,
     width: u16,
 ) -> usize {
-    conversation_lines(conversation, handles, notebook, state, width).len()
+    conversation_lines(
+        conversation,
+        handles,
+        notebook,
+        state,
+        width,
+        &mut Vec::new(),
+    )
+    .len()
 }
 
 fn conversation_lines(
@@ -1471,6 +1476,7 @@ fn conversation_lines(
     notebook: &Notebook,
     state: &ScreenState,
     width: u16,
+    headers: &mut Vec<(usize, usize)>,
 ) -> Vec<Line<'static>> {
     let mut content = notebook_lines(
         conversation,
@@ -1485,6 +1491,7 @@ fn conversation_lines(
         } else {
             state.animation_frame
         },
+        headers,
     );
     if let Some(raw_partial) = state.streaming_text.as_deref() {
         let visible = streaming_message_text(raw_partial);
@@ -1594,13 +1601,34 @@ fn render_conversation(
     handles: &HandleTable,
     notebook: &Notebook,
     state: &ScreenState,
+    geometry: &mut ScreenGeometry,
 ) {
-    let lines = conversation_lines(conversation, handles, notebook, state, area.width);
+    let mut headers = Vec::new();
+    let lines = conversation_lines(
+        conversation,
+        handles,
+        notebook,
+        state,
+        area.width,
+        &mut headers,
+    );
     let start = lines
         .len()
         .saturating_sub(usize::from(area.height))
         .saturating_sub(state.scrollback);
     let total_rows = lines.len();
+    // The same `lines` and the same `start` the draw below uses, so a header
+    // is clickable exactly where it is drawn and nowhere else (`hit.rs`).
+    for (index, cell) in headers {
+        if let Some(offset) = index.checked_sub(start)
+            && offset < usize::from(area.height)
+        {
+            geometry.record_cell(
+                Rect::new(area.x, area.y + offset as u16, area.width, 1),
+                cell,
+            );
+        }
+    }
     let lines: Vec<Line> = lines
         .into_iter()
         .skip(start)
@@ -1615,27 +1643,7 @@ fn render_conversation(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
-    render_scrollbar(frame, area, total_rows, start);
-}
-
-fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, start: usize) {
-    let height = usize::from(area.height);
-    if total <= height || height == 0 || area.width == 0 {
-        return;
-    }
-    let thumb = (height * height / total).max(1);
-    let top = start.min(total - height) * (height - thumb) / (total - height);
-    for row in 0..height {
-        let active = row >= top && row < top + thumb;
-        frame.render_widget(
-            Paragraph::new(if active { "┃" } else { "│" }).style(Style::default().fg(if active {
-                ACCENT
-            } else {
-                Color::DarkGray
-            })),
-            Rect::new(area.right() - 1, area.y + row as u16, 1, 1),
-        );
-    }
+    render_scrollbar(frame, area, total_rows, start, state.scrolling);
 }
 
 /// Preserve the viewed rows as new content arrives; zero remains live-follow.
@@ -1651,7 +1659,11 @@ pub fn anchor_scrollback(scroll: usize, previous: usize, current: usize, height:
     adjusted.min(current.saturating_sub(height))
 }
 
-fn turn_header(lines: &mut Vec<Line<'static>>, label: String, color: Color) {
+/// Pushes a turn's header and answers **which line it is**, so a caller that
+/// knows the header belongs to a cell can record that line as clickable
+/// without searching for it afterwards (`hit.rs`: the map is built by the
+/// draw). Callers that have nothing to record ignore the index.
+fn turn_header(lines: &mut Vec<Line<'static>>, label: String, color: Color) -> usize {
     if !lines.is_empty() {
         lines.push(Line::styled("╰─", Style::default().fg(MUTED)));
         lines.push(Line::from(""));
@@ -1660,6 +1672,7 @@ fn turn_header(lines: &mut Vec<Line<'static>>, label: String, color: Color) {
         format!("╭─ {label}"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     ));
+    lines.len() - 1
 }
 
 /// The recap's own header. It names the author and denies the mistake,
@@ -1721,6 +1734,9 @@ fn notebook_lines(
     pretty: bool,
     width: usize,
     tick: usize,
+    // Line index -> the cell that line's header belongs to, filled as the
+    // headers are pushed. A caller with no use for it passes a scratch vector.
+    headers: &mut Vec<(usize, usize)>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut messages = conversation.messages.iter();
@@ -1809,11 +1825,14 @@ fn notebook_lines(
                                 } else {
                                     "◇ Cell preparing · nothing has run"
                                 };
-                                turn_header(
-                                    &mut lines,
-                                    format!("{label}  · {cell}{}", helper_fold(view)),
-                                    if failed { Color::Red } else { ACCENT },
-                                );
+                                headers.push((
+                                    turn_header(
+                                        &mut lines,
+                                        format!("{label}  · {cell}{}", helper_fold(view)),
+                                        if failed { Color::Red } else { ACCENT },
+                                    ),
+                                    cell,
+                                ));
                                 push_helper_lane(&mut lines, view, tick, width);
                                 let none_ran = view
                                     .and_then(|v| v.execution.as_deref())
@@ -1854,7 +1873,9 @@ fn notebook_lines(
                                     }
                                 }
                                 lines.push(Line::styled(
-                                    format!("Ctrl-O · code and results · /cell {cell} inspect"),
+                                    format!(
+                                        "Ctrl-O · code and results · /cell {cell} or click this header"
+                                    ),
                                     Style::default().fg(MUTED),
                                 ));
                             }
@@ -1960,11 +1981,14 @@ fn notebook_lines(
                 } else {
                     ""
                 };
-                turn_header(
-                    &mut lines,
-                    format!("{role}  [{cell}] in{execution}{}", helper_fold(view)),
-                    ACCENT,
-                );
+                headers.push((
+                    turn_header(
+                        &mut lines,
+                        format!("{role}  [{cell}] in{execution}{}", helper_fold(view)),
+                        ACCENT,
+                    ),
+                    cell,
+                ));
                 push_helper_lane(&mut lines, view, tick, width);
                 if let Some(target) = view.and_then(|v| v.repaired_from) {
                     lines.push(Line::styled(
@@ -2022,7 +2046,10 @@ fn notebook_lines(
                     );
                     push_text_region(&mut lines, execution);
                 }
-                turn_header(&mut lines, format!("TOOL / PREVIEW  [{cell}] out"), MUTED);
+                headers.push((
+                    turn_header(&mut lines, format!("TOOL / PREVIEW  [{cell}] out"), MUTED),
+                    cell,
+                ));
                 match view.and_then(|view| view.table.as_deref()) {
                     Some(table) => push_output_region(&mut lines, table.to_string(), compact),
                     None if cell == total_cells => push_output_region(
@@ -2037,7 +2064,10 @@ fn notebook_lines(
                     push_folded_region(&mut lines, stdout, 6, compact);
                 }
                 if let Some(output) = view.and_then(|view| view.output.as_deref()) {
-                    turn_header(&mut lines, format!("OUTPUT  [{cell}]"), MUTED);
+                    headers.push((
+                        turn_header(&mut lines, format!("OUTPUT  [{cell}]"), MUTED),
+                        cell,
+                    ));
                     lines.extend(markdown::render(&pretty_json(output), width));
                 }
                 if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
@@ -2048,7 +2078,10 @@ fn notebook_lines(
                 }
 
                 if let Some(error) = view.and_then(|view| view.error.as_ref()) {
-                    turn_header(&mut lines, format!("ERROR  [{cell}] error"), Color::Red);
+                    headers.push((
+                        turn_header(&mut lines, format!("ERROR  [{cell}] error"), Color::Red),
+                        cell,
+                    ));
                     push_error_region(&mut lines, error);
                 }
                 if let Some(returned) = view.and_then(|view| view.returned.as_deref()) {

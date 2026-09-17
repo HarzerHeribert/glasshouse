@@ -173,7 +173,7 @@ fn context_window(
     let provenance = tokens.counted.as_str();
     match tokens.cap {
         Some(cap) => {
-            let (bar, percent) = super::context_bar(
+            let (bar, percent) = super::status::context_bar(
                 tokens,
                 width,
                 state.animation_frame,

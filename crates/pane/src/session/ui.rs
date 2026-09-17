@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{self, Activity, Notebook, ScreenState, SidebarVisibility};
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -561,27 +559,76 @@ fn tick_helper_clocks(notebook: &mut Notebook, since: &mut HashMap<(usize, usize
     }
 }
 
-fn select_panel_at(
-    panel: &mut tui::Panel,
-    geometry: &tui::PanelGeometry,
-    mouse: MouseEvent,
-) -> bool {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-        return false;
+/// Opens a cell's inspection: **the one path `/cell <n>` and a click on that
+/// cell's header both take**, so the two routes cannot drift into doing
+/// different things (`tui::hit`: every click has a keyboard twin).
+fn open_cell(state: &mut ScreenState, notebook: &Notebook, cell: usize) {
+    state.inspection = tui::Inspection::open(cell, notebook);
+    state.telemetry_open = false;
+    state.panel = None;
+    if state.inspection.is_none() {
+        state.note("No recorded cell at that number yet. Use /cells after an action.");
     }
-    match geometry.hit(mouse.column, mouse.row) {
-        Some(tui::PanelHit::Provider(index)) => panel.select_provider(index),
-        Some(tui::PanelHit::Model(index)) => panel.select_model_row(index),
+}
+
+/// The input Shift-Tab and a click on the mode field both send, or the
+/// sentence both show instead while a task is running.
+fn mode_change(busy: bool, mode: tui::Mode) -> Result<String, &'static str> {
+    if busy {
+        return Err("Change mode after the current task finishes.");
+    }
+    Ok(format!("/mode {}", mode.next().name()))
+}
+
+/// Turns mouse reporting on or off, sets the state the status line draws
+/// from, and says what just happened.
+///
+/// **What capture actually takes, and what it leaves.** Pane asks for
+/// [`ENABLE_MOUSE_REPORTING`] — `?1000` press/release and the `?1006` SGR
+/// encoding — and deliberately **not** `?1002`/`?1003` motion tracking, so a
+/// pointer dragged across the window is never reported to Pane. What the
+/// terminal does with that drag is then the terminal's own decision: most
+/// keep Shift for native selection whatever the application asked for, and
+/// several select on an unmodified drag too once no motion is requested. That
+/// is a terminal's behaviour, not a promise this program can make, which is
+/// the whole reason for the explicit release below.
+///
+/// **Released, the terminal owns the pointer again and no click reaches
+/// Pane** — including a click on the marker that would take it back, which is
+/// why both routes are keys: `/mouse` and Ctrl-G.
+fn set_mouse_capture(state: &mut tui::ScreenState, on: bool) {
+    if on {
+        if enable_mouse_reporting().is_err() {
+            state.note("This terminal did not accept the mouse-mode change.");
+            return;
+        }
+    } else {
+        disable_mouse_reporting();
+    }
+    state.mouse_off = !on;
+    state.note(if on {
+        "Mouse on: clicks reach Pane. /mouse or Ctrl-G releases it for selection."
+    } else {
+        "Mouse released: drag to select and copy. /mouse or Ctrl-G takes it back."
+    });
+}
+
+/// Applies one panel hit. The hit test itself now lives in
+/// `tui::ScreenGeometry`, which asks the panel first because it is drawn over
+/// the transcript.
+fn select_panel_at(panel: &mut tui::Panel, hit: tui::PanelHit) -> bool {
+    match hit {
+        tui::PanelHit::Provider(index) => panel.select_provider(index),
+        tui::PanelHit::Model(index) => panel.select_model_row(index),
         // The roster's whole point over Tab: the tier you want is already on
         // screen, so reaching it is one click rather than up to two cycles.
-        Some(tui::PanelHit::Tier(tier)) => panel.select_tier(tier),
-        Some(tui::PanelHit::Order(order)) => panel.select_order(order),
-        Some(tui::PanelHit::Mode(index)) => {
+        tui::PanelHit::Tier(tier) => panel.select_tier(tier),
+        tui::PanelHit::Order(order) => panel.select_order(order),
+        tui::PanelHit::Mode(index) => {
             panel.select_model_row(index);
             panel.stage();
             true
         }
-        None => false,
     }
 }
 
@@ -626,7 +673,10 @@ fn run(
     let mut helper_clocks: HashMap<(usize, usize), Instant> = HashMap::new();
     let mut previous_rows = 0usize;
     let mut viewport_height = 10usize;
-    let mut panel_geometry = tui::PanelGeometry::default();
+    let mut geometry = tui::ScreenGeometry::default();
+    // When the position indicator came up, so it can go down again after
+    // `tui::SCROLL_INDICATOR_LINGER` without a timer of its own.
+    let mut last_scroll: Option<Instant> = None;
     let mut approvals: std::collections::VecDeque<crate::approval::Request> =
         std::collections::VecDeque::new();
     let mut approval_scroll = 0u16;
@@ -767,6 +817,13 @@ fn run(
             last_tick = Instant::now();
             dirty = true;
         }
+        if state.scrolling
+            && last_scroll.is_some_and(|at| at.elapsed() >= tui::SCROLL_INDICATOR_LINGER)
+        {
+            state.scrolling = false;
+            last_scroll = None;
+            dirty = true;
+        }
         if dirty {
             tick_helper_clocks(&mut notebook, &mut helper_clocks);
             state.input = editor.text.clone();
@@ -801,7 +858,7 @@ fn run(
                 );
             }
             terminal.draw(|frame| {
-                panel_geometry = tui::render_screen_with_geometry(
+                geometry = tui::render_screen_with_geometry(
                     frame,
                     &conversation,
                     &served,
@@ -846,16 +903,65 @@ fn run(
                     dirty = true;
                     continue;
                 }
-                if state
-                    .panel
-                    .as_mut()
-                    .is_some_and(|panel| select_panel_at(panel, &panel_geometry, mouse))
-                {
-                    dirty = true;
-                    continue;
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    match geometry.hit(mouse.column, mouse.row) {
+                        // The picker's own rows, exactly as they behaved
+                        // before the rest of the screen became clickable.
+                        Some(tui::Hit::Panel(hit)) => {
+                            if state
+                                .panel
+                                .as_mut()
+                                .is_some_and(|panel| select_panel_at(panel, hit))
+                            {
+                                dirty = true;
+                                continue;
+                            }
+                        }
+                        // The same thing `/cell <n>` does, on the cell whose
+                        // header was clicked.
+                        Some(tui::Hit::Cell(cell)) => {
+                            open_cell(&mut state, &notebook, cell);
+                            dirty = true;
+                            continue;
+                        }
+                        // `/model`, submitted for the person: one route, so
+                        // the picker cannot open two different ways.
+                        Some(tui::Hit::Status(tui::StatusField::Model)) => {
+                            let _ = answers.inputs.send(Input::Submit("/model".into()));
+                            dirty = true;
+                            continue;
+                        }
+                        // Shift-Tab's own path, refusal included.
+                        Some(tui::Hit::Status(tui::StatusField::Mode)) => {
+                            match mode_change(busy, state.mode) {
+                                Ok(input) => {
+                                    busy = true;
+                                    let _ = answers.inputs.send(Input::Submit(input));
+                                }
+                                Err(refusal) => state.notice = Some(refusal.into()),
+                            }
+                            dirty = true;
+                            continue;
+                        }
+                        // Where the arrow keys would have walked to.
+                        Some(tui::Hit::Composer { row, column }) => {
+                            let width = terminal.size()?.width;
+                            editor.cursor = tui::composer_offset(
+                                &editor.text,
+                                row,
+                                column,
+                                width.saturating_sub(2),
+                            );
+                            dirty = true;
+                            continue;
+                        }
+                        None => {}
+                    }
                 }
                 let up = mouse.kind == MouseEventKind::ScrollUp;
                 if up || mouse.kind == MouseEventKind::ScrollDown {
+                    state.scrolling = true;
+                    last_scroll = Some(Instant::now());
                     if let Some(inspection) = state.inspection.as_mut() {
                         inspection.scroll = if up {
                             inspection.scroll.saturating_sub(3)
@@ -1182,13 +1288,12 @@ fn run(
                     }
                 }
                 if key.code == KeyCode::BackTab {
-                    if !busy {
-                        busy = true;
-                        let _ = answers
-                            .inputs
-                            .send(Input::Submit(format!("/mode {}", state.mode.next().name())));
-                    } else {
-                        state.notice = Some("Change mode after the current task finishes.".into());
+                    match mode_change(busy, state.mode) {
+                        Ok(input) => {
+                            busy = true;
+                            let _ = answers.inputs.send(Input::Submit(input));
+                        }
+                        Err(refusal) => state.notice = Some(refusal.into()),
                     }
                     continue;
                 }
@@ -1222,6 +1327,15 @@ fn run(
                         }
                         KeyCode::Char('f') => {
                             state.fullscreen = !state.fullscreen;
+                            continue;
+                        }
+                        // Give the pointer back to the terminal, and take it
+                        // again. Ctrl-G because Ctrl-E, Ctrl-A, Ctrl-U and
+                        // Ctrl-K are the composer's, and Ctrl-S and Ctrl-Q
+                        // are the terminal's own flow control.
+                        KeyCode::Char('g') => {
+                            let off = !state.mouse_off;
+                            set_mouse_capture(&mut state, !off);
                             continue;
                         }
                         KeyCode::Home => {
@@ -1271,12 +1385,10 @@ fn run(
                                 Some(value) => value.parse::<usize>().unwrap_or(0),
                                 None => tui::Inspection::latest(&notebook).unwrap_or(0),
                             };
-                            state.inspection = tui::Inspection::open(cell, &notebook);
-                            state.telemetry_open = false;
-                            state.panel = None;
-                            if state.inspection.is_none() {
-                                state.note("No recorded cell at that number yet. Use /cells after an action.");
-                            } else if let Some(line) = &notebook.decision {
+                            open_cell(&mut state, &notebook, cell);
+                            if state.inspection.is_some()
+                                && let Some(line) = &notebook.decision
+                            {
                                 state.note(line.clone());
                             }
                         }
@@ -1293,6 +1405,12 @@ fn run(
                     // rather than with `/sidebar`, so it still works while a
                     // task runs -- watching a long stream fill the screen is
                     // the case this command exists for.
+                    if editor.text.trim() == "/mouse" {
+                        editor.take();
+                        let off = !state.mouse_off;
+                        set_mouse_capture(&mut state, !off);
+                        continue;
+                    }
                     if editor.text.trim() == "/fullscreen" {
                         editor.take();
                         state.fullscreen = !state.fullscreen;
@@ -1668,10 +1786,21 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn point_for(geometry: &tui::PanelGeometry, hit: tui::PanelHit) -> (u16, u16) {
+    /// Clicks the rendered point that answers `hit`, through the screen's own
+    /// hit test, so the test exercises the same route a real click takes.
+    fn click_panel(state: &mut ScreenState, hit: tui::PanelHit) -> bool {
+        let geometry = render_panel_geometry(state);
+        let (column, row) = point_for(&geometry, hit);
+        match geometry.hit(column, row) {
+            Some(tui::Hit::Panel(hit)) => select_panel_at(state.panel.as_mut().unwrap(), hit),
+            other => panic!("expected a panel hit at {column},{row}, got {other:?}"),
+        }
+    }
+
+    fn point_for(geometry: &tui::ScreenGeometry, hit: tui::PanelHit) -> (u16, u16) {
         for row in 0..24 {
             for column in 0..80 {
-                if geometry.hit(column, row) == Some(hit) {
+                if geometry.hit(column, row) == Some(tui::Hit::Panel(hit)) {
                     return (column, row);
                 }
             }
@@ -1679,9 +1808,9 @@ mod tests {
         panic!("no rendered point for {hit:?}");
     }
 
-    fn render_panel_geometry(state: &ScreenState) -> tui::PanelGeometry {
+    fn render_panel_geometry(state: &ScreenState) -> tui::ScreenGeometry {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        let mut geometry = tui::PanelGeometry::default();
+        let mut geometry = tui::ScreenGeometry::default();
         terminal
             .draw(|frame| {
                 geometry = tui::render_screen_with_geometry(
@@ -1727,18 +1856,7 @@ mod tests {
             ..ScreenState::default()
         };
 
-        let geometry = render_panel_geometry(&state);
-        let (column, row) = point_for(&geometry, tui::PanelHit::Provider(1));
-        assert!(select_panel_at(
-            state.panel.as_mut().unwrap(),
-            &geometry,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            }
-        ));
+        assert!(click_panel(&mut state, tui::PanelHit::Provider(1)));
         let panel = state.panel.as_ref().unwrap();
         assert_eq!(
             panel.rows[panel.selected].command.as_deref(),
@@ -1746,18 +1864,7 @@ mod tests {
             "a provider click changes the tab and highlights its first model"
         );
 
-        let geometry = render_panel_geometry(&state);
-        let (column, row) = point_for(&geometry, tui::PanelHit::Model(2));
-        assert!(select_panel_at(
-            state.panel.as_mut().unwrap(),
-            &geometry,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            }
-        ));
+        assert!(click_panel(&mut state, tui::PanelHit::Model(2)));
         let panel = state.panel.as_ref().unwrap();
         assert_eq!(panel.selected, 2);
         assert_eq!(panel.rows[2].command.as_deref(), Some("/model o-two"));
@@ -1766,30 +1873,14 @@ mod tests {
             "selection alone must not apply or close"
         );
 
-        assert!(!select_panel_at(
-            state.panel.as_mut().unwrap(),
-            &tui::PanelGeometry::default(),
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            }
-        ));
+        assert_eq!(
+            tui::ScreenGeometry::default().hit(4, 4),
+            None,
+            "a geometry nobody drew into hits nothing"
+        );
         assert_eq!(state.panel.as_ref().unwrap().selected, 2);
         let click = |state: &mut ScreenState, hit| {
-            let geometry = render_panel_geometry(state);
-            let (column, row) = point_for(&geometry, hit);
-            assert!(select_panel_at(
-                state.panel.as_mut().unwrap(),
-                &geometry,
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column,
-                    row,
-                    modifiers: KeyModifiers::NONE,
-                }
-            ));
+            assert!(click_panel(state, hit));
         };
         click(
             &mut state,
@@ -1842,5 +1933,154 @@ mod tests {
         assert_eq!(editor.text, "sent");
         editor.recall(false);
         assert_eq!(editor.text, "draft");
+    }
+
+    /// A transcript with one executed cell, so the renderer draws a cell
+    /// header the hit map can point at.
+    fn cell_conversation() -> (Conversation, Notebook) {
+        let conversation = Conversation {
+            system: String::new(),
+            messages: vec![
+                crate::contract::Message::text(crate::contract::Role::User, "do the thing"),
+                crate::contract::Message::text(
+                    crate::contract::Role::Assistant,
+                    "```pane\nawait read({path: \"a\"});\n```",
+                ),
+            ],
+        };
+        let mut notebook = Notebook::default();
+        notebook.set(
+            1,
+            tui::CellView {
+                execution: Some("read a".into()),
+                ..tui::CellView::default()
+            },
+        );
+        (conversation, notebook)
+    }
+
+    /// Renders once and hands back both halves: the hit map, and the buffer
+    /// it was built from. **The pair is the point** -- a test that only reads
+    /// the map cannot tell a correct rectangle from one a row out of place.
+    fn render_geometry(
+        state: &ScreenState,
+        conversation: &Conversation,
+        notebook: &Notebook,
+    ) -> (tui::ScreenGeometry, ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut geometry = tui::ScreenGeometry::default();
+        terminal
+            .draw(|frame| {
+                geometry = tui::render_screen_with_geometry(
+                    frame,
+                    conversation,
+                    &ServedBy::default(),
+                    &crate::runtime::handles::HandleTable::new(),
+                    notebook,
+                    state,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (geometry, buffer)
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, row: u16) -> String {
+        (buffer.area.x..buffer.area.right())
+            .map(|x| buffer[(x, row)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn clicking_a_cell_header_opens_what_slash_cell_opens() {
+        let (conversation, notebook) = cell_conversation();
+        let state = ScreenState::default();
+        let (geometry, buffer) = render_geometry(&state, &conversation, &notebook);
+        let point = (0..30)
+            .flat_map(|row| (0..100).map(move |column| (column, row)))
+            .find(|(column, row)| geometry.hit(*column, *row) == Some(tui::Hit::Cell(1)));
+        let (column, row) = point.expect("the drawn cell header is in the hit map");
+        // The drift guard: the clickable row must be the row the header was
+        // drawn on, not a neighbour of it.
+        let drawn = row_text(&buffer, row);
+        assert!(
+            drawn.contains("[1]") || drawn.contains("· 1"),
+            "the hit row must carry cell 1's own header as it was drawn; \
+             row {row} is {drawn:?}"
+        );
+
+        let mut clicked = ScreenState::default();
+        match geometry.hit(column, row) {
+            Some(tui::Hit::Cell(cell)) => open_cell(&mut clicked, &notebook, cell),
+            other => panic!("expected a cell hit, got {other:?}"),
+        }
+        let mut typed = ScreenState::default();
+        open_cell(&mut typed, &notebook, 1);
+
+        assert!(clicked.inspection.is_some(), "the click opened the cell");
+        assert_eq!(
+            clicked.inspection.is_some(),
+            typed.inspection.is_some(),
+            "the click and `/cell 1` reach the same state"
+        );
+    }
+
+    #[test]
+    fn clicking_the_mode_field_sends_what_shift_tab_sends() {
+        let state = ScreenState::default();
+        let (geometry, _) = render_geometry(&state, &Conversation::default(), &Notebook::default());
+        let hit = (0..30)
+            .flat_map(|row| (0..100).map(move |column| (column, row)))
+            .find_map(|(column, row)| geometry.hit(column, row))
+            .is_some();
+        assert!(hit, "something on the drawn screen is clickable");
+        assert_eq!(
+            mode_change(false, state.mode),
+            Ok(format!("/mode {}", state.mode.next().name())),
+            "the click and Shift-Tab submit the same input"
+        );
+        assert_eq!(
+            mode_change(true, state.mode),
+            Err("Change mode after the current task finishes."),
+            "and both refuse the same way while a task runs"
+        );
+    }
+
+    #[test]
+    fn the_status_fields_are_where_the_status_line_drew_them() {
+        let state = ScreenState {
+            model: Some("a-model".into()),
+            project: Some("a-project".into()),
+            ..ScreenState::default()
+        };
+        let regions = tui::screen_regions(ratatui::layout::Rect::new(0, 0, 100, 30), &state);
+        let (geometry, _) = render_geometry(&state, &Conversation::default(), &Notebook::default());
+        let model = (0..100)
+            .find(|column| {
+                geometry.hit(*column, regions.status.y)
+                    == Some(tui::Hit::Status(tui::StatusField::Model))
+            })
+            .expect("the model field is clickable on the status line it is drawn on");
+        assert!(
+            regions.status.height > 0 && model < regions.status.right(),
+            "the field lies inside the status region the renderer used"
+        );
+        assert_eq!(
+            geometry.hit(model, regions.status.y.saturating_sub(4)),
+            None,
+            "and nowhere else"
+        );
+    }
+
+    #[test]
+    fn a_click_on_empty_transcript_space_does_nothing() {
+        let (conversation, notebook) = cell_conversation();
+        let (geometry, _) = render_geometry(&ScreenState::default(), &conversation, &notebook);
+        let regions = tui::screen_regions(
+            ratatui::layout::Rect::new(0, 0, 100, 30),
+            &ScreenState::default(),
+        );
+        // The row above the first drawn line of the transcript body.
+        assert_eq!(geometry.hit(50, regions.transcript.y), None);
     }
 }
