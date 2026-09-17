@@ -209,13 +209,13 @@ pub fn check(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for required in &contract.required_paths {
-        if !root.join(required).exists() {
+        if !under(root, required).exists() {
             findings.push(Finding {
                 kind: FindingKind::RequiredMissing,
-                path: Some(root.join(required)),
+                path: Some(under(root, required)),
                 sentence: format!(
                     "Create {}; the task requires it as a deliverable and it does not exist.",
-                    root.join(required).display()
+                    under(root, required).display()
                 ),
             });
         }
@@ -227,17 +227,17 @@ pub fn check(
             if glob_match(pattern, &text) || (!pattern.contains('/') && glob_match(pattern, name)) {
                 findings.push(Finding {
                     kind: FindingKind::ForbiddenPresent,
-                    path: Some(root.join(path)),
+                    path: Some(under(root, path)),
                     sentence: format!(
                         "Remove {}; it matches the forbidden pattern `{pattern}`.",
-                        root.join(path).display()
+                        under(root, path).display()
                     ),
                 });
             }
         }
     }
     for (dir, allowed) in &contract.exclusive_dirs {
-        let Ok(entries) = fs::read_dir(root.join(dir)) else {
+        let Ok(entries) = fs::read_dir(under(root, dir)) else {
             continue;
         };
         let mut names: Vec<String> = entries
@@ -249,11 +249,11 @@ pub fn check(
             if !allowed.iter().any(|a| a == &name) {
                 findings.push(Finding {
                     kind: FindingKind::ExclusiveDirExtra,
-                    path: Some(root.join(dir).join(&name)),
+                    path: Some(under(root, dir).join(&name)),
                     sentence: format!(
                         "Remove {} or name it in the contract; {} may contain only {}.",
-                        root.join(dir).join(&name).display(),
-                        root.join(dir).display(),
+                        under(root, dir).join(&name).display(),
+                        under(root, dir).display(),
                         allowed.join(", ")
                     ),
                 });
@@ -269,20 +269,20 @@ pub fn check(
         }
         let dir = path.parent().unwrap_or(Path::new(""));
         let outside = match &contract.coverage_tree {
-            Some(tree) => (!path.starts_with(tree)).then(|| root.join(tree)),
+            Some(tree) => (!path.starts_with(tree)).then(|| under(root, tree)),
             None => None,
         };
         let elsewhere = coverage_source_dir(path, &sources)
             .filter(|source_dir| source_dir != dir)
-            .map(|source_dir| root.join(source_dir));
+            .map(|source_dir| under(root, &source_dir));
         if let Some(expected) = outside.or(elsewhere) {
             flagged.insert(path.clone());
             findings.push(Finding {
                 kind: FindingKind::CoverageOutsideTree,
-                path: Some(root.join(path)),
+                path: Some(under(root, path)),
                 sentence: format!(
                     "Move {} under {}, where the verifier looks for coverage data, or build with coverage there.",
-                    root.join(path).display(),
+                    under(root, path).display(),
                     expected.display()
                 ),
             });
@@ -307,13 +307,13 @@ pub fn check(
         let sibling = files
             .present()
             .find(|p| p.parent() == Some(dir) && !is_artifact(root, p))
-            .map(|p| root.join(p));
+            .map(|p| under(root, p));
         findings.push(Finding {
             kind: FindingKind::UnexpectedArtifact,
-            path: Some(root.join(path)),
+            path: Some(under(root, path)),
             sentence: format!(
                 "Remove {} or name it as a deliverable; it is a compiled artifact beside {}.",
-                root.join(path).display(),
+                under(root, path).display(),
                 sibling.map_or_else(
                     || "task-edited files".to_string(),
                     |p| p.display().to_string()
@@ -407,6 +407,19 @@ pub fn fresh_checker_evidence(
         out.push_str(", and does each acceptance item above hold? Name any that does not.\n");
     }
     out
+}
+
+/// `relative` under `root`, spelled with the platform's one separator. A
+/// contract key is written with `/`, and on Windows `Path::join` keeps it
+/// verbatim beside a native root, so a finding would name
+/// `C:\t\sqlite-gcov-build/btree.gcno`; rebuilding the key from its
+/// components (which split on either separator there) spells it natively.
+/// Where `/` is already the separator this is exactly `root.join(relative)`.
+fn under(root: &Path, relative: &Path) -> PathBuf {
+    if std::path::MAIN_SEPARATOR == '/' {
+        return root.join(relative);
+    }
+    root.join(relative.components().collect::<PathBuf>())
 }
 
 fn slashed(path: &Path) -> String {

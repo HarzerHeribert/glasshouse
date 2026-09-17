@@ -719,23 +719,21 @@ impl TaskState {
             if let Some((_, answer)) = self.completion_answer.clone() {
                 let decisions_on = decisions_config.mode == crate::config::DecisionMode::On;
                 let mut finding_added = false;
-                if answer.noul <= decisions_config.completion_no_below {
-                    if decisions_on {
-                        findings.push(crate::completion::Finding {
-                            kind: crate::completion::FindingKind::RequestNotSatisfied,
-                            path: None,
-                            sentence: format!(
-                                "the decision model reads {} as not satisfying the request ({:.2})",
-                                if use_answer_state {
-                                    "the answer"
-                                } else {
-                                    "the diff"
-                                },
-                                answer.noul
-                            ),
-                        });
-                        finding_added = true;
-                    }
+                if answer.noul <= decisions_config.completion_no_below && decisions_on {
+                    findings.push(crate::completion::Finding {
+                        kind: crate::completion::FindingKind::RequestNotSatisfied,
+                        path: None,
+                        sentence: format!(
+                            "the decision model reads {} as not satisfying the request ({:.2})",
+                            if use_answer_state {
+                                "the answer"
+                            } else {
+                                "the diff"
+                            },
+                            answer.noul
+                        ),
+                    });
+                    finding_added = true;
                 }
 
                 let mut hygiene_findings = 0u32;

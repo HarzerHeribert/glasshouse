@@ -11,7 +11,6 @@
 //! copied from `request_modes.rs` rather than shared, per that file's own
 //! FORBIDDEN note in the packet.
 
-use serde_json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -470,7 +469,6 @@ fn family_substitution_and_evaluation() {
 #[test]
 fn family_paths_and_tools() {
     let mut findings: Vec<Finding> = Vec::new();
-    let probe_count;
 
     // 1. write outside the root via `..`
     {
@@ -645,7 +643,7 @@ fn family_paths_and_tools() {
         }
     }
 
-    probe_count = 3 + 3 * 2 + 1 + 2;
+    let probe_count = 3 + 3 * 2 + 1 + 2;
     assert!(
         findings.is_empty(),
         "{probe_count} probes run, escapes:\n{}",
@@ -678,7 +676,8 @@ fn spy_listener() -> (u16, Arc<Mutex<bool>>) {
 #[test]
 fn family_network() {
     let mut findings: Vec<Finding> = Vec::new();
-    let cases: &[(&str, fn(u16) -> String)] = &[
+    type ProbeCase = (&'static str, fn(u16) -> String);
+    let cases: &[ProbeCase] = &[
         ("curl", |port| format!("curl http://127.0.0.1:{port}")),
         ("nc", |port| format!("nc 127.0.0.1 {port}")),
         ("python3 http.client", |port| {

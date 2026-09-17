@@ -26,6 +26,16 @@ fn write(root: &Path, relative: &str, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+/// A `/`-written relative key as a finding names it: the platform's own
+/// separator, so `polyglot\cmain` on Windows.
+fn native(key: &str) -> String {
+    Path::new(key)
+        .components()
+        .collect::<PathBuf>()
+        .display()
+        .to_string()
+}
+
 fn kinds(findings: &[Finding]) -> Vec<FindingKind> {
     findings.iter().map(|f| f.kind).collect()
 }
@@ -42,7 +52,7 @@ fn a_compiled_binary_beside_the_deliverable_is_an_unexpected_artifact() {
     assert_eq!(kinds(&findings), vec![FindingKind::UnexpectedArtifact]);
     let sentence = &findings[0].sentence;
     assert!(sentence.starts_with("Remove "), "{sentence}");
-    assert!(sentence.contains("polyglot/cmain"), "{sentence}");
+    assert!(sentence.contains(&native("polyglot/cmain")), "{sentence}");
     assert!(sentence.contains("name it as a deliverable"), "{sentence}");
     assert_eq!(
         findings[0].path.as_deref(),
@@ -75,7 +85,7 @@ fn coverage_data_away_from_its_source_is_outside_the_tree() {
         findings[0].sentence
     );
     assert!(
-        findings[0].sentence.contains("sqlite/src"),
+        findings[0].sentence.contains(&native("sqlite/src")),
         "{}",
         findings[0].sentence
     );
@@ -196,12 +206,12 @@ fn contract_driven_findings_name_the_path_and_the_fix() {
         findings[0].sentence
     );
     assert!(
-        findings[1].sentence.contains("build/x.log"),
+        findings[1].sentence.contains(&native("build/x.log")),
         "{}",
         findings[1].sentence
     );
     assert!(
-        findings[2].sentence.contains("polyglot/notes.txt"),
+        findings[2].sentence.contains(&native("polyglot/notes.txt")),
         "{}",
         findings[2].sentence
     );

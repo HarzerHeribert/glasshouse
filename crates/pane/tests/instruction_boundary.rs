@@ -217,6 +217,20 @@ fn externally_changed_instruction_text_is_delivered_before_a_dependent_write() {
     assert!(!pending.text.contains("### `root policy`"));
 }
 
+/// A cell whose one `bash` call creates `path`, written for the interpreter
+/// that answers `bash` on this host: `cmd.exe` on Windows
+/// (`tools::registry::BASH`), which has no `touch`, and a POSIX shell
+/// elsewhere. The line is a JS string literal through `{:?}`, so a Windows
+/// path's backslashes arrive escaped rather than read as JS escapes.
+fn create_file_cell(path: &std::path::Path) -> String {
+    let line = if cfg!(windows) {
+        format!("type nul > \"{}\"", path.display())
+    } else {
+        format!("touch {}", path.display())
+    };
+    format!("await bash({{command: {line:?}}});")
+}
+
 /// The 2026-09-13 full-suite run: a downloaded dataset of tens of thousands
 /// of files exhausted the instruction index's entry budget and ended a
 /// 32-cell task as "could not be loaded completely". A scan budget is a
@@ -233,7 +247,7 @@ fn an_exhausted_index_budget_is_a_notice_once_and_never_a_stop() {
     }
     let mut runtime = fixture.runtime(true);
     let marker = fixture.root.join("ran.txt");
-    let source = format!(r#"await bash({{command: "touch {}"}});"#, marker.display());
+    let source = create_file_cell(&marker);
     assert!(matches!(
         runtime.run_cell(&source),
         CellOutcome::Yielded { .. }
@@ -258,10 +272,7 @@ fn an_exhausted_index_budget_is_a_notice_once_and_never_a_stop() {
         runtime.pending_instructions().map(|pending| pending.text)
     );
     assert!(marker.exists(), "the repeated call ran");
-    let again = format!(
-        r#"await bash({{command: "touch {}"}});"#,
-        fixture.root.join("again.txt").display()
-    );
+    let again = create_file_cell(&fixture.root.join("again.txt"));
     let _ = runtime.run_cell(&again);
     assert!(
         runtime.pending_instructions().is_none(),

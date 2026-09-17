@@ -80,7 +80,13 @@ fn skill_invocation_keeps_complete_body_arguments_and_relative_reference_base() 
     )
     .unwrap();
     assert!(task.contains("Read references/rules.md.\nReview the code.\n"));
-    assert!(task.contains(".claude/skills/review"));
+    // The base is named the way the platform spells a path: `.claude\skills\review` on Windows.
+    let base = std::path::Path::new(".claude")
+        .join("skills")
+        .join("review")
+        .display()
+        .to_string();
+    assert!(task.contains(&base), "{task}");
     assert!(task.contains("$(touch bad) `shell` $ARGUMENTS"));
     assert!(!project_dir.root().join("bad").exists());
 }

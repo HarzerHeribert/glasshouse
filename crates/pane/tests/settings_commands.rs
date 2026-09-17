@@ -25,7 +25,8 @@ fn local_is_default_and_concrete_model_ids_are_validated() {
     let root = temp_root("local");
     let output = execute(&root, &strings(&["model.parent", "fixture-model"])).unwrap();
     assert!(output.contains("Saved model.parent"));
-    assert!(output.contains(".pane/config.toml"));
+    let local = std::path::Path::new(".pane").join("config.toml");
+    assert!(output.contains(&local.display().to_string()), "{output}");
     assert!(
         fs::read_to_string(root.join(".pane/config.toml"))
             .unwrap()

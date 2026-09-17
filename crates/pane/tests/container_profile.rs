@@ -24,7 +24,7 @@ struct Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
+        let base = scratch_base().join(format!(
             "pane-container-profile-{}-{label}-{n}",
             std::process::id()
         ));
@@ -57,6 +57,39 @@ impl Fixture {
     fn container(&self, settings: &str) -> Profile {
         self.profile(settings).with_os_sandbox_bypass()
     }
+}
+
+/// Where a fixture tree goes: somewhere §4.3's `$HOME` rule does not cover, so
+/// each test's refusal is decided by the rule it names. On Windows
+/// `temp_dir()` is `%USERPROFILE%\AppData\Local\Temp`, under `$HOME`, so the
+/// first candidate there that is outside the profile and creatable wins; on
+/// Unix `temp_dir()` is already outside it.
+fn scratch_base() -> PathBuf {
+    if cfg!(windows) {
+        let home: Vec<PathBuf> = ["HOME", "USERPROFILE"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .filter(|value| !value.is_empty())
+            .filter_map(|value| std::fs::canonicalize(value).ok())
+            .collect();
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let candidates = [
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+            PathBuf::from(format!("{system_drive}\\pane-container-profile-tmp")),
+        ];
+        for candidate in candidates {
+            if std::fs::create_dir_all(&candidate).is_err() {
+                continue;
+            }
+            let Ok(resolved) = std::fs::canonicalize(&candidate) else {
+                continue;
+            };
+            if !home.iter().any(|home| resolved.starts_with(home)) {
+                return resolved;
+            }
+        }
+    }
+    std::env::temp_dir()
 }
 
 impl Drop for Fixture {
@@ -296,7 +329,10 @@ fn the_manifest_reports_the_mode_the_table_and_an_absent_executable() {
     assert_eq!(plain.writable_roots, vec![root.clone()]);
     assert_eq!(
         plain.reserved_paths,
-        vec![format!("{root}/.pane"), format!("{root}/.claude")]
+        vec![
+            fixture.root().join(".pane").display().to_string(),
+            fixture.root().join(".claude").display().to_string(),
+        ]
     );
     assert_eq!(
         plain.denied_patterns,
