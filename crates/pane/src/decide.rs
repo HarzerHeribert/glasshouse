@@ -1020,6 +1020,181 @@ pub fn supervision_for(
     Some(answer.choice.clone())
 }
 
+/// The most criteria one cell-authored question may name, and the most bytes
+/// its instructions and each criterion may carry.
+///
+/// The question travels to the decision model in a request bounded by the
+/// same two-second decision timeout every gate uses, so these keep one cell
+/// from turning a short errand into a slow one. Two criteria is the smallest question worth asking -- a choice
+/// with one option is not a choice.
+pub const JUDGEMENT_CRITERIA_MIN: usize = 2;
+pub const JUDGEMENT_CRITERIA_MAX: usize = 8;
+pub const JUDGEMENT_TEXT_BYTES: usize = 4 * 1024;
+
+/// The key a cell's own question is asked under, kept distinct from every
+/// harness gate's key so a rollout reader can tell the two apart.
+const JUDGEMENT_KEY: &str = "judgement";
+
+/// One judgement the running program asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Judgement {
+    pub choice: String,
+    pub confidence: f64,
+    pub probabilities: BTreeMap<String, f64>,
+    pub latency_ms: u64,
+}
+
+/// Asks **the model's own** `Choice` question about state the cell already
+/// holds -- the one entry point `decide.choice(...)` reaches from inside a
+/// running program.
+///
+/// It is [`decide`] with one question and the cell's text as the state, and
+/// it is deliberately nothing more: the same `/v1/systemone` route, the same
+/// two-second timeout, the same rule that no error carries more than a
+/// bounded head of a body. What it adds is the bound on a
+/// question a *program* composed, which the harness's own gates do not need
+/// because their questions are written here.
+///
+/// The subject is sent as `state.subject` rather than folded into the
+/// instructions, so the instructions stay the question and the evidence stays
+/// evidence.
+pub fn judgement(
+    model: &str,
+    instructions: &str,
+    subject: &str,
+    criteria: BTreeMap<String, String>,
+) -> Result<Judgement, DecideError> {
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        return Err(DecideError::Parse(
+            "a judgement needs instructions saying what to decide".to_string(),
+        ));
+    }
+    if criteria.len() < JUDGEMENT_CRITERIA_MIN || criteria.len() > JUDGEMENT_CRITERIA_MAX {
+        return Err(DecideError::Parse(format!(
+            "a judgement names between {JUDGEMENT_CRITERIA_MIN} and {JUDGEMENT_CRITERIA_MAX} criteria; this one named {}",
+            criteria.len()
+        )));
+    }
+    if let Some((name, _)) = criteria
+        .iter()
+        .find(|(name, text)| name.trim().is_empty() || text.trim().is_empty())
+    {
+        return Err(DecideError::Parse(format!(
+            "criterion `{name}` needs a name and a sentence saying when it applies"
+        )));
+    }
+    let state = serde_json::json!({
+        "subject": head(subject, JUDGEMENT_TEXT_BYTES),
+    });
+    let questions = [(
+        JUDGEMENT_KEY.to_string(),
+        Question::Choice {
+            instructions: head(instructions, JUDGEMENT_TEXT_BYTES),
+            criteria: criteria
+                .into_iter()
+                .map(|(name, text)| (name, head(&text, JUDGEMENT_TEXT_BYTES)))
+                .collect(),
+        },
+    )];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{JUDGEMENT_KEY}`")))?;
+    match decision.answer {
+        Answer::Choice {
+            choice,
+            confidence,
+            probabilities,
+        } => Ok(Judgement {
+            choice,
+            confidence,
+            probabilities,
+            latency_ms: decision.latency_ms,
+        }),
+        Answer::Noul(_) => Err(DecideError::Parse(format!(
+            "the `{JUDGEMENT_KEY}` question was answered as a noul, not a choice"
+        ))),
+    }
+}
+
+/// `text`'s first `limit` bytes, cut on a character boundary.
+fn head(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut cut = limit;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text[..cut].to_string()
+}
+
+#[cfg(test)]
+mod judgement_tests {
+    use super::*;
+
+    fn criteria(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect()
+    }
+
+    /// The bounds are checked before any request is built, so a malformed
+    /// question costs nothing and says what was wrong with it.
+    #[test]
+    fn a_question_with_one_criterion_is_refused_before_it_is_sent() {
+        let error = judgement(
+            "jev-latest",
+            "Is this a rename?",
+            "diff",
+            criteria(&[("rename_only", "every hunk renames one symbol")]),
+        )
+        .expect_err("one criterion is not a choice");
+        let said = error.to_string();
+        assert!(said.contains("between 2 and 8"), "{said}");
+    }
+
+    #[test]
+    fn a_question_with_no_instructions_is_refused_before_it_is_sent() {
+        let error = judgement(
+            "jev-latest",
+            "   ",
+            "diff",
+            criteria(&[("a", "one"), ("b", "two")]),
+        )
+        .expect_err("a question needs a question");
+        assert!(error.to_string().contains("instructions"));
+    }
+
+    #[test]
+    fn a_criterion_without_a_sentence_is_refused_and_named() {
+        let error = judgement(
+            "jev-latest",
+            "Is this a rename?",
+            "diff",
+            criteria(&[
+                ("rename_only", "every hunk renames one symbol"),
+                ("wider", ""),
+            ]),
+        )
+        .expect_err("a criterion the model cannot apply");
+        assert!(error.to_string().contains("wider"), "{error}");
+    }
+
+    #[test]
+    fn a_subject_longer_than_the_bound_is_cut_on_a_character_boundary() {
+        let text = "é".repeat(JUDGEMENT_TEXT_BYTES);
+        let cut = head(&text, JUDGEMENT_TEXT_BYTES);
+        assert!(cut.len() <= JUDGEMENT_TEXT_BYTES);
+        assert!(text.starts_with(&cut), "a prefix of what was given");
+        assert_eq!(head("short", JUDGEMENT_TEXT_BYTES), "short");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

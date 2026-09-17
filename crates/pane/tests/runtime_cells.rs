@@ -3380,7 +3380,7 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
             task_used: 1,
             task_cap: 400_000,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
         plan,
     };

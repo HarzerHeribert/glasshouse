@@ -174,6 +174,32 @@ const HELPER_CLOSE: &str = "};\n\
     // are not configured, when this cell has used its call ceiling, or when the call\n\
     // itself failed — so attempt the work first and pay for a helper only in the\n\
     // branch that needs one. What it returns is yours to keep or drop.\n";
+/// The `decide` declaration: the decision model, offered to the program that
+/// is holding the evidence.
+///
+/// **Written as an invitation.** It says what the call is for and shows the
+/// chain it makes possible — compute, judge, branch, all inside one cell and
+/// one turn — because a declaration is read by a model deciding whether a
+/// capability is worth reaching for, and a list of prohibitions answers a
+/// question it was not asking.
+const DECIDE_DECLARATION: &str = "declare const decide: {\n  \
+    choice(question: string, criteria: Record<string, string>, subject?: string):\n    \
+    Promise<{choice: string; confidence: number; probabilities: Record<string, number>}>;\n\
+    };\n\
+    // A classifier that answers with one of your named criteria and a confidence,\n\
+    // in about a second, for no turn. Reach for it when the cell already holds the\n\
+    // evidence and what you need next is a judgement about it — then branch on the\n\
+    // answer in the same program:\n\
+    //   const diff = await bash({command: \"git diff --stat\"});\n\
+    //   const call = await decide.choice(\n\
+    //     \"Does this diff do more than rename a symbol?\",\n\
+    //     {rename_only: \"every hunk renames one symbol\", wider: \"anything else changed\"},\n\
+    //     diff.stdout);\n\
+    //   if (call.choice === \"wider\" && call.confidence > 0.8) { /* look closer */ }\n\
+    // Name two to eight criteria, each with a sentence saying when it applies; the\n\
+    // answer is always one of those names. It shares this cell's helper call\n\
+    // allowance and throws ToolError when that is spent or the question failed.\n";
+
 const HELPER_INDENT: &str = "  ";
 const HELPER_BULLET: &str = "// ";
 const HELPER_GAP: &str = ": ";
@@ -532,6 +558,10 @@ pub const RUNTIME: &[Binding] = &[
     Binding {
         global: "helper",
         declaration: HELPER_DECLARATION,
+    },
+    Binding {
+        global: "decide",
+        declaration: DECIDE_DECLARATION,
     },
     Binding {
         global: "todo",

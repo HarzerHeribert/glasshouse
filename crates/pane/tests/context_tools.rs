@@ -307,7 +307,7 @@ fn a_full_context_batch_preserves_whole_evidence_and_does_not_certify_overflow()
             task_used: 0,
             task_cap: 0,
             cells_used: 1,
-            cells_cap: 40,
+            cells_cap: Some(40),
         },
     };
     use pane::contract::{Block, Conversation, Message, Role};

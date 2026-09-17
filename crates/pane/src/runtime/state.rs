@@ -191,6 +191,10 @@ pub(crate) struct RuntimeState {
     pub(crate) globals: crate::runtime::bindings::HostGlobals,
     /// Whether `web` has been bound, so a second broker does not bind twice.
     pub(crate) web_bound: std::cell::Cell<bool>,
+    /// Whether `decide` has been bound, for the same reason as `web_bound`:
+    /// the configuration decides whether the global exists, and it arrives
+    /// after the context is built.
+    pub(crate) decide_bound: std::cell::Cell<bool>,
     pub(crate) agent_templates: crate::project::agents::Catalog,
     pub(crate) effective_config: RefCell<Option<crate::config::PaneConfig>>,
     pub(crate) glasshouse: Glasshouse,
@@ -239,6 +243,9 @@ pub(crate) struct RuntimeState {
     /// `[agents]` as the session read it: what a delegated goal runs on when
     /// the cell does not name a model.
     agents: RefCell<crate::config::AgentsConfig>,
+    /// `[decisions]`, for the one question a *cell* may ask: `decide.choice`
+    /// routes on `model`, and an unset model is why the global is not bound.
+    decisions: RefCell<crate::config::DecisionsConfig>,
     /// What `CallSite::PostResult` has already reduced this task, keyed by
     /// the SHA-256 of the text it reduced.
     ///
@@ -329,6 +336,7 @@ impl RuntimeState {
             web: RefCell::new(None),
             globals: crate::runtime::bindings::HostGlobals::Every,
             web_bound: std::cell::Cell::new(false),
+            decide_bound: std::cell::Cell::new(false),
             agent_templates: crate::project::agents::Catalog::load(profile),
             effective_config: RefCell::new(None),
             glasshouse: glasshouse.clone(),
@@ -346,6 +354,7 @@ impl RuntimeState {
             instructions: RefCell::new(InstructionContext::default()),
             helpers: RefCell::new(HelpersConfig::default()),
             agents: RefCell::new(crate::config::AgentsConfig::default()),
+            decisions: RefCell::new(crate::config::DecisionsConfig::default()),
             reductions: RefCell::new(Vec::new()),
             visible_sources: RefCell::new(HashMap::new()),
             pending_sources: RefCell::new(Vec::new()),
@@ -522,6 +531,31 @@ impl RuntimeState {
     /// deadline_minutes`. `None` is no deadline.
     pub(crate) fn agent_deadline(&self) -> Option<std::time::Duration> {
         self.agents.borrow().deadline
+    }
+
+    /// `[decisions]` for this runtime. Held rather than read from
+    /// `effective_config` so a narrowed child runtime that never received one
+    /// answers "unconfigured" instead of inheriting a parent's model.
+    pub(crate) fn set_decisions(&self, decisions: crate::config::DecisionsConfig) {
+        *self.decisions.borrow_mut() = decisions;
+    }
+
+    /// The model a cell's own question goes to, or why there is none.
+    ///
+    /// `mode` is deliberately not consulted: `off` silences the *harness's*
+    /// gates, which can hold a cell or narrow a grant. A question the program
+    /// asked itself changes nothing it did not already choose to branch on,
+    /// so the model naming it is the whole of the configuration here.
+    pub(crate) fn decision_model(&self) -> Result<String, String> {
+        self.decisions.borrow().model.clone().ok_or_else(|| {
+            "the decision model is not configured: set `[decisions] model` in pane.toml".to_string()
+        })
+    }
+
+    /// Whether `decide` exists for this runtime at all — the predicate the
+    /// binding and the declaration both answer to.
+    pub(crate) fn decisions_configured(&self) -> bool {
+        self.decisions.borrow().model.is_some()
     }
 
     pub(crate) fn set_agents(&self, agents: crate::config::AgentsConfig) {

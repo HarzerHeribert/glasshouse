@@ -41,6 +41,7 @@ use crate::runtime::state::{HeapGuard, RuntimeState};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
 
+mod decide;
 mod watchdog;
 mod web;
 use watchdog::{EpilogueBudget, Watchdog, gave_up, timed_out};
@@ -499,6 +500,7 @@ impl Runtime {
         let runtime = self
             .with_helpers(config.helpers.clone())
             .with_agents(config.agents.clone())
+            .with_decisions(config.decisions.clone())
             .with_web(config.web.clone())?;
         *runtime.state.effective_config.borrow_mut() = Some(config);
         Ok(runtime)

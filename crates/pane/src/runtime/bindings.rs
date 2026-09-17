@@ -34,8 +34,10 @@ use crate::tools::registry::{self, Tool};
 
 mod agent;
 mod console;
+mod decide;
 mod web;
 use console::console_callback;
+pub(crate) use decide::install_decide;
 pub(crate) use web::install_web;
 
 /// Declared once so the classes a refusal is thrown as exist before any cell
@@ -272,8 +274,9 @@ impl HostGlobals {
     /// by the subagent depth check, but a capability absent from the binding
     /// surface cannot be reached by a helper talked into trying, which is the
     /// standard `little-helpers.md` sets for the toolset.
-    pub const WITHHELD_FROM_A_HELPER: [&'static str; 7] =
-        ["bg", "send", "mcp", "checks", "helper", "agent", "web"];
+    pub const WITHHELD_FROM_A_HELPER: [&'static str; 8] = [
+        "bg", "send", "mcp", "checks", "helper", "agent", "web", "decide",
+    ];
 
     /// Whether `global` is installed under this narrowing — the one predicate
     /// [`install`] and [`crate::prompt::render_runtime_for`] both read, so
@@ -294,7 +297,29 @@ impl HostGlobals {
     /// declares on.
     #[must_use]
     pub fn installs_with(self, global: &str, web_configured: bool) -> bool {
-        self.installs(global) && (global != "web" || web_configured)
+        self.installs_reaching(global, web_configured, true)
+    }
+
+    /// [`Self::installs`] with **every** global whose existence a session's
+    /// configuration decides: `web` on `[web]` naming a domain or an endpoint,
+    /// and `decide` on `[decisions]` naming a model. One predicate so the
+    /// binding ([`install_decide`]) and the declaration cannot disagree about
+    /// whether a global exists.
+    ///
+    /// [`Self::installs_with`] answers `true` for the decision half, which is
+    /// what the Runtime block does today: a session with no `[decisions]
+    /// model` binds no `decide` and is still told of it. Passing the real
+    /// flag from `prompt::Reach` closes that, and is the one line left.
+    #[must_use]
+    pub fn installs_reaching(
+        self,
+        global: &str,
+        web_configured: bool,
+        decisions_configured: bool,
+    ) -> bool {
+        self.installs(global)
+            && (global != "web" || web_configured)
+            && (global != "decide" || decisions_configured)
     }
 
     /// Whether a **registered tool** is bound under this narrowing.
@@ -366,6 +391,8 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
 
     // `web` is not bound here: whether it exists is the configuration's
     // decision, made when the broker arrives — see [`install_web`].
+    // `decide` is not bound here either, for the same reason: `[decisions]
+    // model` decides whether it exists — see [`install_decide`].
 
     if globals.installs("mcp") {
         let mcp = v8::Object::new(scope);
