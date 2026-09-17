@@ -35,9 +35,14 @@ other work?**
    `worker-capabilities.md`; `new-packet.sh`'s skeleton is that tier's form.
 
 **What stays at every tier:** Phase −1 as a question answered before the work
-starts; the targeted gate before a commit; one decisive mutation on a decision;
-commit by pathspec; the VM leg for anything Windows; a paragraph of evidence per
-line, not a ceremony. **What is retired:** mandatory packets for everything, the
+starts; the targeted gate before a commit — **and, when a contract changes (a
+refusal where there was none, a global no longer bound), a grep of
+`crates/*/tests` for the feature's name with every target found run too,
+because the blast radius traces distance-zero targets only** (measured
+2026-09-17: the fetch wave's gate was green and two untraced tests in
+`competitive_web_runtime.rs` went red on the sweep); one decisive mutation on a
+decision; commit by pathspec; the VM leg for anything Windows; a paragraph of
+evidence per line, not a ceremony. **What is retired:** mandatory packets for everything, the
 "keep two workers running" floor, `pipeline.sh` nagging, per-worker watches as a
 default, `integrate.sh` as the default path, and the rule that hidden subagents
 are forbidden — the user lifted it on 2026-09-17. **Every sentence below that
