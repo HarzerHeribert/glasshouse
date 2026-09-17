@@ -21,6 +21,7 @@ pub mod helper_context;
 pub mod helpers;
 pub mod images;
 pub mod manifest;
+pub mod models;
 pub mod preflight;
 pub mod progress;
 pub mod project;

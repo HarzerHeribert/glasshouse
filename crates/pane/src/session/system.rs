@@ -14,6 +14,8 @@ use super::*;
 /// byte, so there is no second spelling of the contract here to drift from it.
 pub(super) fn build_system_prompt(
     web: &crate::web::WebConfig,
+    agents: &crate::config::AgentsConfig,
+    served: &[crate::models::RosterModel],
     profile: &Profile,
     interface: crate::abi::Interface,
     manifest: &crate::manifest::Manifest,
@@ -22,13 +24,24 @@ pub(super) fn build_system_prompt(
     let instructions = crate::project::instructions::root(profile);
     // The Runtime block declares `web` only when `[web]` reaches something,
     // the same predicate the runtime binds it on (map 2658).
-    let reach = prompt::declarations::WebReach::from_config(web);
+    let web = prompt::declarations::WebReach::from_config(web);
+    // The models a subagent may be sent to: the gateway's figures, resolved
+    // once at session start, and `[agents]` as it stands now -- a tier
+    // assignment can change the posture mid-session, the served models
+    // cannot change at all.
+    let agents = prompt::declarations::AgentRoster {
+        posture: prompt::declarations::AgentsPosture::from_config(agents),
+        models: served.to_vec(),
+    };
     let mut system = prompt::render_system_reaching(
         &instructions,
         &registry::ALL.iter().collect::<Vec<_>>(),
         &session_facts_with(profile, interface, manifest),
         crate::runtime::bindings::HostGlobals::Every,
-        reach.as_ref(),
+        prompt::Reach {
+            web: web.as_ref(),
+            agents: Some(&agents),
+        },
     );
     if profile.os_sandbox_bypassed() {
         system.push_str(
@@ -39,6 +52,19 @@ pub(super) fn build_system_prompt(
     system.push_str(&crate::project::orientation::collect(profile));
     system
 }
+/// [`build_system_prompt`] for a session that is already running: the same
+/// block, from what the session holds.
+pub(super) fn system_prompt_for(session: &Session<'_>) -> String {
+    build_system_prompt(
+        &session.config().web,
+        &session.config().agents,
+        &session.roster,
+        session.profile,
+        session.interface.get(),
+        &session.manifest,
+    )
+}
+
 /// The most files one preflight serves in full, and the most bytes one of
 /// them may hold to be served at all.
 ///

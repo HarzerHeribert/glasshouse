@@ -34,8 +34,10 @@ fn an_unconfigured_session_binds_no_web_and_declares_none() {
         }
         other => panic!("expected a ReferenceError naming `web`, got {other:?}"),
     }
-    let block =
-        pane::prompt::render_runtime_reaching(pane::runtime::bindings::HostGlobals::Every, None);
+    let block = pane::prompt::render_runtime_reaching(
+        pane::runtime::bindings::HostGlobals::Every,
+        pane::prompt::Reach::default(),
+    );
     assert!(
         !block.contains("declare const web") && !block.contains("web.fetch"),
         "the model was told about a `web` the cell does not hold:\n{block}"

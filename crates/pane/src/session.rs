@@ -765,6 +765,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
     let gateway = gateway::select(args.gateway.as_deref(), &glasshouse, &args.root);
     let accounts = startup::served_accounts(&gateway);
+    let roster = startup::subagent_roster(&gateway, &accounts);
     let started_on = requested.map(|model| startup::settle_model(model, &accounts));
     // Held for the whole session: dropping it kills the gateway pane started.
     // `None` means pane attached to one already serving, or runs direct.
@@ -795,6 +796,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
             Conversation {
                 system: build_system_prompt(
                     &config.borrow().web,
+                    &config.borrow().agents,
+                    &roster,
                     &profile,
                     args.interface.unwrap_or_default(),
                     &manifest,
@@ -903,6 +906,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         )),
         window: RefCell::new(Window::new(WindowConfig::default())),
         messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
+        roster,
         project: &project,
         config: &config,
         profile: &profile,
@@ -985,6 +989,8 @@ struct Session<'a> {
     /// compiled profile; rendered into the system block and read by the
     /// scouting preflight.
     manifest: crate::manifest::Manifest,
+    /// The subagent roster, resolved once beside the manifest (`startup`).
+    roster: Vec<crate::models::RosterModel>,
     project: &'a ProjectConfig,
     config: &'a RefCell<PaneConfig>,
     /// The keyboard's end of the cancellation facility: the SIGINT handler's
@@ -1265,12 +1271,7 @@ fn run_task_inner(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
-    transcript.conversation.system = build_system_prompt(
-        &session.config().web,
-        session.profile,
-        session.interface.get(),
-        &session.manifest,
-    );
+    transcript.conversation.system = system::system_prompt_for(session);
     if let Some(line) = prompt::request_mode_line(session.mode.get(), &session.overlay) {
         transcript.conversation.system.push_str(&line);
     }
@@ -3138,6 +3139,7 @@ mod tests {
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
+            roster: Vec::new(),
             ui: None,
             model: RefCell::new("test".into()),
             context_window: None,

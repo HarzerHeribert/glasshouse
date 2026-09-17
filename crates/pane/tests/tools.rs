@@ -2035,7 +2035,7 @@ fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its
     use pane::prompt::render_runtime_reaching;
     use pane::runtime::bindings::HostGlobals;
 
-    let unconfigured = render_runtime_reaching(HostGlobals::Every, None);
+    let unconfigured = render_runtime_reaching(HostGlobals::Every, pane::prompt::Reach::default());
     assert!(
         !unconfigured.contains("declare const web") && !unconfigured.contains("web.fetch"),
         "an unconfigured session was told about `web`:\n{unconfigured}"
@@ -2049,7 +2049,10 @@ fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its
         max_response_bytes: 1_048_576,
         timeout_seconds: 20,
     };
-    let configured = render_runtime_reaching(HostGlobals::Every, Some(&reach));
+    let configured = render_runtime_reaching(
+        HostGlobals::Every,
+        pane::prompt::Reach::webbed(Some(&reach)),
+    );
     assert!(configured.contains("declare const web: {"), "{configured}");
     assert!(
         configured.contains("web.fetch reaches: docs.rs, *.rust-lang.org"),
@@ -2064,5 +2067,63 @@ fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its
             && HostGlobals::Every.installs_with("web", true)
             && !HostGlobals::Helper(&["read"]).installs_with("web", true),
         "the predicate: configuration decides `web` for a cell, and a helper never holds it"
+    );
+}
+
+/// **The subagent roster: a model can only choose a cheaper model if it is
+/// told which ones exist and what each is worth.** The Runtime block's
+/// `agent` declaration names the models this session's gateway serves,
+/// strongest first, with Artificial Analysis' published indices — and a
+/// session that resolved no roster keeps the table's generic text rather
+/// than claiming an empty one.
+#[test]
+fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
+    use pane::models::RosterModel;
+    use pane::prompt::declarations::{AgentRoster, AgentsPosture};
+    use pane::prompt::render_runtime_reaching;
+    use pane::runtime::bindings::HostGlobals;
+
+    let measured = |id: &str, intelligence: f64, coding: f64| RosterModel {
+        id: id.to_string(),
+        intelligence: Some(intelligence),
+        coding: Some(coding),
+    };
+    let roster = AgentRoster {
+        posture: AgentsPosture::Auto,
+        models: vec![
+            measured("gpt-5.6-sol", 47.1, 77.4),
+            measured("gpt-5.6-luna", 37.5, 71.4),
+            RosterModel {
+                id: "house-model".into(),
+                intelligence: None,
+                coding: None,
+            },
+        ],
+    };
+    let declared = render_runtime_reaching(
+        HostGlobals::Every,
+        pane::prompt::Reach {
+            web: None,
+            agents: Some(&roster),
+        },
+    );
+    assert!(declared.contains("declare const agent: {"), "{declared}");
+    assert!(
+        declared.contains(
+            "Models this session can name, strongest first: gpt-5.6-sol (intelligence 47.1, \
+             coding 77.4), gpt-5.6-luna (intelligence 37.5, coding 71.4), house-model."
+        ),
+        "the roster names each served model with its figures, unmeasured last:\n{declared}"
+    );
+    assert!(
+        declared.contains("Artificial Analysis"),
+        "the figures say where they come from:\n{declared}"
+    );
+
+    let unresolved = render_runtime_reaching(HostGlobals::Every, pane::prompt::Reach::default());
+    assert!(
+        unresolved.contains("declare const agent: {")
+            && !unresolved.contains("Models this session can name"),
+        "a session with no roster claims none:\n{unresolved}"
     );
 }

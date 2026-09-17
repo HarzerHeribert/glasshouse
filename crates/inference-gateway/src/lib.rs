@@ -39,6 +39,7 @@
 pub mod config;
 pub mod entitlement;
 pub mod gateway;
+pub mod models;
 pub mod pool;
 pub mod provider;
 pub mod routing;

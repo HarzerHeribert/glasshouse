@@ -49,6 +49,16 @@ pub(crate) fn served_models(accounts: &[ServedAccount]) -> Vec<String> {
     models
 }
 
+/// The models a subagent may be sent to, with what the gateway publishes for
+/// each -- resolved once at session start, because the accounts a session
+/// serves cannot change while it runs and the figures are a subprocess away.
+pub(super) fn subagent_roster(
+    gateway: &Gateway,
+    accounts: &[ServedAccount],
+) -> Vec<crate::models::RosterModel> {
+    crate::models::roster(gateway, &served_models(accounts))
+}
+
 /// The project's folder name as a person knows it; a relative root such as
 /// `.` names nothing.
 pub(super) fn project_name(root: &std::path::Path) -> String {

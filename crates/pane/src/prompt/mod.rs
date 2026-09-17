@@ -379,26 +379,50 @@ pub fn render_system_for(
     facts: &SessionFacts,
     globals: HostGlobals,
 ) -> String {
-    render_system_reaching(instructions, tools, facts, globals, None)
+    render_system_reaching(instructions, tools, facts, globals, Reach::default())
 }
 
-/// [`render_system_for`] with what this session's `[web]` reaches: the
-/// Runtime block declares `web` only when `web` is configured, and then
-/// says which domains it may name (map 2656, 2658). `None` is an
-/// unconfigured session, which binds no `web` and is told of none.
+/// What this session reaches beyond the fixed table: the `[web]` policy, and
+/// the models a subagent may be sent to.
+///
+/// One struct rather than a parameter per global, because each of these is
+/// the same kind of fact -- a global whose declaration depends on this
+/// session's configuration -- and a caller that has neither says so once.
+#[derive(Clone, Copy, Default)]
+pub struct Reach<'a> {
+    /// `None` is an unconfigured session, which binds no `web` and is told of
+    /// none.
+    pub web: Option<&'a declarations::WebReach>,
+    /// `None` renders the table's generic `agent` text: no roster is claimed
+    /// where the session has not resolved one.
+    pub agents: Option<&'a declarations::AgentRoster>,
+}
+
+impl<'a> Reach<'a> {
+    /// The reach of a session that only configured `[web]`.
+    #[must_use]
+    pub fn webbed(web: Option<&'a declarations::WebReach>) -> Self {
+        Self { web, agents: None }
+    }
+}
+
+/// [`render_system_for`] with what this session reaches: the Runtime block
+/// declares `web` only when `web` is configured, and then says which domains
+/// it may name (map 2656, 2658), and declares `agent` with the models this
+/// session's gateway serves.
 pub fn render_system_reaching(
     instructions: &str,
     tools: &[&Tool],
     facts: &SessionFacts,
     globals: HostGlobals,
-    web: Option<&declarations::WebReach>,
+    reach: Reach<'_>,
 ) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     let mut system = format!(
         "{}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{}",
         preamble_for(facts.interface),
         rendered.join("\n\n"),
-        render_runtime_reaching(globals, web),
+        render_runtime_reaching(globals, reach),
         render_abi_for(globals),
         render_session_facts(facts)
     );
@@ -486,15 +510,19 @@ pub fn render_runtime_for(globals: HostGlobals) -> String {
 /// an endpoint, rendered with what it reaches, on the same predicate
 /// `Runtime::with_web_broker` binds it on
 /// (`HostGlobals::installs_with`; map 2658).
-pub fn render_runtime_reaching(
-    globals: HostGlobals,
-    web: Option<&declarations::WebReach>,
-) -> String {
+pub fn render_runtime_reaching(globals: HostGlobals, reach: Reach<'_>) -> String {
     declarations::RUNTIME
         .iter()
-        .filter(|binding| globals.installs_with(binding.global, web.is_some()))
-        .map(|binding| match (binding.global, web) {
-            ("web", Some(reach)) => declarations::web_declaration(reach),
+        .filter(|binding| globals.installs_with(binding.global, reach.web.is_some()))
+        .map(|binding| match binding.global {
+            "web" => reach.web.map_or_else(
+                || binding.declaration.to_string(),
+                declarations::web_declaration,
+            ),
+            "agent" => reach.agents.map_or_else(
+                || binding.declaration.to_string(),
+                declarations::agent_declaration,
+            ),
             _ => binding.declaration.to_string(),
         })
         .collect::<Vec<_>>()

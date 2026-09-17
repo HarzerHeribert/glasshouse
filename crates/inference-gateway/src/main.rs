@@ -95,6 +95,20 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Published measurements for the models this gateway serves.
+    Models {
+        /// Print the versioned JSON document instead of prose.
+        #[arg(long)]
+        json: bool,
+        /// Only the models whose names contain this text.
+        #[arg(long, value_name = "TEXT")]
+        filter: Option<String>,
+        /// Replace this gateway's overlay with a catalogue read from PATH, or
+        /// `-` for standard input -- what a user's own Artificial Analysis
+        /// key fetched.
+        #[arg(long, value_name = "PATH")]
+        import: Option<PathBuf>,
+    },
     /// Subscription accounts.
     Subscriptions {
         #[command(subcommand)]
@@ -235,6 +249,16 @@ fn run() -> Result<()> {
             let config = load_config(&cli)?;
             entitlements(&config, &data_dir(&cli)?, *json, *refresh)
         }
+        Command::Models {
+            json,
+            filter,
+            import,
+        } => models(
+            &data_dir(&cli)?,
+            *json,
+            filter.as_deref(),
+            import.as_deref(),
+        ),
         Command::Subscriptions {
             command:
                 SubscriptionsCommand::Connect {
@@ -497,6 +521,86 @@ fn wait_for_shutdown() -> Stop {
     // A disconnected channel means both reporters are gone, which can only
     // happen once stdin's thread has ended: treat it as the EOF it is.
     receiver.recv().unwrap_or(Stop::StdinEof)
+}
+
+/// `models [--json] [--filter TEXT] [--import PATH]` — the published figures
+/// this gateway knows for the models it serves.
+///
+/// The numbers come from [`inference_gateway::models`]: the snapshot baked
+/// into this binary, overlaid by whatever the user's own Artificial Analysis
+/// key last fetched. `--import` is how that overlay is written, from a
+/// catalogue any process holding the key produced, so no key ever reaches
+/// this one.
+///
+/// The JSON document is what a harness reads to tell a model which models it
+/// may delegate to and what each is worth: a `version`, the catalogue's
+/// `source`, `index_version` and `captured`, and a `models` object keyed by
+/// normalised model name.
+fn models(data_dir: &Path, json: bool, filter: Option<&str>, import: Option<&Path>) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    if let Some(path) = import {
+        let bytes = if path == Path::new("-") {
+            let mut buffer = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buffer)?;
+            buffer
+        } else {
+            std::fs::read(path).with_context(|| format!("could not read {}", path.display()))?
+        };
+        let count = inference_gateway::models::import(data_dir, &bytes)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        writeln!(
+            stdout,
+            "imported {count} model(s) to {}",
+            inference_gateway::models::overlay_path(data_dir).display()
+        )?;
+        return Ok(());
+    }
+
+    let mut measurements = inference_gateway::models::measurements(data_dir);
+    if let Some(text) = filter {
+        let needle = inference_gateway::models::normalise(text);
+        measurements.models.retain(|id, _| id.contains(&needle));
+    }
+    if json {
+        let document = serde_json::to_string(&serde_json::json!({
+            "version": 1,
+            "source": measurements.source,
+            "index_version": measurements.index_version,
+            "captured": measurements.captured,
+            "fetched_at": measurements.fetched_at,
+            "models": measurements.models,
+        }))?;
+        writeln!(stdout, "{document}")?;
+        return Ok(());
+    }
+    if measurements.models.is_empty() {
+        writeln!(stdout, "no model measurements")?;
+        return Ok(());
+    }
+    // Strongest first: the order a person reading this wants, and the order
+    // a harness renders its roster in.
+    let mut rows: Vec<_> = measurements.models.iter().collect();
+    rows.sort_by(|(a, x), (b, y)| {
+        y.intelligence
+            .partial_cmp(&x.intelligence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+    for (id, facts) in rows {
+        let figure = |value: Option<f64>| {
+            value.map_or_else(|| "-".to_string(), |value| format!("{value:.1}"))
+        };
+        writeln!(
+            stdout,
+            "{id}\tintelligence {}\tcoding {}\tusd/task {}",
+            figure(facts.intelligence),
+            figure(facts.coding),
+            facts
+                .cost_per_task_usd
+                .map_or_else(|| "-".to_string(), |value| format!("{value:.4}")),
+        )?;
+    }
+    Ok(())
 }
 
 /// `entitlements [--json] [--refresh]` — what each configured account is.

@@ -216,11 +216,16 @@ impl Gateway {
 }
 
 /// Whether these arguments ask about state the gateway owns — the accounts it
-/// can serve, the subscriptions behind them, and the credentials they use —
-/// rather than about what this project spent.
+/// can serve, the subscriptions behind them, the credentials they use, and
+/// what the models it serves measured — rather than about what this project
+/// spent.
 fn is_gateway_state(args: &[&str]) -> bool {
-    args.first()
-        .is_some_and(|first| matches!(*first, "entitlements" | "subscriptions" | "credentials"))
+    args.first().is_some_and(|first| {
+        matches!(
+            *first,
+            "entitlements" | "subscriptions" | "credentials" | "models"
+        )
+    })
 }
 
 /// The file names a gateway executable can have on this platform.
