@@ -4,6 +4,12 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
+> **How the work is dispatched changed on 2026-09-17** (user ruling; `CLAUDE.md`,
+> *How work is done*): in-session or a fork by default, a plain subagent for
+> reading, design and review, a worktree worker only for a long, parallel,
+> file-disjoint build. The proof process below is unchanged; the worker
+> mechanics it mentions are the worktree tier's.
+
 This document defines how agent harnesses implement the authoritative
 [`docs/product/capability-map.md`](../product/capability-map.md)
 without confusing code presence with verified product behavior. It is

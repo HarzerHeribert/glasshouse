@@ -2,6 +2,49 @@
 
 Glasshouse uses a spec-to-evidence, multi-harness development process.
 
+## How work is done — user ruling 2026-09-17, and it outranks every process section below
+
+**The user, on the packet-and-worker cycle: "I have a feeling this whole writing
+packets and using workers and rebuilding context thing is highly ineffective"; on
+the replacement: "I like your new approach, makes total sense"; and: "make sure
+future sessions never fall back to the inefficient work SDLC."** Measured that
+day: five commits in six hours done in-session with no packets; the night before,
+one deletion took four worker passes, three hand-applied integrations and two
+workers dead of context. The packet path pays for the same knowledge three
+times — reading the code to write the packet, the worker reading it again to
+start, reading the diff to integrate.
+
+**Three tiers, chosen per task by two questions — does this session already hold
+what the task needs, and is it long enough and independent enough to run beside
+other work?**
+
+1. **In-session, by default.** Work this session understands is done here or by a
+   **fork** (`Agent` with `subagent_type: "fork"`): the fork starts with this
+   session's whole context — the code sites, the VM, the rules — and edits the
+   main tree directly; there is no packet, no worktree, no report file and no
+   integration. The orchestrator commits by pathspec when the fork reports.
+   Forks that edit run one at a time per file set; a second fork on disjoint files
+   is fine.
+2. **A plain subagent for reading, design and review** (`Agent`, general-purpose
+   or Explore): a brief in the prompt, the answer straight back. An independent
+   review is still worth a fresh reader that is not anchored on this session.
+3. **A worktree worker in cmux only for a long, parallel, file-disjoint build the
+   user wants to watch** — and then with a **short packet**: the contract
+   sentence, the box lines, the files, the tests, the one mutation, the Phase −1
+   links. Everything else a packet used to repeat lives in this file and
+   `worker-capabilities.md`; `new-packet.sh`'s skeleton is that tier's form.
+
+**What stays at every tier:** Phase −1 as a question answered before the work
+starts; the targeted gate before a commit; one decisive mutation on a decision;
+commit by pathspec; the VM leg for anything Windows; a paragraph of evidence per
+line, not a ceremony. **What is retired:** mandatory packets for everything, the
+"keep two workers running" floor, `pipeline.sh` nagging, per-worker watches as a
+default, `integrate.sh` as the default path, and the rule that hidden subagents
+are forbidden — the user lifted it on 2026-09-17. **Every sentence below that
+says dispatch, packet, worker, board, watch, pipeline or integrate describes the
+worktree tier and applies only when that tier is chosen.** Memory:
+`in-session-work-first`.
+
 ## Decompression — user ruling 2026-09-03, and the process changes it makes
 
 **The ruling** (design-decisions, *Decompression*; map **Phase 59**, lines 2043–2054):
@@ -164,7 +207,7 @@ worker, reading a failure before fixing it, and the shell traps that have bitten
 Its later sections cover running several workers at once, team leads that
 subcontract, and the cheap leaf tier.
 
-**Run workers in parallel.** Partition batches by the files they touch, order
+**Run workers in parallel** *(worktree tier only — see the ruling at the top)*. Partition batches by the files they touch, order
 those batches by the map, and name the other live workers' files in each
 packet's `FORBIDDEN FILES`. Map order is a priority, not a mutex — one worker
 at a time has already cost this project a session.
@@ -191,7 +234,7 @@ premise-invalid.** Two packets on 2026-08-28 failed this and cost ~$30 of worker
 compute that no downstream optimization could recover. `scripts/validate_round.py`
 enforces it, so the check is free.
 
-**Start every packet with `scripts/new-packet.sh <name> [--recon]
+**Start every packet** *(worktree tier only)* **with `scripts/new-packet.sh <name> [--recon]
 [--lines N,M] [--worktree]`** rather than hand-writing one. It emits a
 skeleton that already passes `validate_round.py` — the correct
 `READ ONLY THIS` scoping, a `FEASIBILITY` block in the one-line form that
@@ -199,7 +242,7 @@ does not shadow itself, and box lines quoted verbatim and unwrapped from
 `--lines` — so the only edit-and-revalidate cycle left is the one for the
 task's actual substance.
 
-**Every worker gets a nagging watch, armed in the same turn it is started:**
+**Every worker gets a nagging watch, armed in the same turn it is started** *(worktree tier only)*:
 `Monitor(command: "scripts/worker-watch.sh <name> <surface> <report>", persistent: true)`.
 It reminds until you run `scripts/worker-ack.sh <name>`. Before starting new
 work, run `scripts/worker-ack.sh --list` and clear anything waiting.
@@ -235,7 +278,7 @@ and the user noticed before any mechanism did.
 `scripts/tests/test_launch_prompts.py` fails the gate if a launch prompt loses
 the instruction again — the rule is enforced now rather than written down.
 
-**Keep the pipeline fed, and let `scripts/pipeline.sh` remember it for you.**
+**Keep the pipeline fed, and let `scripts/pipeline.sh` remember it for you** *(worktree tier only; retired as a default by the 2026-09-17 ruling)*.
 Every other watch in this project fires on a worker *event*. An empty board
 produces no events, so it is quiet in exactly the way that looks like nothing is
 wrong — and on 2026-08-29 an orchestrator sat at one worker with ~90% of the
@@ -342,7 +385,7 @@ the trailing sweep's failures are enumerated PER TARGET before attribution
 into one integrate call where finishes align; co-editors stay serial but now
 pay only the targeted price.
 
-**Dispatch with `scripts/dev/new-worker.sh <name> <cwd> <packet>`.** It creates
+**Dispatch with `scripts/dev/new-worker.sh <name> <cwd> <packet>`** *(worktree tier only)*. It creates
 the pane, launches the harness, types the prompt in, and **proves the prompt
 landed** before returning. Passing a prompt as a command-line argument silently
 does not work here, and `cmux identify --workspace X` reports the *app's*
@@ -360,7 +403,7 @@ the binary this repo builds, and `agy-gh` starts an Antigravity leaf worker
 unattended. Use them instead of re-deriving the workaround or asking the user
 to intervene — practice §19 explains why they are not the product's shims.
 
-Keep Claude Code, OpenCode/Ox, and other native harness workers visible in cmux.
+Worktree-tier workers stay visible in cmux; forks and subagents are hidden by design since the 2026-09-17 ruling.
 **Every editing worker gets an isolated worktree, and it goes in `.worktrees/<name>`
 inside this repository** — gitignored, excluded from the gate's container copy, and
 removed by `scripts/close-worker.sh`. Do not create sibling directories next to the
@@ -549,9 +592,9 @@ mutation reported with its killing test and output, or a script's verdict (trap 
 the batch, and the checkpoint says so. That has never fired** — untested, not
 proven. No scoring and no per-worker ledger: bookkeeping is dropped first.
 
-## An orchestrator does not idle, and does not hand off cold
+## An orchestrator does not idle, and does not hand off cold *(worktree tier; the 2026-09-17 ruling retires the dispatch floor)*
 
-**`scripts/pipeline.sh --watch 600` is not advisory. When it fires, dispatch —
+**`scripts/pipeline.sh --watch 600` is not advisory** *(retired as a default, 2026-09-17; it applies only while the worktree tier is in use)*. **When it fires, dispatch —
 do not reply to it with a reason.** On 2026-08-29 it fired twice and the
 orchestrator answered both times with a well-argued explanation of why waiting
 was reasonable. Both explanations were wrong, and the user had to say so twice.
@@ -573,7 +616,7 @@ their reports as its first act — which is the cheapest possible start.
 worker and the line keeps moving (§84). A co-edit barrier blocks one *file*, not
 the board (§77). An integration blocks nothing.
 
-**The only reasons to leave the board empty** are the user asking you to stop, or
+**The only reasons to leave the board empty** *(worktree tier)* are the user asking you to stop, or
 a defect so central that every candidate package would build on it. Neither has
 happened yet.
 
