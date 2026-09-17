@@ -13,12 +13,12 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1383 closed · 98 active committed open (93%)** — across 22 phases.
+**1383 closed · 105 active committed open (93%)** — across 24 phases.
 
 boundary 100 closed · 0 open
-gateway 391 closed · 11 open
+gateway 391 closed · 14 open
 glasshouse 757 closed · 46 open
-pane 53 closed · 41 open
+pane 53 closed · 45 open
 process 82 closed · 0 open
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
@@ -40,6 +40,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
+| Phase 73 | Gateway: any provider by configuration | **3** | 0 | `2682` |
 
 **glasshouse**
 
@@ -60,6 +61,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 70 | Pane: the network the user configures, and the Windows console | **2** | 3 | `2648` |
 | Phase 71 | Pane: line-tagged edits (Phase 65's successor) | **2** | 0 | `2660` |
 | Phase 67 | Pane: successors named by the 2026-09-16 cleanup | **3** | 0 | `2618` |
+| Phase 72 | Pane: what the cells and the decision model make cheap | **4** | 0 | `2670` |
 | Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 64 | pane: subagents | **5** | 0 | `2539` |
 | Phase 61H | Runtime resilience across models and scripting styles | **8** | 0 | `2555` |
@@ -75,7 +77,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~78 open lines are not.
+other ~82 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -142,6 +144,12 @@ these unwrapped.
 - **2623** ☐ Offer the explicit sandbox bypass on Windows through a `LineShape`-aware command line, so `pane` in dangerously-unconfined mode spawns on Windows exactly as it does on macOS and Linux instead of refusing by name.
 - **2624** ☐ Accept in the in-process `grep` what GNU grep 3.11 accepts and pane refuses today — collating symbols `[[.a.]]`, equivalence classes `[[=a=]]` and back-references `\(a\)\1` — or document each as a named refusal in the tool ABI.
 - **2625** ☐ Surface partial matches to the model when an in-process `grep` walk meets an unreadable directory (exit 2 with matches), instead of the runtime layer treating every exit above 1 as a failure.
+
+### Phase 73 — Gateway: any provider by configuration  (3 open, 0 closed)
+
+- **2688** ☐ Ship a preset list of providers — name, base URL, protocol, the environment variable a key comes from — so `[providers.openrouter]`, `deepseek`, `groq`, `together`, `mistral`, `xai`, `fireworks`, `ollama` and their like need only a key, and `inference-gateway providers list` prints what is configured, what is preset, and what each reaches.
+- **2689** ☐ Discover models per configured provider through the protocol's own listing (`GET /v1/models` and its equivalents), cached briefly, so Pane's picker and `/model` offer what an account can actually reach and no model name is compiled in.
+- **2690** ☐ Add a provider and its key without editing TOML: `inference-gateway providers add <name> --base-url … --protocol … --key-from-env VAR` writing `[providers.<name>]` and the key to the store, and a row in Pane's `/settings` that calls it.
 
 ## Practice sections, by number
 

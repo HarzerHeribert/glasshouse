@@ -2666,3 +2666,25 @@ retyping the text it replaces.
 
 ☐ Tag every line `context` and `read` return with a short content hash, and let `edit` address lines by tag — replace, insert after, delete — checked against the current line's hash and the file version, refusing a stale tag by naming the current one; the `old`/`replacement` form stays.
 ☐ Measure the tags before they become the model's default: one ruler set on a cheap model with tagged edits off and on, compared on output tokens per completed task, edit refusals and outcomes; no default changes without a win.
+
+Phase 72 — Pane: what the cells and the decision model make cheap
+
+The user's ruling of 2026-09-17: take into Pane what is worth building from the other harnesses,
+not what could be a gimmick; no model roles per mode ("with a new one coming out every week this
+gets messy"). Each line here is a harness feature in the form only a program-running runtime with
+a yes-or-no decision model can afford.
+
+☐ After every `edit` or `write`, run the project's own deterministic check (detected or declared: `cargo check`, `tsc --noEmit`, `ruff`, the project's linter) as a handle, and ask the decision model, per finding, whether it concerns the lines just changed; the model sees only the relevant findings on its next batch, and the rest stay in the handle.
+☐ Offer a symbol index without a language server: `symbols(path)`, `references(name)` and `rename(name, new)` for TypeScript and JavaScript through the oxc parser Pane already links, a rename being one transactional multi-file edit checked by the diff-hygiene question "only that symbol's declarations and uses changed"; other languages follow by parser, never by an LSP process.
+☐ After each cell in a task with a plan, ask the decision model whether the cell completed the plan's current step, and show step progress in the sidebar and the task capsule without a model token; a confident no feeds the no-progress guard.
+☐ Deliver a message typed while a task runs into the task's next batch, and let the decision model say whether it changes the task, so a change interrupts at the next cell boundary and a remark waits for the turn's end.
+
+Phase 73 — Gateway: any provider by configuration
+
+The user's ruling of 2026-09-17: providers must be addable by default and the gateway must reach
+more of them. `[providers.<name>]` with a base URL and one of the three protocols already reaches
+every Anthropic- or OpenAI-compatible endpoint; what is missing is the convenience around it.
+
+☐ Ship a preset list of providers — name, base URL, protocol, the environment variable a key comes from — so `[providers.openrouter]`, `deepseek`, `groq`, `together`, `mistral`, `xai`, `fireworks`, `ollama` and their like need only a key, and `inference-gateway providers list` prints what is configured, what is preset, and what each reaches.
+☐ Discover models per configured provider through the protocol's own listing (`GET /v1/models` and its equivalents), cached briefly, so Pane's picker and `/model` offer what an account can actually reach and no model name is compiled in.
+☐ Add a provider and its key without editing TOML: `inference-gateway providers add <name> --base-url … --protocol … --key-from-env VAR` writing `[providers.<name>]` and the key to the store, and a row in Pane's `/settings` that calls it.
