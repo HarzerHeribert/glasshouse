@@ -788,7 +788,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         (
             Conversation {
                 system: build_system_prompt(
-                    &project,
+                    &config.borrow().web,
                     &profile,
                     args.interface.unwrap_or_default(),
                     &manifest,
@@ -1265,7 +1265,7 @@ fn run_task_inner(
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
     transcript.conversation.system = build_system_prompt(
-        session.project,
+        &session.config().web,
         session.profile,
         session.interface.get(),
         &session.manifest,

@@ -517,7 +517,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "web.allow_domains",
         label: "Allowed domains",
-        description: "Empty permits all public domains. `*.example.org` matches subdomains only.",
+        description: "The domains web.fetch may reach; empty refuses every fetch. `*.example.org` matches subdomains only.",
         kind: Kind::List,
         choices: &[],
         basic: false,

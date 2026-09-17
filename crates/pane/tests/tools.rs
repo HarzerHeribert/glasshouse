@@ -153,6 +153,12 @@ fn a_tool_declaring_no_purity_does_not_compile_or_is_rejected() {
 /// present and failing. Asserted positively against the names the spec calls
 /// out and against every declared executable, so adding a `curl` tool under
 /// any name fails here.
+///
+/// The invariant, stated for what it is: **no tool the cell's sandboxed exec
+/// path runs reaches a network.** The host globals `web.fetch` and
+/// `web.search` are not registered tools — they run in pane's own process
+/// through the web broker, never in a cell — and they exist only when `[web]`
+/// is configured; the test below is that half (map 2658).
 #[test]
 fn no_registered_tool_needs_the_network() {
     let names = registry::names();
@@ -2014,5 +2020,48 @@ fn no_pure_search_tool_can_write_and_no_flag_shaped_argument_becomes_a_flag() {
         std::fs::read(&json).unwrap(),
         before_json,
         "a pure search tool changed a file"
+    );
+}
+
+/// **Map 2658: a network tool exists only when its configuration does.** An
+/// unconfigured session's Runtime block declares no `web` at all — the
+/// model cannot be told about a global it does not hold — and a configured
+/// one names exactly the domains `web.fetch` may reach and whether
+/// `web.search` exists. The same predicate the runtime binds on
+/// (`HostGlobals::installs_with`).
+#[test]
+fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its_reach() {
+    use pane::prompt::declarations::WebReach;
+    use pane::prompt::render_runtime_reaching;
+    use pane::runtime::bindings::HostGlobals;
+
+    let unconfigured = render_runtime_reaching(HostGlobals::Every, None);
+    assert!(
+        !unconfigured.contains("declare const web") && !unconfigured.contains("web.fetch"),
+        "an unconfigured session was told about `web`:\n{unconfigured}"
+    );
+    assert!(unconfigured.contains("declare const bg"), "{unconfigured}");
+
+    let reach = WebReach {
+        domains: vec!["docs.rs".into(), "*.rust-lang.org".into()],
+        search: false,
+        max_response_bytes: 1_048_576,
+        timeout_seconds: 20,
+    };
+    let configured = render_runtime_reaching(HostGlobals::Every, Some(&reach));
+    assert!(configured.contains("declare const web: {"), "{configured}");
+    assert!(
+        configured.contains("web.fetch reaches: docs.rs, *.rust-lang.org"),
+        "{configured}"
+    );
+    assert!(
+        configured.contains("web.search: not configured"),
+        "{configured}"
+    );
+    assert!(
+        !HostGlobals::Every.installs_with("web", false)
+            && HostGlobals::Every.installs_with("web", true)
+            && !HostGlobals::Helper(&["read"]).installs_with("web", true),
+        "the predicate: configuration decides `web` for a cell, and a helper never holds it"
     );
 }

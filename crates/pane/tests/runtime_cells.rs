@@ -22,6 +22,7 @@ use pane::sandbox::profile::Profile;
 // there (the cell's three reds on `a8766b2`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use pane::tools::invoke::CancellationToken;
+use pane::web::{WebBroker, WebConfig, WebResponse, WebTransport};
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -3485,4 +3486,109 @@ fn a_subagent_inherits_the_parents_model() {
     };
     assert_eq!(asked.turns.clamp(1, MAX_TURNS), MAX_TURNS);
     const { assert!(DEFAULT_TURNS <= MAX_TURNS) };
+}
+
+// --- `web` exists only when configured, and a fetch is one rollout line
+
+/// A transport that answers every GET with one fixed document and remembers
+/// what it was asked, so the broker's own policy and the runtime's record are
+/// what is measured, not the network.
+struct FixedTransport {
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl WebTransport for FixedTransport {
+    fn get(&self, url: &str, _: usize, _: Duration) -> Result<WebResponse, String> {
+        self.asked.lock().unwrap().push(url.to_string());
+        Ok(WebResponse {
+            status: 200,
+            location: None,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: b"hello from the fixture".to_vec(),
+        })
+    }
+}
+
+fn web_broker(config: WebConfig) -> WebBroker {
+    WebBroker::with_transport(
+        config,
+        Box::new(FixedTransport {
+            asked: std::sync::Mutex::new(Vec::new()),
+        }),
+    )
+    .unwrap()
+}
+
+/// **Map 2658 and 2656, through a real isolate.** Before any broker, and with
+/// a broker whose configuration allows nothing, `web` is not a name the cell
+/// holds; once `[web]` allows a domain it is; and a fetch leaves one call
+/// record naming the URL, the status, the size and the type of the answer —
+/// the rollout line the transcript renders.
+#[test]
+fn web_is_bound_only_when_configured_and_a_fetch_is_one_rollout_line() {
+    let fixture = Fixture::new("web-bound");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("web-bound-session");
+
+    let mut bare = runtime(&fixture, &glasshouse, &session);
+    assert_eq!(
+        returned_string(&bare.run_cell("return typeof web;")),
+        "undefined",
+        "a runtime nobody configured holds a `web`"
+    );
+
+    let unconfigured = WebConfig {
+        enabled: true,
+        ..WebConfig::default()
+    };
+    let mut still_bare =
+        runtime(&fixture, &glasshouse, &session).with_web_broker(web_broker(unconfigured));
+    assert_eq!(
+        returned_string(&still_bare.run_cell("return typeof web;")),
+        "undefined",
+        "enabled with nothing allowed is not configured, so `web` must not exist"
+    );
+
+    let configured = WebConfig {
+        enabled: true,
+        allow_domains: vec!["example.com".into()],
+        ..WebConfig::default()
+    };
+    let mut runtime =
+        runtime(&fixture, &glasshouse, &session).with_web_broker(web_broker(configured));
+    assert_eq!(
+        returned_string(&runtime.run_cell("return typeof web;")),
+        "object"
+    );
+    let outcome = runtime
+        .run_cell("const page = web.fetch(\"https://example.com/docs\");\nreturn page.content;");
+    assert_eq!(returned_string(&outcome), "hello from the fixture");
+    let calls = &outcome.turn().record.calls;
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let call = &calls[0];
+    assert_eq!(call.tool, "web.fetch");
+    assert_eq!(call.args["url"], "https://example.com/docs");
+    assert_eq!(call.args["status"], "200");
+    assert_eq!(call.args["bytes"], "22");
+    assert!(
+        call.args["content_type"].starts_with("text/plain"),
+        "{:?}",
+        call.args
+    );
+    assert!(call.error.is_none(), "{call:?}");
+
+    // A refused fetch is still one line, with the URL and the refusal.
+    let refused = runtime
+        .run_cell("try { web.fetch(\"https://elsewhere.org/\"); } catch (e) { return String(e); }");
+    let calls = &refused.turn().record.calls;
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].args["url"], "https://elsewhere.org/");
+    assert!(
+        calls[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("denied")),
+        "{:?}",
+        calls[0]
+    );
 }

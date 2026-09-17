@@ -37,11 +37,41 @@ fn broker(config: WebConfig, replies: Vec<WebResponse>) -> (WebBroker, Arc<Mutex
         urls,
     )
 }
+/// Enabled with `example.com` allowed: since map 2656 an empty allow list
+/// refuses every fetch, so a fixture that fetches names its domain.
 fn enabled() -> WebConfig {
     WebConfig {
         enabled: true,
+        allow_domains: vec!["example.com".into(), "*.example.com".into()],
         ..WebConfig::default()
     }
+}
+
+/// **Map 2656: refused until a domain is allowed.** Enabled with nothing
+/// allowed, a fetch is refused by a sentence naming the setting, and the
+/// transport is never asked — an empty list is not "everything".
+#[test]
+fn an_empty_allow_list_refuses_every_fetch_and_names_the_setting() {
+    let config = WebConfig {
+        enabled: true,
+        ..WebConfig::default()
+    };
+    assert!(!config.fetch_configured());
+    assert!(
+        !config.configured(),
+        "nothing is configured, so `web` does not exist"
+    );
+    let (web, urls) = broker(config, vec![response(200, "text/plain", "never", None)]);
+    let refusal = web.fetch("https://example.com").unwrap_err();
+    assert!(
+        refusal.contains("no domain is allowed") && refusal.contains("allow_domains"),
+        "{refusal}"
+    );
+    assert!(urls.lock().unwrap().is_empty(), "the transport was asked");
+    // And the same list with one domain reaches it.
+    let (web, urls) = broker(enabled(), vec![response(200, "text/plain", "ok", None)]);
+    assert_eq!(web.fetch("https://example.com").unwrap().content, "ok");
+    assert_eq!(urls.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -201,11 +231,15 @@ fn excessive_redirects_large_responses_nontext_and_http_errors_fail() {
 
 #[test]
 fn configured_search_encodes_query_and_returns_filtered_citations() {
+    // No allow list: the endpoint is reached by being configured, and the
+    // hits answer to the deny list and the private-address rule only.
     let config = WebConfig {
+        enabled: true,
         search_endpoint: Some("https://search.example.com/search".into()),
         deny_domains: vec!["blocked.example.com".into()],
-        ..enabled()
+        ..WebConfig::default()
     };
+    assert!(config.search_configured() && config.configured());
     let payload = r#"{"results":[{"title":"Rust","url":"https://rust-lang.org/","content":"A language"},{"title":"Bad","url":"https://blocked.example.com/"},{"title":"Local","url":"http://localhost/"}]}"#;
     let (web, urls) = broker(
         config,

@@ -15,7 +15,11 @@ use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 #[serde(default, deny_unknown_fields)]
 pub struct WebConfig {
     pub enabled: bool,
-    /// Empty permits all public domains. `*.example.org` matches subdomains only.
+    /// The domains `web.fetch` may reach; `*.example.org` matches subdomains
+    /// only. **Empty refuses every fetch**: the tool exists once a domain is
+    /// allowed (map 2656). A destination the user configured — the search
+    /// endpoint, a remote MCP server — is reached by being configured and does
+    /// not consult this list; the deny list still wins everywhere.
     pub allow_domains: Vec<String>,
     /// Deny wins over allow. Bare names match exactly.
     pub deny_domains: Vec<String>,
@@ -38,6 +42,35 @@ impl Default for WebConfig {
             timeout_seconds: 20,
         }
     }
+}
+
+impl WebConfig {
+    /// Whether `web.fetch` reaches anything: enabled, with a domain allowed.
+    pub fn fetch_configured(&self) -> bool {
+        self.enabled && !self.allow_domains.is_empty()
+    }
+
+    /// Whether `web.search` reaches anything: enabled, with an endpoint.
+    pub fn search_configured(&self) -> bool {
+        self.enabled && self.search_endpoint.is_some()
+    }
+
+    /// Whether the `web` global exists at all for this configuration — the
+    /// one predicate `runtime::bindings::install_web` and the Runtime block
+    /// both read (map 2658), so a session that configured nothing binds no
+    /// `web` and is told of none.
+    pub fn configured(&self) -> bool {
+        self.fetch_configured() || self.search_configured()
+    }
+}
+
+/// Whose policy a request answers to: the model's `web.fetch`, which must
+/// name an allowed domain, or a destination the user configured — the search
+/// endpoint — which is reached by being configured.
+#[derive(Clone, Copy)]
+enum Destination {
+    Fetch,
+    Endpoint,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,13 +136,20 @@ pub struct WebBroker {
 }
 
 impl WebBroker {
+    /// The configuration this broker was built from.
+    pub fn config(&self) -> &WebConfig {
+        &self.config
+    }
+
     pub fn fetch_cancellable(
         &self,
         url: &str,
         token: &CancellationToken,
     ) -> Result<FetchResult, String> {
         let url = url.to_owned();
-        self.on_worker(token, move |broker, token| broker.fetch_inner(&url, &token))
+        self.on_worker(token, move |broker, token| {
+            broker.fetch_inner(&url, &token, Destination::Fetch)
+        })
     }
 
     pub fn search_cancellable(
@@ -331,13 +371,26 @@ impl WebBroker {
     }
 
     pub fn fetch(&self, url: &str) -> Result<FetchResult, String> {
-        self.fetch_inner(url, &CancellationToken::new())
+        self.fetch_inner(url, &CancellationToken::new(), Destination::Fetch)
     }
 
-    fn fetch_inner(&self, url: &str, token: &CancellationToken) -> Result<FetchResult, String> {
+    fn fetch_inner(
+        &self,
+        url: &str,
+        token: &CancellationToken,
+        destination: Destination,
+    ) -> Result<FetchResult, String> {
         if !self.config.enabled {
             return Err(
                 "web tools are disabled; enable [web].enabled in host configuration".into(),
+            );
+        }
+        // Refused until a domain is allowed (map 2656): the model's fetch
+        // answers to the allow list, and an empty list is not "everything".
+        if matches!(destination, Destination::Fetch) && self.config.allow_domains.is_empty() {
+            return Err(
+                "web.fetch refused: no domain is allowed; add the domain to [web] allow_domains"
+                    .into(),
             );
         }
         let mut current = url.to_owned();
@@ -415,6 +468,7 @@ impl WebBroker {
         let response = self.fetch_inner(
             &format!("{endpoint}{sep}q={}&format=json", encode(query)),
             token,
+            Destination::Endpoint,
         )?;
         #[derive(Deserialize)]
         struct Payload {

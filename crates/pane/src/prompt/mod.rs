@@ -379,12 +379,26 @@ pub fn render_system_for(
     facts: &SessionFacts,
     globals: HostGlobals,
 ) -> String {
+    render_system_reaching(instructions, tools, facts, globals, None)
+}
+
+/// [`render_system_for`] with what this session's `[web]` reaches: the
+/// Runtime block declares `web` only when `web` is configured, and then
+/// says which domains it may name (map 2656, 2658). `None` is an
+/// unconfigured session, which binds no `web` and is told of none.
+pub fn render_system_reaching(
+    instructions: &str,
+    tools: &[&Tool],
+    facts: &SessionFacts,
+    globals: HostGlobals,
+    web: Option<&declarations::WebReach>,
+) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     let mut system = format!(
         "{}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{}",
         preamble_for(facts.interface),
         rendered.join("\n\n"),
-        render_runtime_for(globals),
+        render_runtime_reaching(globals, web),
         render_abi_for(globals),
         render_session_facts(facts)
     );
@@ -455,12 +469,34 @@ pub fn render_runtime() -> String {
 }
 
 /// [`render_runtime`] for a narrowed context: the same table, filtered by the
-/// predicate `bindings::install` itself binds on.
+/// predicate `bindings::install` itself binds on. `web` is declared in its
+/// table form here — this is the complete table, not a session's block; a
+/// session renders through [`render_runtime_reaching`].
 pub fn render_runtime_for(globals: HostGlobals) -> String {
     declarations::RUNTIME
         .iter()
         .filter(|binding| globals.installs(binding.global))
         .map(|binding| binding.declaration.to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A session's Runtime block: the table filtered by the narrowing **and by
+/// the configuration** — `web` appears only when `[web]` names a domain or
+/// an endpoint, rendered with what it reaches, on the same predicate
+/// `Runtime::with_web_broker` binds it on
+/// (`HostGlobals::installs_with`; map 2658).
+pub fn render_runtime_reaching(
+    globals: HostGlobals,
+    web: Option<&declarations::WebReach>,
+) -> String {
+    declarations::RUNTIME
+        .iter()
+        .filter(|binding| globals.installs_with(binding.global, web.is_some()))
+        .map(|binding| match (binding.global, web) {
+            ("web", Some(reach)) => declarations::web_declaration(reach),
+            _ => binding.declaration.to_string(),
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }

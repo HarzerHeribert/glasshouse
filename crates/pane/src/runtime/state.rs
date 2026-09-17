@@ -185,6 +185,12 @@ pub(crate) struct RuntimeState {
     pub(crate) watchdog_fired: RefCell<Option<Arc<AtomicBool>>>,
     pub(crate) mcp: RefCell<crate::tools::mcp::Mcp>,
     pub(crate) web: RefCell<Option<crate::web::WebBroker>>,
+    /// The narrowing this runtime's context was built under, kept because
+    /// the one global the configuration decides (`web`) is bound after
+    /// construction, when the broker arrives — `Runtime::with_web_broker`.
+    pub(crate) globals: crate::runtime::bindings::HostGlobals,
+    /// Whether `web` has been bound, so a second broker does not bind twice.
+    pub(crate) web_bound: std::cell::Cell<bool>,
     pub(crate) agent_templates: crate::project::agents::Catalog,
     pub(crate) effective_config: RefCell<Option<crate::config::PaneConfig>>,
     pub(crate) glasshouse: Glasshouse,
@@ -306,6 +312,12 @@ impl Repeat {
 const RESERVED_FOR_THE_MODEL: u32 = 2;
 
 impl RuntimeState {
+    /// The narrowing the context is built under — `Every` unless told.
+    pub(crate) fn with_globals(mut self, globals: crate::runtime::bindings::HostGlobals) -> Self {
+        self.globals = globals;
+        self
+    }
+
     pub(crate) fn new(profile: &Profile, glasshouse: &Glasshouse, session: &SessionId) -> Self {
         Self {
             messages: RefCell::new(Rc::new(RefCell::new(HashMap::new()))),
@@ -315,6 +327,8 @@ impl RuntimeState {
             watchdog_fired: RefCell::new(None),
             mcp: RefCell::new(crate::tools::mcp::Mcp::default()),
             web: RefCell::new(None),
+            globals: crate::runtime::bindings::HostGlobals::Every,
+            web_bound: std::cell::Cell::new(false),
             agent_templates: crate::project::agents::Catalog::load(profile),
             effective_config: RefCell::new(None),
             glasshouse: glasshouse.clone(),

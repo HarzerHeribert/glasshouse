@@ -42,6 +42,7 @@ use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
 
 mod watchdog;
+mod web;
 use watchdog::{EpilogueBudget, Watchdog, gave_up, timed_out};
 
 /// The isolate's heap ceiling until `pane.toml` supplies one — 61F owns the
@@ -531,21 +532,6 @@ impl Runtime {
         self
     }
 
-    /// Installs host-owned brokered web access without granting shell network access.
-    pub fn with_web(self, config: crate::web::WebConfig) -> Result<Self, String> {
-        if let Some(effective) = self.state.effective_config.borrow_mut().as_mut() {
-            effective.web = config.clone();
-        }
-        self.state.mcp.borrow_mut().configure_web(config.clone())?;
-        Ok(self.with_web_broker(crate::web::WebBroker::new(config)?))
-    }
-
-    /// A host embedding may provide its own broker transport; JavaScript cannot.
-    pub fn with_web_broker(self, broker: crate::web::WebBroker) -> Self {
-        *self.state.web.borrow_mut() = Some(broker);
-        self
-    }
-
     pub fn with_helpers(self, helpers: crate::config::HelpersConfig) -> Self {
         if let Some(config) = self.state.effective_config.borrow_mut().as_mut() {
             config.helpers = helpers.clone();
@@ -712,7 +698,7 @@ impl Runtime {
             Rc::as_ptr(&heap).cast_mut().cast::<c_void>(),
         );
 
-        let state = Rc::new(RuntimeState::new(profile, glasshouse, session));
+        let state = Rc::new(RuntimeState::new(profile, glasshouse, session).with_globals(globals));
         isolate.set_slot(state.clone());
 
         let context = {

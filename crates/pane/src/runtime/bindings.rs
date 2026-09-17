@@ -33,7 +33,9 @@ use crate::tools::invoke::{self, Args, ToolContext, ToolError, ToolResult};
 use crate::tools::registry::{self, Tool};
 
 mod console;
+mod web;
 use console::console_callback;
+pub(crate) use web::install_web;
 
 /// Declared once so the classes a refusal is thrown as exist before any cell
 /// runs, and so the one JIT surface a code-over-objects runtime has no use
@@ -283,6 +285,17 @@ impl HostGlobals {
         }
     }
 
+    /// [`Self::installs`] with the one global whose existence the session's
+    /// configuration decides: `web` is bound and declared only when
+    /// `[web]` names a domain or an endpoint (map 2658), so an unconfigured
+    /// session holds no `web` and is told of none. The predicate
+    /// [`install_web`] binds on and [`crate::prompt::render_runtime_reaching`]
+    /// declares on.
+    #[must_use]
+    pub fn installs_with(self, global: &str, web_configured: bool) -> bool {
+        self.installs(global) && (global != "web" || web_configured)
+    }
+
     /// Whether a **registered tool** is bound under this narrowing.
     ///
     /// Separate from [`Self::installs`] because a tool is admitted by the
@@ -350,16 +363,8 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
         set_fixed_key(scope, global, "off", function.into());
     }
 
-    if globals.installs("web") {
-        let web = v8::Object::new(scope);
-        for name in ["fetch", "search"] {
-            let data = js_string(scope, name);
-            if let Some(function) = v8::Function::builder(web_callback).data(data).build(scope) {
-                set_fixed_key(scope, web, name, function.into());
-            }
-        }
-        set_fixed_key(scope, global, "web", web.into());
-    }
+    // `web` is not bound here: whether it exists is the configuration's
+    // decision, made when the broker arrives — see [`install_web`].
 
     if globals.installs("mcp") {
         let mcp = v8::Object::new(scope);
@@ -491,73 +496,6 @@ pub(crate) fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s,
 }
 
 // --- registered tools -------------------------------------------------
-
-fn web_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue,
-) {
-    let operation = args.data().to_rust_string_lossy(scope);
-    let name = format!("web.{operation}");
-    if !args.get(0).is_string() {
-        throw_tool_error(
-            scope,
-            "web.fetch requires a URL string; web.search requires a query string",
-        );
-        return;
-    }
-    let input = args.get(0).to_rust_string_lossy(scope);
-    let state = state(scope);
-    if state.token.borrow().is_cancelled() {
-        throw_cancelled(scope, &name);
-        return;
-    }
-    let result = (|| -> Result<serde_json::Value, String> {
-        let broker = state.web.borrow();
-        let broker = broker
-            .as_ref()
-            .ok_or("web access is disabled; configure [web] in pane.toml")?;
-        match operation.as_str() {
-            "fetch" => {
-                serde_json::to_value(broker.fetch_cancellable(&input, &state.token.borrow())?)
-                    .map_err(|e| e.to_string())
-            }
-            "search" => {
-                serde_json::to_value(broker.search_cancellable(&input, &state.token.borrow())?)
-                    .map_err(|e| e.to_string())
-            }
-            _ => Err("unknown web operation".into()),
-        }
-    })();
-    trace(scope).record(CallRecord {
-        tool: name.clone(),
-        args: std::collections::BTreeMap::new(),
-        evidence: None,
-        lifted_from: None,
-        exit_code: None,
-        repeat_of: None,
-        error: result.as_ref().err().cloned(),
-        ended: if result.is_ok() {
-            Ended::Ok
-        } else {
-            Ended::Threw {
-                class: "ToolError".into(),
-            }
-        },
-    });
-    if state.token.borrow().is_cancelled() {
-        throw_cancelled(scope, &name);
-        return;
-    }
-    match result {
-        Ok(json) => {
-            let value = json_to_v8(scope, &json);
-            tag_mcp_result(scope, &state, &name, value, &json.to_string());
-            retval.set(value);
-        }
-        Err(reason) => throw_tool_error(scope, &reason),
-    }
-}
 
 fn mcp_list_callback(
     scope: &mut v8::PinScope,

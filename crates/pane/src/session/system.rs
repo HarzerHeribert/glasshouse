@@ -13,17 +13,22 @@ use super::*;
 /// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
 /// byte, so there is no second spelling of the contract here to drift from it.
 pub(super) fn build_system_prompt(
-    _project: &ProjectConfig,
+    web: &crate::web::WebConfig,
     profile: &Profile,
     interface: crate::abi::Interface,
     manifest: &crate::manifest::Manifest,
 ) -> String {
     // Configuration/grants remain session-scoped; guidance is read fresh.
     let instructions = crate::project::instructions::root(profile);
-    let mut system = prompt::render_system(
+    // The Runtime block declares `web` only when `[web]` reaches something,
+    // the same predicate the runtime binds it on (map 2658).
+    let reach = prompt::declarations::WebReach::from_config(web);
+    let mut system = prompt::render_system_reaching(
         &instructions,
         &registry::ALL.iter().collect::<Vec<_>>(),
         &session_facts_with(profile, interface, manifest),
+        crate::runtime::bindings::HostGlobals::Every,
+        reach.as_ref(),
     );
     if profile.os_sandbox_bypassed() {
         system.push_str(

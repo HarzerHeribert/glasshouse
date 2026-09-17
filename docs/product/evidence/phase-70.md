@@ -17,3 +17,19 @@ Opened 2026-09-17 by the user's rulings (design-decisions.md, *Pane first, and P
 **Gates.** Host: `--lib session::ui::terminal_input` 26/26, `--test tui_live` 23/23, clippy clean, blast radius: windows-gnu check clean, rustdoc clean. VM: `--lib session::ui::terminal_input` 26/26, `--test tui_live` 21/21 (the once-session paste guard prints `skipped:` there, as designed). Windows clippy is the `pane (windows-latest)` cell (`cargo-clippy` is not installed on the VM's toolchain).
 
 **Limits.** The paste half is a console limit on this Windows; the two paste guards keep their `skipped:` branches on ConPTY. No test distinguishes the two console modes (the survived mutation); the trace is the evidence.
+
+## 2656 and 2658 — COMPLETE 2026-09-17 (GH-PANE-FETCH-TOOL, a fork; `web.fetch` existed, this finishes it)
+
+**Contract 2656.** Given `[web]` enabled, when the model calls `web.fetch`, Pane fetches by GET only a URL whose domain is in `allow_domains` — an empty list refuses and names the setting — through the broker's policy on every hop, and records one `CallRecord` with url, status, bytes and content type; a search endpoint the user configured is still reached by being configured, and the deny list wins everywhere.
+
+**Contract 2658.** Given a session, when `[web]` names no domain and no endpoint, Pane binds no `web` global and the Runtime block declares none; when it names one, `web` is bound and the declaration says which domains `web.fetch` reaches and whether `web.search` exists — on the one predicate `HostGlobals::installs_with` — while a helper's narrowing withholds `web` regardless and `no_registered_tool_needs_the_network` keeps its meaning (the never-registered list constrains `registry::ALL`, not host globals; its doc comment now says so).
+
+**Production.** `web.rs :: WebBroker::fetch_inner` (the `Destination::Fetch` refusal), `WebConfig::{fetch_configured, search_configured, configured}`; `runtime/bindings.rs :: HostGlobals::installs_with`; `runtime/bindings/web.rs :: web_callback` (the call record: url or query, status, content type, bytes or results); `runtime/isolate/web.rs :: Runtime::with_web_broker` (bound only when configured and the narrowing admits it); `prompt/declarations.rs :: WebReach::from_config, web_declaration`; `prompt/mod.rs :: render_runtime_reaching`; `session/system.rs :: build_system_prompt` (takes the `[web]` config in place of an unused parameter). The web binding moved into two submodules because `bindings.rs` and `isolate.rs` are over the size bar and may only shrink — a split, not a baseline edit.
+
+**Regression.** `web_capabilities::an_empty_allow_list_refuses_every_fetch_and_names_the_setting`; `runtime_cells::web_is_bound_only_when_configured_and_a_fetch_is_one_rollout_line`; `tools::an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its_reach`; `tools::no_registered_tool_needs_the_network` (invariant restated).
+
+**Mutation.** `empty-allow-list-permits-again` (`&& self.config.allow_domains.is_empty() {` → `… && false {`): KILLED by `web_capabilities::an_empty_allow_list_refuses_every_fetch_and_names_the_setting` ("panicked at web_capabilities.rs:65:52 — unwrap_err on a fetch that succeeded").
+
+**Gates.** blast radius over 14 files exit 0: runtime_cells 90/90, prompt_bytes 107/107, tools 36/36, web_capabilities 12/12, lib slices ok, windows-gnu check clean, rustdoc clean, sizes none grown; clippy clean.
+
+**Limits.** No real host is fetched (fake transport; the dogfooding lane covers it). The sidebar's `net:` field and `/config`'s network line still say `net:off`/`grants_network()` (design §8; the search package). Two scans pin literal shapes the design did not know: `runtime_cells.rs:782` reads `(self,` as a builder, so `with_web_broker` takes `self` and rebinds inside; the `RUNTIME` table stays complete for `the_runtime_block_carries_every_non_tool_binding`, so a session renders through `render_runtime_reaching`.
