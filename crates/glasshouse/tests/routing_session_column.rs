@@ -46,9 +46,42 @@ use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::Provider;
 use glasshouse::routing::evidence::{
-    EffortLevel, EvidenceLedger, HARNESS_TURN_PURPOSE, NewObservation, ObservationQuery, Outcome,
-    RoutingObservation, TurnShape,
+    EffortLevel, EvidenceLedger, Outcome, RoutingObservation, TurnShape,
 };
+
+/// Local stand-in for the ledger's own (now-internal) `ObservationQuery`:
+/// this file filters exactly these four fields client-side against
+/// [`EvidenceLedger::observations_in_window`], the successor to the deleted
+/// `EvidenceLedger::recent`.
+#[derive(Debug, Clone, Copy)]
+struct ObservationQuery<'a> {
+    provider: &'a str,
+    model: &'a str,
+    route: Option<&'a str>,
+    harness: Option<&'a str>,
+}
+
+fn recent(
+    ledger: &EvidenceLedger,
+    query: ObservationQuery<'_>,
+    _limit: usize,
+) -> Vec<RoutingObservation> {
+    // `now_unix: i64::MAX, window_seconds: i64::MAX` saturates the window's
+    // lower bound at 0 rather than underflowing, so this reads every row
+    // ever recorded — real current-time rows and fixtures planted at a
+    // literal `observed_at` of 1 or 2 alike.
+    ledger
+        .observations_in_window(i64::MAX, i64::MAX)
+        .expect("read the ledger")
+        .into_iter()
+        .filter(|row| {
+            row.provider == query.provider
+                && row.model == query.model
+                && row.route.as_deref() == query.route
+                && row.harness.as_deref() == query.harness
+        })
+        .collect()
+}
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, SecretRef, SecretStore};
 use glasshouse::session::{ProjectSessions, SessionId};
@@ -431,7 +464,7 @@ fn wait_for_rows(
 ) -> Vec<RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let rows = ledger.recent(query, 32).expect("read the ledger");
+        let rows = recent(ledger, query, 32);
         if rows.len() >= at_least || Instant::now() >= deadline {
             return rows;
         }
@@ -669,27 +702,6 @@ impl LaunchedSession {
         records[0].id.clone()
     }
 
-    /// `glasshouse routing-cost`, run as its own process against the same
-    /// directories.
-    fn routing_cost(&self) -> String {
-        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
-            .arg("--scope")
-            .arg(&self.root)
-            .arg("--data-dir")
-            .arg(self.base.join("data"))
-            .arg("--config-dir")
-            .arg(self.base.join("config"))
-            .arg("routing-cost")
-            .output()
-            .expect("run routing-cost");
-        assert!(
-            output.status.success(),
-            "routing-cost must succeed: stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
     fn stop(mut self) {
         std::fs::write(&self.stop_file, "go").expect("write the stop file");
         let status = self.launch.wait().expect("wait for the launch");
@@ -899,97 +911,13 @@ fn a_relayed_exchange_records_the_session_and_neither_request_fact() {
 }
 
 // ===========================================================================
-// (d) The readout: a per-session ratio, and words where no session was named.
-// ===========================================================================
-
-/// Map line 2019's readout half, through `glasshouse routing-cost` itself:
-/// the `SAVINGS` section's translation facet gains a per-session grouping
-/// beside the per-credential one it already prints, naming the launched
-/// session's own id with its ratio and denominator — and saying *no session
-/// recorded* in words, never `0`, for a row that names none.
-///
-/// Five exchanges, because a ratio is a rate and sits behind the ledger's
-/// standing sample floor (`MIN_SAMPLE_FOR_SUMMARY`); the sixth planted row
-/// below the floor is what proves the floor prints words rather than a
-/// percentage nobody earned.
-#[test]
-fn routing_cost_prints_a_per_session_ratio_and_words_for_a_row_with_no_session() {
-    let fixture = FixtureUpstream::answering(chat_completion_answer());
-    let session = LaunchedSession::start(&fixture);
-    for _ in 0..glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY {
-        session.send(&prompt_body());
-    }
-
-    let runtime = session.runtime();
-    let ledger = EvidenceLedger::open(&runtime).expect("open the launched project's ledger");
-    let rows = wait_for_rows(
-        &ledger,
-        launched_query(),
-        glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY,
-    );
-    assert_eq!(
-        rows.len(),
-        glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY
-    );
-
-    // A translated row naming no session — what a build older than migration
-    // 24 wrote, and what a gateway nobody told writes.
-    ledger
-        .record(
-            NewObservation::new("planted", "planted-model")
-                .with_harness(Some("claude-code"))
-                .with_purpose(Some(HARNESS_TURN_PURPOSE))
-                .with_route(Some("anthropic-messages->openai-chat"))
-                .with_quota_context(Some("cred-planted"))
-                .with_tokens(Some(90), Some(5), Some(10)),
-            glasshouse::provider::cache::now_unix_seconds(),
-        )
-        .expect("plant a session-less translated row");
-
-    let report = session.routing_cost();
-    let expected = session.session_id();
-
-    let facet = section(&report, "translation by session");
-    assert!(
-        facet.contains(expected.as_str()),
-        "the per-session facet must name the launched session:\n{report}"
-    );
-    // Five exchanges, each stating `prompt_tokens: 40` of which
-    // `cached_tokens: 8` — the decoder records the 8 apart from the 32 that
-    // were not served from cache, so the group is 40 cached of 200.
-    assert!(
-        facet.contains("5 exchanges, prompt-cache reads 40 of 200 translated input tokens (20.0%)"),
-        "expected the launched session's own counts and ratio in:\n{facet}"
-    );
-    assert!(
-        facet.contains("(no session recorded)"),
-        "a row naming no session must say so in words:\n{facet}"
-    );
-    assert!(
-        facet.contains(
-            "1 exchanges, prompt-cache reads 10 of 100 translated input tokens \
-                        (not counted: 1 of 5 exchanges needed)"
-        ),
-        "a group below the standing sample floor must print words for its ratio, never a \
-         percentage nobody earned:\n{facet}"
-    );
-
-    session.stop();
-}
-
-/// The rendered block for one `SAVINGS` facet's label, from the blank line
-/// before `  {label}` to the next blank line — `tests/savings_readout.rs`'s
-/// own convention.
-fn section(report: &str, label: &str) -> String {
-    let marker = format!("\n  {label}\n");
-    let start = report
-        .find(&marker)
-        .unwrap_or_else(|| panic!("no section for {label:?} in:\n{report}"));
-    let rest = &report[start + 1..];
-    let end = rest.find("\n\n").unwrap_or(rest.len());
-    rest[..end].to_owned()
-}
-
+// (d) was the readout: a per-session ratio, and words where no session was
+// named, through `glasshouse routing-cost`'s `SAVINGS` section. Both the
+// command and that section are gone with the routing deletion
+// (design-decisions, 2026-09-16) — `EvidenceLedger::translation_cache_savings`
+// and `main.rs::render_savings_section` have no production caller left, the
+// same finding `tests/savings_readout.rs`'s own removal made — so there is
+// nothing left here to drive.
 // ===========================================================================
 // (e) The migration: three NULLs for an older row, and no error for a word
 //     this build does not know.
@@ -1069,17 +997,16 @@ fn a_version_23_database_migrates_and_reads_back_three_nulls() {
     let migrated = glasshouse::bootstrap(&cli, &root).expect("the upgrade bootstrap");
     {
         let ledger = EvidenceLedger::open(&migrated).expect("open the ledger");
-        let older = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "older-build",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .expect("read the older row");
+        let older = recent(
+            &ledger,
+            ObservationQuery {
+                provider: "older-build",
+                model: "m",
+                route: None,
+                harness: None,
+            },
+            1,
+        );
         assert_eq!(older.len(), 1);
         assert_eq!(
             older[0].session_id, None,
@@ -1105,17 +1032,16 @@ fn a_version_23_database_migrates_and_reads_back_three_nulls() {
     }
     {
         let ledger = EvidenceLedger::open(&migrated).expect("open the ledger");
-        let future = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "future-build",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .expect("the row reads, it does not error");
+        let future = recent(
+            &ledger,
+            ObservationQuery {
+                provider: "future-build",
+                model: "m",
+                route: None,
+                harness: None,
+            },
+            1,
+        );
         assert_eq!(future.len(), 1);
         assert_eq!(future[0].effort_level, None);
         assert_eq!(future[0].turn_shape, None);

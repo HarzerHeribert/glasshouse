@@ -11,9 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use glasshouse::config;
 use glasshouse::integrations::IntegrationId;
-use glasshouse::shell::{
-    self, MemorySettingsEdit, RoutingSettingsEdit, SettingsEdit, SettingsSection, ShellState,
-};
+use glasshouse::shell::{self, MemorySettingsEdit, SettingsEdit, SettingsSection, ShellState};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 /// Tab until `target` has the cursor, rather than a fixed count.
@@ -240,89 +238,23 @@ fn a_save_only_touches_the_fields_an_edit_actually_named() {
 
 /// Routing follows the same two explicit save paths as every other Settings
 /// section, and its per-field edit shape must not promote untouched values.
-#[test]
-fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
-    use glasshouse::config::{
-        EffectiveConfig, Layer, PremiumReservePercent, RouterCostMicroUsd, RouterLatencyMs,
-        RoutingModelChoice,
-    };
-
-    let workspace = new_workspace();
-    let data = tempfile::tempdir().unwrap();
-    let runtime = runtime_for(workspace.path(), data.path());
-
-    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Automatic))
-        .set_max_router_latency(Some(RouterLatencyMs::try_from(1_500).unwrap()));
-    user.save(runtime.paths()).unwrap();
-
-    let user_edit = RoutingSettingsEdit {
-        max_cost: Some(RouterCostMicroUsd::try_from(2_500).unwrap()),
-        prefer_free: Some(false),
-        ..RoutingSettingsEdit::default()
-    };
-    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&user_edit), None)
-        .unwrap();
-    assert!(
-        !runtime
-            .project()
-            .display_root()
-            .join(".glasshouse")
-            .exists(),
-        "a user routing save wrote into the project"
-    );
-    let user = config::UserConfig::load(runtime.paths()).unwrap();
-    assert_eq!(user.routing().model(), Some(&RoutingModelChoice::Automatic));
-    assert_eq!(user.routing().max_router_latency().unwrap().get(), 1_500);
-    assert_eq!(user.routing().max_marginal_cost().unwrap().get(), 2_500);
-    assert_eq!(user.routing().prefer_free(), Some(false));
-
-    let project_edit = RoutingSettingsEdit {
-        max_latency: Some(RouterLatencyMs::try_from(350).unwrap()),
-        premium_reserve: Some(PremiumReservePercent::try_from(12).unwrap()),
-        ..RoutingSettingsEdit::default()
-    };
-    let path = shell::save_project_settings_with_routing(
-        &runtime,
-        &[],
-        &[],
-        &[],
-        Some(&project_edit),
-        None,
-    )
-    .unwrap();
-    assert!(path.is_file());
-    let project = config::load_project_config(runtime.project())
-        .unwrap()
-        .expect("project routing config");
-    let effective = EffectiveConfig::new(&user, Some(&project));
-    assert_eq!(effective.max_router_latency().layer, Layer::Project);
-    assert_eq!(effective.max_router_latency().value.get(), 350);
-    assert_eq!(effective.max_router_cost().layer, Layer::User);
-    assert_eq!(effective.max_router_cost().value.get(), 2_500);
-    assert_eq!(effective.prefer_free_routing().layer, Layer::User);
-    assert!(!effective.prefer_free_routing().value);
-    assert_eq!(effective.premium_reserve().layer, Layer::Project);
-    assert_eq!(effective.premium_reserve().value.get(), 12);
-}
-
 /// Memory follows the same two explicit save paths as every other Settings
-/// section, and its single-field edit must not touch routing config it never
-/// named — the sibling half of the "only the named field" guarantee
+/// section, and its single-field edit must not touch config it never named —
+/// the sibling half of the "only the named field" guarantee
 /// `a_save_only_touches_the_fields_an_edit_actually_named` already proves for
-/// harnesses.
+/// harnesses. `premium_reserve_percent` is the sibling here: a top-level
+/// field (design-decisions.md, 2026-09-16 ruling) a memory-only edit has no
+/// business touching.
 #[test]
-fn memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_routing_fields() {
-    use glasshouse::config::{EffectiveConfig, Layer, Layered, RoutingModelChoice};
+fn memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_fields() {
+    use glasshouse::config::{EffectiveConfig, Layer, Layered, PremiumReservePercent};
 
     let workspace = new_workspace();
     let data = tempfile::tempdir().unwrap();
     let runtime = runtime_for(workspace.path(), data.path());
 
     let mut user = config::UserConfig::load(runtime.paths()).unwrap();
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Automatic));
+    user.set_premium_reserve_percent(Some(PremiumReservePercent::try_from(15).unwrap()));
     user.save(runtime.paths()).unwrap();
 
     // Premise, per §17: before the edit, this layer has never decided
@@ -334,8 +266,7 @@ fn memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_routing_f
     let user_edit = MemorySettingsEdit {
         memory_extraction: Some(false),
     };
-    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], None, Some(&user_edit))
-        .unwrap();
+    shell::save_user_settings_with_memory(&runtime, &[], &[], &[], Some(&user_edit)).unwrap();
     assert!(
         !runtime
             .project()
@@ -347,23 +278,17 @@ fn memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_routing_f
     let user = config::UserConfig::load(runtime.paths()).unwrap();
     assert_eq!(user.memory_extraction(), Some(false));
     assert_eq!(
-        user.routing().model(),
-        Some(&RoutingModelChoice::Automatic),
-        "a memory-only edit must not clobber the routing model it never named"
+        user.premium_reserve_percent().map(|value| value.get()),
+        Some(15),
+        "a memory-only edit must not clobber a field it never named"
     );
 
     let project_edit = MemorySettingsEdit {
         memory_extraction: Some(true),
     };
-    let path = shell::save_project_settings_with_routing(
-        &runtime,
-        &[],
-        &[],
-        &[],
-        None,
-        Some(&project_edit),
-    )
-    .unwrap();
+    let path =
+        shell::save_project_settings_with_memory(&runtime, &[], &[], &[], Some(&project_edit))
+            .unwrap();
     assert!(path.is_file());
     let project = config::load_project_config(runtime.project())
         .unwrap()
@@ -447,11 +372,6 @@ fn a_config_file_written_before_free_resources_existed_loads_with_empty_preferen
         provider.cost_of("anything"),
         glasshouse::routing::Cost::Metered
     );
-
-    let preferences = loaded.routing().free_preferences();
-    assert!(preferences.order().is_empty());
-    assert!(preferences.disabled().is_empty());
-    assert_eq!(preferences.pin(), None);
 }
 
 /// A config file predating the Memory section — same file as Acceptance 3 —
@@ -481,87 +401,6 @@ fn a_config_file_written_before_the_memory_section_existed_loads_with_the_defaul
         Layered::new(true, Layer::Default),
         "nothing recorded anywhere must resolve to enabled"
     );
-}
-
-/// Acceptance 4 — the user's order, disabled list and pin round-trip, and a
-/// pin naming a provider that is no longer configured degrades visibly
-/// rather than failing, through the frozen routing policy —
-/// `RoutingModelChoice::resolve`'s own reasoning, applied to a free-resource
-/// pin.
-#[test]
-fn free_resource_order_disabled_and_pin_round_trip_and_a_stale_pin_degrades_visibly() {
-    use glasshouse::config::FreeResourceRef;
-    use glasshouse::routing::disposable::{
-        DisposableCandidate, DisposableRouting, JobKind, NoResource,
-    };
-    use glasshouse::routing::free::FreePool;
-    use glasshouse::routing::{Cost, CredentialId};
-    use glasshouse::secret::SecretRef;
-
-    let workspace = new_workspace();
-    let data = tempfile::tempdir().unwrap();
-    let runtime = runtime_for(workspace.path(), data.path());
-
-    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
-    user.routing_mut()
-        .set_free_resource_order(Some(vec![
-            FreeResourceRef::new("nous", "c-model"),
-            FreeResourceRef::new("openrouter", "b-model"),
-        ]))
-        .set_free_resource_disabled(Some(vec![FreeResourceRef::new("openrouter", "a-model")]))
-        .set_free_resource_pin(Some(FreeResourceRef::new(
-            "vanished-provider",
-            "gone-model",
-        )));
-    user.save(runtime.paths()).unwrap();
-
-    let loaded = config::UserConfig::load(runtime.paths()).unwrap();
-    assert_eq!(
-        loaded.routing().free_resource_order().unwrap(),
-        &[
-            FreeResourceRef::new("nous", "c-model"),
-            FreeResourceRef::new("openrouter", "b-model"),
-        ]
-    );
-    assert_eq!(
-        loaded.routing().free_resource_disabled().unwrap(),
-        &[FreeResourceRef::new("openrouter", "a-model")]
-    );
-    assert_eq!(
-        loaded.routing().free_resource_pin(),
-        Some(&FreeResourceRef::new("vanished-provider", "gone-model"))
-    );
-
-    // The stale pin was never validated against configured providers at
-    // load time — loading did not fail — and the frozen routing policy is
-    // where it degrades, visibly, rather than silently substituting another
-    // free resource.
-    let preferences = loaded.routing().free_preferences();
-    let routing = DisposableRouting::for_support_work(true, preferences);
-    let candidate = DisposableCandidate::new(
-        "openrouter",
-        "b-model",
-        CredentialId::new(
-            "openrouter",
-            SecretRef::Environment {
-                var: "OPENROUTER_API_KEY".to_owned(),
-            },
-        ),
-        Cost::Free,
-    );
-    let err = routing
-        .choose(
-            JobKind::Classification,
-            &[candidate],
-            &FreePool::new(),
-            std::time::Instant::now(),
-            None,
-        )
-        .expect_err(
-            "a pin naming a provider nobody configured must not silently substitute another \
-             resource",
-        );
-    assert!(matches!(err, NoResource::PinnedResourceUnavailable { .. }));
 }
 
 /// GH-PROFILE-ENABLED acceptance test 2: a disabled launch profile is still
@@ -664,114 +503,6 @@ fn rendered_settings(state: &glasshouse::shell::ShellState, width: u16, height: 
         .join("\n")
 }
 
-/// Acceptance 5 — the Routing settings screen renders the reason for the
-/// resource in use, for each of the three `UseReason` values, using that
-/// type's own words — there is exactly one spelling of those three phrases
-/// and it is `UseReason::Display`'s.
-#[test]
-fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words() {
-    use glasshouse::routing::disposable::{DisposableCandidate, DisposableRouting, JobKind};
-    use glasshouse::routing::free::{FreePool, FreePreferences, FreeResource, WorkloadOutcome};
-    use glasshouse::routing::{Cost, CredentialId, UseReason};
-    use glasshouse::secret::SecretRef;
-    use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
-
-    fn credential(provider: &str) -> CredentialId {
-        CredentialId::new(
-            provider,
-            SecretRef::Environment {
-                var: format!("{}_API_KEY", provider.to_uppercase()),
-            },
-        )
-    }
-
-    for reason in [
-        UseReason::UserPreference,
-        UseReason::QuotaPreservation,
-        UseReason::Fallback,
-    ] {
-        let (routing, candidates, pool) = match reason {
-            UseReason::UserPreference => (
-                DisposableRouting::for_support_work(true, FreePreferences::new()),
-                vec![DisposableCandidate::new(
-                    "openrouter",
-                    "a-free-model",
-                    credential("openrouter"),
-                    Cost::Free,
-                )],
-                FreePool::new(),
-            ),
-            UseReason::QuotaPreservation => (
-                DisposableRouting::for_support_work(false, FreePreferences::new()),
-                vec![DisposableCandidate::new(
-                    "openrouter",
-                    "a-free-model",
-                    credential("openrouter"),
-                    Cost::Free,
-                )],
-                FreePool::new(),
-            ),
-            UseReason::Fallback => {
-                let mut pool = FreePool::new();
-                let first_credential = credential("openrouter");
-                for _ in 0..2 {
-                    pool.observe(
-                        &FreeResource::new(first_credential.clone(), "first-model"),
-                        WorkloadOutcome::CapacityFailure,
-                        std::time::Instant::now(),
-                    );
-                }
-                (
-                    DisposableRouting::for_support_work(true, FreePreferences::new()),
-                    vec![
-                        DisposableCandidate::new(
-                            "openrouter",
-                            "first-model",
-                            first_credential,
-                            Cost::Free,
-                        ),
-                        DisposableCandidate::new(
-                            "openrouter",
-                            "second-model",
-                            credential("openrouter"),
-                            Cost::Free,
-                        ),
-                    ],
-                    pool,
-                )
-            }
-        };
-
-        let choice = routing
-            .choose(
-                JobKind::Classification,
-                &candidates,
-                &pool,
-                std::time::Instant::now(),
-                None,
-            )
-            .expect("configured");
-        assert_eq!(choice.reason(), reason);
-
-        let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
-        state.open_settings(
-            Vec::<HarnessRow>::new(),
-            Vec::new(),
-            Vec::<ProviderRow>::new(),
-            Vec::<ProfileRow>::new(),
-        );
-        state.record_disposable_choice(choice);
-        tab_to(&mut state, SettingsSection::Routing);
-
-        let text = rendered_settings(&state, 100, 30);
-        assert!(
-            text.contains(reason.as_str()),
-            "the Routing screen must show `{}` in `UseReason`'s own words:\n{text}",
-            reason.as_str()
-        );
-    }
-}
-
 /// The Memory section shows the current automatic-memory-extraction setting
 /// and its layer, using the same `layer_label` treatment as every other
 /// section, and an edit both flips the value and promotes its layer to
@@ -860,27 +591,6 @@ fn no_credential_value_leaks_through_the_free_resource_editors() {
     press(&mut state, KeyCode::Enter);
     screens.push(rendered_settings(&state, 100, 30));
     screens.push(rendered_settings(&state, 400, 60));
-
-    // Routing: the order, disabled and pin editors, each typed and confirmed.
-    tab_to(&mut state, SettingsSection::Routing);
-    for (key, typed) in [
-        (
-            KeyCode::Char('o'),
-            "openrouter:a-free-model,nous:b-free-model",
-        ),
-        (KeyCode::Char('d'), "openrouter:c-free-model"),
-        (KeyCode::Char('n'), "openrouter:a-free-model"),
-    ] {
-        press(&mut state, key);
-        for c in typed.chars() {
-            press(&mut state, KeyCode::Char(c));
-        }
-        screens.push(rendered_settings(&state, 100, 30));
-        screens.push(rendered_settings(&state, 400, 60));
-        press(&mut state, KeyCode::Enter);
-        screens.push(rendered_settings(&state, 100, 30));
-        screens.push(rendered_settings(&state, 400, 60));
-    }
 
     // SAFETY: matches the `set_var` above.
     unsafe {

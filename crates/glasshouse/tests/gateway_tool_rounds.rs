@@ -22,7 +22,7 @@ use std::time::Duration;
 use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, SecretRef, SecretStore};
 use serde_json::{Value, json};
@@ -442,11 +442,24 @@ fn status_line(response: &[u8]) -> String {
 
 fn wait_for_row(
     ledger: &EvidenceLedger,
-    query: ObservationQuery<'_>,
+    provider: &str,
+    model: &str,
+    route: Option<&str>,
+    harness: Option<&str>,
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == route
+                    && row.harness.as_deref() == harness
+            })
+            .collect();
         if !rows.is_empty() || std::time::Instant::now() >= deadline {
             return rows;
         }
@@ -495,12 +508,10 @@ fn a_translated_stream_with_two_tool_calls_and_one_error_result_counts_both() {
 
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "fixture",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "fixture",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(rows.len(), 1, "one routing observation for the exchange");
     let row = &rows[0];
@@ -569,12 +580,10 @@ fn a_translated_document_with_one_tool_call_and_no_error_result_counts_both() {
 
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "fixture",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "fixture",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
@@ -621,12 +630,10 @@ fn a_translated_stream_with_no_tool_use_counts_zero() {
 
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "fixture",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "fixture",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -685,12 +692,10 @@ fn a_relayed_exchange_records_no_tool_rounds_or_repairs() {
 
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "fixture",
-            model: "claude-x",
-            route: Some("anthropic-messages"),
-            harness: Some("claude-code"),
-        },
+        "fixture",
+        "claude-x",
+        Some("anthropic-messages"),
+        Some("claude-code"),
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(

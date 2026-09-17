@@ -46,10 +46,6 @@ use std::process::Command;
 use clap::Parser;
 
 use glasshouse::evaluation::{EvaluationKind, EvaluationObservations, EvaluationOutcome};
-// Used only by the `#[cfg(unix)]` tests below; on Windows the import would be
-// unused and `-D warnings` refuses it (the wave-100 Windows VM leg, 2026-09-02).
-#[cfg(unix)]
-use glasshouse::evaluation::NewObservation;
 use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
 use glasshouse::{Cli, Runtime, bootstrap};
 
@@ -858,8 +854,7 @@ fn a_retrieval_delivered_by_the_briefing_door_with_no_turn_end_counts_as_unknown
 /// `Completed` turn, with no rating, counts as `proxy`. Nothing here is
 /// planted — see the module header for why the door-spawned session's own
 /// `glasshouse hook` call is what makes this real: `record_turn_outcome`
-/// writes a row for it even though it was never routed, which is exactly
-/// what `record_routing_outcome` (still, correctly) refuses to do.
+/// writes a row for it whether or not it was ever routed.
 #[cfg(unix)]
 #[test]
 fn a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy() {
@@ -885,18 +880,11 @@ fn a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as
     assert_eq!(retrieved.len(), 1, "{retrieved:#?}");
     assert_eq!(retrieved[0].session_id.as_deref(), Some(session.as_str()));
 
-    // The harness reports its turn ended, through the real hook — the
-    // door-spawned session was never routed, so `record_routing_outcome`
-    // still writes nothing for it, but `record_turn_outcome` does.
+    // The harness reports its turn ended, through the real hook —
+    // `record_turn_outcome` writes a row for it whether or not it was ever
+    // routed.
     run_hook(&fixture.base, &root, &session, "Stop");
 
-    assert!(
-        ledger
-            .recent_of_kind(EvaluationKind::RoutingOutcomeObserved, 10)
-            .unwrap()
-            .is_empty(),
-        "a door-spawned session is never routed, so this row must stay empty"
-    );
     let turn_outcomes = ledger
         .recent_of_kind(EvaluationKind::TurnOutcomeObserved, 10)
         .unwrap();
@@ -918,66 +906,6 @@ fn a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as
     assert!(
         explicit_line.contains("explicit useful 0 / not-useful 0 of 0 rated"),
         "got: {explicit_line}"
-    );
-}
-
-/// A session that was both routed by `glasshouse launch` **and** briefed —
-/// this build's other producer path — is not double-counted: one retrieval,
-/// one turn ended, one proxy hit. This is the case that would have shipped
-/// wrong if `usefulness()`/`prevented_repetition()` had joined on session id
-/// alone without `EvaluationKind::TurnOutcomeObserved` being the single row
-/// written per session-turn (`record_turn_outcome` writes exactly one row per
-/// call, and the hook is called once per `TurnEnded`).
-#[cfg(unix)]
-#[test]
-fn a_routed_and_briefed_session_counts_the_proxy_once() {
-    let fixture = door::Fixture::new();
-    let root = fixture.project_root("alpha");
-    let runtime = fixture.runtime(&root);
-    ProjectMemory::open(&runtime)
-        .unwrap()
-        .store()
-        .record(NewMemory::new(
-            MemoryKind::Decision,
-            "onyx compaction runs nightly",
-        ))
-        .unwrap();
-
-    let server = door::Server::start(&fixture, &root);
-    let session = server.spawn_with_task("onyx");
-
-    let ledger = EvaluationObservations::open(&runtime).unwrap();
-    assert_eq!(
-        ledger
-            .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
-            .unwrap()
-            .len(),
-        1
-    );
-
-    // This session was never routed (the door doesn't route), so a routing
-    // decision is recorded against it here, by hand, purely to prove the
-    // reader does not double the proxy hit when both rows exist for one
-    // session — `RoutingOutcomeObserved` from the routed half and
-    // `TurnOutcomeObserved` from the hook both being present for the same
-    // session is exactly the shape a genuine `glasshouse launch` + briefing
-    // combination would produce.
-    ledger
-        .record(
-            NewObservation::new(EvaluationKind::RoutingOutcomeObserved)
-                .with_subject("completed")
-                .with_session_id(session.clone()),
-            glasshouse::evaluation::now_unix(),
-        )
-        .unwrap();
-
-    run_hook(&fixture.base, &root, &session, "Stop");
-
-    let report = retrievals_report(&fixture.base, &root);
-    let line = line_containing(&report, "proxy useful");
-    assert!(
-        line.contains("proxy useful 1 of 1 retrieved-into-completed-turns"),
-        "one retrieval, one completed turn, one proxy hit — not two; got: {line}"
     );
 }
 

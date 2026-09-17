@@ -271,7 +271,6 @@ impl Binary {
         let (config_text, gateway_text) = split_gateway_state(&format!(
             "version = 1\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
-                 [routing]\nautomatic = false\n\
                  {extra}"
         ));
         std::fs::write(config_dir.join("config.toml"), config_text).expect("write user config");

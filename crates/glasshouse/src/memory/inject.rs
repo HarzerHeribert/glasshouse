@@ -538,9 +538,50 @@ pub struct FileAwareMemory {
     pub freshness: Freshness,
 }
 
+/// Every path-shaped token named in `task_text` — a spelling test, not a
+/// filesystem check: a slash-containing token of two or more characters, or
+/// a token ending in a lowercase file extension of one to five characters
+/// of at least two characters. The stem rule is what keeps `e.g.` and `i.e.`
+/// out; the lowercase rule keeps `Ph.D.` out; the letter rule keeps `v1.2`
+/// out. `Node.js` gets in, which is the price of a spelling test.
+///
+/// Surrounding punctuation and backticks are stripped, so `` `src/foo.rs`, ``
+/// names `src/foo.rs`. Order is first mention, without repeats.
+///
+/// Relocated here from the deleted `routing::session` (2026-09-16 ruling):
+/// [`file_observed_memories`] below is its only caller.
+fn paths_named_in(task_text: &str) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for raw in task_text.split_whitespace() {
+        let token = raw
+            .trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
+        if token.is_empty() || token.contains("://") {
+            continue;
+        }
+        let has_separator = token.contains('/') && token.trim_matches('/').len() > 1;
+        if (has_separator || has_file_extension(token)) && !named.iter().any(|n| n == token) {
+            named.push(token.to_owned());
+        }
+    }
+    named
+}
+
+fn has_file_extension(token: &str) -> bool {
+    let Some((stem, extension)) = token.rsplit_once('.') else {
+        return false;
+    };
+    stem.chars().count() >= 2
+        && !stem.ends_with('/')
+        && (1..=5).contains(&extension.len())
+        && extension
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && extension.chars().any(|c| c.is_ascii_lowercase())
+}
+
 /// Line 1140: memories this project learned while a task's own named files
 /// were being worked on — [`MemoryStore::for_path`] over every path
-/// [`crate::routing::session::paths_named_in`] finds in `task`.
+/// [`paths_named_in`] finds in `task`.
 ///
 /// `task` naming no path, or naming one nothing was ever observed against,
 /// both answer `Ok(Vec::new())`.
@@ -565,7 +606,7 @@ fn file_observed_memories(
     already_selected: &[MemoryRecord],
     project_root: Option<&std::path::Path>,
 ) -> Result<Vec<FileAwareMemory>, MemoryStoreError> {
-    let paths = crate::routing::session::paths_named_in(task);
+    let paths = paths_named_in(task);
     if paths.is_empty() {
         return Ok(Vec::new());
     }

@@ -7,12 +7,12 @@
 //! hand from the public builder API, the same way `provider::quota`'s own
 //! test module builds one.
 
+use glasshouse::config::WorkloadTier;
 use glasshouse::provider::quota::{
     Capacity, CapacityBand, CapacityBandThresholds, CapacityState, LimitingUnit, LimitingUnits,
     NativeAmount, Pool, RESET_DISTANT_SECONDS, RESET_IMMINENT_SECONDS, RateCeilings, Reading,
     ReadingSource, ReserveDecisionInputs, TokenBudget, evaluate_reserve_spend,
 };
-use glasshouse::routing::classify::WorkloadTier;
 
 const OBSERVED: i64 = 1_800_000_000;
 

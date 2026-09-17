@@ -36,9 +36,7 @@ use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::resources::{GatheredTelemetry, ReportOptions, report};
 use glasshouse::provider::telemetry::GatewayQuotaCache;
-use glasshouse::routing::evidence::{
-    EvidenceLedger, FailureClass, ObservationQuery, Outcome, RoutingObservation,
-};
+use glasshouse::routing::evidence::{EvidenceLedger, FailureClass, Outcome, RoutingObservation};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use glasshouse::{Cli, Runtime};
@@ -315,15 +313,6 @@ fn gateway_over(
     gateway
 }
 
-fn query(provider: &str) -> ObservationQuery<'_> {
-    ObservationQuery {
-        provider,
-        model: MODEL,
-        route: Some("anthropic-messages"),
-        harness: Some("claude-code"),
-    }
-}
-
 /// Poll the ledger until `expected` rows exist for `provider`, oldest first —
 /// the connection thread writes its row after `ingress::serve` has already
 /// closed the client's socket, so `send_and_read` returning is not proof the
@@ -335,7 +324,17 @@ fn wait_for_rows(
 ) -> Vec<RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let mut rows = ledger.recent(query(provider), 64).unwrap();
+        let mut rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == MODEL
+                    && row.route.as_deref() == Some("anthropic-messages")
+                    && row.harness.as_deref() == Some("claude-code")
+            })
+            .collect();
         if rows.len() >= expected || Instant::now() >= deadline {
             rows.sort_by_key(|row| row.seq);
             return rows;

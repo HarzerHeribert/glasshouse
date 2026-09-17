@@ -24,7 +24,6 @@ pub mod authority;
 pub mod chunk;
 pub mod credentials;
 pub mod diagnostics;
-pub mod disposable;
 pub mod lifecycle;
 pub mod model;
 pub mod schema;
@@ -303,11 +302,9 @@ impl TokenUsage {
 /// One real call to a provider: which resource answered, and what it
 /// reported spending.
 ///
-/// Only an implementation that actually reached a provider constructs one.
-/// [`RoutedModel`](disposable::RoutedModel) with no client supplied chooses a
-/// resource and calls nothing, so it has no call to describe and reports
-/// [`None`] — the distinction that keeps a routing *decision* out of a ledger
-/// of what routing actually *cost*.
+/// Only an implementation that actually reached a provider constructs one —
+/// the distinction that keeps a choice that called nothing out of a ledger
+/// of what a call actually *cost*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCall {
     /// The provider as the user's own configuration names it.
@@ -331,9 +328,8 @@ pub struct ModelCall {
     pub usage: TokenUsage,
     /// When this call was dispatched, and when it finished — capability map
     /// line 1539's producer half. [`None`] from any implementation that read
-    /// no clock around its own call; `disposable::RoutedModel::complete_observed`
-    /// is the one production caller that does, using the same
-    /// `crate::provider::cache::now_unix_seconds` the gateway's own timing
+    /// no clock around its own call; the one production caller that does
+    /// reads the same `crate::provider::cache::now_unix_seconds` the gateway's own timing
     /// already reads. Two fields rather than a duration, matching
     /// [`crate::routing::evidence::NewObservation::with_timing`]'s own shape,
     /// so a row's dispatch and completion can each be `NULL` independently
@@ -354,9 +350,8 @@ impl ModelCall {
     /// unwritten because a column filled with the nearest available value is
     /// worse than an honest `NULL`: a consumer cannot tell the two apart.
     /// Timing is the one exception, and only because it is not a nearby
-    /// guess: `disposable::RoutedModel::complete_observed` reads the actual
-    /// clock around the actual call, the same standard the token counts
-    /// already meet.
+    /// guess: the caller reads the actual clock around the actual call, the
+    /// same standard the token counts already meet.
     pub fn observation(&self) -> crate::routing::evidence::NewObservation {
         crate::routing::evidence::NewObservation::new(&self.provider, &self.model)
             .with_route(self.route.as_deref())

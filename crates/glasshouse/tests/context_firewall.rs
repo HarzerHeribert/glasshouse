@@ -15,9 +15,44 @@ use glasshouse::Runtime;
 use glasshouse::events::{EventLog, LifecycleEvent};
 use glasshouse::routing::evidence::{
     CONTEXT_FIREWALL_BYPASS_PURPOSE, CONTEXT_FIREWALL_EXPANSION_PURPOSE,
-    CONTEXT_FIREWALL_REDUCTION_PURPOSE, EvidenceLedger, ObservationQuery,
+    CONTEXT_FIREWALL_REDUCTION_PURPOSE, EvidenceLedger,
 };
 use glasshouse::session::SessionId;
+
+/// Local stand-in for the ledger's own (now-internal) `ObservationQuery`:
+/// this file filters exactly these four fields client-side against
+/// [`EvidenceLedger::consumption_in_window`], the successor to the deleted
+/// `EvidenceLedger::recent`. Not `observations_in_window`: that reader's
+/// `outcome IS NOT NULL` filter is for real model spend, and the bookkeeping
+/// rows this file plants (reduction/bypass/expansion) never carry an
+/// outcome at all — the same distinction the doc comment beside
+/// `commands::context_firewall`'s `NewObservation::new("glasshouse",
+/// "context-firewall")` call draws.
+#[derive(Debug, Clone, Copy)]
+struct ObservationQuery<'a> {
+    provider: &'a str,
+    model: &'a str,
+    route: Option<&'a str>,
+    harness: Option<&'a str>,
+}
+
+fn recent(
+    ledger: &EvidenceLedger,
+    query: ObservationQuery<'_>,
+    _limit: usize,
+) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
+    ledger
+        .consumption_in_window(i64::MAX, i64::MAX)
+        .expect("read the ledger")
+        .into_iter()
+        .filter(|row| {
+            row.provider == query.provider
+                && row.model == query.model
+                && row.route.as_deref() == query.route
+                && row.harness.as_deref() == query.harness
+        })
+        .collect()
+}
 
 // ===========================================================================
 // Fixture: a bootstrapped project, and the shipped binary pointed at it.
@@ -393,17 +428,16 @@ fn line_1987_reduction_and_bypass_are_recorded_in_the_evidence_ledger() {
 
     let ledger = fixture.ledger();
 
-    let reduced_rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "glasshouse",
-                model: "context-firewall",
-                route: None,
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let reduced_rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "glasshouse",
+            model: "context-firewall",
+            route: None,
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert!(
         reduced_rows.iter().any(|row| row.purpose.as_deref()
             == Some(CONTEXT_FIREWALL_REDUCTION_PURPOSE)
@@ -411,17 +445,16 @@ fn line_1987_reduction_and_bypass_are_recorded_in_the_evidence_ledger() {
         "a reduction row must be recorded: {reduced_rows:?}"
     );
 
-    let bypass_rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "glasshouse",
-                model: "context-firewall",
-                route: Some("ineligible-tool"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let bypass_rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "glasshouse",
+            model: "context-firewall",
+            route: Some("ineligible-tool"),
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert!(
         bypass_rows.iter().any(|row| row.purpose.as_deref()
             == Some(CONTEXT_FIREWALL_BYPASS_PURPOSE)
@@ -452,17 +485,16 @@ fn line_1988_raw_expansion_requests_are_tracked_as_their_own_rows() {
     fixture.show("gh-tool://0000000000000000-00000000000000000000000000000000");
 
     let ledger = fixture.ledger();
-    let found_rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "glasshouse",
-                model: "context-firewall",
-                route: Some("found"),
-                harness: None,
-            },
-            10,
-        )
-        .unwrap();
+    let found_rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "glasshouse",
+            model: "context-firewall",
+            route: Some("found"),
+            harness: None,
+        },
+        10,
+    );
     assert!(
         found_rows
             .iter()
@@ -470,17 +502,16 @@ fn line_1988_raw_expansion_requests_are_tracked_as_their_own_rows() {
         "a found expansion request must be recorded: {found_rows:?}"
     );
 
-    let not_found_rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "glasshouse",
-                model: "context-firewall",
-                route: Some("not-found"),
-                harness: None,
-            },
-            10,
-        )
-        .unwrap();
+    let not_found_rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "glasshouse",
+            model: "context-firewall",
+            route: Some("not-found"),
+            harness: None,
+        },
+        10,
+    );
     assert!(
         not_found_rows
             .iter()

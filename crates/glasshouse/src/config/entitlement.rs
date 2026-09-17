@@ -89,17 +89,17 @@ impl<'de> Deserialize<'de> for ConfiguredHarness {
         })
     }
 }
-/// A [`crate::routing::disposable::JobKind`] as it is written in a
+/// A [`crate::config::JobKind`] as it is written in a
 /// `[entitlements]` rule — the spelling is the kind's own `as_str`, and
 /// `JOB_KIND_SPELLINGS` is kept complete by `job_kind_ordinal`'s
 /// exhaustive `match`, exactly as [`ConfiguredWorkloadTier`] is kept honest
 /// by `workload_tier_ordinal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfiguredJobKind(crate::routing::disposable::JobKind);
-/// Every [`crate::routing::disposable::JobKind`], in the type's own order.
+pub struct ConfiguredJobKind(crate::config::JobKind);
+/// Every [`crate::config::JobKind`], in the type's own order.
 /// Kept complete by `job_kind_ordinal`.
-pub(super) const JOB_KIND_SPELLINGS: [crate::routing::disposable::JobKind; 5] = {
-    use crate::routing::disposable::JobKind as J;
+pub(super) const JOB_KIND_SPELLINGS: [crate::config::JobKind; 5] = {
+    use crate::config::JobKind as J;
     [
         J::Classification,
         J::MemoryExtraction,
@@ -112,8 +112,8 @@ pub(super) const JOB_KIND_SPELLINGS: [crate::routing::disposable::JobKind; 5] = 
 /// variant — see `workload_tier_ordinal` for why this is `#[cfg(test)]`
 /// and still a real gate.
 #[cfg(test)]
-pub(super) fn job_kind_ordinal(kind: crate::routing::disposable::JobKind) -> usize {
-    use crate::routing::disposable::JobKind as J;
+pub(super) fn job_kind_ordinal(kind: crate::config::JobKind) -> usize {
+    use crate::config::JobKind as J;
     match kind {
         J::Classification => 0,
         J::MemoryExtraction => 1,
@@ -123,11 +123,11 @@ pub(super) fn job_kind_ordinal(kind: crate::routing::disposable::JobKind) -> usi
     }
 }
 impl ConfiguredJobKind {
-    pub fn new(kind: crate::routing::disposable::JobKind) -> Self {
+    pub fn new(kind: crate::config::JobKind) -> Self {
         Self(kind)
     }
 
-    pub fn kind(self) -> crate::routing::disposable::JobKind {
+    pub fn kind(self) -> crate::config::JobKind {
         self.0
     }
 
@@ -363,7 +363,7 @@ impl EntitlementConfig {
 
     pub fn set_allow_tiers(
         &mut self,
-        value: impl IntoIterator<Item = crate::routing::classify::WorkloadTier>,
+        value: impl IntoIterator<Item = crate::config::WorkloadTier>,
     ) -> &mut Self {
         self.allow_tiers = value.into_iter().map(ConfiguredWorkloadTier::new).collect();
         self
@@ -371,7 +371,7 @@ impl EntitlementConfig {
 
     pub fn set_deny_tiers(
         &mut self,
-        value: impl IntoIterator<Item = crate::routing::classify::WorkloadTier>,
+        value: impl IntoIterator<Item = crate::config::WorkloadTier>,
     ) -> &mut Self {
         self.deny_tiers = value.into_iter().map(ConfiguredWorkloadTier::new).collect();
         self
@@ -379,7 +379,7 @@ impl EntitlementConfig {
 
     pub fn set_allow_job_kinds(
         &mut self,
-        value: impl IntoIterator<Item = crate::routing::disposable::JobKind>,
+        value: impl IntoIterator<Item = crate::config::JobKind>,
     ) -> &mut Self {
         self.allow_job_kinds = value.into_iter().map(ConfiguredJobKind::new).collect();
         self
@@ -387,7 +387,7 @@ impl EntitlementConfig {
 
     pub fn set_deny_job_kinds(
         &mut self,
-        value: impl IntoIterator<Item = crate::routing::disposable::JobKind>,
+        value: impl IntoIterator<Item = crate::config::JobKind>,
     ) -> &mut Self {
         self.deny_job_kinds = value.into_iter().map(ConfiguredJobKind::new).collect();
         self

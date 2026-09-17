@@ -24,7 +24,7 @@ use glasshouse::session::{ProjectSessions, SessionId};
 /// more important than the session it is keeping books about.
 pub(crate) fn report_hook(runtime: &Runtime, session: &str, event: &str) {
     report_hook_with(runtime, session, event, |id| {
-        crate::commands::routing_classification::disposable_extraction_model(runtime, id)
+        crate::commands::shared::disposable_extraction_model(runtime, id)
     });
 }
 
@@ -395,12 +395,6 @@ pub(crate) fn report_hook_with(
             }
 
             glasshouse::evaluation::record_turn_outcome(
-                runtime,
-                id.as_str(),
-                outcome,
-                glasshouse::evaluation::now_unix(),
-            );
-            glasshouse::evaluation::record_routing_outcome(
                 runtime,
                 id.as_str(),
                 outcome,

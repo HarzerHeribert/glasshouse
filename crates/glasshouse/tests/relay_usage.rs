@@ -32,9 +32,7 @@ use std::time::Duration;
 use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{
-    EvidenceLedger, ObservationQuery, Outcome, RoutingObservation,
-};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome, RoutingObservation};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, SecretRef, SecretStore};
 
@@ -380,22 +378,22 @@ fn send_and_read(address: SocketAddr, raw: &[u8]) -> Vec<u8> {
     received
 }
 
-/// `ObservationQuery::route` is `None` **for rows with no route**, not for
-/// any route — so the protocol is named here rather than left out.
+/// A row with no route is `None`, not any route — so the protocol is named
+/// here rather than left out.
 fn wait_for_row(ledger: &EvidenceLedger, protocol: &str) -> Vec<RoutingObservation> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "fixture",
-                    model: "claude-x",
-                    route: Some(protocol),
-                    harness: Some("claude-code"),
-                },
-                10,
-            )
-            .expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == "fixture"
+                    && row.model == "claude-x"
+                    && row.route.as_deref() == Some(protocol)
+                    && row.harness.as_deref() == Some("claude-code")
+            })
+            .collect();
         if !rows.is_empty() || std::time::Instant::now() >= deadline {
             return rows;
         }

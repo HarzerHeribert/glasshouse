@@ -12,21 +12,9 @@ fn every_kind_the_type_can_produce_is_one_the_schema_constant_declares() {
     let declared = [
         EvaluationKind::MemoryRetrieved,
         EvaluationKind::MemoryRetrievalMiss,
-        EvaluationKind::DisposableRouteDecided,
-        EvaluationKind::RoutingOverrideDecided,
-        EvaluationKind::RoutingContinuationDecided,
-        EvaluationKind::RoutingCostClassObserved,
-        EvaluationKind::RoutingEvidenceObserved,
-        EvaluationKind::RoutingOutcomeObserved,
-        EvaluationKind::RoutingTierObserved,
-        EvaluationKind::FailoverPrevented,
         EvaluationKind::MemoryRated,
         EvaluationKind::MemoryRevalidated,
         EvaluationKind::TurnOutcomeObserved,
-        EvaluationKind::SessionRouteDecided,
-        EvaluationKind::RoutingConsumptionEstimated,
-        EvaluationKind::ReserveAvailabilityObserved,
-        EvaluationKind::RoutingRated,
         EvaluationKind::MemoryExtractionObserved,
     ];
     let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();

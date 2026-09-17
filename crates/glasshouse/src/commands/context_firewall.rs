@@ -692,7 +692,7 @@ fn record_context_firewall_expansion(runtime: &Runtime, found_tool: Option<&str>
 /// stage), no configured candidate matches it, or
 /// [`glasshouse::routing::disposable::DisposableRouting::choose`] found no
 /// resource at all — including because an entitlement's `deny_job_kinds`
-/// refuses [`glasshouse::routing::disposable::JobKind::ContextReduction`]
+/// refuses [`glasshouse::config::JobKind::ContextReduction`]
 /// for every matching candidate, which is this line's own per-entitlement
 /// job-kind rule applying unchanged.
 /// Map line 488's notice for this hook: the configured reducer's provider —
@@ -706,9 +706,7 @@ pub(crate) fn reducer_credential_notice(
     gateway: &config::GatewayCatalogue,
     secrets: &dyn glasshouse::secret::SecretStore,
 ) -> Option<String> {
-    use crate::commands::routing_classification::{
-        withheld_credential_notice, withheld_provider_credentials,
-    };
+    use crate::commands::shared::{withheld_credential_notice, withheld_provider_credentials};
 
     let effective = EffectiveConfig::with_gateway(user, project, gateway);
     let reducer_ref = effective.context_firewall_reducer().value?;
@@ -795,8 +793,8 @@ fn disposable_reducer(
     // and `reducer_model` name, never to rank. Ranking among what is left is
     // exactly the decision design-decisions.md's 2026-09-16 ruling (Glasshouse
     // never decides which model is used) takes away from this job.
-    let candidates = crate::commands::routing_classification::disposable_candidates(
-        user, project, &effective, &secrets, &telemetry, now_unix,
+    let candidates = crate::commands::shared::disposable_candidates(
+        user, project, &effective, &secrets, &telemetry,
     );
 
     let mut filtered: Vec<_> = candidates

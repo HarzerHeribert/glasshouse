@@ -51,7 +51,7 @@ use glasshouse::harness::{Declared, WireProtocol};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::{ProtocolSupport, Provider};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use serde_json::{Value, json};
@@ -644,11 +644,24 @@ fn sse_events(text: &str) -> Vec<(String, Value)> {
 
 fn wait_for_row(
     ledger: &EvidenceLedger,
-    query: ObservationQuery<'_>,
+    provider: &str,
+    model: &str,
+    route: Option<&str>,
+    harness: Option<&str>,
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == route
+                    && row.harness.as_deref() == harness
+            })
+            .collect();
         if !rows.is_empty() || Instant::now() >= deadline {
             return rows;
         }
@@ -804,12 +817,10 @@ fn a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_w
     // Recorded under the pair's own name, with the provider's exact usage.
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "chat",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "chat",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(
         rows.len(),
@@ -1558,12 +1569,10 @@ fn a_claude_code_launch_on_a_chat_only_entitlement_is_translated_end_to_end() {
     let ledger = EvidenceLedger::open(&runtime).expect("open the project evidence ledger");
     let rows = wait_for_row(
         &ledger,
-        ObservationQuery {
-            provider: "chat",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "chat",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(
         rows.len(),

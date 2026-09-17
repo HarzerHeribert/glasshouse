@@ -1,7 +1,7 @@
 //! The semantic reducer seam — Phase 57B, map lines 1997-2003.
 //!
-//! This module mirrors [`crate::memory::extract::model`] and
-//! [`crate::memory::extract::disposable`]'s pattern, applied to a different
+//! This module mirrors [`crate::memory::extract::model`]'s pattern, applied
+//! to a different
 //! job: a trait ([`Reducer`]) a caller asks to decide over numbered
 //! candidates, and the one disposable-backed implementation
 //! ([`ConfiguredReducer`]) that actually calls a model, over the same

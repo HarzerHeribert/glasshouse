@@ -304,8 +304,7 @@ mod tests {
             include_str!("../commands/setup.rs"),
             include_str!("../commands/response.rs"),
             include_str!("../commands/resources.rs"),
-            include_str!("../commands/route.rs"),
-            include_str!("../commands/routing_cost.rs"),
+            include_str!("../commands/cost.rs"),
             include_str!("../commands/context_firewall.rs"),
             include_str!("../commands/credentials.rs"),
             include_str!("../commands/sessions.rs"),
@@ -317,8 +316,6 @@ mod tests {
             include_str!("../commands/assumptions.rs"),
             include_str!("../commands/launch.rs"),
             include_str!("../commands/resume.rs"),
-            include_str!("../commands/routing_destinations.rs"),
-            include_str!("../commands/routing_classification.rs"),
             include_str!("../commands/shared.rs"),
         ]
         .iter()

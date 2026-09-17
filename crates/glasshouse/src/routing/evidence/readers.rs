@@ -1,17 +1,13 @@
-//! The readers that summarise `routing_observations` alone: per-route,
-//! per-provider and per-session summaries, translation and consumption
-//! savings, and the classification/support-work latency records. Nothing
-//! here reads `evaluation_observations` or any other table — see `joins.rs`
-//! for that, and see `signals.rs` for the throttle/correlation/credential
-//! classification over an already-fetched observation slice.
+//! The readers that survive over `routing_observations` after the
+//! 2026-09-16 ruling deleted the router: per-identity, per-provider and
+//! per-session/per-purpose consumption summaries, and the per-session
+//! cached-input share `glasshouse cost` and the shell's meters read.
 
 use super::*;
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::config::pairing::{ObservationSource, ObservedEvidence};
-use crate::harness::pairing::EvidenceKey;
-use crate::provider::quota::{Freshness, ReadingSource};
+use crate::provider::quota::ReadingSource;
 
 /// Rolling summaries for one `(provider, model, route)` identity, within one
 /// [`ContextState`] bucket — capability map line 1337's separation kept all
@@ -95,11 +91,10 @@ pub struct ObservationQuery<'a> {
 /// `routing_observations` within a queried window, grouped further by
 /// [`ContextState`] — capability map line 1762's route-evidence table and
 /// line 1764's "which of warm, cold or unknown," and the missing link batch
-/// 42 found and this package builds (practice §71): [`EvidenceLedger::recent`]
-/// and [`EvidenceLedger::summarize`] both require the caller to already name
-/// an identity via [`ObservationQuery`]; neither, nor anything else on this
-/// ledger before [`EvidenceLedger::observed_identities`], can answer "which
-/// identities exist at all."
+/// 42 found and this package builds (practice §71): every other reader on
+/// this ledger requires the caller to already name an identity via its own
+/// query type; nothing before [`EvidenceLedger::observed_identities`] can
+/// answer "which identities exist at all."
 ///
 /// `context_state` is part of the group, not a value chosen or averaged
 /// across it — the same separation [`RoutingSummary`] keeps for the same
@@ -111,7 +106,7 @@ pub struct ObservedIdentity {
     pub provider: String,
     pub model: String,
     /// `None` means these rows were recorded with no route, matching
-    /// [`ObservationQuery::route`]'s own convention.
+    /// `ObservationQuery::route`'s own convention.
     pub route: Option<String>,
     pub context_state: ContextState,
     sample_count: usize,
@@ -244,9 +239,7 @@ pub struct PurposeConsumption {
     pub repairs: Option<i64>,
     /// The group's summed exchange duration, in seconds —
     /// `SUM(completed_at - dispatched_at)` over the rows that carried both,
-    /// `None` when none did. Line 1350's denominator for
-    /// [`Self::tool_rounds_per_minute`], independent of whether those same
-    /// rows counted a tool round.
+    /// `None` when none did.
     pub serving_seconds: Option<i64>,
     /// How many of this group's rows carry a known outcome
     /// (`succeeded`/`failed`) — the same test `failure_rate_aggregate`
@@ -257,133 +250,22 @@ pub struct PurposeConsumption {
     /// The fraction of [`Self::failure_rate_sample`] that failed —
     /// [`MIN_SAMPLE_FOR_SUMMARY`]'s standing rate floor applied here as it is
     /// everywhere else on this ledger: `None` below it, never a rate nobody
-    /// should trust. 1351's *purpose's failure rate*, the second half of
-    /// [`Self::effective_ttfc_ms`].
+    /// should trust.
     pub failure_rate: Option<f64>,
 }
 
-impl PurposeConsumption {
-    /// Line 1350: tool rounds per minute of serving time, an outcome-adjacent
-    /// measure — never folded into a quality score, this module's own header
-    /// and `docs/product/design-decisions.md`'s *"Tool rounds and repairs on
-    /// the translated path"* both keep that rule. `None` when either half is
-    /// unrecorded or the group's summed serving time is `0`, never a
-    /// fabricated rate.
-    pub fn tool_rounds_per_minute(&self) -> Option<f64> {
-        let rounds = self.tool_rounds?;
-        let serving_seconds = self.serving_seconds?;
-        if serving_seconds == 0 {
-            return None;
-        }
-        Some(rounds as f64 * 60.0 / serving_seconds as f64)
-    }
-
-    /// Line 1349: decode tokens per second — output tokens over the time
-    /// between the first real token and the end of the exchange, summed
-    /// across exactly the rows that recorded all three.
-    ///
-    /// **A model-serving characteristic and not task progress**, which is the
-    /// whole of what line 1349 asks for and the reason it is a method here
-    /// and never a term in any score: a fast decode says the provider is
-    /// serving quickly, not that the agent got anywhere. It is printed on its
-    /// own line beside TTFC and TTFT (line 1355) rather than folded in with
-    /// them.
-    ///
-    /// `None` when either half is unrecorded — a group of rows written
-    /// before migration 25 has no `first_token_ms` at all, and there is no
-    /// seconds fallback here on purpose: at one-second resolution the
-    /// denominator is routinely `0` and the rate it produces is an artefact
-    /// of the clock rather than a reading. `None` too when the summed decode
-    /// time is `0`, never an infinite rate.
-    pub fn decode_tokens_per_second(&self) -> Option<f64> {
-        let output_tokens = self.decode_output_tokens?;
-        let decode_ms = self.decode_ms?;
-        if decode_ms <= 0 {
-            return None;
-        }
-        Some(output_tokens as f64 * 1000.0 / decode_ms as f64)
-    }
-
-    /// Line 1351: effective TTFC, `mean_time_to_first_tool_call_ms` divided
-    /// by one minus this group's own failure rate — the fifth figure line
-    /// 1355 names, on a `PurposeConsumption` group rather than a single
-    /// route. `None` unless both halves clear [`MIN_SAMPLE_FOR_SUMMARY`]
-    /// (the TTFC figure's own [`Self::first_tool_call_ms_sample_count`], and
-    /// [`Self::failure_rate_sample`] behind [`Self::failure_rate`]) and the
-    /// failure rate is below 100% — never a clamped number.
-    /// [`RouteResponsiveness::effective_ttfc_ms`] is the same formula over a
-    /// raw observation slice; this is its `PurposeConsumption`-shaped
-    /// sibling.
-    pub fn effective_ttfc_ms(&self) -> Option<f64> {
-        if self.first_tool_call_ms_sample_count < MIN_SAMPLE_FOR_SUMMARY {
-            return None;
-        }
-        let raw = self.mean_time_to_first_tool_call_ms?;
-        let p = self.failure_rate?;
-        if p >= 1.0 {
-            return None;
-        }
-        Some(raw / (1.0 - p))
-    }
-}
-
-/// [`EvidenceLedger::translation_cache_savings`]'s result — map line 2034's
-/// translation facet, one row per `(route, quota_context)` that carries at
-/// least one [`HARNESS_TURN_PURPOSE`] row with `input_tokens` in the window.
+/// A session's cached-input share over its own translated exchanges —
+/// capability map line 2019's *"show the per-session cache ratio beside the
+/// routing evidence"*, whose producer is migration 24's `session_id`. Built
+/// by [`EvidenceLedger::cached_share_for_session`].
 ///
-/// `input_tokens` and `cached_input_tokens` are plain `i64`, not `Option`,
-/// because this reader's own `WHERE input_tokens IS NOT NULL` (see the
-/// method's doc comment) already excludes every relayed row before the
-/// `GROUP BY` runs — a group that exists at all is, by construction, a
-/// translated one, so there is nothing here for a `None` to distinguish.
-/// `cached_input_tokens` is summed with SQL's `COALESCE(...,0)` for the same
-/// reason [`RoutingOverhead`]'s own doc comment gives for leaving cached
-/// tokens out of its spend sum elsewhere: a translated row can carry
-/// `input_tokens` with no cache activity that turn, and that omission must
-/// not turn the whole group's cache figure absent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranslationSavings {
-    /// `None` matches [`ObservationQuery::route`]'s own convention: these
-    /// rows were recorded with no route, not "any route."
-    pub route: Option<String>,
-    /// The credential label `crate::gateway::session` stamps on every
-    /// translated row — see `with_quota_context` there.
-    pub quota_context: Option<String>,
-    pub sample_count: usize,
-    pub input_tokens: i64,
-    pub cached_input_tokens: i64,
-}
-
-impl TranslationSavings {
-    /// Prompt-cache reads over translated input tokens — `cached_input_tokens`
-    /// of `input_tokens + cached_input_tokens`, `None` only when the
-    /// denominator is `0`, which cannot happen for a group this reader's own
-    /// `WHERE input_tokens IS NOT NULL` produced from at least one row, but
-    /// is still handled rather than assumed away.
-    pub fn cache_read_ratio(&self) -> Option<f64> {
-        let denominator = self.input_tokens + self.cached_input_tokens;
-        (denominator > 0).then(|| self.cached_input_tokens as f64 / denominator as f64)
-    }
-}
-
-/// [`TranslationSavings`] grouped by the session that was served rather than
-/// by the route and credential that served it — capability map line 2019's
-/// *"show the per-session cache ratio beside the routing evidence"*, whose
-/// producer is migration 24's `session_id`.
-///
-/// The same reader, the same window and the same `WHERE input_tokens IS NOT
-/// NULL` filter as [`EvidenceLedger::translation_cache_savings`], so every
-/// note on that type applies here unchanged. What differs is the grouping
-/// key, and one consequence of it: `session_id` is nullable, so **one group
-/// may have no session at all** — every translated row written by a gateway
-/// nothing told which session it serves, and every row written before
-/// migration 24. That group is a real reading about real exchanges and is
-/// not dropped; it is [`Self::session_id`] `None`, and a renderer says so in
-/// words rather than printing an empty name or a zero.
+/// `session_id` is nullable at the row level, but every value this type is
+/// actually built with names the one session it was queried for; `None`
+/// here would mean the query itself matched no rows, which
+/// [`EvidenceLedger::cached_share_for_session`] already turns into `Ok(None)`
+/// before constructing one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTranslationSavings {
-    /// `None` is *these rows name no session*, never "any session" — the
-    /// convention [`TranslationSavings::route`] already follows.
     pub session_id: Option<String>,
     pub sample_count: usize,
     pub input_tokens: i64,
@@ -391,79 +273,13 @@ pub struct SessionTranslationSavings {
 }
 
 impl SessionTranslationSavings {
-    /// [`TranslationSavings::cache_read_ratio`], per session.
+    /// The share of this session's input tokens a translated exchange
+    /// reported as cached, or `None` when neither side of the ratio is
+    /// counted.
     pub fn cache_read_ratio(&self) -> Option<f64> {
         let denominator = self.input_tokens + self.cached_input_tokens;
         (denominator > 0).then(|| self.cached_input_tokens as f64 / denominator as f64)
     }
-
-    /// Whether this group carries at least [`MIN_SAMPLE_FOR_SUMMARY`]
-    /// exchanges — the standing floor every *rate* on this ledger sits
-    /// behind ([`AggregateReading`]'s own doc comment), applied to the ratio
-    /// and to nothing else. The counts beside it are counts, not rates, and
-    /// are honest at any sample size, exactly as
-    /// [`PurposeConsumption::sample_count`] is.
-    pub fn meets_sample_floor(&self) -> bool {
-        self.sample_count >= MIN_SAMPLE_FOR_SUMMARY
-    }
-}
-
-/// What this project's ledger holds about one `(provider, model)` **as a
-/// routing-model classifier** — capability map lines 1422/1432 (does it
-/// come back in the schema?) and 1421/1435 (how long does it take?) — read
-/// from the [`CLASSIFICATION_PURPOSE`] rows alone.
-///
-/// `outcomes_recorded` counts rows carrying [`Outcome::Succeeded`] or
-/// [`Outcome::Failed`]; `parsed` is how many of those succeeded. `timed` is
-/// how many rows carry a duration, and `median_duration_ms` is their median
-/// only once there are at least [`MIN_SAMPLE_FOR_SUMMARY`] of them — below
-/// that floor the field is `None`, read as *unmeasured*, never as fast.
-///
-/// **Resolution is one second**: `dispatched_at`/`completed_at` are whole
-/// Unix seconds, so every duration is a multiple of 1000ms and a ceiling
-/// compared against this median is honest only to the second. Not split by
-/// [`ContextState`]: a classification call is a fresh prompt every time,
-/// and its producer records [`ContextState::Unknown`] on every row.
-// History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `struct ClassificationRecord` doc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassificationRecord {
-    pub provider: String,
-    pub model: String,
-    /// Rows carrying [`Outcome::Succeeded`] or [`Outcome::Failed`].
-    pub outcomes_recorded: usize,
-    /// Of those, the rows whose reply parsed as a classification.
-    pub parsed: usize,
-    /// Rows carrying a duration at all.
-    pub timed: usize,
-    /// The median of those durations, once there are enough to trust.
-    pub median_duration_ms: Option<i64>,
-}
-
-impl ClassificationRecord {
-    /// The share of outcome-carrying rows that parsed, or `None` when no
-    /// row carries an outcome — a ratio over a zero denominator is not a
-    /// reliability of `0`.
-    pub fn parsed_fraction(&self) -> Option<f64> {
-        (self.outcomes_recorded > 0).then(|| self.parsed as f64 / self.outcomes_recorded as f64)
-    }
-}
-
-/// What this project's ledger holds about one `(provider, model)` as a
-/// **support-work** resource's measured latency — capability map line 1539,
-/// read from the [`EXTRACTION_PURPOSE`] rows alone.
-/// [`ClassificationRecord`]'s sibling: the same floor and the same
-/// one-second resolution (this module's header, on line 1332's gap), and
-/// deliberately no outcome or parse fields — a disposable support-work call
-/// has nothing to parse as a classification schema, so there is no
-/// reliability axis to carry here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LatencyRecord {
-    /// Rows carrying a duration at all.
-    pub timed: usize,
-    /// The median of those durations, once there are at least
-    /// [`MIN_SAMPLE_FOR_SUMMARY`] of them. `None` below the floor — a
-    /// consumer must read this as *unmeasured*, never as fast.
-    pub median_duration_ms: Option<i64>,
 }
 
 /// Routing-model spend set against everything else — capability map line
@@ -667,66 +483,6 @@ impl RoutingOverhead {
     }
 }
 
-/// One [`EvidenceLedger::request_stats_by_harness`] row — map line 1951's
-/// token/wall-clock/request-count half for one harness.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HarnessRequestStats {
-    pub harness: String,
-    /// Every `routing_observations` row this harness produced in the
-    /// window, whether or not it carries timing or token data.
-    pub requests: i64,
-    /// `None` when no row in this window carries both `dispatched_at` and
-    /// `completed_at` — never a fabricated zero.
-    pub wall_clock: Option<WallClockSummary>,
-    /// Rows carrying an `input_tokens` count — the relay path's rows never
-    /// do (refusal register P1b), so this is `0` there, not [`Self::requests`].
-    pub token_rows_present: i64,
-    /// `input_tokens` summed over exactly [`Self::token_rows_present`] rows.
-    /// A caller must print *"not exposed on `requests -
-    /// token_rows_present` of `requests` exchanges"* rather than this sum
-    /// alone whenever `token_rows_present < requests` (map line 1951's own
-    /// mutation: printing `0` for an all-`NULL` group is refused).
-    pub input_tokens_sum: i64,
-    pub output_tokens_sum: i64,
-}
-
-impl HarnessRequestStats {
-    fn from_rows(harness: String, rows: &[RoutingObservation]) -> Self {
-        let durations: Vec<i64> = rows
-            .iter()
-            .filter_map(RoutingObservation::duration_ms)
-            .collect();
-        let wall_clock = (!durations.is_empty()).then(|| WallClockSummary {
-            sample_count: durations.len() as i64,
-            sum_ms: durations.iter().sum(),
-            median_ms: median(durations.clone()),
-        });
-        let with_tokens: Vec<&RoutingObservation> = rows
-            .iter()
-            .filter(|observation| observation.input_tokens.is_some())
-            .collect();
-        Self {
-            harness,
-            requests: rows.len() as i64,
-            wall_clock,
-            token_rows_present: with_tokens.len() as i64,
-            input_tokens_sum: with_tokens.iter().filter_map(|o| o.input_tokens).sum(),
-            output_tokens_sum: with_tokens.iter().filter_map(|o| o.output_tokens).sum(),
-        }
-    }
-}
-
-/// [`HarnessRequestStats::wall_clock`] — `completed_at - dispatched_at`
-/// over exactly the rows that carry both, matching
-/// [`RoutingObservation::duration_ms`]'s own gap: neither timestamp is
-/// invented for a row missing one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WallClockSummary {
-    pub sample_count: i64,
-    pub sum_ms: i64,
-    pub median_ms: i64,
-}
-
 fn duration_aggregate(
     observations: &[RoutingObservation],
     reduce: fn(Vec<i64>) -> i64,
@@ -841,29 +597,6 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
     })
 }
 
-fn row_to_session_translation_savings(
-    row: &Row<'_>,
-) -> rusqlite::Result<SessionTranslationSavings> {
-    let sample_count: i64 = row.get("sample_count")?;
-    Ok(SessionTranslationSavings {
-        session_id: row.get("session_id")?,
-        sample_count: sample_count as usize,
-        input_tokens: row.get("input_tokens")?,
-        cached_input_tokens: row.get("cached_input_tokens")?,
-    })
-}
-
-fn row_to_translation_savings(row: &Row<'_>) -> rusqlite::Result<TranslationSavings> {
-    let sample_count: i64 = row.get("sample_count")?;
-    Ok(TranslationSavings {
-        route: row.get("route")?,
-        quota_context: row.get("quota_context")?,
-        sample_count: sample_count as usize,
-        input_tokens: row.get("input_tokens")?,
-        cached_input_tokens: row.get("cached_input_tokens")?,
-    })
-}
-
 fn row_to_identity(
     row: &Row<'_>,
 ) -> rusqlite::Result<Result<ObservedIdentity, EvidenceLedgerError>> {
@@ -886,280 +619,16 @@ fn row_to_identity(
     }))
 }
 
-/// How old an aggregate's most recent contributing observation may be before
-/// [`ObservedEvidenceSource`] stops trusting it at full strength — map line
-/// 1548's "stale windows count for less." This is distinct from the window
-/// [`ObservedEvidenceSource::new`] is given: a row can sit comfortably inside
-/// a wide `summarize` window (`crate::routing::interactive`'s own
-/// `FAILOVER_EVIDENCE_WINDOW_SECONDS` is seven days) and still be the only
-/// thing behind an aggregate that has not moved in days — the window decides
-/// what is read at all, this decides how much the read result is trusted.
-///
-/// Provisional, like [`STALE_OBSERVATION_DISCOUNT`]: a day is long enough
-/// that a routing decision inside the same working session trusts it fully,
-/// and short enough that "stale" and "within the seven-day evidence window"
-/// stay two different words rather than one.
-const EVIDENCE_STALE_AFTER_SECONDS: i64 = 24 * 60 * 60;
-
-/// How much a stale aggregate's effective sample count is discounted before
-/// [`crate::config::pairing::evidence_signal`] — and, through
-/// [`ObservedEvidence::reliable_observation_count`], the native-pairing
-/// prior's own decay — ever sees it.
-///
-/// A fraction, never zero: line 1548 asks stale evidence to count for *less*,
-/// not to vanish, and reducing all the way to zero would silently reproduce
-/// the "no evidence at all" case this module already represents honestly
-/// (an absent [`ObservedEvidence`], not a zeroed-out one — see
-/// [`ObservedEvidenceSource::observed`]'s own empty-count fallback).
-/// Provisional, tuned against nothing but being large enough to prove
-/// against float rounding at [`MIN_SAMPLE_FOR_SUMMARY`]'s own boundary in a
-/// test.
-const STALE_OBSERVATION_DISCOUNT: f64 = 0.5;
-
-/// [`ObservationSource`] for [`crate::config::pairing`]'s pairing prior —
-/// design decision 6, replacing `NoObservations` with a real implementation
-/// backed by this ledger.
-///
-/// A thin wrapper rather than `impl ObservationSource for EvidenceLedger`
-/// directly, so the window this evidence is drawn from and the minimum
-/// sample it requires are visible at the call site that constructs one,
-/// rather than buried as constants only this module can see.
-pub struct ObservedEvidenceSource<'a> {
-    ledger: &'a EvidenceLedger,
-    now_unix: i64,
-    window_seconds: i64,
-}
-
-impl<'a> ObservedEvidenceSource<'a> {
-    pub fn new(ledger: &'a EvidenceLedger, now_unix: i64, window_seconds: i64) -> Self {
-        Self {
-            ledger,
-            now_unix,
-            window_seconds,
-        }
-    }
-}
-
-impl ObservationSource for ObservedEvidenceSource<'_> {
-    /// See this module's own header for the one gap in this match: `key`'s
-    /// launch profile is not part of the query, because nothing this ledger
-    /// stores carries one.
-    ///
-    /// `key.route().provider` is `None` for a first-party, non-gateway
-    /// route — this ledger's one producer never records an observation for
-    /// one of those (see this module's header), so there is nothing to look
-    /// up and this answers `None` rather than guessing a provider.
-    fn observed(&self, key: &EvidenceKey) -> Option<ObservedEvidence> {
-        let provider = key.route().provider.as_deref()?;
-        let route = key.route().protocol.map(|protocol| protocol.slug());
-        let query = ObservationQuery {
-            provider,
-            model: key.model().label(),
-            route,
-            harness: Some(key.client()),
-        };
-        let summary = self
-            .ledger
-            .summarize(
-                query,
-                ContextState::Unknown,
-                self.now_unix,
-                self.window_seconds,
-            )
-            .ok()?;
-
-        let task_success_rate = summary
-            .failure_rate
-            .as_ref()
-            .map(|reading| 1.0 - reading.value());
-        // Line 1548: a stale aggregate contributes less than a fresh one at
-        // the same sample count, never a fabricated number — `task_success_rate`
-        // above is untouched, only how many observations the rest of this
-        // struct claims to stand on. See `EVIDENCE_STALE_AFTER_SECONDS` and
-        // `STALE_OBSERVATION_DISCOUNT` for why these two numbers.
-        let reliable_observation_count = summary
-            .failure_rate
-            .as_ref()
-            .map(|reading| {
-                let raw = reading.sample_count();
-                match reading.freshness(self.now_unix, EVIDENCE_STALE_AFTER_SECONDS) {
-                    Freshness::Fresh { .. } => raw,
-                    Freshness::Stale { .. } => ((raw as f64) * STALE_OBSERVATION_DISCOUNT) as usize,
-                }
-            })
-            .unwrap_or(0);
-
-        if reliable_observation_count == 0 {
-            return None;
-        }
-
-        Some(ObservedEvidence {
-            reliable_observation_count,
-            task_success_rate,
-            // Not supplied by this ledger's one producer today — see this
-            // module's own header. `None` rather than a guess.
-            usable_tool_call_rate: None,
-            repair_rate: None,
-            // Requires `first_byte_at`, which this ledger's gateway producer
-            // never records (see this module's header) — there is no honest
-            // ratio to compute.
-            effective_ttfc_ratio: None,
-            reliability: None,
-            user_override_signal: None,
-        })
-    }
-}
-
 impl EvidenceLedger {
-    /// The most recent observations for one `(provider, model, route)`
-    /// identity, newest first — the raw rows line 1335 requires to remain
-    /// available beside [`Self::summarize`]'s aggregates, and the read
-    /// `routing_observations_by_route_time` (migration 11's own index)
-    /// exists to serve.
-    ///
-    /// `route` and `harness` match exactly, including `None`, which is
-    /// deliberate: a route or harness recorded as unknown is a different fact
-    /// from any named one, and this read must not conflate them.
-    pub fn recent(
-        &self,
-        query: ObservationQuery<'_>,
-        limit: usize,
-    ) -> Result<Vec<RoutingObservation>, EvidenceLedgerError> {
-        let conn = self.lock();
-        let mut statement = conn
-            .prepare(
-                "SELECT * FROM routing_observations
-                 WHERE provider = ?1 AND model = ?2
-                   AND route IS ?3 AND harness IS ?4
-                 ORDER BY observed_at DESC
-                 LIMIT ?5",
-            )
-            .map_err(sql_err("read routing observations"))?;
-        let rows = statement
-            .query_map(
-                params![
-                    query.provider,
-                    query.model,
-                    query.route,
-                    query.harness,
-                    limit as i64
-                ],
-                row_to_observation,
-            )
-            .map_err(sql_err("read routing observations"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(sql_err("read a routing observation"))??);
-        }
-        Ok(out)
-    }
-
-    /// **Map line 1629**'s reader: the most recent observations, newest
-    /// first, whose `purpose` is [`CLASSIFICATION_PURPOSE`] or
-    /// [`EXTRACTION_PURPOSE`] — *"which resource performed important memory
-    /// extraction or classification for debugging"* — across every
-    /// `(provider, model, route, harness)` identity at once.
-    ///
-    /// **Not [`Self::recent`].** That method requires the caller to already
-    /// name one identity via [`ObservationQuery`], and the question this
-    /// line asks is the opposite: which identity performed the work,
-    /// unknown in advance. A purpose-filtered sibling fits where `recent`'s
-    /// exact-identity shape does not.
-    pub fn recent_support_work(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<RoutingObservation>, EvidenceLedgerError> {
-        let conn = self.lock();
-        let mut statement = conn
-            .prepare(
-                "SELECT * FROM routing_observations
-                 WHERE project_id = ?1 AND purpose IN (?2, ?3)
-                 ORDER BY observed_at DESC
-                 LIMIT ?4",
-            )
-            .map_err(sql_err("read support-work routing observations"))?;
-        let rows = statement
-            .query_map(
-                params![
-                    self.project_id,
-                    CLASSIFICATION_PURPOSE,
-                    EXTRACTION_PURPOSE,
-                    limit as i64
-                ],
-                row_to_observation,
-            )
-            .map_err(sql_err("read support-work routing observations"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(sql_err("read a support-work routing observation"))??);
-        }
-        Ok(out)
-    }
-
-    /// **Map line 1951**'s token/wall-clock/request-count half, grouped by
-    /// harness alone. `routing_observations.harness` is written directly by
-    /// every producer
-    /// (`crate::gateway::session::record_routing_observation`'s
-    /// `.with_harness(...)`, and `main.rs`'s five `with_purpose` call
-    /// sites), so this needs no join to `sessions` — unlike
-    /// [`crate::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]'s
-    /// outcome half, which has no harness of its own to read and joins
-    /// `sessions.harness` instead.
-    ///
-    /// Reads the raw rows and folds them in Rust rather than aggregating in
-    /// SQL — the same choice [`Self::route_correlations`] and
-    /// [`Self::throttle_scopes`] make and for the same reason: the
-    /// wall-clock median and the "rows without token data" split are
-    /// decisions worth testing without a database, not SQL to get right
-    /// once and never examine again.
-    pub fn request_stats_by_harness(
-        &self,
-        from: i64,
-        to: i64,
-    ) -> Result<Vec<HarnessRequestStats>, EvidenceLedgerError> {
-        let observations = {
-            let conn = self.lock();
-            let mut statement = conn
-                .prepare(
-                    "SELECT * FROM routing_observations
-                     WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
-                     ORDER BY harness IS NULL, harness ASC, observed_at ASC",
-                )
-                .map_err(sql_err("read routing observations by harness"))?;
-            let rows = statement
-                .query_map(params![self.project_id, from, to], row_to_observation)
-                .map_err(sql_err("read routing observations by harness"))?;
-            let mut observations = Vec::new();
-            for row in rows {
-                observations.push(row.map_err(sql_err("read a routing observation"))??);
-            }
-            observations
-        };
-
-        let mut by_harness: std::collections::BTreeMap<String, Vec<RoutingObservation>> =
-            std::collections::BTreeMap::new();
-        for observation in observations {
-            let harness = observation
-                .harness
-                .clone()
-                .unwrap_or_else(|| UNKNOWN_HARNESS.to_owned());
-            by_harness.entry(harness).or_default().push(observation);
-        }
-
-        Ok(by_harness
-            .into_iter()
-            .map(|(harness, rows)| HarnessRequestStats::from_rows(harness, &rows))
-            .collect())
-    }
-
     /// Rolling summaries for one `(provider, model, route, harness)`
     /// identity, within one [`ContextState`] bucket, computed from every
     /// observation newer than `now_unix - window_seconds` — capability map
     /// line 1341's decay: nothing older than the window contributes to the
-    /// aggregate, but nothing is deleted from the table to make that true. A
-    /// raw row outside the window is still readable through [`Self::recent`]
-    /// for as long as it exists.
-    pub fn summarize(
+    /// aggregate, but nothing is deleted from the table to make that true.
+    /// [`Self::summarize_latest_for_model`]'s own private helper, kept as a
+    /// method rather than a free function because it is the one place this
+    /// crate builds a [`RoutingSummary`] from a named identity.
+    fn summarize(
         &self,
         query: ObservationQuery<'_>,
         context_state: ContextState,
@@ -1226,7 +695,7 @@ impl EvidenceLedger {
     /// `glasshouse resources` renders: one entry per provider, across every
     /// model, route, harness and context state it was observed under.
     ///
-    /// Per provider rather than per [`ObservationQuery`] identity because
+    /// Per provider rather than per `ObservationQuery` identity because
     /// the question these two lines ask — *is this provider throttling me,
     /// out of quota, or unwell?* — is about the resource, and
     /// `crate::provider::resources` keys its health rendering by provider
@@ -1298,77 +767,10 @@ impl EvidenceLedger {
         Ok(out)
     }
 
-    /// Every pair of routes this project has observed failing or serving at
-    /// the same moments, over the window ending at `now_unix` — lines 1370,
-    /// 1373, 1374 and 1376's reader, and the one door
-    /// `crate::gateway::session::SessionRouting::observe_exchange` reaches
-    /// [`correlate_routes`] through.
-    ///
-    /// Reads every outcome-carrying row in the window in one pass and hands
-    /// them to the pure function rather than joining in SQL: the overlap
-    /// tolerance, the class match and the minimum are decisions, and a
-    /// decision belongs where a test reaches it without a database. Rows
-    /// with no outcome never inform a pair (see [`RouteCorrelation`]), so
-    /// the query leaves them on disk.
-    ///
-    /// Called once per provider failure, not per exchange: a failover is a
-    /// small minority of exchanges, and a full-window read at that moment
-    /// costs less than keeping a correlation warm across every exchange that
-    /// moved nothing.
-    pub fn route_correlations(
-        &self,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<RouteCorrelations, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let observations = {
-            let conn = self.lock();
-            let mut statement = conn
-                .prepare(
-                    "SELECT * FROM routing_observations
-                     WHERE project_id = ?1
-                       AND observed_at >= ?2 AND observed_at <= ?3
-                       AND outcome IS NOT NULL
-                     ORDER BY observed_at ASC",
-                )
-                .map_err(sql_err("read routing observations for correlation"))?;
-            let rows = statement
-                .query_map(
-                    params![self.project_id, earliest, now_unix],
-                    row_to_observation,
-                )
-                .map_err(sql_err("read routing observations for correlation"))?;
-            let mut observations = Vec::new();
-            for row in rows {
-                observations.push(row.map_err(sql_err("read a routing observation"))??);
-            }
-            observations
-        };
-        Ok(correlate_routes(&observations))
-    }
-
-    /// Capability map line 1317's reader: [`classify_throttle_scopes`], fed
-    /// every outcome-carrying row in the window ending at `now_unix` — the
-    /// same query shape [`Self::route_correlations`] runs, for the same
-    /// reason: the tolerance, the class match and the minimum are decisions,
-    /// and a decision belongs where a test reaches it without a database.
-    pub fn throttle_scopes(
-        &self,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<ThrottleScopes, EvidenceLedgerError> {
-        Ok(classify_throttle_scopes(
-            &self.observations_in_window(now_unix, window_seconds)?,
-        ))
-    }
-
-    /// Every outcome-carrying observation in the window ending at `now_unix`
-    /// — the exact row set [`Self::throttle_scopes`] and
-    /// [`Self::route_correlations`] classify, exposed for a caller that
-    /// needs the rows themselves: map line 1965's entitlement telemetry
-    /// resolver narrows them by provider and
-    /// [`RoutingObservation::quota_context`]
-    /// ([`recent_credential_throttles`]).
+    /// Every outcome-carrying observation in the window ending at `now_unix`,
+    /// for a caller that needs the raw rows: map line 1965's entitlement
+    /// telemetry resolver narrows them by provider and
+    /// [`RoutingObservation::quota_context`].
     pub fn observations_in_window(
         &self,
         now_unix: i64,
@@ -1412,8 +814,8 @@ impl EvidenceLedger {
     /// all, so widening `observations_in_window` instead would silently
     /// change what four existing classifiers count.
     ///
-    /// Ordered by `observed_at` ascending, like its sibling, because
-    /// [`crate::routing::burn`] buckets by time and an idle gap is a property of
+    /// Ordered by `observed_at` ascending, like its sibling, because a
+    /// caller bucketing by time reads an idle gap as a property of
     /// consecutive rows.
     // History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `fn consumption_in_window`.
     pub fn consumption_in_window(
@@ -1444,11 +846,11 @@ impl EvidenceLedger {
         Ok(observations)
     }
 
-    /// [`Self::summarize`] for whichever `(route, harness, context_state)`
+    /// `Self::summarize` for whichever `(route, harness, context_state)`
     /// this `(provider, model)` was most recently observed under — additive,
     /// because a caller that only knows a routing selection's provider and
     /// model from configuration (never its route, harness or context-state
-    /// bucket) cannot build the [`ObservationQuery`] [`Self::summarize`]
+    /// bucket) cannot build the `ObservationQuery` `Self::summarize`
     /// requires, the same gap [`Self::observed_identities`] closed for
     /// listing rather than summarizing (practice §71). This picks the single
     /// most recently active identity for the pair and summarizes exactly
@@ -1514,77 +916,24 @@ impl EvidenceLedger {
         )?))
     }
 
-    /// Capability map line 1564's producer: the [`FailureClass`] of the
-    /// **most recent** exchange this project recorded against `(provider,
-    /// model)` within the window — `Ok(None)` when nothing was recorded, or
-    /// the latest row carried no class (it succeeded, or a producer wrote a
-    /// verdict without a kind).
-    ///
-    /// The latest row and not a count: line 1564 says *after* a clearly
-    /// attributable failure, and "the last thing that happened on this
-    /// backend" is the attribution this ledger can honestly make — rows
-    /// carry no session id, so a count over the window would mix in every
-    /// other session's exchanges. `main.rs`'s task-boundary `route` path
-    /// reads it for the destination the work is on and hands it to
-    /// `SessionRouter::with_retry_after`, which promotes one tier on a
-    /// [`FailureClass::RequestIncompatibility`] or
-    /// [`FailureClass::EmptyCompletion`] and on nothing else.
-    ///
-    /// Scoped to this ledger's `project_id`, like [`Self::observed_identities`].
-    pub fn latest_failure_class_for_model(
-        &self,
-        provider: &str,
-        model: &str,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<Option<FailureClass>, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let stored: Option<Option<String>> = {
-            let conn = self.lock();
-            conn.query_row(
-                "SELECT failure_class
-                 FROM routing_observations
-                 WHERE project_id = ?1 AND provider = ?2 AND model = ?3
-                   AND observed_at >= ?4 AND observed_at <= ?5
-                 ORDER BY observed_at DESC, seq DESC
-                 LIMIT 1",
-                params![self.project_id, provider, model, earliest, now_unix],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err("find the most recent failure class for a model"))?
-        };
-        match stored.flatten() {
-            None => Ok(None),
-            Some(text) => FailureClass::from_stored(&text).map(Some).ok_or(
-                EvidenceLedgerError::UnknownAggregateValue {
-                    column: "failure_class",
-                    value: text,
-                },
-            ),
-        }
-    }
-
     /// The distinct `(provider, model, route, context_state)` identities
     /// this project has actually recorded within the last `window_seconds`,
     /// most recently active first — capability map lines 1762 and 1764, and
-    /// the enumeration link batch 42 found missing (practice §71):
-    /// [`Self::recent`] and [`Self::summarize`] both require the caller to
-    /// already name an identity; this is the one method on this ledger that
-    /// answers which identities exist at all.
+    /// the enumeration link batch 42 found missing (practice §71): every
+    /// other reader on this ledger requires the caller to already name an
+    /// identity; this is the one method on this ledger that answers which
+    /// identities exist at all.
     ///
     /// A `SELECT DISTINCT`, expressed as a `GROUP BY` with its own count and
     /// window — over columns `routing_observations` already has. No schema
-    /// change, and [`Self::record`], [`Self::recent`], [`Self::summarize`]
-    /// and [`ObservationQuery`] are all untouched. Bounded by `limit`, the
-    /// same shape [`Self::recent`] takes: an unbounded listing over a
-    /// growing table is a defect waiting for a busy project.
+    /// change. Bounded by `limit`: an unbounded listing over a growing table
+    /// is a defect waiting for a busy project.
     ///
     /// Scoped to this ledger's own `project_id`, like every write this
     /// ledger makes — belt-and-suspenders alongside the physical per-project
-    /// database file [`Self::open`] already guarantees, because this method,
-    /// unlike [`Self::recent`] and [`Self::summarize`], reads across every
-    /// identity in the table rather than one already-named one.
+    /// database file [`Self::open`] already guarantees, because this method
+    /// reads across every identity in the table rather than one
+    /// already-named one.
     pub fn observed_identities(
         &self,
         now_unix: i64,
@@ -1737,120 +1086,15 @@ impl EvidenceLedger {
         Ok(out)
     }
 
-    /// [`TranslationSavings`] for every `(route, quota_context)` this ledger
-    /// holds at least one translated row for, within one window — map line
-    /// 2034's translation facet, and [`consumption_by_purpose`]'s sibling
-    /// query rather than a filter over its output: that reader groups by
-    /// `purpose` first and folds every route together, which is exactly the
-    /// per-route/per-credential breakdown this line asks for and that one
-    /// does not give.
+    /// A session-scoped translation cache reading, with no time window —
+    /// capability map line 1760's evidence half: `sessions show <id> --debug`
+    /// reads this to show what providers actually reported on this session's
+    /// own translated exchanges.
     ///
-    /// `purpose = HARNESS_TURN_PURPOSE` restricts to the gateway's own rows
-    /// (map line 1330's stamp), and `input_tokens IS NOT NULL` is what
-    /// separates a translated exchange from a relayed one **by
-    /// construction**: `crate::gateway::session`'s doc comment (near line
-    /// 485) and this module's own header (near line 89) both say a relayed
-    /// exchange leaves all three token columns `NULL`, so a row that cleared
-    /// this filter parsed a real reply body. A relayed row is never in this
-    /// reader's denominator, which is the whole point of filtering in SQL
-    /// rather than summing in Rust and hoping every caller remembers the
-    /// same guard.
-    ///
-    /// [`consumption_by_purpose`]: Self::consumption_by_purpose
-    pub fn translation_cache_savings(
-        &self,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<Vec<TranslationSavings>, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let conn = self.lock();
-        let mut statement = conn
-            .prepare(
-                "SELECT route,
-                        quota_context,
-                        COUNT(*) AS sample_count,
-                        SUM(input_tokens) AS input_tokens,
-                        SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens
-                 FROM routing_observations
-                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
-                   AND purpose = ?4 AND input_tokens IS NOT NULL
-                 GROUP BY route, quota_context
-                 ORDER BY route IS NULL, route ASC, quota_context IS NULL, quota_context ASC",
-            )
-            .map_err(sql_err("read translation cache savings"))?;
-        let rows = statement
-            .query_map(
-                params![self.project_id, earliest, now_unix, HARNESS_TURN_PURPOSE],
-                row_to_translation_savings,
-            )
-            .map_err(sql_err("read translation cache savings"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(sql_err("read one route's translation cache savings"))?);
-        }
-        Ok(out)
-    }
-
-    /// [`Self::translation_cache_savings`] grouped by migration 24's
-    /// `session_id` instead of by route and credential — capability map line
-    /// 2019's per-session clause.
-    ///
-    /// Deliberately a second query rather than a second grouping column on
-    /// the first: the two readings answer different questions (*which
-    /// credential's traffic is cache-warm* and *which session's is*), a row
-    /// belongs to exactly one group in each, and folding them into one
-    /// `GROUP BY route, quota_context, session_id` would give a reader
-    /// neither total without re-summing in Rust — which is the thing the
-    /// existing reader's own doc comment says it filters in SQL to avoid.
-    ///
-    /// `session_id IS NULL` is a group, not an exclusion: see
-    /// [`SessionTranslationSavings::session_id`]. Ordered with that group
-    /// last, so a report's named sessions read first.
-    pub fn session_translation_cache_savings(
-        &self,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<Vec<SessionTranslationSavings>, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let conn = self.lock();
-        let mut statement = conn
-            .prepare(
-                "SELECT session_id,
-                        COUNT(*) AS sample_count,
-                        SUM(input_tokens) AS input_tokens,
-                        SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens
-                 FROM routing_observations
-                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
-                   AND purpose = ?4 AND input_tokens IS NOT NULL
-                 GROUP BY session_id
-                 ORDER BY session_id IS NULL, session_id ASC",
-            )
-            .map_err(sql_err("read per-session translation cache savings"))?;
-        let rows = statement
-            .query_map(
-                params![self.project_id, earliest, now_unix, HARNESS_TURN_PURPOSE],
-                row_to_session_translation_savings,
-            )
-            .map_err(sql_err("read per-session translation cache savings"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(sql_err("read one session's translation cache savings"))?);
-        }
-        Ok(out)
-    }
-
-    /// [`Self::session_translation_cache_savings`] narrowed to one session
-    /// and with no time window — capability map line 1760's evidence half:
-    /// `sessions show <id> --debug` reads this to show what providers
-    /// actually reported on this session's own translated exchanges, beside
-    /// the router's own `prompt-cache state` estimate at launch
-    /// ([`crate::routing::session::prompt_cache_state`]).
-    ///
-    /// A whole-session reading rather than a windowed one, deliberately:
-    /// unlike [`Self::session_translation_cache_savings`]'s report over
-    /// *recent* activity, one session's own exchanges are a bounded set
-    /// already, and windowing them by recency would silently drop a
-    /// session's earliest turns from its own evidence.
+    /// A whole-session reading rather than a windowed one, deliberately: one
+    /// session's own exchanges are a bounded set already, and windowing them
+    /// by recency would silently drop a session's earliest turns from its
+    /// own evidence.
     ///
     /// `Ok(None)` is *no translated exchange has reported cached-input
     /// tokens for this session* — a session started before migration 24, a
@@ -1891,144 +1135,5 @@ impl EvidenceLedger {
             input_tokens,
             cached_input_tokens,
         }))
-    }
-
-    /// [`ClassificationRecord`] for one `(provider, model)` over the last
-    /// `window_seconds` — the reader for capability map lines 1422/1432 and
-    /// 1421/1435, and the one that makes those quantities *measured* for
-    /// `crate::routing::disposable`'s classification filters.
-    ///
-    /// Reads only rows whose `purpose` is [`CLASSIFICATION_PURPOSE`]: a
-    /// model's gateway exchanges or extraction calls say nothing about how
-    /// it behaves as a classifier, and folding them in would let a model
-    /// that relays fine but never returns the schema look reliable.
-    ///
-    /// Scoped to this ledger's own `project_id`, like every read here that
-    /// is not already keyed by a full identity.
-    pub fn classification_record(
-        &self,
-        provider: &str,
-        model: &str,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<ClassificationRecord, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let observations = {
-            let conn = self.lock();
-            let mut statement = conn
-                .prepare(
-                    "SELECT * FROM routing_observations
-                     WHERE project_id = ?1 AND provider = ?2 AND model = ?3
-                       AND purpose = ?4
-                       AND observed_at >= ?5 AND observed_at <= ?6
-                     ORDER BY observed_at ASC",
-                )
-                .map_err(sql_err("read classification observations"))?;
-            let rows = statement
-                .query_map(
-                    params![
-                        self.project_id,
-                        provider,
-                        model,
-                        CLASSIFICATION_PURPOSE,
-                        earliest,
-                        now_unix
-                    ],
-                    row_to_observation,
-                )
-                .map_err(sql_err("read classification observations"))?;
-            let mut observations = Vec::new();
-            for row in rows {
-                observations.push(row.map_err(sql_err("read a classification observation"))??);
-            }
-            observations
-        };
-
-        let outcomes_recorded = observations
-            .iter()
-            .filter(|o| matches!(o.outcome, Some(Outcome::Succeeded) | Some(Outcome::Failed)))
-            .count();
-        let parsed = observations
-            .iter()
-            .filter(|o| o.outcome == Some(Outcome::Succeeded))
-            .count();
-        let durations: Vec<i64> = observations
-            .iter()
-            .filter_map(RoutingObservation::duration_ms)
-            .collect();
-        let timed = durations.len();
-        let median_duration_ms = (timed >= MIN_SAMPLE_FOR_SUMMARY).then(|| median(durations));
-
-        Ok(ClassificationRecord {
-            provider: provider.to_owned(),
-            model: model.to_owned(),
-            outcomes_recorded,
-            parsed,
-            timed,
-            median_duration_ms,
-        })
-    }
-
-    /// [`LatencyRecord`] for one `(provider, model)` over the last
-    /// `window_seconds` — the reader for capability map line 1539, and
-    /// [`Self::classification_record`]'s sibling over [`EXTRACTION_PURPOSE`]
-    /// rows instead of [`CLASSIFICATION_PURPOSE`] ones: a support-work call's
-    /// own latency says nothing about how it behaves as a classifier, and
-    /// folding the two together would let a slow classifier's rows inflate a
-    /// fast support-work resource's median or the reverse.
-    ///
-    /// Scoped to this ledger's own `project_id`, like every read here that
-    /// is not already keyed by a full identity.
-    pub fn support_work_latency(
-        &self,
-        provider: &str,
-        model: &str,
-        now_unix: i64,
-        window_seconds: i64,
-    ) -> Result<LatencyRecord, EvidenceLedgerError> {
-        let earliest = now_unix.saturating_sub(window_seconds);
-        let observations = {
-            let conn = self.lock();
-            let mut statement = conn
-                .prepare(
-                    "SELECT * FROM routing_observations
-                     WHERE project_id = ?1 AND provider = ?2 AND model = ?3
-                       AND purpose = ?4
-                       AND observed_at >= ?5 AND observed_at <= ?6
-                     ORDER BY observed_at ASC",
-                )
-                .map_err(sql_err("read support-work latency observations"))?;
-            let rows = statement
-                .query_map(
-                    params![
-                        self.project_id,
-                        provider,
-                        model,
-                        EXTRACTION_PURPOSE,
-                        earliest,
-                        now_unix
-                    ],
-                    row_to_observation,
-                )
-                .map_err(sql_err("read support-work latency observations"))?;
-            let mut observations = Vec::new();
-            for row in rows {
-                observations
-                    .push(row.map_err(sql_err("read a support-work latency observation"))??);
-            }
-            observations
-        };
-
-        let durations: Vec<i64> = observations
-            .iter()
-            .filter_map(RoutingObservation::duration_ms)
-            .collect();
-        let timed = durations.len();
-        let median_duration_ms = (timed >= MIN_SAMPLE_FOR_SUMMARY).then(|| median(durations));
-
-        Ok(LatencyRecord {
-            timed,
-            median_duration_ms,
-        })
     }
 }

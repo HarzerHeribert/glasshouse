@@ -61,8 +61,7 @@ impl OnboardingState {
 ///
 /// Two preferences, both optional so that a project can override one
 /// without restating the other, and both `None` for "this layer never
-/// decided" — the same three-state reasoning [`RoutingConfig::model`] gives.
-/// The vocabularies are [`crate::guardrails`]' own, so a value this file
+/// decided". The vocabularies are [`crate::guardrails`]' own, so a value this file
 /// accepts is a value the gate understands, and the shipped defaults live
 /// with the gate (`Policy::default_policy`) rather than here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,12 +216,19 @@ pub struct UserConfig {
     /// [`EffectiveConfig::entitlements`].
     #[serde(default, skip_serializing_if = "EntitlementTable::is_empty")]
     entitlements: EntitlementTable,
-    /// Skipped when empty so a first run that declines the routing-model
-    /// step writes no `[routing]` table at all — see [`RoutingConfig::model`].
-    #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
-    routing: RoutingConfig,
+    /// Capability map line 1270. `None` means the defaults in
+    /// [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] apply.
+    /// There is no `[routing]` table any more (2026-09-16 ruling) — this is
+    /// a top-level key, unrelated to routing: how `glasshouse resources` and
+    /// the dashboard colour remaining quota.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity_band_thresholds: Option<CapacityBandThresholdsConfig>,
+    /// Capability map line 1288. `None` means the defaults apply. See
+    /// [`Self::capacity_band_thresholds`] for why this is a top-level key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    premium_reserve_percent: Option<PremiumReservePercent>,
     /// Pairing metadata corrections — Phase 9J line 561. Skipped when empty
-    /// for the same reason `routing` is: a user who never corrected a
+    /// for the same reason `capacity_band_thresholds` is: a user who never corrected a
     /// pairing has no `[pairing]` table in their file at all.
     #[serde(default, skip_serializing_if = "pairing::PairingConfig::is_unset")]
     pairing: pairing::PairingConfig,
@@ -234,13 +240,11 @@ pub struct UserConfig {
     response: response::ResponseConfig,
     /// Whether Glasshouse's automatic post-turn memory-extraction trigger
     /// (Phase 21) may run in this project. `None` means "never decided" and
-    /// resolves to enabled — the same reasoning [`RoutingConfig::model`]
-    /// documents for why this stays an `Option` rather than a plain `bool`:
-    /// a project that wants to record an explicit "off" over a user-level
-    /// "on" needs a third state to override, not just two.
+    /// resolves to enabled: a project that wants to record an explicit "off"
+    /// over a user-level "on" needs a third state to override, not just two.
     ///
-    /// Independent of [`RoutingConfig::model`] and
-    /// [`response::ResponseConfig`]'s own `enabled` field by construction —
+    /// Independent of [`response::ResponseConfig`]'s own `enabled` field by
+    /// construction —
     /// each lives in its own table/field and is read by
     /// [`EffectiveConfig::memory_extraction_enabled`] alone, so setting one
     /// never touches another. See
@@ -324,7 +328,8 @@ impl Default for UserConfig {
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
             entitlements: EntitlementTable::default(),
-            routing: RoutingConfig::default(),
+            capacity_band_thresholds: None,
+            premium_reserve_percent: None,
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
             memory_extraction: None,
@@ -383,12 +388,32 @@ impl UserConfig {
         &mut self.entitlements
     }
 
-    pub fn routing(&self) -> &RoutingConfig {
-        &self.routing
+    /// This layer's recorded capacity-band thresholds, or `None` for
+    /// "never decided" — capability map line 1270.
+    pub fn capacity_band_thresholds(&self) -> Option<CapacityBandThresholdsConfig> {
+        self.capacity_band_thresholds
     }
 
-    pub fn routing_mut(&mut self) -> &mut RoutingConfig {
-        &mut self.routing
+    pub fn set_capacity_band_thresholds(
+        &mut self,
+        value: Option<CapacityBandThresholdsConfig>,
+    ) -> &mut Self {
+        self.capacity_band_thresholds = value;
+        self
+    }
+
+    /// This layer's recorded premium-reserve percentage, or `None` for
+    /// "never decided" — capability map line 1288.
+    pub fn premium_reserve_percent(&self) -> Option<PremiumReservePercent> {
+        self.premium_reserve_percent
+    }
+
+    pub fn set_premium_reserve_percent(
+        &mut self,
+        value: Option<PremiumReservePercent>,
+    ) -> &mut Self {
+        self.premium_reserve_percent = value;
+        self
     }
 
     pub fn pairing(&self) -> &pairing::PairingConfig {
@@ -540,12 +565,14 @@ pub struct ProjectConfig {
     /// [`EffectiveConfig::entitlements`].
     #[serde(default, skip_serializing_if = "EntitlementTable::is_empty")]
     entitlements: EntitlementTable,
-    /// A project may override the routing-model choice, unlike
-    /// [`IntegrationConfig::bypass_acknowledged`] — see
-    /// [`EffectiveConfig::routing_model`] for why this is a preference and
-    /// that one is not.
-    #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
-    routing: RoutingConfig,
+    /// A project may override the capacity-band thresholds — capability map
+    /// line 1270. See [`UserConfig::capacity_band_thresholds`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity_band_thresholds: Option<CapacityBandThresholdsConfig>,
+    /// A project may override the premium-reserve percentage — capability
+    /// map line 1288. See [`UserConfig::premium_reserve_percent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    premium_reserve_percent: Option<PremiumReservePercent>,
     /// A project may correct pairing metadata for the models its own work
     /// uses, and its corrections win per key over the user's — see
     /// [`EffectiveConfig::pairing_overrides`].
@@ -613,7 +640,8 @@ impl Default for ProjectConfig {
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
             entitlements: EntitlementTable::default(),
-            routing: RoutingConfig::default(),
+            capacity_band_thresholds: None,
+            premium_reserve_percent: None,
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
             memory_extraction: None,
@@ -664,12 +692,32 @@ impl ProjectConfig {
         &mut self.entitlements
     }
 
-    pub fn routing(&self) -> &RoutingConfig {
-        &self.routing
+    /// This layer's recorded capacity-band thresholds, or `None` for
+    /// "never decided" — capability map line 1270.
+    pub fn capacity_band_thresholds(&self) -> Option<CapacityBandThresholdsConfig> {
+        self.capacity_band_thresholds
     }
 
-    pub fn routing_mut(&mut self) -> &mut RoutingConfig {
-        &mut self.routing
+    pub fn set_capacity_band_thresholds(
+        &mut self,
+        value: Option<CapacityBandThresholdsConfig>,
+    ) -> &mut Self {
+        self.capacity_band_thresholds = value;
+        self
+    }
+
+    /// This layer's recorded premium-reserve percentage, or `None` for
+    /// "never decided" — capability map line 1288.
+    pub fn premium_reserve_percent(&self) -> Option<PremiumReservePercent> {
+        self.premium_reserve_percent
+    }
+
+    pub fn set_premium_reserve_percent(
+        &mut self,
+        value: Option<PremiumReservePercent>,
+    ) -> &mut Self {
+        self.premium_reserve_percent = value;
+        self
     }
 
     pub fn pairing(&self) -> &pairing::PairingConfig {
@@ -919,6 +967,19 @@ fn parse_toml<T: serde::de::DeserializeOwned>(
     path: &Path,
     contents: &str,
 ) -> Result<T, ConfigError> {
+    // A `[routing]` table from before the 2026-09-16 ruling is refused
+    // rather than silently ignored — see `ConfigError::RemovedRoutingTable`.
+    // Checked against the raw TOML, not `T`'s own `Deserialize`: `T` no
+    // longer has a `routing` field at all, so an unknown top-level key would
+    // otherwise be dropped exactly like this file's own doc says every
+    // other unknown key is.
+    if let Ok(raw) = toml::from_str::<toml::Value>(contents)
+        && raw.get("routing").is_some()
+    {
+        return Err(ConfigError::RemovedRoutingTable {
+            path: path.to_path_buf(),
+        });
+    }
     toml::from_str(contents).map_err(|source| {
         // A table still holding a key the gateway owns is refused by
         // `EntitlementConfig`/`ProviderConfig`'s own `Deserialize`, which can

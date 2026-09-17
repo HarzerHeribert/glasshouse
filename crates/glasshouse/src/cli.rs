@@ -93,27 +93,6 @@ fn parse_rating_verdict(value: &str) -> Result<crate::evaluation::EvaluationOutc
     }
 }
 
-/// clap value parser for `glasshouse rate-route`'s `<VERDICT>`: the same
-/// shape as [`parse_rating_verdict`], against
-/// [`crate::evaluation::ROUTE_RATING_VERDICTS`]' own closed two words rather
-/// than the memory rating's eight — a route rating refuses every word it
-/// does not share with a memory rating, `unknown` included, by name.
-fn parse_route_rating_verdict(value: &str) -> Result<crate::evaluation::EvaluationOutcome, String> {
-    use crate::evaluation::{EvaluationOutcome, ROUTE_RATING_VERDICTS};
-
-    match EvaluationOutcome::from_stored(value) {
-        Some(outcome) if ROUTE_RATING_VERDICTS.contains(&outcome) => Ok(outcome),
-        _ => Err(format!(
-            "`{value}` is not a route rating verdict; use one of {}",
-            ROUTE_RATING_VERDICTS
-                .iter()
-                .map(|verdict| verdict.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
-}
-
 /// Non-interactive commands.
 ///
 /// Every one of these is project scoped: it operates on the project resolved
@@ -211,27 +190,21 @@ pub enum Command {
     /// Setup runs by itself the first time Glasshouse is used in an
     /// interactive terminal; this is how to revisit those choices later.
     Setup,
-    /// Report what Glasshouse believes about each harness-and-model pairing.
+    /// Print the published model measurements this machine has cached.
     ///
-    /// Who publishes a harness, who developed a model, and who serves that
-    /// model are three different questions, and a router that ran them
-    /// together would treat a reseller as an author. This prints them apart,
-    /// with the class each pairing falls into and the evidence behind it.
+    /// One JSON document on stdout: every model Artificial Analysis lists,
+    /// with its intelligence, coding and agentic indices, its prices and its
+    /// measured speed. A machine surface — `pane`'s model picker orders its
+    /// catalogue by it — so a missing key, an empty cache and a failed
+    /// refresh all print an empty catalogue and exit 0 rather than failing.
     ///
-    /// Anything Glasshouse has not read stays `unknown` — a model named
-    /// after a company is not evidence it was made there. Correct one with a
-    /// `[pairing.models."<model id>"]` table in the configuration file; the
-    /// next run reflects it, and no router code changes.
-    Pairing {
-        /// Ask about one model by its exact id, whether or not any launch
-        /// profile names it.
-        #[arg(long, value_name = "ID")]
-        model: Option<String>,
-
-        /// Narrow `--model` to one harness, by its identifier — for example
-        /// `claude-code`.
-        #[arg(long, value_name = "ID")]
-        harness: Option<String>,
+    /// `--refresh` fetches first, when `ARTIFICIAL_ANALYSIS_API_KEY` is set,
+    /// the cache is over a day old, and the free-tier budget allows it; it
+    /// says on stderr which of those decided.
+    Analysis {
+        /// Fetch before printing, subject to the key, the age and the budget.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Report the response profile in effect and what each harness would do
     /// with it.
@@ -331,99 +304,6 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Report what Glasshouse believes a request needs, without acting on it.
-    ///
-    /// Reads the words as free-form request text — not a query language —
-    /// and answers whether it needs repository context, code modification, a
-    /// shell, or browser interaction; a coarse complexity and workload tier;
-    /// whether it looks safe to hand to a disposable free or local model; and
-    /// how confident the classification is, so an uncertain answer can be
-    /// escalated rather than trusted outright.
-    ///
-    /// Asks the configured routing model when one is pinned or resolved
-    /// automatically; falls back to the deterministic heuristic path when
-    /// none is configured, or when the model call fails. Either way the
-    /// report says which one actually answered.
-    Classify {
-        /// The request text to classify.
-        text: Vec<String>,
-    },
-    /// Print the published model measurements this machine has cached.
-    ///
-    /// One JSON document on stdout: every model Artificial Analysis lists,
-    /// with its intelligence, coding and agentic indices, its prices and its
-    /// measured speed. A machine surface — `pane`'s model picker orders its
-    /// catalogue by it — so a missing key, an empty cache and a failed
-    /// refresh all print an empty catalogue and exit 0 rather than failing.
-    ///
-    /// `--refresh` fetches first, when `ARTIFICIAL_ANALYSIS_API_KEY` is set,
-    /// the cache is over a day old, and the free-tier budget allows it; it
-    /// says on stderr which of those decided.
-    Analysis {
-        /// Fetch before printing, subject to the key, the age and the budget.
-        #[arg(long)]
-        refresh: bool,
-    },
-    /// Show where Glasshouse would send this work, and why.
-    ///
-    /// Ranks every destination — the sessions this project already has and a
-    /// fresh one per launch profile — and prints the contributions behind the
-    /// winner, every alternative's score, and anything a hard constraint
-    /// removed. Decides nothing and starts nothing.
-    ///
-    /// The same ranking runs on `glasshouse launch` and `glasshouse run`,
-    /// which do start something; this is how to see the answer first. The one
-    /// difference is stated in the report: a session that is still *running*
-    /// is a destination a person can act on and not one a second process can
-    /// enter, so it is ranked here and left out there.
-    Route {
-        /// `session-start`, `task-boundary`, or `mid-turn`.
-        #[arg(long, value_name = "MOMENT", default_value = "session-start")]
-        moment: String,
-        /// Send the work to this destination whatever the ranking says.
-        #[arg(long, value_name = "ID")]
-        to: Option<String>,
-        /// Start a fresh session whatever the ranking says.
-        #[arg(long, conflicts_with = "to")]
-        fresh: bool,
-        /// Decide now, even mid-turn.
-        #[arg(long)]
-        now: bool,
-        /// Describe the work, so the ranking can weigh what it actually
-        /// needs (repository access, shell execution, browser interaction)
-        /// instead of nothing. Optional; omitting it leaves routing exactly
-        /// as it behaves today.
-        #[arg(long, value_name = "TEXT")]
-        task: Option<String>,
-    },
-    /// Record an operator's or agent's own verdict on a session's route — the
-    /// explicit half of map line 1846's own design note, *"The routing half
-    /// of RC-B: an explicit route rating when given, the turn-outcome proxy
-    /// otherwise"*, 2026-09-05.
-    ///
-    /// `<VERDICT>` is `useful` or `not-useful` —
-    /// [`crate::evaluation::EvaluationKind::MemoryRated`]'s own two words,
-    /// reused rather than a second scale for the same question. A flat
-    /// command, not a group under `route`, because `route` is already flat
-    /// with its own flags (`--moment`, `--to`, `--fresh`).
-    ///
-    /// Refuses a session with no recorded route: a route can only be rated
-    /// once it was actually taken. This records a new observation; it is
-    /// never an edit of the routing outcome it judges, and a session rated
-    /// twice keeps both rows — the readers that count it take the latest.
-    RateRoute {
-        /// The routed session to rate.
-        session: String,
-
-        /// `useful` or `not-useful`.
-        #[arg(value_name = "VERDICT", value_parser = parse_route_rating_verdict)]
-        verdict: crate::evaluation::EvaluationOutcome,
-
-        /// A short note, printed back in this project's own readout. Your
-        /// own text; never a memory's body.
-        #[arg(long, value_name = "TEXT")]
-        note: Option<String>,
-    },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.
     ///
@@ -472,42 +352,6 @@ pub enum Command {
 
         /// Print this project's active claims and change nothing.
         #[arg(long, conflicts_with_all = ["path", "session", "release"])]
-        list: bool,
-    },
-    /// Declare that a session's current task is nearly complete, so a quota
-    /// threshold alone will not move the work elsewhere.
-    ///
-    /// Glasshouse protects a slice of each provider's quota, and when that
-    /// reserve is crossed it will normally prefer to move work to a cheaper
-    /// resource. That is the wrong call for a task that is almost done:
-    /// moving it throws away the context it has built up to save a small
-    /// amount of quota. This is how you say so.
-    ///
-    /// **Glasshouse never guesses this.** It cannot see how far through a
-    /// task a session is — it sees turns starting and ending, and a turn
-    /// boundary is not a task boundary. Every available guess (how many
-    /// turns have passed, how long the session has been running) reports
-    /// "almost done" for work that has merely been going on a while, which
-    /// is exactly the long-running work the reserve exists to keep serving.
-    /// So the declaration is yours to make, and it is the only thing that
-    /// sets it.
-    ///
-    /// A declaration is project-scoped and **expires by itself**, because a
-    /// statement that outlived its task would keep protecting work that had
-    /// already finished. Declaring again for the same session renews it;
-    /// `--withdraw` ends it early, and it ends anyway when the session does.
-    TaskProgress {
-        /// Which session's task is nearly complete, by the identifier
-        /// `glasshouse sessions` prints, or any leading part of it.
-        #[arg(long, required_unless_present = "list")]
-        session: Option<String>,
-
-        /// Withdraw the declaration instead of making one.
-        #[arg(long)]
-        withdraw: bool,
-
-        /// Print this project's active declarations and change nothing.
-        #[arg(long, conflicts_with_all = ["session", "withdraw"])]
         list: bool,
     },
     /// Search this project's durable memory.
@@ -993,18 +837,22 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
-    /// Report what Glasshouse's own routing model has consumed, in tokens
-    /// and requests, apart from every other row this project's evidence
-    /// ledger holds — capability map line 1464.
+    /// Report what this project's evidence ledger holds about cost: request
+    /// and token consumption grouped by purpose over a window, or one
+    /// session's own cached-input share.
     ///
-    /// Groups every recorded observation by what it was for: `classification`
-    /// is `glasshouse classify`'s own calls; the coding-agent group is every
-    /// exchange the gateway relayed for a harness; everything else groups
-    /// together under no purpose and no harness. A relayed exchange whose
-    /// reply the gateway could not read leaves the token columns `NULL`, and
-    /// a `NULL` column prints as *not counted* (prose) or `null` (`--json`),
-    /// never `0`.
-    RoutingCost {
+    /// Groups every recorded observation by what it was for: the
+    /// coding-agent group is every exchange the gateway relayed for a
+    /// harness; everything else groups together under no purpose and no
+    /// harness. A relayed exchange whose reply the gateway could not read
+    /// leaves the token columns `NULL`, and a `NULL` column prints as *not
+    /// counted* (prose) or `null` (`--json`), never `0`.
+    ///
+    /// `--session` narrows to exactly that session: without `--json`, its
+    /// own cached-input share over its own translated exchanges (never
+    /// windowed — a session's exchanges are already a bounded set); with
+    /// `--json`, the window's observations narrowed to that session alone.
+    Cost {
         /// How far back to look, in hours.
         #[arg(long, value_name = "N", default_value_t = 24)]
         hours: u32,
@@ -1014,11 +862,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
         /// Start the window at this Unix second instead of `--hours` ago;
-        /// the window still ends now.
+        /// the window still ends now. `--json` only.
         #[arg(long, value_name = "UNIX", conflicts_with = "hours", requires = "json")]
         since: Option<i64>,
-        /// Keep only this session's rows.
-        #[arg(long, value_name = "ID", requires = "json")]
+        /// Narrow to one session.
+        #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
     /// The context firewall — Phase 57's tool-output compaction between
@@ -2020,32 +1868,6 @@ pub enum SessionCommand {
     Close {
         /// The session, or the leading part of its identifier.
         session: String,
-    },
-
-    /// Let this session's background jobs spend protected quota reserve.
-    ///
-    /// Glasshouse keeps a protected reserve of each premium resource's quota
-    /// and normally refuses to spend it on the small background jobs it runs
-    /// for itself — memory extraction and the like. This overrides that
-    /// refusal, for the session named here and for no other.
-    ///
-    /// It is recorded in your user configuration and stays until you remove
-    /// it with `--clear`. There is deliberately no way to say "every
-    /// session": an override that covered everything would be the reserve
-    /// switched off rather than overridden, and the reserve exists to stop
-    /// background work exhausting the quota an interactive session needs.
-    ///
-    /// The override is never silent. When it is what allowed a spend, the
-    /// routing explanation the decision carries names this session by
-    /// identifier, so a reader can see whose override it was rather than only
-    /// that one existed.
-    Reserve {
-        /// The session, or the leading part of its identifier.
-        session: String,
-
-        /// Withdraw this session's override instead of granting one.
-        #[arg(long)]
-        clear: bool,
     },
 
     /// Warn before, then carry out, a profile change on a running session —

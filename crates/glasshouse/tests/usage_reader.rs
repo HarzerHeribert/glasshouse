@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glasshouse::config::{ExtractionModelRef, ProviderConfig, UserConfig};
 use glasshouse::memory::extract::{ModelCall, TokenUsage};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, RoutingObservation};
+use glasshouse::routing::evidence::{EvidenceLedger, RoutingObservation};
 use glasshouse::session::{NewSession, ProjectSessions, SessionId, SessionLifecycle};
 use glasshouse::{Cli, Runtime};
 
@@ -243,20 +243,24 @@ impl Fixture {
     ///
     /// `route` and `harness` match exactly, including [`None`], so this asks
     /// for the identity the producer actually writes rather than for
-    /// anything that happens to be in the table.
+    /// anything that happens to be in the table. `consumption_in_window`,
+    /// not `observations_in_window`: `ModelCall::observation`'s own doc
+    /// comment leaves `outcome` `NULL` rather than fill it with a nearby
+    /// guess, so the outcome-filtering reader would silently drop every row
+    /// this file plants for.
     fn observations(&self) -> Vec<RoutingObservation> {
-        EvidenceLedger::open(&self.runtime)
-            .expect("the project database is bound")
-            .recent(
-                ObservationQuery {
-                    provider: PROVIDER,
-                    model: MODEL,
-                    route: Some(ROUTE),
-                    harness: None,
-                },
-                16,
-            )
+        let ledger = EvidenceLedger::open(&self.runtime).expect("the project database is bound");
+        ledger
+            .consumption_in_window(i64::MAX, i64::MAX)
             .expect("reading observations back")
+            .into_iter()
+            .filter(|row| {
+                row.provider == PROVIDER
+                    && row.model == MODEL
+                    && row.route.as_deref() == Some(ROUTE)
+                    && row.harness.is_none()
+            })
+            .collect()
     }
 
     /// The one observation this project's ledger holds, or a failure naming

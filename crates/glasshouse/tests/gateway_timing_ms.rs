@@ -42,7 +42,37 @@ use std::time::Duration;
 use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
+
+/// Local stand-in for the ledger's own (now-internal) `ObservationQuery`:
+/// this file filters exactly these four fields client-side against
+/// [`EvidenceLedger::observations_in_window`], the successor to the deleted
+/// `EvidenceLedger::recent`.
+#[derive(Debug, Clone, Copy)]
+struct ObservationQuery<'a> {
+    provider: &'a str,
+    model: &'a str,
+    route: Option<&'a str>,
+    harness: Option<&'a str>,
+}
+
+fn recent(
+    ledger: &EvidenceLedger,
+    query: ObservationQuery<'_>,
+    _limit: usize,
+) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
+    ledger
+        .observations_in_window(i64::MAX, i64::MAX)
+        .expect("read the ledger")
+        .into_iter()
+        .filter(|row| {
+            row.provider == query.provider
+                && row.model == query.model
+                && row.route.as_deref() == query.route
+                && row.harness.as_deref() == query.harness
+        })
+        .collect()
+}
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, SecretRef, SecretStore};
 use serde_json::{Value, json};
@@ -461,7 +491,7 @@ fn wait_for_row(
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows = recent(ledger, query, 10);
         if !rows.is_empty() || std::time::Instant::now() >= deadline {
             return rows;
         }
@@ -970,9 +1000,7 @@ fn a_version_24_database_migrates_and_reads_back_four_nulls() {
         harness: None,
     };
 
-    let older = ledger
-        .recent(query("older-build"), 1)
-        .expect("read the older row");
+    let older = recent(&ledger, query("older-build"), 1);
     assert_eq!(older.len(), 1);
     assert_eq!(
         (
@@ -1002,7 +1030,7 @@ fn a_version_24_database_migrates_and_reads_back_four_nulls() {
             2,
         )
         .expect("record a measured row");
-    let newer = ledger.recent(query("newer-build"), 1).expect("read");
+    let newer = recent(&ledger, query("newer-build"), 1);
     assert_eq!(
         (
             newer[0].first_byte_ms,

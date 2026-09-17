@@ -47,7 +47,7 @@ use glasshouse::gateway::{Gateway, Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::Provider;
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
 use glasshouse::routing::{AssignedModel, Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use serde_json::{Value, json};
@@ -711,11 +711,24 @@ fn event_names(events: &[(String, Value)]) -> Vec<String> {
 
 fn wait_for_row(
     ledger: &EvidenceLedger,
-    query: ObservationQuery<'_>,
+    provider: &str,
+    model: &str,
+    route: Option<&str>,
+    harness: Option<&str>,
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == route
+                    && row.harness.as_deref() == harness
+            })
+            .collect();
         if !rows.is_empty() || Instant::now() >= deadline {
             return rows;
         }
@@ -926,12 +939,10 @@ fn a_claude_code_request_is_translated_to_generate_content_and_the_answer_back_w
     // Recorded under the pair's own name, with the provider's exact usage.
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "gemini",
-            model: MODEL,
-            route: Some("anthropic-messages->gemini-generate-content"),
-            harness: Some("claude-code"),
-        },
+        "gemini",
+        MODEL,
+        Some("anthropic-messages->gemini-generate-content"),
+        Some("claude-code"),
     );
     assert_eq!(
         rows.len(),

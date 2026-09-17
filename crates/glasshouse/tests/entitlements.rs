@@ -1,455 +1,24 @@
 //! Phase 56 lines 1946, 1947 and 1954, renamed by Phase 56A line 1962 — an
 //! entitlement as a routing resource with rules of its own, entered the way
-//! production enters it.
+//! production enters it: the shipped binary against a `[entitlements.<name>]`
+//! table it wrote itself.
 //!
-//! Two halves, for the reason `tests/subscription_pressure.rs` gives for its
-//! own. The first goes through [`SessionRouter::choose`] with hand-built
-//! destinations that differ **in the entitlement alone**, and shows the
-//! entitlement constraint removing a candidate, naming itself, and refusing
-//! to be outranked by a score. The second runs the shipped binary against a
-//! `[entitlements.<name>]` table it wrote itself: nothing in half one can
-//! fail on a build where `main.rs::routing_destinations` stops attaching the
-//! entitlement, where the launch proceeds past a refused sole destination,
-//! or where the announcement names the harness instead of the entitlement —
-//! and those three are the whole of what this package wires. Practice §35.
+//! This file used to have a second, unit-level half through
+//! `SessionRouter::choose`, hand-building destinations that differed in the
+//! entitlement alone — deleted with the router (design-decisions.md,
+//! 2026-09-16, "Glasshouse never decides which model is used"), along with
+//! the two tests below that drove the deleted `glasshouse route`/`--task`
+//! surface. What is left is `launch`'s own application of
+//! `EntitlementRules::refusal`, which needed no router to begin with.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Instant;
 
 use clap::Parser as _;
-use glasshouse::config::pairing::{WarmSession, WarmSessionState};
-use glasshouse::harness::pairing::PairingOverrides;
-use glasshouse::integrations::IntegrationId;
-use glasshouse::routing::classify::WorkloadTier;
-use glasshouse::routing::disposable::JobKind;
-use glasshouse::routing::free::FreePool;
-use glasshouse::routing::session::{
-    Destination, OverrideRefusal, Routed, RouterInputs, RoutingMoment, RoutingOverride,
-    SessionRouter, TaskRequirements,
-};
-use glasshouse::routing::{
-    AssignedModel, Backend, Cost, CredentialId, Entitlement, EntitlementRefusal, EntitlementRules,
-    HardConstraint, ToolSemantics,
-};
-use glasshouse::secret::SecretRef;
 
 // Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
 // gateway's `gateway.toml` — see the included file for what moves and why.
 include!("fixtures/gateway_split.rs");
-
-// ===========================================================================
-// Half one — the rules, and the router through `SessionRouter::choose`.
-// ===========================================================================
-
-const PROTOCOL: &str = "anthropic-messages";
-const HARNESS: IntegrationId = IntegrationId::ClaudeCode;
-
-fn backend(provider: &str) -> Backend {
-    Backend::new(
-        provider,
-        PROTOCOL,
-        AssignedModel::named("the-same-model"),
-        CredentialId::new(
-            provider,
-            SecretRef::Environment {
-                var: format!("{}_KEY", provider.to_uppercase().replace('-', "_")),
-            },
-        ),
-        Cost::Metered,
-        ToolSemantics::Verified,
-    )
-}
-
-/// A fresh destination that differs from its siblings in the entitlement
-/// it carries and in nothing the router scores.
-fn fresh(id: &str, entitlement: Option<Entitlement>) -> Destination {
-    Destination::fresh(id, HARNESS, "profile", backend("the-same-provider"), None)
-        .with_entitlement(entitlement)
-}
-
-/// A live, zero-idle existing session — the warmest destination this router
-/// can be handed — carrying `entitlement`.
-fn warm(id: &str, entitlement: Option<Entitlement>) -> Destination {
-    Destination::existing(
-        id,
-        HARNESS,
-        "profile",
-        backend("the-same-provider"),
-        WarmSession {
-            state: WarmSessionState::Live,
-            idle_seconds: 0,
-        },
-    )
-    .with_entitlement(entitlement)
-}
-
-/// The unrestricted entry configuration supplies for a harness's own
-/// sign-in when the user configured none.
-fn own_sign_in() -> Entitlement {
-    Entitlement::new(HARNESS.slug(), EntitlementRules::UNRESTRICTED)
-}
-
-/// A team's API key that must never serve Claude Code.
-fn team_key() -> Entitlement {
-    Entitlement::new(
-        "team-key",
-        EntitlementRules::UNRESTRICTED.deny_harnesses([HARNESS]),
-    )
-}
-
-struct Fixture {
-    overrides: PairingOverrides,
-    health: FreePool,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        Self {
-            overrides: PairingOverrides::default(),
-            health: FreePool::new(),
-        }
-    }
-
-    fn inputs(&self, tier: Option<WorkloadTier>) -> RouterInputs<'_> {
-        RouterInputs {
-            overrides: &self.overrides,
-            health: &self.health,
-            now: Instant::now(),
-            requirements: TaskRequirements {
-                minimum_tier: tier,
-                ..TaskRequirements::default()
-            },
-        }
-    }
-
-    fn choose(
-        &self,
-        router: &SessionRouter,
-        destinations: &[Destination],
-        tier: Option<WorkloadTier>,
-    ) -> Routed {
-        router
-            .choose(
-                RoutingMoment::SessionStart,
-                None,
-                destinations,
-                &self.inputs(tier),
-            )
-            .expect("at least one destination is eligible in every test that calls this")
-    }
-}
-
-/// The rejection recorded for `id`, if a hard constraint removed it.
-fn rejection<'a>(routed: &'a Routed, id: &str) -> Option<&'a HardConstraint> {
-    routed
-        .rejected()
-        .iter()
-        .find(|(destination, _)| destination.id() == id)
-        .map(|(_, constraint)| constraint)
-}
-
-fn refused_harness(entitlement: &str, harness: IntegrationId) -> HardConstraint {
-    HardConstraint::Entitlement {
-        entitlement: entitlement.to_owned(),
-        refused: EntitlementRefusal::Harness(harness),
-    }
-}
-
-fn refused_tier(entitlement: &str, tier: WorkloadTier) -> HardConstraint {
-    HardConstraint::Entitlement {
-        entitlement: entitlement.to_owned(),
-        refused: EntitlementRefusal::Tier(tier),
-    }
-}
-
-// --- line 1947: the rule -----------------------------------------------------
-
-/// **Line 1947's resolution rule, on every axis.** Deny wins over allow; a
-/// value on both lists is refused. The three axes share one resolution
-/// function, and this holds each of them to it.
-#[test]
-fn deny_wins_over_allow_on_every_axis() {
-    let rules = EntitlementRules::UNRESTRICTED
-        .allow_harnesses([IntegrationId::ClaudeCode, IntegrationId::Codex])
-        .deny_harnesses([IntegrationId::ClaudeCode])
-        .allow_tiers([WorkloadTier::Leaf, WorkloadTier::Heavy])
-        .deny_tiers([WorkloadTier::Heavy])
-        .allow_job_kinds([JobKind::Classification, JobKind::Evaluation])
-        .deny_job_kinds([JobKind::Evaluation]);
-
-    assert!(
-        !rules.serves_harness(IntegrationId::ClaudeCode),
-        "a harness on both lists is denied"
-    );
-    assert!(rules.serves_harness(IntegrationId::Codex));
-    assert!(
-        !rules.serves_tier(WorkloadTier::Heavy),
-        "a tier on both lists is denied"
-    );
-    assert!(rules.serves_tier(WorkloadTier::Leaf));
-    assert!(
-        !rules.serves_job_kind(JobKind::Evaluation),
-        "a job kind on both lists is denied"
-    );
-    assert!(rules.serves_job_kind(JobKind::Classification));
-
-    assert_eq!(
-        rules.refusal(IntegrationId::ClaudeCode, Some(WorkloadTier::Leaf)),
-        Some(EntitlementRefusal::Harness(IntegrationId::ClaudeCode)),
-        "the harness half is asked first"
-    );
-    assert_eq!(
-        rules.refusal(IntegrationId::Codex, Some(WorkloadTier::Heavy)),
-        Some(EntitlementRefusal::Tier(WorkloadTier::Heavy))
-    );
-    assert_eq!(
-        rules.refusal(IntegrationId::Codex, Some(WorkloadTier::Leaf)),
-        None
-    );
-}
-
-/// **Line 1947's two meanings of "absent".** An empty allow-list admits
-/// everything not denied — which is what makes the default entry for a
-/// harness's own sign-in change nothing — and a stated allow-list admits
-/// only what it names.
-#[test]
-fn an_empty_allow_list_admits_everything_not_denied_and_a_stated_one_only_its_members() {
-    assert!(EntitlementRules::UNRESTRICTED.is_unrestricted());
-    for harness in IntegrationId::ALL {
-        assert!(EntitlementRules::UNRESTRICTED.serves_harness(*harness));
-    }
-    for tier in [
-        WorkloadTier::Deterministic,
-        WorkloadTier::Leaf,
-        WorkloadTier::Standard,
-        WorkloadTier::Heavy,
-        WorkloadTier::Frontier,
-    ] {
-        assert!(EntitlementRules::UNRESTRICTED.serves_tier(tier));
-        assert_eq!(
-            EntitlementRules::UNRESTRICTED.refusal(HARNESS, Some(tier)),
-            None
-        );
-    }
-
-    let deny_only = EntitlementRules::UNRESTRICTED.deny_tiers([WorkloadTier::Frontier]);
-    assert!(!deny_only.is_unrestricted());
-    assert!(
-        deny_only.serves_tier(WorkloadTier::Heavy),
-        "not denied, and no allow-list"
-    );
-    assert!(!deny_only.serves_tier(WorkloadTier::Frontier));
-
-    let allow_only = EntitlementRules::UNRESTRICTED.allow_harnesses([IntegrationId::Codex]);
-    assert!(allow_only.serves_harness(IntegrationId::Codex));
-    assert!(
-        !allow_only.serves_harness(IntegrationId::Cursor),
-        "a stated allow-list admits only its members"
-    );
-}
-
-// --- line 1954: the constraint ----------------------------------------------
-
-/// **Line 1954 at the router.** Two fresh destinations identical in every
-/// scored axis; one carries an entitlement whose rule denies this harness.
-/// It is never a candidate — it is in `rejected`, not `considered` — the
-/// constraint names the entitlement, and the rendered explanation carries
-/// the sentence a person reads. Both orders, so the caller's tiebreaker
-/// cannot be what decided it.
-#[test]
-fn an_entitlement_that_denies_the_harness_removes_the_destination_and_names_itself() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::new();
-    let team = fresh("team", Some(team_key()));
-    let own = fresh("own", Some(own_sign_in()));
-
-    for order in [
-        vec![team.clone(), own.clone()],
-        vec![own.clone(), team.clone()],
-    ] {
-        let routed = fixture.choose(&router, &order, None);
-        assert_eq!(routed.chosen().id(), "own", "{}", routed.render_overview());
-        assert!(
-            routed.considered().iter().all(|(d, _)| d.id() != "team"),
-            "a refused destination is never scored:\n{}",
-            routed.render_overview()
-        );
-        assert_eq!(
-            rejection(&routed, "team"),
-            Some(&refused_harness("team-key", HARNESS)),
-            "{}",
-            routed.render_overview()
-        );
-        let rendered = routed.render_overview();
-        assert!(
-            rendered.contains(
-                "hard entitlement constraint — entitlement `team-key` does not serve harness \
-                 `claude-code`"
-            ),
-            "the explanation must name the entitlement and the harness:\n{rendered}"
-        );
-    }
-}
-
-/// **A hard constraint, not a price.** The warmest destination this router
-/// knows — a live, zero-idle session — loses to a cold fresh one when its
-/// entitlement's rule denies the harness. No score outranks the user's rule.
-#[test]
-fn the_entitlement_constraint_outranks_a_warm_session() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::new();
-    let warm_but_denied = warm("warm", Some(team_key()));
-    let cold = fresh("cold", Some(own_sign_in()));
-
-    let routed = fixture.choose(
-        &router,
-        &[warm_but_denied, cold],
-        Some(WorkloadTier::Standard),
-    );
-    assert_eq!(routed.chosen().id(), "cold", "{}", routed.render_overview());
-    assert_eq!(
-        rejection(&routed, "warm"),
-        Some(&refused_harness("team-key", HARNESS))
-    );
-}
-
-/// **The tier half fires only against an established tier.** With no task
-/// stated the tier is unknown, and a rule about tiers has nothing to compare
-/// against — an allow-list of tiers does not refuse a launch that stated no
-/// task, exactly as line 1516's ceiling gate is never raised against an
-/// unknown ceiling. With a tier stated, deny and allow both bite, and the
-/// constraint names the tier.
-#[test]
-fn a_tier_rule_fires_only_against_an_established_tier() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::new();
-    let no_heavy = Entitlement::new(
-        "no-heavy",
-        EntitlementRules::UNRESTRICTED.deny_tiers([WorkloadTier::Heavy]),
-    );
-    let leaf_only = Entitlement::new(
-        "leaf-only",
-        EntitlementRules::UNRESTRICTED.allow_tiers([WorkloadTier::Leaf]),
-    );
-    let set = vec![
-        fresh("no-heavy", Some(no_heavy)),
-        fresh("leaf-only", Some(leaf_only)),
-        fresh("own", Some(own_sign_in())),
-    ];
-
-    let unknown = fixture.choose(&router, &set, None);
-    assert!(
-        unknown.rejected().is_empty(),
-        "no tier is established, so no tier rule fires:\n{}",
-        unknown.render_overview()
-    );
-
-    let heavy = fixture.choose(&router, &set, Some(WorkloadTier::Heavy));
-    assert_eq!(
-        rejection(&heavy, "no-heavy"),
-        Some(&refused_tier("no-heavy", WorkloadTier::Heavy))
-    );
-    assert_eq!(
-        rejection(&heavy, "leaf-only"),
-        Some(&refused_tier("leaf-only", WorkloadTier::Heavy))
-    );
-    assert_eq!(heavy.chosen().id(), "own");
-    assert!(
-        heavy
-            .render_overview()
-            .contains("entitlement `no-heavy` does not serve the `heavy` tier"),
-        "{}",
-        heavy.render_overview()
-    );
-
-    let leaf = fixture.choose(&router, &set, Some(WorkloadTier::Leaf));
-    assert!(
-        leaf.rejected().is_empty(),
-        "leaf work is admitted by both rules:\n{}",
-        leaf.render_overview()
-    );
-}
-
-/// **A destination with no entitlement is never refused by one.** `None`
-/// is "no entry describes this resource" — a gateway-backed profile, a
-/// provider nobody named — and nobody's rule can refuse what nobody's rule
-/// describes.
-#[test]
-fn a_destination_with_no_entitlement_is_never_refused_by_one() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::new();
-    let routed = fixture.choose(
-        &router,
-        &[fresh("unnamed", None), fresh("team", Some(team_key()))],
-        Some(WorkloadTier::Frontier),
-    );
-    assert_eq!(routed.chosen().id(), "unnamed");
-    assert_eq!(rejection(&routed, "unnamed"), None);
-    assert_eq!(
-        rejection(&routed, "team"),
-        Some(&refused_harness("team-key", HARNESS))
-    );
-}
-
-/// **`refused` reports the gate `choose` ran, for the case `choose` cannot.**
-/// One destination, refused, no current session to hold: `choose` answers
-/// `None`, and the rejection would be lost with it. `refused` is the same
-/// gate, and the launch path asks it before falling back — see half two.
-#[test]
-fn refused_reports_the_gate_when_choose_has_nowhere_to_go() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::new();
-    let only = vec![fresh("team", Some(team_key()))];
-    let inputs = fixture.inputs(None);
-
-    assert!(
-        router
-            .choose(RoutingMoment::SessionStart, None, &only, &inputs)
-            .is_none(),
-        "every destination refused and nothing to hold is `None`"
-    );
-    let refused = router.refused(&only, &inputs);
-    assert_eq!(refused.len(), 1);
-    assert_eq!(refused[0].0.id(), "team");
-    assert_eq!(refused[0].1, refused_harness("team-key", HARNESS));
-
-    // And the same gate admits what `choose` would have admitted.
-    let admitted = vec![fresh("own", Some(own_sign_in()))];
-    assert!(router.refused(&admitted, &inputs).is_empty());
-}
-
-/// **An override overrules a ranking, never a fact about what can serve.**
-/// The user names the refused destination; the router keeps the eligible one
-/// and says the override hit an entitlement constraint.
-#[test]
-fn an_override_naming_a_refused_destination_is_refused_by_the_entitlement() {
-    let fixture = Fixture::new();
-    let router = SessionRouter::with_override(RoutingOverride::to("team"));
-    let routed = fixture.choose(
-        &router,
-        &[
-            fresh("own", Some(own_sign_in())),
-            fresh("team", Some(team_key())),
-        ],
-        None,
-    );
-    assert_eq!(routed.chosen().id(), "own");
-    assert_eq!(
-        routed.override_refused(),
-        Some(&OverrideRefusal::Ineligible(
-            "team".to_owned(),
-            refused_harness("team-key", HARNESS)
-        ))
-    );
-    assert!(
-        routed
-            .render_overview()
-            .contains("which a hard entitlement constraint rejected"),
-        "{}",
-        routed.render_overview()
-    );
-}
 
 // ===========================================================================
 // Half two — the shipped binary, reading `[entitlements.<name>]`.
@@ -545,10 +114,6 @@ impl Binary {
             .env("PATH", self.base.join("empty-path"))
             .output()
             .expect("the glasshouse binary must be runnable")
-    }
-
-    fn stdout(&self, args: &[&str]) -> String {
-        String::from_utf8_lossy(&self.glasshouse(args).stdout).into_owned()
     }
 
     fn both_streams(output: &Output) -> String {
@@ -772,15 +337,6 @@ mod shared_fixture_proof {
     }
 }
 
-/// The `rejected` section of a `glasshouse route` report, or an empty string
-/// when nothing was rejected.
-fn rejected_section(report: &str) -> &str {
-    report
-        .split_once("\nrejected\n")
-        .map(|(_, rejected)| rejected)
-        .unwrap_or("")
-}
-
 /// **Line 1954's *never charge*, through the acting path.** A launch under a
 /// profile whose entitlement's rule denies this harness is refused **by
 /// name**, before anything exists: no process, no session. The sibling
@@ -822,37 +378,6 @@ fn a_launch_whose_entitlement_denies_the_harness_is_refused_by_name_and_starts_n
     assert_eq!(binary.harness_invocations().len(), 1);
 }
 
-/// **Line 1954 on the reporting path.** `glasshouse route` ranks every
-/// destination this project could use; the one whose entitlement denies the
-/// harness is under `rejected`, with the entitlement named — and it decides
-/// nothing.
-#[test]
-fn route_names_the_entitlement_that_refused_a_destination() {
-    let binary = Binary::with_config(&format!("{PROFILES}{TEAM_KEY_DENIES_CLAUDE_CODE}"));
-    let report = binary.stdout(&["route"]);
-    let rejected = rejected_section(&report);
-    assert!(
-        rejected.contains("fresh:claude-code:alpha"),
-        "the alpha profile is refused:\n{report}"
-    );
-    assert!(
-        rejected.contains(
-            "hard entitlement constraint — entitlement `team-key` does not serve harness \
-             `claude-code`"
-        ),
-        "{report}"
-    );
-    assert!(
-        !rejected.contains("fresh:claude-code:beta")
-            && !rejected.contains("fresh:claude-code:native"),
-        "only the destination the rule describes is refused:\n{report}"
-    );
-    assert!(
-        binary.harness_invocations().is_empty(),
-        "`route` starts nothing"
-    );
-}
-
 /// **Line 1954's *announce which entitlement served*, and line 1946's
 /// default.** A user who configured nothing is told the harness's own sign-in
 /// serves the session, under the default entry named for the harness; a user
@@ -861,11 +386,11 @@ fn route_names_the_entitlement_that_refused_a_destination() {
 /// instead of the entitlement fails the second half.
 #[test]
 fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name() {
-    // Automatic routing off: this test's contract is the NATIVE announcement,
-    // and since map line 372 closed, an unpinned launch under automatic
-    // routing (the default) may legitimately land on a provider profile
-    // instead of the implied native one.
-    let unconfigured = Binary::with_config(&format!("{PROFILES}\n[routing]\nautomatic = false\n"));
+    // `glasshouse launch` with no destination flag opens the native entry
+    // unconditionally now (design-decisions.md, 2026-09-16, "Glasshouse
+    // never decides which model is used") — no automatic-routing toggle
+    // left to turn off.
+    let unconfigured = Binary::with_config(PROFILES);
     let said = unconfigured.launch_ok(None);
     assert!(
         said.contains(
@@ -874,9 +399,7 @@ fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name(
         "{said}"
     );
 
-    let configured = Binary::with_config(&format!(
-        "{PROFILES}{MAX_PLAN}\n[routing]\nautomatic = false\n"
-    ));
+    let configured = Binary::with_config(&format!("{PROFILES}{MAX_PLAN}"));
     let said = configured.launch_ok(None);
     assert!(
         said.contains(
@@ -944,48 +467,4 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
         "{said}"
     );
     assert_eq!(binary.harness_invocations().len(), 1);
-}
-
-/// **The tier half, through the classification `--task` produces.** A rule
-/// denying heavy work refuses the destination for a task the heuristics
-/// classify as heavy, names the tier, and leaves a leaf-shaped task alone.
-#[test]
-fn a_tier_rule_reaches_the_route_report_through_the_task_classification() {
-    const NO_HEAVY_WORK: &str = "\n\
-         [entitlements.team-key]\nprovider = \"alpha-probe\"\n\
-         deny_tiers = [\"heavy\", \"frontier\"]\n";
-    let binary = Binary::with_config(&format!("{PROFILES}{NO_HEAVY_WORK}"));
-
-    let heavy = binary.stdout(&[
-        "route",
-        "--task",
-        "run the whole test suite in the terminal and fix whatever breaks",
-    ]);
-    let rejected = rejected_section(&heavy);
-    assert!(
-        rejected.contains("fresh:claude-code:alpha")
-            && rejected.contains("entitlement `team-key` does not serve the `heavy` tier"),
-        "{heavy}"
-    );
-
-    let leaf = binary.stdout(&["route", "--task", "what is a monad"]);
-    assert!(
-        !rejected_section(&leaf).contains("fresh:claude-code:alpha"),
-        "leaf work is not heavy work:\n{leaf}"
-    );
-
-    // A session that already runs under `alpha` — started with no task, so
-    // no tier rule could fire — is refused for heavy work exactly as the
-    // fresh destination is: the rule is attached to recorded sessions too.
-    binary.launch_ok(Some("alpha"));
-    let heavy_again = binary.stdout(&[
-        "route",
-        "--task",
-        "run the whole test suite in the terminal and fix whatever breaks",
-    ]);
-    let rejected = rejected_section(&heavy_again);
-    assert!(
-        rejected.contains("via alpha-probe (existing) — hard entitlement constraint — entitlement `team-key` does not serve the `heavy` tier"),
-        "{heavy_again}"
-    );
 }

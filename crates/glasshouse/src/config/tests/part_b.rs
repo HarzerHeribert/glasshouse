@@ -1,219 +1,48 @@
-//! `config::tests`, part B: routing policy, memory/firewall, entitlement and model-facts tests.
+//! `config::tests`, part B: the `[routing]`-refusal test, memory/firewall,
+//! entitlement and model-facts tests.
 //!
 
 use super::*;
 
-/// Phase 2C's whole job is to *record* the choice, so the thing worth
-/// proving is that it survives the process that made it. Each of the
-/// three answers the wizard offers goes to disk through the real `save`
-/// and comes back through the real `load` — a `toml::to_string` in
-/// isolation would pass even if `UserConfig`'s `[routing]` table were
-/// never wired into the file that is actually written.
+/// design-decisions.md, 2026-09-16, *Glasshouse never decides which model is
+/// used*: a config file that still carries a `[routing]` table is refused by
+/// name at load, rather than silently dropped — a build that dropped it
+/// quietly would leave a user believing a preference they wrote (a pinned
+/// model, a reserve threshold) was still in effect. Checked against both
+/// `UserConfig::load` and `load_project_config`, since both route through
+/// the same `parse_toml`.
 #[test]
-fn every_routing_model_choice_survives_a_real_save_and_load() {
-    fn round_trip(choice: Option<RoutingModelChoice>) -> UserConfig {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-        let mut user = fully_populated_user_config();
-        user.routing_mut().set_model(choice);
-        user.save(&paths).unwrap();
-
-        let loaded = UserConfig::load(&paths).unwrap();
-        assert_eq!(
-            loaded, user,
-            "recording a routing model must not disturb anything else in the file"
-        );
-        loaded
-    }
-
-    assert_eq!(
-        round_trip(Some(RoutingModelChoice::Automatic))
-            .routing()
-            .model(),
-        Some(&RoutingModelChoice::Automatic)
-    );
-
-    let pinned = RoutingModelChoice::Pinned {
-        provider: "openrouter".to_owned(),
-        model: "gpt-5.6-luna".to_owned(),
-    };
-    assert_eq!(
-        round_trip(Some(pinned.clone())).routing().model(),
-        Some(&pinned)
-    );
-
-    assert_eq!(
-        round_trip(Some(RoutingModelChoice::Deterministic))
-            .routing()
-            .model(),
-        Some(&RoutingModelChoice::Deterministic)
-    );
-
-    // "Do later" must read back as *nothing recorded* rather than as an
-    // explicit deterministic choice: the two resolve the same way but
-    // say different, accurate things about what the user decided.
-    let declined = round_trip(None);
-    assert_eq!(declined.routing().model(), None);
-    assert_eq!(
-        EffectiveConfig::new(&declined, None)
-            .routing_model_resolution()
-            .value,
-        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
-    );
-}
-
-/// Phase 2C line 4: declining the routing step leaves no routing model
-/// configured *and* the system keeps working. Both halves are asserted,
-/// and the second is the one that matters — "nothing crashed" is not the
-/// contract, "deterministic heuristics are what answer" is.
-#[test]
-fn declining_the_routing_step_writes_no_routing_table_and_still_resolves() {
+fn a_routing_table_is_refused_by_name_naming_the_ruling() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+    std::fs::create_dir_all(paths.user_config_file().parent().unwrap()).unwrap();
+    std::fs::write(
+        paths.user_config_file(),
+        "version = 1\n[routing]\nmax_router_latency_ms = 2000\n",
+    )
+    .unwrap();
 
-    let mut user = fully_populated_user_config();
-    user.routing_mut().set_model(None);
-    user.save(&paths).unwrap();
-
-    let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+    let err = UserConfig::load(&paths).unwrap_err().to_string();
+    assert!(err.contains("[routing]"), "{err}");
+    assert!(err.contains("2026-09-16"), "{err}");
     assert!(
-        !text.contains("routing"),
-        "\"Do later\" must leave no `[routing]` table at all, not an empty one:\n{text}"
+        err.contains("Glasshouse never decides which model is used"),
+        "{err}"
     );
 
-    let loaded = UserConfig::load(&paths).unwrap();
-    let effective = EffectiveConfig::new(&loaded, None);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(
-        resolution.value,
-        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured),
-        "deterministic heuristics must be what answers, and must say they are \
-         answering because nothing was ever configured"
-    );
-    assert_eq!(resolution.layer, Layer::Default);
-    assert_eq!(
-        effective.routing_model().value,
-        RoutingModelChoice::Deterministic
-    );
-}
-
-/// Phase 2C's behavioural contract: a configuration naming a routing
-/// model whose provider has disappeared must degrade "and say so". It is
-/// the one lookup in this module that refuses to return an error — a
-/// routing model is an optimisation over a system that already works
-/// without it, so a rotated key must not stop Glasshouse from starting.
-#[test]
-fn a_pinned_routing_model_whose_provider_is_gone_degrades_and_names_it() {
-    let mut user = UserConfig::default();
-    user.providers_mut()
-        .set("openrouter", ProviderConfig::new("openrouter"));
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Pinned {
-            provider: "retired-mirror".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        }));
-
-    let effective = EffectiveConfig::new(&user, None);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(
-        resolution.value,
-        RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
-            provider: "retired-mirror".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        })
-    );
-    assert_eq!(
-        resolution.layer,
-        Layer::User,
-        "the layer reported is where the CHOICE came from, not a claim about \
-         where the degrade was decided"
-    );
-
-    // The degrade has to be *sayable*, and saying "your routing model is
-    // unavailable" without naming which one is not saying it.
-    let said = resolution.value.fallback().unwrap().to_string();
-    assert!(said.contains("`retired-mirror`"), "{said}");
-    assert!(said.contains("`gpt-5.6-luna`"), "{said}");
-    assert!(said.contains("which is not configured"), "{said}");
-    assert!(
-        said.contains("deterministic routing heuristics"),
-        "the message must say what is answering instead:\n{said}"
-    );
-
-    // The contrast that proves the degrade is a lookup and not a
-    // blanket refusal: the same shape pinned to a provider that *is*
-    // configured resolves to that model.
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Pinned {
-            provider: "openrouter".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        }));
-    assert_eq!(
-        EffectiveConfig::new(&user, None)
-            .routing_model_resolution()
-            .value,
-        RoutingModelResolution::Pinned {
-            provider: "openrouter".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        }
-    );
-}
-
-/// A routing-model choice grants nothing and attests to nothing, so it
-/// layers by the ordinary rule rather than following
-/// `bypass_acknowledged`'s user-layer-only exception. The first case is
-/// the reason the stored field is an `Option` and not a plain enum: a
-/// project saying "deterministic, on purpose" has to be able to override
-/// a user-level `automatic`, which a collapsed shape could not express.
-#[test]
-fn a_routing_choice_layers_project_over_user_and_reports_the_deciding_layer() {
-    let mut user = UserConfig::default();
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Automatic));
-
-    let mut project = ProjectConfig::default();
-    project
-        .routing_mut()
-        .set_model(Some(RoutingModelChoice::Deterministic));
-
-    // Case 1: the project's explicit deterministic-only beats the user's
-    // automatic, and the reason given is "chosen", not "never set".
-    let effective = EffectiveConfig::new(&user, Some(&project));
-    let chosen = effective.routing_model();
-    assert_eq!(chosen.value, RoutingModelChoice::Deterministic);
-    assert_eq!(chosen.layer, Layer::Project);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(
-        resolution.value,
-        RoutingModelResolution::Heuristics(RoutingFallback::DeterministicChosen)
-    );
-    assert_eq!(resolution.layer, Layer::Project);
-
-    // Case 2: a project that has recorded nothing falls through to the
-    // user layer rather than shadowing it with a default.
-    let silent = ProjectConfig::default();
-    let effective = EffectiveConfig::new(&user, Some(&silent));
-    let chosen = effective.routing_model();
-    assert_eq!(chosen.value, RoutingModelChoice::Automatic);
-    assert_eq!(chosen.layer, Layer::User);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(resolution.value, RoutingModelResolution::Automatic);
-    assert_eq!(resolution.layer, Layer::User);
-
-    // Case 3: neither layer decided, so the default answers — and says
-    // so with `NotConfigured`, not `DeterministicChosen`.
-    let undecided = UserConfig::default();
-    let effective = EffectiveConfig::new(&undecided, Some(&silent));
-    let chosen = effective.routing_model();
-    assert_eq!(chosen.value, RoutingModelChoice::Deterministic);
-    assert_eq!(chosen.layer, Layer::Default);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(
-        resolution.value,
-        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
-    );
-    assert_eq!(resolution.layer, Layer::Default);
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let project = test_project(&project_root);
+    let project_config_path = project_config_path(&project).unwrap();
+    std::fs::create_dir_all(project_config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &project_config_path,
+        "version = 1\n[routing]\nprefer_free = true\n",
+    )
+    .unwrap();
+    let project_err = load_project_config(&project).unwrap_err().to_string();
+    assert!(project_err.contains("[routing]"), "{project_err}");
+    assert!(project_err.contains("2026-09-16"), "{project_err}");
 }
 
 #[test]
@@ -583,390 +412,6 @@ fn automatic_checkpoint_and_memory_extraction_disable_independently() {
     }
 }
 
-/// A pin is two names — a key into `ProviderTable` and a model name —
-/// and never a credential, alongside
-/// [`serialized_form_has_no_secret_capable_field`]'s structural guard on
-/// the same shape. This is the behavioural half: a real key is planted
-/// in the environment the pinned provider's `credential_env` points at,
-/// so a serializer that resolved the pin to a usable credential — the
-/// failure this test exists to catch — would have something to leak.
-#[test]
-fn a_pinned_routing_model_persists_names_and_never_a_credential_value() {
-    const VAR: &str = "GLASSHOUSE_CONFIG_TEST_ONLY_ROUTING_PIN_VAR";
-    const VALUE: &str = "sk-or-v1-routingpin0123456789abcdef0123456789abcdef01234567";
-
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-    let mut provider = ProviderConfig::new("openrouter");
-    provider
-        .set_credential_env(vec![VAR.to_owned()])
-        .set_credential_store(Some(StoredCredentialRef::new("glasshouse", VAR)));
-
-    let pinned = RoutingModelChoice::Pinned {
-        provider: "openrouter".to_owned(),
-        model: "gpt-5.6-luna".to_owned(),
-    };
-    let mut user = UserConfig::default();
-    user.providers_mut().set("openrouter", provider);
-    user.routing_mut().set_model(Some(pinned.clone()));
-
-    // SAFETY: `VAR` is unique to this test and removed again below.
-    unsafe {
-        std::env::set_var(VAR, VALUE);
-    }
-    let saved = user.save(&paths);
-    unsafe {
-        std::env::remove_var(VAR);
-    }
-    saved.unwrap();
-
-    let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
-    assert!(
-        !text.contains(VALUE),
-        "a credential value reached the configuration file:\n{text}"
-    );
-    assert!(
-        !text.contains("sk-or-v1-"),
-        "not even a prefix of a key belongs in a tracked configuration file:\n{text}"
-    );
-
-    // ... and the two names a pin is made of really are what got
-    // written, so the assertion above is not passing on an empty file.
-    assert!(text.contains("gpt-5.6-luna"), "{text}");
-    assert!(text.contains("openrouter"), "{text}");
-    assert!(text.contains("pinned"), "{text}");
-    assert!(text.contains(VAR), "the NAME must be there:\n{text}");
-
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert_eq!(loaded.routing().model(), Some(&pinned));
-}
-
-/// Every configuration file on disk today was written before this field
-/// existed, so the missing `[routing]` table is the ordinary case, not an
-/// edge one — the same treatment this module already gives unknown and
-/// missing keys. Written by hand rather than saved, because a config this
-/// build produced could never be missing a key this build knows about.
-#[test]
-fn a_configuration_written_before_routing_existed_loads_with_nothing_recorded() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-    std::fs::create_dir_all(paths.config_dir()).unwrap();
-    std::fs::write(
-        paths.user_config_file(),
-        r#"
-            version = 1
-
-            [onboarding]
-            completed = true
-            completed_at_version = "0.1.0"
-
-            [integrations.claude-code]
-            enabled = true
-
-            [providers.openrouter]
-            template = "openrouter"
-            credential_env = ["OPENROUTER_API_KEY"]
-        "#,
-    )
-    .unwrap();
-
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert!(loaded.onboarding().completed());
-    assert_eq!(
-        loaded.routing().model(),
-        None,
-        "an older file must load as \"never decided\", not as some invented choice"
-    );
-
-    let effective = EffectiveConfig::new(&loaded, None);
-    let resolution = effective.routing_model_resolution();
-    assert_eq!(
-        resolution.value,
-        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
-    );
-    assert_eq!(resolution.layer, Layer::Default);
-}
-
-/// Phase 2D routing preferences are exact, bounded, independently
-/// layered values. A real save/load proves their serde wiring; mixed
-/// layers prove one project override does not copy its siblings; invalid
-/// TOML proves absurd scalar values cannot enter through hand editing.
-#[test]
-fn routing_policy_values_round_trip_layer_independently_and_reject_absurd_inputs() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-    let latency_user = RouterLatencyMs::try_from(1_500).unwrap();
-    let cost_user = RouterCostMicroUsd::try_from(2_500).unwrap();
-    let reserve_user = PremiumReservePercent::try_from(15).unwrap();
-    let mut user = UserConfig::default();
-    user.routing_mut()
-        .set_max_router_latency(Some(latency_user))
-        .set_max_marginal_cost(Some(cost_user))
-        .set_prefer_free(Some(false))
-        .set_premium_reserve(Some(reserve_user));
-    user.save(&paths).unwrap();
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert_eq!(loaded.routing(), user.routing());
-
-    let latency_project = RouterLatencyMs::try_from(350).unwrap();
-    let mut project = ProjectConfig::default();
-    project
-        .routing_mut()
-        .set_max_router_latency(Some(latency_project))
-        .set_prefer_free(Some(true));
-    let effective = EffectiveConfig::new(&loaded, Some(&project));
-    assert_eq!(
-        effective.max_router_latency(),
-        Layered::new(latency_project, Layer::Project)
-    );
-    assert_eq!(
-        effective.max_router_cost(),
-        Layered::new(cost_user, Layer::User)
-    );
-    assert_eq!(
-        effective.prefer_free_routing(),
-        Layered::new(true, Layer::Project)
-    );
-    assert_eq!(
-        effective.premium_reserve(),
-        Layered::new(reserve_user, Layer::User)
-    );
-
-    for invalid in [
-        "max_router_latency_ms = 0",
-        "max_router_latency_ms = 60001",
-        "max_marginal_cost_micro_usd = 1000001",
-        "premium_reserve_percent = 101",
-    ] {
-        let text = format!("version = 1\n[routing]\n{invalid}\n");
-        assert!(
-            toml::from_str::<UserConfig>(&text).is_err(),
-            "absurd routing policy was accepted: {invalid}"
-        );
-    }
-    assert_eq!(RouterLatencyMs::DEFAULT.get(), 2_000);
-    assert_eq!(RouterCostMicroUsd::DEFAULT.get(), 1_000);
-    assert_eq!(PremiumReservePercent::DEFAULT.get(), 20);
-}
-
-/// Capability map line 1270: capacity-band thresholds are user-
-/// configurable, and a non-ascending set is refused at load time rather
-/// than sorted into shape — the same fail-closed idiom
-/// `routing_policy_values_round_trip_layer_independently_and_reject_absurd_inputs`
-/// already proves for the single-field routing values, applied here to a
-/// value validated across four fields at once.
-#[test]
-fn capacity_band_thresholds_round_trip_and_reject_a_non_monotonic_set() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-    let mut user = UserConfig::default();
-    assert_eq!(user.routing().capacity_band_thresholds(), None);
-    user.routing_mut().set_capacity_band_thresholds(Some(
-        crate::provider::quota::CapacityBandThresholds::new(1, 10, 30, 60)
-            .unwrap()
-            .into(),
-    ));
-    user.save(&paths).unwrap();
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert_eq!(
-        loaded.routing().capacity_band_thresholds(),
-        user.routing().capacity_band_thresholds()
-    );
-
-    let effective = EffectiveConfig::new(&loaded, None);
-    let resolved = effective.capacity_band_thresholds();
-    assert_eq!(resolved.layer, Layer::User);
-    assert_eq!(resolved.value.reserve_percent(), 10);
-
-    // §35-adjacent: prove the *loader* itself is the fail-closed gate,
-    // not merely `CapacityBandThresholds::new` in isolation — this
-    // parses through the exact path `UserConfig::load` uses.
-    for invalid in [
-        // reserve (50) above tight (30): not ascending.
-        "[routing.capacity_band_thresholds]\nexhausted_percent = 2\nreserve_percent = 50\n\
-         tight_percent = 30\nhealthy_percent = 70\n",
-        // healthy_percent above 100.
-        "[routing.capacity_band_thresholds]\nexhausted_percent = 2\nreserve_percent = 10\n\
-         tight_percent = 30\nhealthy_percent = 150\n",
-    ] {
-        let text = format!("version = 1\n{invalid}");
-        assert!(
-            toml::from_str::<UserConfig>(&text).is_err(),
-            "a non-monotonic set of capacity-band thresholds was accepted: {invalid}"
-        );
-    }
-
-    // With nothing recorded, the domain default applies.
-    let empty = UserConfig::default();
-    let effective = EffectiveConfig::new(&empty, None);
-    assert_eq!(
-        effective.capacity_band_thresholds().value,
-        crate::provider::quota::CapacityBandThresholds::DEFAULT
-    );
-    assert_eq!(effective.capacity_band_thresholds().layer, Layer::Default);
-}
-
-/// Capability map lines 1357/1358: routing score weights are
-/// user-configurable, round-trip through the loader, resolve project
-/// over user over [`crate::routing::session::ScoreWeights::default`] —
-/// the same layering [`CapacityBandThresholdsConfig`]'s own test proves
-/// — and a non-finite field is refused at load time rather than
-/// substituted silently.
-#[test]
-fn score_weights_round_trip_layer_project_over_user_and_reject_non_finite_fields() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-    let mut user = UserConfig::default();
-    assert_eq!(user.routing().score_weights(), None);
-    let user_weights = crate::routing::session::ScoreWeights {
-        quota_pressure_weight: 0.4,
-        health_failure_penalty: -0.5,
-        health_penalty_floor: -1.2,
-        health_unavailable_penalty: -2.0,
-    };
-    user.routing_mut()
-        .set_score_weights(Some(user_weights.into()));
-    user.save(&paths).unwrap();
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert_eq!(
-        loaded.routing().score_weights(),
-        user.routing().score_weights()
-    );
-
-    let effective = EffectiveConfig::new(&loaded, None);
-    let resolved = effective.score_weights();
-    assert_eq!(resolved.layer, Layer::User);
-    assert_eq!(resolved.value, user_weights);
-
-    let mut project = ProjectConfig::default();
-    let project_weights = crate::routing::session::ScoreWeights {
-        quota_pressure_weight: 0.1,
-        ..user_weights
-    };
-    project
-        .routing_mut()
-        .set_score_weights(Some(project_weights.into()));
-    let effective = EffectiveConfig::new(&loaded, Some(&project));
-    let resolved = effective.score_weights();
-    assert_eq!(resolved.layer, Layer::Project);
-    assert_eq!(resolved.value, project_weights);
-
-    // §35-adjacent: the loader itself is the fail-closed gate, not
-    // merely a hypothetical caller of `ScoreWeights` in isolation — this
-    // parses through the exact path `UserConfig::load` uses.
-    for invalid in [
-        "[routing.score_weights]\nquota_pressure_weight = nan\n\
-         health_failure_penalty = -0.3\nhealth_penalty_floor = -0.9\n\
-         health_unavailable_penalty = -1.5\n",
-        "[routing.score_weights]\nquota_pressure_weight = 0.8\n\
-         health_failure_penalty = -0.3\nhealth_penalty_floor = -0.9\n\
-         health_unavailable_penalty = inf\n",
-    ] {
-        let text = format!("version = 1\n{invalid}");
-        assert!(
-            toml::from_str::<UserConfig>(&text).is_err(),
-            "a non-finite score weight was accepted: {invalid}"
-        );
-    }
-
-    // With nothing recorded, the domain default applies — today's
-    // compile-time constants, unchanged.
-    let empty = UserConfig::default();
-    let effective = EffectiveConfig::new(&empty, None);
-    assert_eq!(
-        effective.score_weights().value,
-        crate::routing::session::ScoreWeights::default()
-    );
-    assert_eq!(effective.score_weights().layer, Layer::Default);
-}
-
-/// Capability map line 1577: `[routing.reserve]` carries two policies,
-/// they round-trip through the loader, they resolve **per field** with
-/// the project layer first, and a layer that recorded neither leaves the
-/// fail-closed `protect` default in place for both scopes.
-#[test]
-fn reserve_policies_round_trip_and_resolve_per_scope_with_protect_as_the_default() {
-    use crate::routing::pressure::{ReservePolicy, ReserveScope};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
-
-    let mut user = UserConfig::default();
-    assert_eq!(user.routing().reserve(), None);
-    let mut reserve = ReservePoliciesConfig::default();
-    reserve
-        .set_interactive(Some(ReservePolicy::Spend))
-        .set_background(Some(ReservePolicy::Protect));
-    user.routing_mut().set_reserve(Some(reserve));
-    user.save(&paths).unwrap();
-    let loaded = UserConfig::load(&paths).unwrap();
-    assert_eq!(loaded.routing().reserve(), user.routing().reserve());
-
-    // The on-disk spelling is the enum's own, kebab-case.
-    let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
-    assert!(text.contains("interactive = \"spend\""), "{text}");
-    assert!(text.contains("background = \"protect\""), "{text}");
-
-    let effective = EffectiveConfig::new(&loaded, None);
-    let interactive = effective.reserve_policy(ReserveScope::Interactive);
-    assert_eq!(
-        (interactive.value, interactive.layer),
-        (ReservePolicy::Spend, Layer::User)
-    );
-    let background = effective.reserve_policy(ReserveScope::Background);
-    assert_eq!(
-        (background.value, background.layer),
-        (ReservePolicy::Protect, Layer::User)
-    );
-
-    // A project that records only the background policy wins that field
-    // and leaves the interactive one to the user layer.
-    let project: ProjectConfig =
-        toml::from_str("version = 1\n\n[routing.reserve]\nbackground = \"spend\"\n").unwrap();
-    let effective = EffectiveConfig::new(&loaded, Some(&project));
-    let interactive = effective.reserve_policy(ReserveScope::Interactive);
-    assert_eq!(
-        (interactive.value, interactive.layer),
-        (ReservePolicy::Spend, Layer::User)
-    );
-    let background = effective.reserve_policy(ReserveScope::Background);
-    assert_eq!(
-        (background.value, background.layer),
-        (ReservePolicy::Spend, Layer::Project)
-    );
-    assert_eq!(
-        effective.reserve_policies(),
-        crate::routing::pressure::ReservePolicies {
-            interactive: ReservePolicy::Spend,
-            background: ReservePolicy::Spend,
-        }
-    );
-
-    // Nothing recorded anywhere: protect, for both, from the default layer.
-    let empty = UserConfig::default();
-    let effective = EffectiveConfig::new(&empty, None);
-    for scope in [ReserveScope::Interactive, ReserveScope::Background] {
-        let resolved = effective.reserve_policy(scope);
-        assert_eq!(
-            (resolved.value, resolved.layer),
-            (ReservePolicy::Protect, Layer::Default)
-        );
-    }
-
-    // An unknown spelling is refused by the loader rather than defaulted.
-    assert!(
-        toml::from_str::<UserConfig>(
-            "version = 1\n\n[routing.reserve]\ninteractive = \"exclude\"\n"
-        )
-        .is_err(),
-        "an unknown reserve policy must be refused, not read as a default"
-    );
-}
-
 /// Phase 56 lines 1946 and 1947: `[entitlements.<name>]` round-trips
 /// through the loader with the routing types' own spellings, resolves
 /// **by name** with the project layer replacing the user's entry whole,
@@ -975,9 +420,9 @@ fn reserve_policies_round_trip_and_resolve_per_scope_with_protect_as_the_default
 /// it as "no rule".
 #[test]
 fn entitlements_round_trip_and_resolve_project_over_user_with_a_native_default() {
+    use crate::config::JobKind;
+    use crate::config::WorkloadTier;
     use crate::profile::BackendResource;
-    use crate::routing::classify::WorkloadTier;
-    use crate::routing::disposable::JobKind;
 
     let tmp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
@@ -1251,7 +696,7 @@ fn contradictory_entitlement_tables_are_refused_by_name() {
     );
 }
 
-/// Every [`crate::routing::disposable::JobKind`] is listed in
+/// Every [`crate::config::JobKind`] is listed in
 /// [`JOB_KIND_SPELLINGS`] exactly once and round-trips through its
 /// spelling — the run-time half of the guard `job_kind_ordinal`'s
 /// exhaustive `match` provides at compile time.
@@ -1283,7 +728,7 @@ fn every_job_kind_spelling_round_trips() {
 }
 
 /// Map line 1796, the spelling half. Every
-/// [`crate::routing::classify::WorkloadTier`] is listed in
+/// [`crate::config::WorkloadTier`] is listed in
 /// [`WORKLOAD_TIER_SPELLINGS`] exactly once and round-trips through
 /// [`ConfiguredWorkloadTier`]'s parse and its serialised form — so the
 /// config file's vocabulary is the tier type's own `as_str` and cannot
@@ -1294,7 +739,7 @@ fn every_job_kind_spelling_round_trips() {
 /// array and the match still agree.
 #[test]
 fn every_workload_tier_spelling_round_trips() {
-    use crate::routing::classify::WorkloadTier;
+    use crate::config::WorkloadTier;
 
     assert_eq!(
         WORKLOAD_TIER_SPELLINGS.len(),
@@ -1347,7 +792,7 @@ fn an_unknown_model_ceiling_spelling_is_refused_at_load_rather_than_read_as_abse
             .get("alpha")
             .expect("the provider was configured")
             .ceiling_of("small"),
-        Some(crate::routing::classify::WorkloadTier::Leaf)
+        Some(crate::config::WorkloadTier::Leaf)
     );
 
     let typo = "version = 1\n\n[providers.alpha]\ntemplate = \"openrouter\"\n\n\
@@ -1368,7 +813,7 @@ fn an_unknown_model_ceiling_spelling_is_refused_at_load_rather_than_read_as_abse
 /// [`EffectiveConfig::model_cost`] is.
 #[test]
 fn model_ceiling_is_layered_and_absent_where_nobody_stated_one() {
-    use crate::routing::classify::WorkloadTier;
+    use crate::config::WorkloadTier;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
@@ -1575,7 +1020,7 @@ fn an_axis_absent_from_a_declared_models_table_stays_unverified() {
 /// unconfigured provider, and a provider that declares no facts at all.
 #[test]
 fn model_facts_is_layered_and_unverified_where_nobody_declared_a_fact() {
-    use crate::routing::capability::ResourceFacts;
+    use crate::config::ResourceFacts;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");

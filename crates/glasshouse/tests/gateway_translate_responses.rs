@@ -36,7 +36,7 @@ use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::Provider;
 use glasshouse::routing::AssignedModel;
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
 use glasshouse::secret::EnvironmentSecretStore;
 use serde_json::{Value, json};
 
@@ -672,11 +672,24 @@ fn sse_events(text: &str) -> Vec<(String, Value)> {
 
 fn wait_for_row(
     ledger: &EvidenceLedger,
-    query: ObservationQuery<'_>,
+    provider: &str,
+    model: &str,
+    route: Option<&str>,
+    harness: Option<&str>,
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == route
+                    && row.harness.as_deref() == harness
+            })
+            .collect();
         if !rows.is_empty() || Instant::now() >= deadline {
             return rows;
         }
@@ -842,12 +855,10 @@ fn a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_pre
     // Recorded under the pair's own name, with the provider's exact usage.
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "responsesonly",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-responses"),
-            harness: Some("claude-code"),
-        },
+        "responsesonly",
+        "claude-x",
+        Some("anthropic-messages->openai-responses"),
+        Some("claude-code"),
     );
     assert_eq!(
         rows.len(),
@@ -1166,12 +1177,10 @@ fn a_codex_request_is_translated_to_anthropic_messages_and_back_with_ids_preserv
     // Recorded under the mirror pair's own name.
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "anthroponly",
-            model: "gpt-5",
-            route: Some("openai-responses->anthropic-messages"),
-            harness: Some("codex"),
-        },
+        "anthroponly",
+        "gpt-5",
+        Some("openai-responses->anthropic-messages"),
+        Some("codex"),
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));

@@ -545,10 +545,14 @@ pub(super) const CONTROL_PRIMARY: usize = 3;
 /// footer tests, which still assert every action is both drawn and clickable
 /// at eighty columns.
 ///
-/// Below the fold the order is `tui-actionables.md`'s measured priority — quit,
-/// overview, project, events, theme, health, routes, decisions, knowledge,
-/// memory, headless — with `tab`/`enter` last because they are motion rather
-/// than actions and both are discoverable by pressing an arrow.
+/// Below the fold the order is `tui-actionables.md`'s measured priority —
+/// quit, overview, project, events, theme, knowledge, memory, headless — with
+/// `tab`/`enter` last because they are motion rather than actions and both
+/// are discoverable by pressing an arrow. `health`, `routes` and `decisions`
+/// left this list with the routing deletion (design-decisions, 2026-09-16):
+/// their overlays (`Overlay::RouteHealth`/`RouteEvidence`/`RouteDecisions`)
+/// and the `handle_control_key` arms that opened them are gone, and a pill
+/// advertising a key that does nothing is worse than no pill at all.
 ///
 /// One table, read both by the footer that draws it and by the geometry that
 /// reserves room for it, so an action cannot be added in one place and go
@@ -580,9 +584,6 @@ pub(super) fn control_pills(theme: Theme) -> Vec<Pill> {
         Pill::key("p", "project", KeyCode::Char('p')),
         Pill::key("e", "events", KeyCode::Char('e')),
         Pill::toggle("t", "theme:", theme.name(), THEME_SLOT, KeyCode::Char('t')),
-        Pill::key("h", "health", KeyCode::Char('h')),
-        Pill::key("r", "routes", KeyCode::Char('r')),
-        Pill::key("d", "decisions", KeyCode::Char('d')),
         Pill::key("k", "knowledge", KeyCode::Char('k')),
         Pill::key("M", "memory", KeyCode::Char('M')),
         Pill::key("N", "headless", KeyCode::Char('N')),

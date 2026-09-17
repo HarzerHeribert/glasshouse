@@ -641,34 +641,15 @@ fn an_external_spawn_records_the_pane_as_presentation_metadata() {
     let listing = fixture.sessions();
     assert!(listing.contains("external workspace:12"), "{listing}");
 
-    // A pane's launch that the router resolves to *continuing* a recorded
-    // session moves that session into the pane rather than recording
-    // nothing: the record it continues now names the pane.
-    let continued = fixture.glasshouse(
-        Cmux::Absent,
-        &[
-            "launch",
-            "claude-code",
-            "--headless",
-            "--presentation-ref",
-            "workspace:13",
-        ],
-    );
-    assert!(continued.status.success(), "{}", both(&continued));
-    let said = stderr(&continued);
-    let Some(continued_id) = said
-        .lines()
-        .find_map(|line| line.strip_prefix("glasshouse: continuing session "))
-        .and_then(|rest| rest.split(' ').next())
-    else {
-        panic!("the router was expected to continue a recorded session here:\n{said}");
-    };
-    let shown = stdout(&fixture.glasshouse(Cmux::Absent, &["sessions", "show", continued_id]));
-    assert!(shown.contains("presented          external\n"), "{shown}");
-    assert!(
-        shown.contains("presentation ref   workspace:13\n"),
-        "the continued session is recorded where it is now shown:\n{shown}"
-    );
+    // A pane's launch used to be able to have the router *resolve* it to
+    // continuing an existing recorded session, re-homing that session's
+    // presentation into the new pane without the caller naming it — Phase
+    // 37's automatic continuation. That ranking is gone (design-decisions,
+    // 2026-09-16, "Glasshouse never decides which model is used"), and
+    // `launch_no_ranking.rs`'s own `no_flags_opens_a_fresh_session_every_time`
+    // is the replacement proof: every bare launch, from a pane or otherwise,
+    // now opens a fresh session rather than continuing one. There is nothing
+    // left here for this file to prove about *implicit* continuation.
 }
 
 // -------------------------------------------------------------------------

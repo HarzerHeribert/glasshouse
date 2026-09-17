@@ -369,11 +369,11 @@ fn every_failure_class_the_type_supports_is_one_the_schema_records() {
 ///
 /// Two independently written spellings: [`TASK_CLASSES`], beside the
 /// migration where a schema reader looks, and
-/// [`crate::routing::request::TaskClass`], which the writer stores.
+/// [`crate::routing::TaskClass`], which the writer stores.
 /// Neither is derived from the other.
 #[test]
 fn every_task_class_the_type_supports_is_one_the_schema_records() {
-    use crate::routing::request::TaskClass;
+    use crate::routing::TaskClass;
 
     let declared: Vec<&str> = TaskClass::ALL.iter().map(|class| class.as_str()).collect();
     assert_eq!(
@@ -444,9 +444,7 @@ fn whole_schema(conn: &Connection) -> Vec<(String, String, Option<String>)> {
 /// dropped before the next is opened and before the re-bootstrap.
 #[test]
 fn migration_18_adds_failure_class_and_undoes_cleanly() {
-    use crate::routing::evidence::{
-        EvidenceLedger, FailureClass, NewObservation, ObservationQuery, Outcome,
-    };
+    use crate::routing::evidence::{EvidenceLedger, FailureClass, NewObservation, Outcome};
 
     // Migrations 20 and 19 are undone first: a rollback undoes every
     // migration above the version it claims, or the re-run fails with
@@ -535,17 +533,11 @@ fn migration_18_adds_failure_class_and_undoes_cleanly() {
     // and a row written now carries the class it was given.
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let pre = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "pre-migration",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .unwrap();
+        let rows = ledger.observations_in_window(1, 10).unwrap();
+        let pre: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "pre-migration")
+            .collect();
         assert_eq!(pre.len(), 1);
         assert_eq!(pre[0].outcome, Some(Outcome::Failed));
         assert_eq!(
@@ -561,17 +553,11 @@ fn migration_18_adds_failure_class_and_undoes_cleanly() {
                 2,
             )
             .unwrap();
-        let post = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "post-migration",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .unwrap();
+        let rows = ledger.observations_in_window(2, 10).unwrap();
+        let post: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "post-migration")
+            .collect();
         assert_eq!(post[0].failure_class, Some(FailureClass::Throttle));
     }
 
@@ -605,8 +591,8 @@ fn migration_18_adds_failure_class_and_undoes_cleanly() {
 /// dropped before the next is opened and before the re-bootstrap.
 #[test]
 fn migration_23_adds_task_class_and_undoes_cleanly() {
-    use crate::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
-    use crate::routing::request::TaskClass;
+    use crate::routing::TaskClass;
+    use crate::routing::evidence::{EvidenceLedger, NewObservation, Outcome};
 
     const UNDO_23: &str = "
             ALTER TABLE routing_observations DROP COLUMN completed_ms;
@@ -688,13 +674,11 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
     // the class it was given.
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let query = |provider| ObservationQuery {
-            provider,
-            model: "m",
-            route: None,
-            harness: None,
-        };
-        let pre = ledger.recent(query("pre-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(1, 10).unwrap();
+        let pre: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "pre-migration")
+            .collect();
         assert_eq!(pre.len(), 1);
         assert_eq!(
             pre[0].task_class, None,
@@ -709,7 +693,11 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
                 2,
             )
             .unwrap();
-        let post = ledger.recent(query("post-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(2, 10).unwrap();
+        let post: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "post-migration")
+            .collect();
         assert_eq!(post[0].task_class, Some(TaskClass::CodeModification));
     }
 
@@ -729,17 +717,11 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
     }
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let future = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "future-build",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .unwrap();
+        let rows = ledger.observations_in_window(3, 10).unwrap();
+        let future: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "future-build")
+            .collect();
         assert_eq!(future.len(), 1, "the row reads, it does not error");
         assert_eq!(future[0].task_class, None);
         assert_eq!(future[0].outcome, Some(Outcome::Succeeded));
@@ -801,7 +783,7 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
 #[test]
 fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
     use crate::routing::evidence::{
-        EffortLevel, EvidenceLedger, NewObservation, ObservationQuery, Outcome, TurnShape,
+        EffortLevel, EvidenceLedger, NewObservation, Outcome, TurnShape,
     };
 
     const UNDO_24: &str = "
@@ -883,13 +865,11 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
     // carries what it was given.
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let query = |provider| ObservationQuery {
-            provider,
-            model: "m",
-            route: None,
-            harness: None,
-        };
-        let pre = ledger.recent(query("pre-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(1, 10).unwrap();
+        let pre: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "pre-migration")
+            .collect();
         assert_eq!(pre.len(), 1);
         assert_eq!(
             pre[0].session_id, None,
@@ -908,7 +888,11 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
                 2,
             )
             .unwrap();
-        let post = ledger.recent(query("post-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(2, 10).unwrap();
+        let post: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "post-migration")
+            .collect();
         assert_eq!(post[0].session_id.as_deref(), Some("ses_planted"));
         assert_eq!(post[0].effort_level, Some(EffortLevel::Medium));
         assert_eq!(post[0].turn_shape, Some(TurnShape::ToolResume));
@@ -933,17 +917,11 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
     }
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let future = ledger
-            .recent(
-                ObservationQuery {
-                    provider: "future-build",
-                    model: "m",
-                    route: None,
-                    harness: None,
-                },
-                1,
-            )
-            .unwrap();
+        let rows = ledger.observations_in_window(3, 10).unwrap();
+        let future: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "future-build")
+            .collect();
         assert_eq!(future.len(), 1, "the row reads, it does not error");
         assert_eq!(future[0].effort_level, None);
         assert_eq!(future[0].turn_shape, None);
@@ -1014,7 +992,7 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
 /// four columns must fail the negative-offset refusal below.
 #[test]
 fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
-    use crate::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
+    use crate::routing::evidence::{EvidenceLedger, NewObservation, Outcome};
 
     const UNDO_25: &str = "
             ALTER TABLE routing_observations DROP COLUMN completed_ms;
@@ -1095,13 +1073,11 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
     // where the offset exists and is unchanged where it does not.
     {
         let ledger = EvidenceLedger::open(&migrated).unwrap();
-        let query = |provider| ObservationQuery {
-            provider,
-            model: "m",
-            route: None,
-            harness: None,
-        };
-        let pre = ledger.recent(query("pre-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(1, 10).unwrap();
+        let pre: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "pre-migration")
+            .collect();
         assert_eq!(pre.len(), 1);
         assert_eq!(
             pre[0].first_byte_ms, None,
@@ -1128,7 +1104,11 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
                 2,
             )
             .unwrap();
-        let post = ledger.recent(query("post-migration"), 1).unwrap();
+        let rows = ledger.observations_in_window(2, 10).unwrap();
+        let post: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == "post-migration")
+            .collect();
         assert_eq!(post[0].first_byte_ms, Some(120));
         assert_eq!(post[0].first_token_ms, Some(1_450));
         assert_eq!(post[0].first_tool_call_ms, Some(2_600));

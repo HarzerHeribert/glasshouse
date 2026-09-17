@@ -79,7 +79,6 @@ impl Fixture {
             format!(
                 "version = 1\nimplementation_policy = false\n\n\
                  [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
-                 [routing]\nautomatic = false\n\
                  {extra}"
             ),
         )

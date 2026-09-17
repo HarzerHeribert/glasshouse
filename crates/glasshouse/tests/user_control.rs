@@ -187,25 +187,28 @@ impl Launcher {
             .collect()
     }
 
-    /// Every **full** session identifier `glasshouse route` names, in the
-    /// order it ranked them.
-    ///
-    /// `glasshouse sessions` prints the first twelve characters and `--to`
-    /// compares against the whole identifier, so the report is where a person
-    /// gets one they can paste — which is exactly what `--to`'s own help says
-    /// ("by the identifier `glasshouse route` prints") and what this reads.
-    fn ranked_session_ids(&self) -> Vec<String> {
-        let report = self.stdout(&["route"]);
-        let mut ids = Vec::new();
-        for token in report.split(|c: char| !c.is_ascii_alphanumeric()) {
-            if token.len() == 32
-                && token.chars().all(|c| c.is_ascii_hexdigit())
-                && !ids.iter().any(|seen| seen == token)
-            {
-                ids.push(token.to_owned());
-            }
-        }
-        ids
+    /// Every recorded session's **full** identifier, oldest first — what
+    /// `--to` compares against, since `glasshouse sessions` only ever prints
+    /// the first twelve characters.
+    fn full_session_ids(&self) -> Vec<String> {
+        let cli = Cli {
+            scope: Some(self.root.clone()),
+            allow_unsafe_scope: false,
+            data_dir: Some(self.base.join("data")),
+            config_dir: Some(self.base.join("config")),
+            log_level: None,
+            log_file: None,
+            log_stderr: false,
+            command: None,
+        };
+        let runtime = glasshouse::bootstrap(&cli, &self.root).expect("bootstrap the fixture");
+        let sessions = ProjectSessions::open(&runtime).expect("open the session store");
+        let mut records = sessions.store().list().expect("list sessions");
+        records.sort_by_key(|record| record.created_at);
+        records
+            .into_iter()
+            .map(|record| record.id.as_str().to_owned())
+            .collect()
     }
 
     fn checkpoint_listing(&self) -> String {
@@ -296,16 +299,20 @@ fn pinning_a_harness_opens_that_harness_and_not_the_other_one() {
 // Lines 1714 and 1715 — pin a session, force a fresh one
 // ---------------------------------------------------------------------------
 
-/// **Lines 1714 and 1715, both against a ranking that would have chosen
-/// otherwise.**
+/// **Lines 1714 and 1715, naming exactly the session that is not the other
+/// one.**
 ///
-/// The point of both flags is that they beat an automatic answer, so a test
-/// in which the ranking agreed with them would prove nothing. Two sessions
-/// exist; the ranking's own answer is read out of `glasshouse route` first
-/// and asserted to be the *other* one, and only then is `--to` given the
-/// session it did not pick.
+/// There is no automatic ranking left to override (design-decisions,
+/// 2026-09-16, "Glasshouse never decides which model is used"; `--to`'s own
+/// proof against a single session is `launch_no_ranking.rs`'s
+/// `to_continues_exactly_the_named_session_and_writes_no_ranking_decision`).
+/// What this file still owes, on the process-control angle its own header
+/// promises, is that `--to` with two sessions on record resumes the one it
+/// was actually given and not the other — a claim a fixture with only one
+/// session cannot distinguish from luck.
 ///
-/// `--fresh` is the mirror image: the same ranking, and a new session anyway.
+/// `--fresh` is the mirror image: named or not, it always starts a new
+/// session.
 #[test]
 fn to_and_fresh_override_a_ranking_that_would_have_chosen_otherwise() {
     let fixture = Launcher::new();
@@ -318,17 +325,16 @@ fn to_and_fresh_override_a_ranking_that_would_have_chosen_otherwise() {
         "two sessions must exist for a pin to be distinguishable from a default"
     );
 
-    // What the ranking itself would do, read from the command that answers
-    // without acting. The first identifier is the destination it chose.
-    let ranked = fixture.ranked_session_ids();
-    assert!(
-        ranked.len() >= 2,
-        "the report must rank both sessions, or `--to` has nothing to overrule: {ranked:?}"
+    let full_ids = fixture.full_session_ids();
+    assert_eq!(
+        full_ids.len(),
+        2,
+        "both launches above must be on record: {full_ids:?}"
     );
-    let automatic = ranked[0].clone();
-    let displaced = ranked[1].clone();
+    let named = full_ids[0].clone();
+    let other = full_ids[1].clone();
 
-    let pinned = fixture.glasshouse(&["launch", "claude-code", "--headless", "--to", &displaced]);
+    let pinned = fixture.glasshouse(&["launch", "claude-code", "--headless", "--to", &named]);
     let said = Launcher::both_streams(&pinned);
     assert!(pinned.status.success(), "`--to` must launch:\n{said}");
 
@@ -350,12 +356,12 @@ fn to_and_fresh_override_a_ranking_that_would_have_chosen_otherwise() {
         "exactly one resume must have happened:\n{invocations:?}"
     );
     assert!(
-        !resumed[0].contains(&automatic),
-        "the resume must not be of the destination the ranking preferred (`{automatic}`) — that \
-         is the whole of line 1714:\n{invocations:?}"
+        !resumed[0].contains(&other),
+        "the resume must be of the session `--to` named, not the other one on record:\n\
+         {invocations:?}"
     );
     assert!(
-        said.contains(&displaced) || said.contains("continuing session"),
+        said.contains(&named) || said.contains("continuing session"),
         "and the launch must say where it went:\n{said}"
     );
 
@@ -406,8 +412,8 @@ fn checkpoint_first_leaves_a_checkpoint_for_the_session_being_left() {
     // session the work is currently in — the one a migration leaves.
     let leaving = sessions[0].clone();
 
-    let ranked = fixture.ranked_session_ids();
-    let elsewhere = ranked
+    let full_ids = fixture.full_session_ids();
+    let elsewhere = full_ids
         .iter()
         .find(|id| !id.starts_with(&leaving))
         .expect("a destination other than the session in hand")

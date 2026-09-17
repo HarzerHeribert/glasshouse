@@ -106,8 +106,7 @@ impl EvidenceLedger {
                 new.outcome.map(Outcome::as_str),
                 new.context_state.as_str(),
                 new.failure_class.map(FailureClass::as_str),
-                new.task_class
-                    .map(crate::routing::request::TaskClass::as_str),
+                new.task_class.map(crate::routing::TaskClass::as_str),
                 new.session_id,
                 new.effort_level.map(EffortLevel::as_str),
                 new.turn_shape.map(TurnShape::as_str),

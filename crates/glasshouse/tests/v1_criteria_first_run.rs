@@ -5,14 +5,19 @@
 //! VM leg. `scripts/tests/test_windows_test_binary_names.py` keeps the next
 //! name out of that list.
 //!
-//! Ten V1-completion criteria (map lines 1899–1908) over Glasshouse's
-//! setup/portability phases the map already records closed — harness
-//! detection, launch profiles, the local gateway, provider templates,
-//! free-pool routing, and response profiles — proved against the shipped
-//! binary or the nearest deterministic production seam, per
+//! Nine V1-completion criteria (map lines 1899–1906 and 1908) over
+//! Glasshouse's setup/portability phases the map already records closed —
+//! harness detection, launch profiles, the local gateway, provider
+//! templates, and response profiles — proved against the shipped binary or
+//! the nearest deterministic production seam, per
 //! `.agent-runtime/packet-prove-it-54a.md`. Each test's doc comment quotes
 //! the map line, names the evidence entry that proves the underlying
 //! mechanism, and states its mutation.
+//!
+//! Line 1907 (*"a zero-cost or free-tier model can perform a disposable
+//! Glasshouse support job"*) went with the router (design-decisions.md,
+//! 2026-09-16, "Glasshouse never decides which model is used"): its own
+//! mutation target, `main.rs::disposable_candidates`, no longer exists.
 //!
 //! Unix only (`#![cfg(unix)]`): every fake harness here is a `#!/bin/sh`
 //! script, the same shape `tests/v1_criteria_sessions.rs` and
@@ -29,16 +34,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
-
-use glasshouse::config::{ProviderConfig, RoutingModelChoice, UserConfig};
 use glasshouse::gateway::{Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::response::floor_directive;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::routing::{Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
-use glasshouse::{Cli, Runtime, bootstrap};
 
 // ---------------------------------------------------------------------------
 // Shared fixtures — trimmed from `tests/v1_criteria_sessions.rs` (harness
@@ -104,20 +105,6 @@ fn run(data_dir: &Path, config_dir: &Path, root: &Path, args: &[&str]) -> std::p
         .args(args)
         .output()
         .expect("the glasshouse binary must be runnable")
-}
-
-fn bootstrap_at(data_dir: &Path, config_dir: &Path, root: &Path) -> Runtime {
-    let cli = Cli::try_parse_from([
-        "glasshouse",
-        "--scope",
-        root.to_str().unwrap(),
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-        "--config-dir",
-        config_dir.to_str().unwrap(),
-    ])
-    .expect("parse the fixture command line");
-    bootstrap(&cli, root).expect("bootstrap the fixture runtime")
 }
 
 fn all_files_under(dir: &Path) -> Vec<PathBuf> {
@@ -1238,148 +1225,6 @@ fn v1_1906_openrouter_and_both_generic_templates_are_configured_and_actually_pro
         "the anthropic-compatible template must attach the credential as x-api-key, not a \
          bearer token: {:?}",
         anthropic_requests[0]
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 1907 — a free-tier model performs a disposable support job
-// ---------------------------------------------------------------------------
-
-/// **1907** — "Consider free-pool support usable when at least one
-/// configured zero-cost or free-tier model can perform a disposable
-/// Glasshouse support job."
-///
-/// Shape: `tests/classification_call.rs`'s pattern — a provider with one
-/// model named under `free_models`, `routing.model = automatic`, and
-/// `glasshouse classify <text>` run through the shipped binary against a
-/// canned OpenAI chat-completions endpoint. Entry: `phase-9i.md`
-/// ("free-pool routing, 9 of 14" — the disposable policy's caller).
-///
-/// Mutation: `main.rs::disposable_candidates`, discarding the provider's
-/// declared `free_models` before any candidate is built — "refuse free
-/// models for support jobs" — on the seam this packet may edit
-/// (`routing/disposable.rs` is FORBIDDEN, live worker entitlement-pool's).
-#[test]
-fn v1_1907_a_free_tier_model_performs_the_classification_support_job() {
-    let tmp = tempdir();
-    let base = tmp.path();
-    let project = git_project(base, "proj");
-    let data_dir = base.join("data");
-    let config_dir = base.join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-
-    let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    // Blocking accept on a dedicated thread, armed here before the subprocess
-    // spawns below, matching `launch_preflight.rs`'s `FakeProvider` idiom: a
-    // nonblocking poll can miss the connection window between polls, but a
-    // blocking `accept()` cannot miss a connection the kernel has already
-    // queued, so the server side of this race is gone by construction.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback must bind");
-    let address = listener.local_addr().unwrap();
-    let (served_tx, served_rx) = std::sync::mpsc::channel();
-    {
-        let requests = Arc::clone(&requests);
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request_line = String::new();
-                if reader.read_line(&mut request_line).is_ok() {
-                    let mut length = 0usize;
-                    loop {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-                            break;
-                        }
-                        if let Some(v) = line
-                            .to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(str::trim)
-                            .and_then(|v| v.parse().ok())
-                        {
-                            length = v;
-                        }
-                    }
-                    let mut body = vec![0u8; length];
-                    let _ = reader.read_exact(&mut body);
-                    requests
-                        .lock()
-                        .unwrap()
-                        .push(String::from_utf8_lossy(&body).into_owned());
-                    let content = "{\"needs_repo_context\":false,\"needs_code_modification\":false,\
-                                    \"needs_shell_execution\":false,\"needs_browser_interaction\":false,\
-                                    \"complexity\":\"trivial\",\"likely_multi_turn\":false,\
-                                    \"workload_tier\":\"leaf\",\"safe_for_disposable_model\":true,\
-                                    \"warm_context\":\"prefer_warm\",\"confidence\":\"high\"}";
-                    let document = serde_json::json!({
-                        "choices": [{ "message": { "role": "assistant", "content": content } }],
-                        "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
-                    })
-                    .to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                         content-length: {}\r\nconnection: close\r\n\r\n{document}",
-                        document.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.flush();
-                }
-            }
-            // The subprocess connects only once its request has been fully
-            // read and answered above, so a receiver that never fires means
-            // the connection this test guards never happened at all.
-            let _ = served_tx.send(());
-        });
-    }
-
-    let runtime = bootstrap_at(&data_dir, &config_dir, &project);
-    let mut user = UserConfig::load(runtime.paths()).unwrap();
-    let mut provider = ProviderConfig::new("openai-compatible");
-    provider.set_base_url(Some(format!("http://{address}/v1")));
-    provider.set_credential_env(vec!["V1907_KEY".to_owned()]);
-    provider.set_free_models(vec!["v1907-free-model".to_owned()]);
-    user.providers_mut().set("v1907-provider", provider);
-    user.routing_mut()
-        .set_model(Some(RoutingModelChoice::Automatic));
-    user.save(runtime.paths()).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
-        .env("V1907_KEY", "sk-planted-not-a-real-key-1907")
-        .arg("--scope")
-        .arg(&project)
-        .arg("--data-dir")
-        .arg(&data_dir)
-        .arg("--config-dir")
-        .arg(&config_dir)
-        .arg("classify")
-        .arg("what changed in this diff?")
-        .output()
-        .expect("run glasshouse classify");
-    // The subprocess has already exited, so the accept thread is either done
-    // or never going to hear from anyone; a generous bound just keeps a
-    // genuinely-missed connection from hanging the test instead of failing
-    // the assertions below.
-    let _ = served_rx.recv_timeout(Duration::from_secs(5));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        report.contains("v1907-free-model") || report.to_ascii_lowercase().contains("model"),
-        "the classification report must say a model answered: {report}"
-    );
-
-    let seen = requests.lock().unwrap();
-    assert_eq!(
-        seen.len(),
-        1,
-        "the free-tier model's own endpoint must have been asked exactly once: {seen:?}"
-    );
-    assert!(
-        seen[0].contains("v1907-free-model"),
-        "the request must have named the free model this provider declared: {}",
-        seen[0]
     );
 }
 

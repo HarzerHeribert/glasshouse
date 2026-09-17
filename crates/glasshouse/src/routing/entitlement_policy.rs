@@ -1,12 +1,45 @@
 //! Entitlement policy: which entitlement may serve which work, and why one
 //! was refused. Host-side rules over the gateway's own destination
-//! vocabulary -- they read `classify`, `disposable` and `integrations`, which
-//! is exactly why they are not the gateway's.
+//! vocabulary -- they read `crate::config` and `integrations`, which is
+//! exactly why they are not the gateway's.
 
-use super::{capability, classify, disposable};
 use inference_gateway::provider::quota::CapacityBand;
 use inference_gateway::routing::evidence::SubscriptionHeadroomEstimate;
 use inference_gateway::routing::{AssignedModel, ProviderUnavailableCause};
+
+/// Which of the seven routing axes map lines 1383–1389 named a resource's
+/// capability was established absent for a [`HardConstraint::Capability`].
+///
+/// Kept here rather than in a `routing::capability` module (deleted by the
+/// 2026-09-16 ruling along with the session router that was its only caller
+/// of the rest of that module) because this is the sole surviving consumer:
+/// a session that could not serve a hard capability requirement is a fact
+/// [`HardConstraint`] still needs to be able to name, even though nothing
+/// computes one from a live resource any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityAxis {
+    CodeEdit,
+    ShellToolUse,
+    BrowserUse,
+    LargeContext,
+    FastCheapAnalysis,
+    RepositoryReview,
+    Mcp,
+}
+
+impl CapabilityAxis {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CodeEdit => "code-edit",
+            Self::ShellToolUse => "shell/tool-use",
+            Self::BrowserUse => "browser-use",
+            Self::LargeContext => "large-context",
+            Self::FastCheapAnalysis => "fast-cheap-analysis",
+            Self::RepositoryReview => "repository-review",
+            Self::Mcp => "MCP",
+        }
+    }
+}
 
 /// Which part of an entitlement's rules refused a destination or a candidate —
 /// the thing a [`HardConstraint::Entitlement`] names after the entitlement
@@ -17,7 +50,7 @@ use inference_gateway::routing::{AssignedModel, ProviderUnavailableCause};
 /// `session::hard_constraint`, because a session has a harness and may have a
 /// classified tier but never a job kind; `disposable::DisposableRouting`
 /// raises [`Self::JobKind`] through [`Entitlement::job_constraint`], because
-/// a disposable job has a [`disposable::JobKind`] and neither a harness nor
+/// a disposable job has a [`crate::config::JobKind`] and neither a harness nor
 /// a tier of its own. No caller can raise the wrong part: each asks only the
 /// question its work actually poses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,10 +58,10 @@ pub enum EntitlementRefusal {
     /// The rules do not admit this harness.
     Harness(crate::integrations::IntegrationId),
     /// The rules do not admit the tier this work would run as.
-    Tier(classify::WorkloadTier),
+    Tier(crate::config::WorkloadTier),
     /// The rules do not admit this kind of bounded support job — the third
     /// clause of map line 1947, consumed by `disposable::DisposableRouting`.
-    JobKind(disposable::JobKind),
+    JobKind(crate::config::JobKind),
     /// Map line 1953's model half: the entitlement's **declared** model list
     /// is known and does not name the model this destination would serve.
     /// Raised only from a [`EntitlementModelsFacet::Declared`] facet — a
@@ -125,10 +158,10 @@ impl std::fmt::Display for EntitlementRefusal {
 pub struct EntitlementRules {
     allow_harnesses: Vec<crate::integrations::IntegrationId>,
     deny_harnesses: Vec<crate::integrations::IntegrationId>,
-    allow_tiers: Vec<classify::WorkloadTier>,
-    deny_tiers: Vec<classify::WorkloadTier>,
-    allow_job_kinds: Vec<disposable::JobKind>,
-    deny_job_kinds: Vec<disposable::JobKind>,
+    allow_tiers: Vec<crate::config::WorkloadTier>,
+    deny_tiers: Vec<crate::config::WorkloadTier>,
+    allow_job_kinds: Vec<crate::config::JobKind>,
+    deny_job_kinds: Vec<crate::config::JobKind>,
     /// Map line 1971's fourth axis: the cumulative spend, in tokens, past
     /// which this entitlement may not be charged. `None` — the default and
     /// the shape [`Self::UNRESTRICTED`] carries — is *the user stated no
@@ -176,25 +209,37 @@ impl EntitlementRules {
     }
 
     #[must_use]
-    pub fn allow_tiers(mut self, tiers: impl IntoIterator<Item = classify::WorkloadTier>) -> Self {
+    pub fn allow_tiers(
+        mut self,
+        tiers: impl IntoIterator<Item = crate::config::WorkloadTier>,
+    ) -> Self {
         self.allow_tiers = tiers.into_iter().collect();
         self
     }
 
     #[must_use]
-    pub fn deny_tiers(mut self, tiers: impl IntoIterator<Item = classify::WorkloadTier>) -> Self {
+    pub fn deny_tiers(
+        mut self,
+        tiers: impl IntoIterator<Item = crate::config::WorkloadTier>,
+    ) -> Self {
         self.deny_tiers = tiers.into_iter().collect();
         self
     }
 
     #[must_use]
-    pub fn allow_job_kinds(mut self, kinds: impl IntoIterator<Item = disposable::JobKind>) -> Self {
+    pub fn allow_job_kinds(
+        mut self,
+        kinds: impl IntoIterator<Item = crate::config::JobKind>,
+    ) -> Self {
         self.allow_job_kinds = kinds.into_iter().collect();
         self
     }
 
     #[must_use]
-    pub fn deny_job_kinds(mut self, kinds: impl IntoIterator<Item = disposable::JobKind>) -> Self {
+    pub fn deny_job_kinds(
+        mut self,
+        kinds: impl IntoIterator<Item = crate::config::JobKind>,
+    ) -> Self {
         self.deny_job_kinds = kinds.into_iter().collect();
         self
     }
@@ -230,7 +275,7 @@ impl EntitlementRules {
         Self::admits(&self.allow_harnesses, &self.deny_harnesses, &harness)
     }
 
-    pub fn serves_tier(&self, tier: classify::WorkloadTier) -> bool {
+    pub fn serves_tier(&self, tier: crate::config::WorkloadTier) -> bool {
         Self::admits(&self.allow_tiers, &self.deny_tiers, &tier)
     }
 
@@ -241,7 +286,7 @@ impl EntitlementRules {
     /// [`Entitlement::job_constraint`] for every candidate that carries an
     /// entitlement, and a candidate whose entitlement does not serve the job's
     /// kind is never a candidate at all.
-    pub fn serves_job_kind(&self, kind: disposable::JobKind) -> bool {
+    pub fn serves_job_kind(&self, kind: crate::config::JobKind) -> bool {
         Self::admits(&self.allow_job_kinds, &self.deny_job_kinds, &kind)
     }
 
@@ -257,7 +302,7 @@ impl EntitlementRules {
     pub fn refusal(
         &self,
         harness: crate::integrations::IntegrationId,
-        tier: Option<classify::WorkloadTier>,
+        tier: Option<crate::config::WorkloadTier>,
     ) -> Option<EntitlementRefusal> {
         if !self.serves_harness(harness) {
             return Some(EntitlementRefusal::Harness(harness));
@@ -456,7 +501,7 @@ mod entitlement_fallback_seam_tests {
     /// than as a guess in either direction.
     #[test]
     fn the_tier_seam_compares_two_attached_values() {
-        use classify::WorkloadTier;
+        use crate::config::WorkloadTier;
 
         assert_eq!(
             same_capability_tier(Some(WorkloadTier::Frontier), Some(WorkloadTier::Frontier)),
@@ -557,7 +602,7 @@ pub enum HardConstraint {
     /// `session::is_adequate` established absent, and the
     /// `Declared::Verified` evidence behind it.
     Capability {
-        axis: capability::CapabilityAxis,
+        axis: CapabilityAxis,
         evidence: &'static str,
     },
     Privacy,
@@ -566,8 +611,8 @@ pub enum HardConstraint {
     /// is strictly below `required`; a destination whose ceiling nobody has
     /// established is never given this constraint (`session::hard_constraint`).
     WorkloadTier {
-        required: classify::WorkloadTier,
-        offered: classify::WorkloadTier,
+        required: crate::config::WorkloadTier,
+        offered: crate::config::WorkloadTier,
     },
     /// Line 1954. The entitlement that would be charged for this destination
     /// has a rule — [`EntitlementRules`] — that does not admit the harness
@@ -648,8 +693,8 @@ impl std::fmt::Display for HardConstraint {
 /// The seam map line 1970's tier-preserving fallback consumes: are these two
 /// destinations' models of the same user-assigned capability tier?
 ///
-/// Neither `classify::WorkloadTier` (how hard the task is) nor
-/// `capability::CapabilityAxis` (can it do this at all) answers "how capable
+/// Neither `crate::config::WorkloadTier` (how hard the task is) nor
+/// `CapabilityAxis` (can it do this at all) answers "how capable
 /// is this model, relative to others" — Phase 34F's answer is the resolved
 /// ceiling a user assigns a model, in the same `WorkloadTier` vocabulary,
 /// read as *the tier this model is trusted to serve*. The caller resolves
@@ -663,8 +708,8 @@ impl std::fmt::Display for HardConstraint {
 /// fallback silently downgrading the model is worse than a refusal.
 // History: design-decisions.md, "Trims: routing module docs", routing/mod.rs `fn same_capability_tier`.
 pub fn same_capability_tier(
-    from: Option<classify::WorkloadTier>,
-    to: Option<classify::WorkloadTier>,
+    from: Option<crate::config::WorkloadTier>,
+    to: Option<crate::config::WorkloadTier>,
 ) -> TierRelation {
     match (from, to) {
         (Some(from), Some(to)) if from == to => TierRelation::Same,
@@ -1036,7 +1081,7 @@ impl Entitlement {
     pub fn constraint(
         &self,
         harness: crate::integrations::IntegrationId,
-        tier: Option<classify::WorkloadTier>,
+        tier: Option<crate::config::WorkloadTier>,
     ) -> Result<(), HardConstraint> {
         match self.rules.refusal(harness, tier) {
             Some(refused) => Err(HardConstraint::Entitlement {
@@ -1052,7 +1097,7 @@ impl Entitlement {
     /// the refusal a support job reports names the entitlement and the job
     /// kind exactly as the session router's names the entitlement and the
     /// harness or tier.
-    pub fn job_constraint(&self, kind: disposable::JobKind) -> Result<(), HardConstraint> {
+    pub fn job_constraint(&self, kind: crate::config::JobKind) -> Result<(), HardConstraint> {
         if self.rules.serves_job_kind(kind) {
             Ok(())
         } else {

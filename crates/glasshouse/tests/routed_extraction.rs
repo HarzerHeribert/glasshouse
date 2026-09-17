@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use glasshouse::config::{ExtractionModelRef, ProviderConfig, UserConfig};
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery};
+use glasshouse::routing::evidence::EvidenceLedger;
 use glasshouse::session::{NewSession, ProjectSessions, SessionId, SessionLifecycle};
 use glasshouse::{Cli, Runtime};
 
@@ -354,6 +354,13 @@ impl Fixture {
         self.run(&["memory", "commit", "--session", session.as_str()])
     }
 
+    /// [`glasshouse::memory::extract::ModelCall::observation`]'s own doc
+    /// comment: an extraction row deliberately leaves `outcome` `NULL` rather
+    /// than fill it with a nearby guess, so `observations_in_window`'s
+    /// `outcome IS NOT NULL` filter would silently drop every row this
+    /// method plants for. `consumption_in_window` is the outcome-agnostic
+    /// reader, the same fix `tests/context_firewall.rs`'s own `recent`
+    /// needed for the identical reason.
     fn observations(
         &self,
         provider: &str,
@@ -361,16 +368,16 @@ impl Fixture {
     ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
         EvidenceLedger::open(&self.runtime)
             .unwrap()
-            .recent(
-                ObservationQuery {
-                    provider,
-                    model,
-                    route: Some(ROUTE),
-                    harness: None,
-                },
-                16,
-            )
+            .consumption_in_window(i64::MAX, i64::MAX)
             .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == Some(ROUTE)
+                    && row.harness.is_none()
+            })
+            .collect()
     }
 
     fn memory_count(&self) -> i64 {

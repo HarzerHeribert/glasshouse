@@ -569,12 +569,11 @@ fn is_timeout_kind(kind: std::io::ErrorKind) -> bool {
 // ---------------------------------------------------------------------------
 
 /// A [`ConfiguredModel`] called because configuration named it, never because
-/// [`crate::routing::disposable::DisposableRouting`] chose it. Stamps the two
-/// facts [`ConfiguredModel::complete_observed`] cannot know about itself —
-/// which credential *name* paid, and when the call happened — the same stamp
-/// [`super::disposable::RoutedModel::complete_observed`] applies for a routed
-/// call. There is no [`crate::routing::disposable::DisposableChoice`] to
-/// carry that through on this path, so this carries it directly instead.
+/// a router chose it — there is no more router (design-decisions,
+/// 2026-09-16). Stamps the two facts [`ConfiguredModel::complete_observed`]
+/// cannot know about itself — which credential *name* paid, and when the
+/// call happened — because there is no more routed candidate to carry that
+/// through, so this carries it directly instead.
 pub struct ConfiguredCall {
     client: Result<ConfiguredModel, String>,
     credential_label: Option<String>,
@@ -588,8 +587,7 @@ impl ConfiguredCall {
         }
     }
 
-    /// Whether this call has a client it can actually reach — the direct
-    /// analogue of [`super::disposable::RoutedModel::can_call`], for a caller
+    /// Whether this call has a client it can actually reach, for a caller
     /// that only wants to offer a model it can use.
     pub fn can_call(&self) -> bool {
         self.client.is_ok()
@@ -677,8 +675,8 @@ fn configured_provider(
 /// other reader of a provider's `credential_env` walks. Moved from
 /// `commands::routing_classification::extraction_client_for`
 /// (GH-GLASSHOUSE-CONFIGURED-MODELS) and widened to hand back the label too,
-/// since there is no more routed [`crate::routing::disposable::DisposableChoice`]
-/// to carry it for [`ConfiguredCall`].
+/// since there is no more routed candidate to carry it for
+/// [`ConfiguredCall`].
 pub fn extraction_client_for(
     user: &crate::config::UserConfig,
     project: Option<&crate::config::ProjectConfig>,

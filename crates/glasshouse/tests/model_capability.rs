@@ -15,17 +15,14 @@
 //! for an override — the routing gate observably changing a decision
 //! because of a configured capability record, not only a struct in a test.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-
 use glasshouse::config::ProviderConfig;
+use glasshouse::config::WorkloadTier;
 use glasshouse::config::capability::{
     CapabilityProvenance, CapabilityQuery, CeilingResolution, ModelCapabilityRecord,
     TaskSuitability,
 };
 use glasshouse::harness::pairing::PairingClass;
 use glasshouse::integrations::IntegrationId;
-use glasshouse::routing::classify::WorkloadTier;
 
 // --- 1475: configurable data, not hard-coded router logic ------------------
 
@@ -417,220 +414,17 @@ fn line_1485_two_providers_with_the_same_model_name_resolve_independently() {
     );
 }
 
-// --- Production-caller assertion: the shipped binary's routing gate --------
-
-/// The provider credential variable — a name only, matching
-/// `tests/tier_ceiling.rs`'s own fixture convention.
-const CREDENTIAL_VAR: &str = "GLASSHOUSE_MODEL_CAPABILITY_TEST_KEY";
-
-/// The same standard-tier repository task `tests/tier_ceiling.rs` uses, kept
-/// identical on purpose: this file's binary test is the same experiment,
-/// sourced from `model_capabilities` instead of `model_ceilings`, and a
-/// mutation to the classifier should fail both files identically.
-const STANDARD_REPO_TASK: &str = "refactor the launch profile handling in this project";
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    base: PathBuf,
-    root: PathBuf,
-}
-
-impl Fixture {
-    fn new(harnesses: &[&str], extra: &str) -> Self {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().to_path_buf();
-        let root = base.join("workspace");
-        std::fs::create_dir_all(root.join(".git")).expect("create project root");
-        let root = std::fs::canonicalize(&root).expect("canonicalize project root");
-
-        let bin_dir = base.join("bin");
-        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
-
-        let mut config = String::from("version = 1\n\n");
-        for harness in harnesses {
-            let exe = install_fake_harness(&bin_dir, harness);
-            let escaped = exe.display().to_string().replace('\\', "\\\\");
-            config.push_str(&format!(
-                "[integrations.{harness}]\nenabled = true\nexecutable = \"{escaped}\"\n\n"
-            ));
-        }
-        config.push_str(extra);
-
-        let config_dir = base.join("config");
-        std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(config_dir.join("config.toml"), config).expect("write user config");
-
-        Self {
-            _tmp: tmp,
-            base,
-            root,
-        }
-    }
-
-    fn glasshouse(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_glasshouse"))
-            .arg("--scope")
-            .arg(&self.root)
-            .arg("--data-dir")
-            .arg(self.base.join("data"))
-            .arg("--config-dir")
-            .arg(self.base.join("config"))
-            .args(args)
-            .env(CREDENTIAL_VAR, "planted-opaque-model-capability-test-value")
-            .env("PATH", self.base.join("empty-path"))
-            .output()
-            .expect("the glasshouse binary must be runnable")
-    }
-
-    fn route(&self, args: &[&str]) -> String {
-        let output = self.glasshouse(args);
-        assert!(
-            output.status.success(),
-            "`glasshouse {}` failed:\n{}{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-}
-
-#[cfg(unix)]
-fn install_fake_harness(bin_dir: &Path, harness: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(format!("fake-{harness}"));
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
-
-#[cfg(windows)]
-fn install_fake_harness(bin_dir: &Path, harness: &str) -> PathBuf {
-    let path = bin_dir.join(format!("fake-{harness}.cmd"));
-    std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake harness");
-    path
-}
-
-/// **The production-caller assertion.** With *no* `model_ceilings` table at
-/// all — only a `model_capabilities` record, `provenance = "user"` — the
-/// shipped binary still refuses the capped destination for a task above its
-/// capability-record ceiling, exactly as `tests/tier_ceiling.rs` proves for
-/// an override. The only path from this TOML table to that refusal is
-/// `ProviderConfig::resolved_ceiling` -> `EffectiveConfig::model_ceiling` ->
-/// `main.rs::destination_tier_ceiling` -> `Destination::with_tier_ceiling` ->
-/// `session::hard_constraint` — every link production code, none of it
-/// touched by this test.
-#[test]
-fn a_configured_capability_record_excludes_a_destination_below_the_required_tier_on_the_shipped_binary()
- {
-    let fixture = Fixture::new(
-        &["claude-code"],
-        &format!(
-            "[providers.alpha]\ntemplate = \"openrouter\"\n\
-             credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
-             [providers.alpha.model_capabilities.small]\n\
-             ceiling = \"leaf\"\n\
-             provenance = \"user\"\n\n\
-             [profiles.capped]\nharness = \"claude-code\"\nmodel = \"small\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.capped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-             [profiles.uncapped]\nharness = \"claude-code\"\nmodel = \"big\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.uncapped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n"
-        ),
-    );
-    let report = fixture.route(&["route", "--task", STANDARD_REPO_TASK]);
-
-    let rejected = report
-        .split_once("\nrejected\n")
-        .unwrap_or_else(|| panic!("nothing was rejected at all:\n{report}"))
-        .1;
-    assert!(
-        rejected.contains("fresh:claude-code:capped"),
-        "the destination whose only established ceiling comes from a capability record must be \
-         refused, not merely scored low:\n{report}"
-    );
-    assert!(
-        rejected.contains("hard workload tier constraint"),
-        "the refusal must name the workload-tier constraint:\n{report}"
-    );
-    assert!(
-        !rejected.contains("fresh:claude-code:uncapped"),
-        "the destination with no capability record at all must still be eligible — \"nobody has \
-         said\" is not \"cannot\":\n{report}"
-    );
-}
-
-/// **Line 1482's closing half, on the shipped binary.**
-/// `line_1482_a_harness_scoped_record_is_inert_to_context_blind_resolution`
-/// proves a harness-scoped record is safely *inert* on the context-blind
-/// path; this proves it is actually *applied* on the context-aware one —
-/// `main.rs::destination_tier_ceiling` now builds a `CapabilityQuery` from
-/// the harness it is iterating and calls
-/// `EffectiveConfig::model_ceiling_for`, so a record scoped to `claude-code`
-/// caps `claude-code`'s own destination and leaves `codex`'s destination on
-/// the identical provider and model untouched.
-///
-/// The control is `big`'s record, which states no harness at all: it caps
-/// **both** harnesses' destinations, attributing the isolation above to the
-/// harness scope specifically rather than to some other difference between
-/// the four profiles.
-#[test]
-fn a_harness_scoped_capability_record_applies_only_to_its_own_harness_on_the_shipped_binary() {
-    let fixture = Fixture::new(
-        &["claude-code", "codex"],
-        &format!(
-            "[providers.alpha]\ntemplate = \"openrouter\"\n\
-             credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
-             [providers.alpha.model_capabilities.small]\n\
-             harness = \"claude-code\"\n\
-             ceiling = \"leaf\"\n\
-             provenance = \"user\"\n\n\
-             [providers.alpha.model_capabilities.big]\n\
-             ceiling = \"leaf\"\n\
-             provenance = \"user\"\n\n\
-             [profiles.cc-scoped]\nharness = \"claude-code\"\nmodel = \"small\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.cc-scoped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-             [profiles.cc-control]\nharness = \"claude-code\"\nmodel = \"big\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.cc-control.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-             [profiles.codex-scoped]\nharness = \"codex\"\nmodel = \"small\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.codex-scoped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-             [profiles.codex-control]\nharness = \"codex\"\nmodel = \"big\"\n\
-             expected_protocol = \"openai-chat\"\n\
-             [profiles.codex-control.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n"
-        ),
-    );
-    let report = fixture.route(&["route", "--task", STANDARD_REPO_TASK]);
-
-    let rejected = report
-        .split_once("\nrejected\n")
-        .unwrap_or_else(|| panic!("nothing was rejected at all:\n{report}"))
-        .1;
-
-    assert!(
-        rejected.contains("fresh:claude-code:cc-scoped"),
-        "the harness-scoped record must cap its own harness's destination:\n{report}"
-    );
-    assert!(
-        !rejected.contains("fresh:codex:codex-scoped"),
-        "a record scoped to claude-code must be invisible to codex's identical provider and \
-         model — leaking it would cap every harness a scoped calibration was never measured on:\
-         \n{report}"
-    );
-    assert!(
-        rejected.contains("fresh:claude-code:cc-control"),
-        "the control: an unscoped record must still cap claude-code:\n{report}"
-    );
-    assert!(
-        rejected.contains("fresh:codex:codex-control"),
-        "the control: the same unscoped record must ALSO cap codex — proving the isolation \
-         above is caused by the harness scope, not by some other difference between the four \
-         profiles:\n{report}"
-    );
-}
+// --- Production-caller assertion: was the shipped binary's routing gate ----
+//
+// Two tests used to drive `glasshouse route --task <text>` here to prove a
+// capability record's ceiling actually excluded a destination through
+// `main.rs::destination_tier_ceiling` -> `Destination::with_tier_ceiling` ->
+// `session::hard_constraint`. That whole chain is gone with the routing
+// deletion (design-decisions, 2026-09-16): there is no more automatic
+// destination ranking for a capability record to gate, and `ModelCapabilityRecord`/
+// `CapabilityQuery` (moved to `config/capability.rs`) now have no production
+// reader at all — confirmed by grep, zero callers outside the config module
+// that stores them. The tests above this point, which prove the data type's
+// own round-trip, resolution and precedence rules, still hold; there is no
+// surviving production entry point left to drive a binary-level proof
+// through.

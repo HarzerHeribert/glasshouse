@@ -704,50 +704,29 @@ mod tests {
         );
     }
 
-    /// The disable trio's response half: disabling injection must not move
-    /// [`super::super::RoutingConfig::model`] or
-    /// [`super::super::UserConfig::memory_extraction`], and setting either of
-    /// those must not move this. Each reads its own field.
+    /// The disable pair's response half: disabling injection must not move
+    /// [`super::super::UserConfig::memory_extraction`], and setting that
+    /// must not move this. Each reads its own field.
     #[test]
-    fn the_three_automatic_behaviours_disable_independently() {
-        use crate::config::RoutingModelChoice;
-
-        for (routing_off, memory_off, response_off) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
-            (true, true, true),
-        ] {
+    fn the_two_automatic_behaviours_disable_independently() {
+        for (memory_off, response_off) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let mut user = UserConfig::default();
-            if routing_off {
-                user.routing_mut()
-                    .set_model(Some(RoutingModelChoice::Deterministic));
-            }
             user.set_memory_extraction(Some(!memory_off));
             user.response_mut().set_enabled(Some(!response_off));
 
             let effective = EffectiveConfig::new(&user, None);
 
             assert_eq!(
-                matches!(
-                    effective.routing_model_resolution().value,
-                    crate::config::RoutingModelResolution::Heuristics(
-                        crate::config::RoutingFallback::DeterministicChosen
-                    )
-                ),
-                routing_off,
-                "routing state must depend only on the routing field, case {routing_off} {memory_off} {response_off}"
-            );
-            assert_eq!(
                 effective.memory_extraction_enabled().value,
                 !memory_off,
-                "memory-extraction state must depend only on its own field, case {routing_off} {memory_off} {response_off}"
+                "memory-extraction state must depend only on its own field, case {memory_off} {response_off}"
             );
             assert_eq!(
                 effective.response_injection_enabled().value,
                 !response_off,
-                "response-injection state must depend only on its own field, case {routing_off} {memory_off} {response_off}"
+                "response-injection state must depend only on its own field, case {memory_off} {response_off}"
             );
         }
     }

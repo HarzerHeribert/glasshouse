@@ -21,10 +21,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::WorkloadTier;
 use crate::harness::WireProtocol;
 use crate::harness::pairing::PairingClass;
 use crate::integrations::IntegrationId;
-use crate::routing::classify::WorkloadTier;
 
 use super::{ConfiguredHarness, ConfiguredWorkloadTier, is_false};
 

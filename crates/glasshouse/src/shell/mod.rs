@@ -50,9 +50,8 @@ pub use state::{
     Action, HarnessRow, IntegrationRow, KnowledgeSection, MemoryDetail, MemoryRow,
     MemorySettingsEdit, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind, ProfileRow,
     ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
-    ProviderSettingsEdit, ReachabilityCheck, RouteDecisionRow, RouteEvidenceRow, RouteHealthRow,
-    RoutingRow, RoutingSettingsEdit, SettingsEdit, SettingsRows, SettingsSection, ShellState,
-    SubscriptionRow, ViewportGrid,
+    ProviderSettingsEdit, ReachabilityCheck, SettingsEdit, SettingsRows, SettingsSection,
+    ShellState, SubscriptionRow, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves. Session *records* are
@@ -249,7 +248,6 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     }
                     Action::OpenProjectOverview => {
                         let resources = build_project_overview_capacity(runtime);
-                        let routing = build_project_overview_routing(runtime);
                         match build_project_overview_memory(runtime) {
                             Ok(memory) => {
                                 state.open_project_overview(
@@ -257,7 +255,6 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     memory.todos,
                                     memory.todos_omitted,
                                     resources,
-                                    routing,
                                     None,
                                 );
                             }
@@ -271,7 +268,6 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     Vec::new(),
                                     0,
                                     resources,
-                                    routing,
                                     Some(format!("project memory unavailable: {err:#}")),
                                 );
                             }
@@ -303,39 +299,6 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             );
                         }
                     },
-                    Action::OpenRouteEvidence => match build_route_evidence_table(runtime) {
-                        Ok(rows) => {
-                            state.open_route_evidence(rows, None);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "could not read the routing evidence ledger for the route table"
-                            );
-                            state.open_route_evidence(
-                                Vec::new(),
-                                Some(format!("routing evidence unavailable: {err:#}")),
-                            );
-                        }
-                    },
-                    Action::OpenRouteHealth => {
-                        state.open_route_health(build_route_health_table(runtime));
-                    }
-                    Action::OpenRouteDecisions => match build_route_decision_table(runtime) {
-                        Ok(rows) => {
-                            state.open_route_decisions(rows, None);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "could not read the evaluation ledger for the routing-decisions view"
-                            );
-                            state.open_route_decisions(
-                                Vec::new(),
-                                Some(format!("routing decisions unavailable: {err:#}")),
-                            );
-                        }
-                    },
                     Action::OpenProjectMemory => match build_project_memory_view(runtime) {
                         Ok(memory) => {
                             state.open_project_memory(memory, None);
@@ -355,21 +318,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
                         let profile_edits = state.settings_profile_edits();
-                        let routing_edit = state.settings_routing_edit();
                         let memory_edit = state.settings_memory_edit();
                         if harness_edits.is_empty()
                             && provider_edits.is_empty()
                             && profile_edits.is_empty()
-                            && routing_edit.is_none()
                             && memory_edit.is_none()
                         {
                             state.set_status("no settings changes to save");
-                        } else if let Err(err) = save_user_settings_with_routing(
+                        } else if let Err(err) = save_user_settings_with_memory(
                             runtime,
                             &harness_edits,
                             &provider_edits,
                             &profile_edits,
-                            routing_edit.as_ref(),
                             memory_edit.as_ref(),
                         ) {
                             tracing::warn!(error = %err, "could not save user settings");
@@ -391,22 +351,19 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
                         let profile_edits = state.settings_profile_edits();
-                        let routing_edit = state.settings_routing_edit();
                         let memory_edit = state.settings_memory_edit();
                         if harness_edits.is_empty()
                             && provider_edits.is_empty()
                             && profile_edits.is_empty()
-                            && routing_edit.is_none()
                             && memory_edit.is_none()
                         {
                             state.set_status("no settings changes to save");
                         } else {
-                            match save_project_settings_with_routing(
+                            match save_project_settings_with_memory(
                                 runtime,
                                 &harness_edits,
                                 &provider_edits,
                                 &profile_edits,
-                                routing_edit.as_ref(),
                                 memory_edit.as_ref(),
                             ) {
                                 Ok(path) => {
@@ -1210,9 +1167,7 @@ fn build_project_overview_memory(runtime: &Runtime) -> anyhow::Result<ProjectOve
 /// the condensed sibling of `glasshouse resources`'s full report, read the
 /// same way: [`crate::provider::resources::observed_capacity`], no network
 /// call. Scoped to [`EffectiveConfig::provider_names`], not the full
-/// registry — the same set `main.rs::disposable_candidates` scores a
-/// routing decision over. Line 1661 is [`build_project_overview_routing`],
-/// split out because it reads a database this function never opens.
+/// registry.
 /// Cannot fail visibly: an unreadable configuration becomes one honest line,
 /// the same file-I/O split [`build_project_overview_memory`] keeps.
 fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
@@ -1244,201 +1199,22 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
         .gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths().gateway_data_dir()));
     let base_thresholds = effective.capacity_band_thresholds().value;
 
-    // **Line 1283's producer.** The rows a burn rate counts, read once for
-    // every provider below. Fail-soft: a ledger that cannot be opened leaves
-    // the forecast honestly absent — never an error, never a guess.
-    let consumption = crate::routing::evidence::EvidenceLedger::open(runtime)
-        .and_then(|ledger| {
-            Ok(ledger.consumption_in_window(
-                now_unix,
-                crate::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
-            )?)
-        })
-        .map_err(|err| {
-            tracing::debug!(
-                error = %err,
-                "could not read the routing evidence ledger for the capacity overview's forecasts"
-            );
-        })
-        .ok();
-
-    let mut lines: Vec<String> = providers
+    providers
         .into_iter()
         .map(|provider| {
             let kind = ResourceKind::from_direct_provider(&provider);
             let state = observed_capacity(&kind, &effective, &telemetry, now_unix);
             let reserve_percent = effective.reserve_percent(&provider).value.get();
             let thresholds = base_thresholds.with_resource_reserve(reserve_percent);
-            let seconds_until_reset = state.seconds_until_reset(now_unix);
-            // Keyed provider-wide (`quota_context: None`): this overview is
-            // per configured provider, and names no credential of it.
-            let forecast = consumption.as_ref().and_then(|rows| {
-                crate::routing::burn::forecast(
-                    rows,
-                    crate::routing::burn::ResourceKey {
-                        provider: &provider,
-                        quota_context: None,
-                    },
-                    state.requests().remaining(),
-                    now_unix,
-                    seconds_until_reset,
-                )
-            });
             resource_capacity_line(
                 &kind.label(),
                 &state,
                 &thresholds,
                 reserve_percent,
                 now_unix,
-                forecast,
             )
         })
-        .collect();
-
-    // Line 1276: the same rows, read once more for the moving average per
-    // task class. Absent entirely, never a zero, when no class has enough
-    // live rows — gated at `MIN_ROWS_FOR_BURN_RATE`, the same minimum
-    // `burn_rate` enforces for the per-resource line above.
-    if let Some(rows) = consumption.as_ref() {
-        let rates = crate::routing::burn::task_class_request_rates(rows, now_unix, None);
-        let printable: Vec<_> = rates
-            .iter()
-            .filter(|rate| rate.rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE)
-            .collect();
-        if !printable.is_empty() {
-            // Line 1275: the same floor, on `token_rows` independently of
-            // the request figure — `tokens not counted` rather than a
-            // fabricated `0 tok/h`.
-            let by_class = printable
-                .iter()
-                .map(|rate| {
-                    let tokens = if rate.token_rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE
-                    {
-                        format!(
-                            "~{:.0} tok/h",
-                            rate.tokens_per_hour.expect(
-                                "token_rows at or above the floor means tokens_per_hour is Some"
-                            )
-                        )
-                    } else {
-                        "tokens not counted".to_owned()
-                    };
-                    format!(
-                        "{} ~{:.1}/h, {tokens}",
-                        rate.class.as_str(),
-                        rate.requests_per_hour
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            lines.push(format!(
-                "  requests by task class (recent, estimated)  {by_class}"
-            ));
-        }
-    }
-
-    lines
-}
-
-/// Map line 1661: the routing model currently selected to classify work, and
-/// its most recent observed latency — the first production reader
-/// `EvidenceLedger::summarize`'s duration fields have had outside a test.
-/// Model: [`EffectiveConfig::routing_model_resolution`], the same live
-/// answer map line 1680 reports — a `Pinned` choice naming a since-removed
-/// provider does not read as "selected" when nothing routes through it.
-/// Latency: only [`crate::config::RoutingModelResolution::Pinned`] names an
-/// identity the ledger can query; `Automatic`/`Heuristics` classify without
-/// one, so the line says so rather than showing an average attributed to a
-/// name that did not earn it (ruling 3). Cannot fail visibly: degrades to
-/// one honest line, the same shape [`build_project_overview_capacity`] uses.
-fn build_project_overview_routing(runtime: &Runtime) -> String {
-    use crate::config::RoutingModelResolution;
-    use crate::routing::evidence::EvidenceLedger;
-
-    let user = match UserConfig::load(runtime.paths()) {
-        Ok(user) => user,
-        Err(err) => return format!("  routing model  unavailable: {err:#}"),
-    };
-    let project_config = match config::load_project_config(runtime.project()) {
-        Ok(project_config) => project_config,
-        Err(err) => return format!("  routing model  unavailable: {err:#}"),
-    };
-    let gateway = config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
-    let effective = EffectiveConfig::with_gateway(&user, project_config.as_ref(), &gateway);
-    let resolution = effective.routing_model_resolution().value;
-    let label = routing_resolution_label(&resolution);
-
-    let latency = match &resolution {
-        RoutingModelResolution::Pinned { provider, model } => {
-            let now_unix = crate::provider::cache::now_unix_seconds();
-            match EvidenceLedger::open(runtime) {
-                Ok(ledger) => match ledger.summarize_latest_for_model(
-                    provider,
-                    model,
-                    now_unix,
-                    ROUTE_EVIDENCE_WINDOW_SECONDS,
-                ) {
-                    Ok(summary) => routing_latency_phrase(summary.as_ref()),
-                    Err(err) => format!("unavailable: {err:#}"),
-                },
-                Err(err) => format!("unavailable: {err:#}"),
-            }
-        }
-        RoutingModelResolution::Automatic | RoutingModelResolution::Heuristics(_) => {
-            "not applicable — no single model is selected".to_owned()
-        }
-    };
-
-    format!("  routing model  {label}, recent latency {latency}")
-}
-
-/// The short label for what will actually classify a request right now — the
-/// first pure half of [`build_project_overview_routing`], testable without a
-/// config file. Matches `shell::view::render_routing`'s word choice for
-/// [`crate::config::RoutingModelChoice::Automatic`]/`Deterministic`/`Pinned`
-/// exactly, plus the one thing a *resolution* can say that a raw choice
-/// cannot: which fallback, if any, is actually in effect right now.
-fn routing_resolution_label(resolution: &crate::config::RoutingModelResolution) -> String {
-    use crate::config::{RoutingFallback, RoutingModelResolution};
-
-    match resolution {
-        RoutingModelResolution::Automatic => "automatic".to_owned(),
-        RoutingModelResolution::Pinned { provider, model } => format!("{provider}:{model}"),
-        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured) => {
-            "deterministic heuristics (none configured)".to_owned()
-        }
-        RoutingModelResolution::Heuristics(RoutingFallback::DeterministicChosen) => {
-            "deterministic heuristics".to_owned()
-        }
-        RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
-            provider,
-            ..
-        }) => format!("deterministic heuristics (`{provider}` no longer configured)"),
-    }
-}
-
-/// One phrase naming a queried model's most recent latency, or exactly why
-/// there is none — the second pure half of [`build_project_overview_routing`],
-/// testable directly against a hand-built
-/// [`crate::routing::evidence::RoutingSummary`].
-/// Ruling 1: `None` is never `0`. `summary` being absent and
-/// `summary.median_duration_ms` being absent (below the minimum sample) both
-/// read the same honest "unknown" here — a caller downstream does not need
-/// to tell the two apart; `summarize_latest_for_model` keeps that
-/// distinction for one that does.
-fn routing_latency_phrase(summary: Option<&crate::routing::evidence::RoutingSummary>) -> String {
-    let Some(median) = summary.and_then(|s| s.median_duration_ms.as_ref()) else {
-        return "unknown — not enough observations yet".to_owned();
-    };
-    let tail = summary
-        .and_then(|s| s.tail_duration_ms.as_ref())
-        .map(|reading| format!(", p95 {}ms", reading.value()));
-    format!(
-        "median {}ms{} ({} sample(s))",
-        median.value(),
-        tail.unwrap_or_default(),
-        median.sample_count()
-    )
+        .collect()
 }
 
 /// One line describing what Glasshouse currently believes about `label`'s
@@ -1456,7 +1232,6 @@ fn resource_capacity_line(
     thresholds: &crate::provider::quota::CapacityBandThresholds,
     reserve_percent: u8,
     now_unix: i64,
-    forecast: Option<crate::routing::burn::ExhaustionForecast>,
 ) -> String {
     use crate::provider::quota::{CapacityBand, TelemetryClass};
 
@@ -1464,7 +1239,6 @@ fn resource_capacity_line(
         Some(seconds) => format!(", reset in {seconds}s"),
         None => String::new(),
     };
-    let forecast_note = forecast_note(forecast);
 
     let Some(score) = state.remaining_capacity_score() else {
         // No pool normalized to a percentage, but a manually configured plan
@@ -1476,7 +1250,7 @@ fn resource_capacity_line(
             Some(TelemetryClass::Estimated) => "estimated",
             Some(TelemetryClass::Manual) => "manual",
         };
-        return format!("  {label}  capacity {class_word}{reset_note}{forecast_note}");
+        return format!("  {label}  capacity {class_word}{reset_note}");
     };
 
     let band = score.band(thresholds);
@@ -1498,35 +1272,12 @@ fn resource_capacity_line(
     };
 
     let reserve_note = if band <= CapacityBand::Reserve {
-        format!("; protected reserve {reserve_percent}% is limiting routing here")
+        format!("; protected reserve {reserve_percent}% is limiting capacity here")
     } else {
         String::new()
     };
 
-    format!("  {label}  {band} {digits}% [{class_word}]{reset_note}{reserve_note}{forecast_note}")
-}
-
-/// **Line 1283**: an exhaustion forecast rendered as an *estimate*, never as
-/// a promise — real error bars a reader will act on, so every sentence is
-/// hedged in the text itself. Full wording rationale in design-decisions.md,
-/// "Trims: `shell/mod.rs`". `""` when there is no forecast, which the
-/// property `a_resource_with_no_forecast_prints_exactly_what_it_printed_before`
-/// pins.
-fn forecast_note(forecast: Option<crate::routing::burn::ExhaustionForecast>) -> String {
-    let Some(forecast) = forecast else {
-        return String::new();
-    };
-    let hours = forecast.seconds_to_exhaustion as f64 / 3600.0;
-    let reach = match forecast.survives_until_reset {
-        Some(false) => ", and may not reach its reset at the current rate",
-        Some(true) => ", which at the current rate would carry it past its reset",
-        None => "",
-    };
-    format!(
-        "; estimated to last about {hours:.1}h at the current rate \
-         ({:.1} requests/hour over {} observations){reach}",
-        forecast.requests_per_hour, forecast.rows
-    )
+    format!("  {label}  {band} {digits}% [{class_word}]{reset_note}{reserve_note}")
 }
 
 /// One display line: the memory's kind, and its subject if it has one or its
@@ -1742,150 +1493,6 @@ fn build_project_memory_view(runtime: &Runtime) -> anyhow::Result<KnowledgeSecti
     })
 }
 
-/// How many identities [`build_route_evidence_table`] shows — the same
-/// generous default [`PROJECT_KNOWLEDGE_SECTION_LIMIT`] uses.
-const ROUTE_EVIDENCE_ROW_LIMIT: usize = 20;
-
-/// How far back [`build_route_evidence_table`] looks for observed
-/// identities. A week: long enough a project still sees its own routing
-/// activity, short enough an identity nobody has exercised in a month ages
-/// out. Provisional, like `crate::routing::evidence`'s own constants.
-const ROUTE_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
-
-/// Read the routing evidence ledger's own distinct identities — Phase 47
-/// lines 1762 and 1764, closed after batch 42 found the ledger could not
-/// enumerate identities at all (practice §71).
-/// [`crate::routing::evidence::EvidenceLedger::observed_identities`] is this
-/// package's one additive method and the whole of what makes this possible.
-fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvidenceRow>> {
-    use crate::routing::evidence::EvidenceLedger;
-
-    let ledger = EvidenceLedger::open(runtime)?;
-    let now = crate::provider::cache::now_unix_seconds();
-    let identities =
-        ledger.observed_identities(now, ROUTE_EVIDENCE_WINDOW_SECONDS, ROUTE_EVIDENCE_ROW_LIMIT)?;
-    Ok(identities
-        .into_iter()
-        .map(|identity| {
-            let (window_start_unix, window_end_unix) = identity.window();
-            let sample_count = identity.sample_count();
-            RouteEvidenceRow {
-                provider: identity.provider,
-                model: identity.model,
-                route: identity.route,
-                context_state: identity.context_state.as_str().to_owned(),
-                sample_count,
-                window_start_unix,
-                window_end_unix,
-            }
-        })
-        .collect())
-}
-
-/// How many decisions the routing-decisions view shows.
-/// Smaller than [`ROUTE_EVIDENCE_ROW_LIMIT`] on purpose: a row here is a
-/// whole rationale, not one line, so twenty would be several screens nobody
-/// scrolls. Ten is a few days of ordinary use.
-const ROUTE_DECISION_ROW_LIMIT: usize = 10;
-
-/// Read the disposable-routing rationales `glasshouse hook` recorded.
-/// [`crate::evaluation::EvaluationObservations::recent_of_kind`] is this
-/// package's one additive read: `recent` alone is an unkeyed listing over
-/// every kind, so a project that has searched its memory recently would
-/// otherwise show retrievals here instead of routing decisions.
-/// **Project scope is the store's, not this function's**: the ledger opens
-/// from [`Runtime`] alone, and migration 15's triggers refuse a row naming
-/// any other `project_id`. **Nothing is derived** — every field is the
-/// stored column, and a row recording no session or rationale arrives as
-/// `None`, never an empty string.
-fn build_route_decision_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteDecisionRow>> {
-    use crate::evaluation::{EvaluationKind, EvaluationObservations};
-
-    let ledger = EvaluationObservations::open(runtime)?;
-    let decisions = ledger.recent_of_kind(
-        EvaluationKind::DisposableRouteDecided,
-        ROUTE_DECISION_ROW_LIMIT,
-    )?;
-    Ok(decisions
-        .into_iter()
-        .map(|observation| RouteDecisionRow {
-            observed_at_unix: observation.observed_at,
-            // `subject` is the job kind's own name, written by the producer.
-            // A row that recorded none says so rather than being drawn as a
-            // decision about nothing in particular.
-            job: observation
-                .subject
-                .unwrap_or_else(|| "(no job recorded)".to_owned()),
-            session_id: observation.session_id,
-            rationale: observation.detail,
-        })
-        .collect())
-}
-
-/// Read what a local gateway has observed about each free resource — Phase 47
-/// map line 1765, *"show route health, immediate availability, cadence, quota
-/// reset, and failure-domain evidence as separate concepts"*.
-/// The shell has no gateway or router of its own — [`run`] takes only a
-/// [`Runtime`] — but `crate::gateway::mod`'s accept loop, in a different
-/// invocation, already writes both caches to disk on every forwarded
-/// exchange; `glasshouse resources` reads them back the same way. Never
-/// fails: absent, unreadable or old-format all mean *nothing was observed*.
-/// **Scope is installation-wide, and the view says so**: both caches live
-/// under [`crate::paths::RuntimePaths::data_dir`], keyed by provider, **not**
-/// `project_state_dir` — visible to every project's shell.
-fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
-    use crate::provider::telemetry::{GatewayHealthCache, GatewayQuotaCache};
-    use crate::routing::domain::FailureDomain;
-
-    let now_unix = crate::provider::cache::now_unix_seconds();
-    let quota: std::collections::HashMap<
-        String,
-        (crate::provider::telemetry::RateLimitHeaders, i64),
-    > = GatewayQuotaCache::new(runtime.paths().gateway_data_dir())
-        .load_all()
-        .into_iter()
-        .map(|(provider, headers, observed_at)| (provider, (headers, observed_at)))
-        .collect();
-
-    let mut rows = Vec::new();
-    for (provider, readings) in
-        GatewayHealthCache::new(runtime.paths().gateway_data_dir()).load_all()
-    {
-        // Concept 5's only honest signal. `FailureDomain::between` compares
-        // two `Backend`s and neither cache stores one, so this uses the
-        // identity that comparison would use — the provider name. The
-        // vocabulary comes from the enum itself, and `Independent` is
-        // unreachable by construction.
-        let peers = readings.len().saturating_sub(1);
-        let domain = if peers > 0 {
-            FailureDomain::Shared
-        } else {
-            FailureDomain::Unknown
-        };
-        let stated = quota.get(&provider);
-        for reading in readings {
-            rows.push(RouteHealthRow {
-                provider: provider.clone(),
-                credential_label: reading.credential_label.clone(),
-                model: reading.model.clone(),
-                consecutive_failures: reading.consecutive_failures,
-                credential_rejected: reading.credential_rejected,
-                // The producer's own decision, asked rather than re-derived
-                // from the two fields above.
-                available_now: reading.is_available(now_unix),
-                cooling_down_until_unix: reading.cooling_down_until_unix,
-                stated_limit: stated.and_then(|(headers, _)| headers.limit()),
-                stated_window_seconds: stated.and_then(|(headers, _)| headers.window_seconds()),
-                quota_resets_at_unix: stated
-                    .and_then(|(headers, observed_at)| headers.resets_at_unix(*observed_at)),
-                failure_domain: domain.as_str().to_owned(),
-                failure_domain_peers: peers,
-            });
-        }
-    }
-    rows
-}
-
 /// How many subscription accounts this user has configured and connected.
 ///
 /// Every failure — an unreadable user configuration, a project file that does
@@ -2001,26 +1608,6 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         }
     }
 
-    let routing_model = effective.routing_model();
-    let max_latency = effective.max_router_latency();
-    let max_cost = effective.max_router_cost();
-    let prefer_free = effective.prefer_free_routing();
-    let premium_reserve = effective.premium_reserve();
-    // Phase 9I line 536: the user's order, disabled list and pin over the
-    // free pool, layered like every routing preference beside them.
-    let free_order = effective.free_resource_order();
-    let free_disabled = effective.free_resource_disabled();
-    let free_pin = effective.free_resource_pin();
-    let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
-    let routing = RoutingRow::new(
-        routing_model,
-        max_latency,
-        max_cost,
-        prefer_free,
-        premium_reserve,
-        configured_providers,
-    )
-    .with_free_preferences(free_order, free_disabled, free_pin);
     let memory = MemoryRow::new(effective.memory_extraction_enabled());
 
     // The accounts a user connects an existing plan through. Read here rather
@@ -2042,7 +1629,6 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         integrations,
         providers,
         profiles,
-        routing,
         memory,
         subscriptions,
         broker,
@@ -2351,35 +1937,6 @@ fn apply_profile_edits(table: &mut config::ProfileTable, edits: &[ProfileSetting
     }
 }
 
-fn apply_routing_edit(table: &mut config::RoutingConfig, edit: &RoutingSettingsEdit) {
-    if let Some(model) = &edit.model {
-        table.set_model(Some(model.clone()));
-    }
-    if let Some(value) = edit.max_latency {
-        table.set_max_router_latency(Some(value));
-    }
-    if let Some(value) = edit.max_cost {
-        table.set_max_marginal_cost(Some(value));
-    }
-    if let Some(value) = edit.prefer_free {
-        table.set_prefer_free(Some(value));
-    }
-    if let Some(value) = edit.premium_reserve {
-        table.set_premium_reserve(Some(value));
-    }
-    // Phase 9I line 536: the pin is a double `Option` because "no pin" is a
-    // state a user can choose explicitly, unlike every preference above it.
-    if let Some(value) = &edit.free_order {
-        table.set_free_resource_order(Some(value.clone()));
-    }
-    if let Some(value) = &edit.free_disabled {
-        table.set_free_resource_disabled(Some(value.clone()));
-    }
-    if let Some(value) = &edit.free_pin {
-        table.set_free_resource_pin(value.clone());
-    }
-}
-
 /// Write every pending Settings edit to the user-level configuration file.
 /// Never touches the project root — see the design decision's "writes
 /// default to the user layer".
@@ -2389,33 +1946,21 @@ pub fn save_user_settings(
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
 ) -> anyhow::Result<()> {
-    save_user_settings_with_routing(
-        runtime,
-        harness_edits,
-        provider_edits,
-        profile_edits,
-        None,
-        None,
-    )
+    save_user_settings_with_memory(runtime, harness_edits, provider_edits, profile_edits, None)
 }
 
-/// User-level save including independently staged Routing fields and the
-/// Memory field.
-pub fn save_user_settings_with_routing(
+/// User-level save including the independently staged Memory field.
+pub fn save_user_settings_with_memory(
     runtime: &Runtime,
     harness_edits: &[SettingsEdit],
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
-    routing_edit: Option<&RoutingSettingsEdit>,
     memory_edit: Option<&MemorySettingsEdit>,
 ) -> anyhow::Result<()> {
     let mut config = UserConfig::load(runtime.paths())?;
     apply_settings_edits(config.integrations_mut(), harness_edits);
     apply_provider_edits(config.providers_mut(), provider_edits);
     apply_profile_edits(config.profiles_mut(), profile_edits);
-    if let Some(edit) = routing_edit {
-        apply_routing_edit(config.routing_mut(), edit);
-    }
     if let Some(value) = memory_edit.and_then(|edit| edit.memory_extraction) {
         config.set_memory_extraction(Some(value));
     }
@@ -2435,34 +1980,23 @@ pub fn save_project_settings(
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
 ) -> anyhow::Result<std::path::PathBuf> {
-    save_project_settings_with_routing(
-        runtime,
-        harness_edits,
-        provider_edits,
-        profile_edits,
-        None,
-        None,
-    )
+    save_project_settings_with_memory(runtime, harness_edits, provider_edits, profile_edits, None)
 }
 
-/// Project-level counterpart to [`save_user_settings_with_routing`]. The
+/// Project-level counterpart to [`save_user_settings_with_memory`]. The
 /// caller reaches this only after the same explicit `W` confirmation as all
 /// other project Settings edits.
-pub fn save_project_settings_with_routing(
+pub fn save_project_settings_with_memory(
     runtime: &Runtime,
     harness_edits: &[SettingsEdit],
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
-    routing_edit: Option<&RoutingSettingsEdit>,
     memory_edit: Option<&MemorySettingsEdit>,
 ) -> anyhow::Result<std::path::PathBuf> {
     let mut project_config = config::load_project_config(runtime.project())?.unwrap_or_default();
     apply_settings_edits(project_config.integrations_mut(), harness_edits);
     apply_provider_edits(project_config.providers_mut(), provider_edits);
     apply_profile_edits(project_config.profiles_mut(), profile_edits);
-    if let Some(edit) = routing_edit {
-        apply_routing_edit(project_config.routing_mut(), edit);
-    }
     if let Some(value) = memory_edit.and_then(|edit| edit.memory_extraction) {
         project_config.set_memory_extraction(Some(value));
     }

@@ -152,14 +152,10 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
-        Some(Command::Pairing { model, harness }) => {
-            let user = UserConfig::load(runtime.paths())?;
-            let project = config::load_project_config(runtime.project())?;
-            let gateway = config::GatewayCatalogue::for_paths(runtime.paths())?;
-            let effective = EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
-            print!(
+        Some(Command::Analysis { refresh }) => {
+            println!(
                 "{}",
-                config::pairing::report(&effective, model.as_deref(), harness.as_deref())
+                crate::commands::analysis::run(runtime.paths(), *refresh)
             );
         }
         Some(Command::Response {
@@ -211,146 +207,20 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 )?
             );
         }
-        Some(Command::Analysis { refresh }) => {
-            println!(
-                "{}",
-                crate::commands::analysis::run(runtime.paths(), *refresh)
-            );
-        }
-        Some(Command::Classify { text }) => {
-            let request = text.join(" ");
-            // A model failure degrades to the heuristic and says so, rather
-            // than failing the command: the classification is still produced,
-            // and Phase 35's own fallback is what produces it. The exit code
-            // is unchanged — this command has never had a failure mode, and a
-            // routing model the user configured being unreachable is not one
-            // it should acquire.
-            //
-            // Line 1469: the same text-keyed cache `classify_for_routing`
-            // consults, best-effort on a configuration re-read exactly like
-            // `forbidden_providers` does — this command has no `EffectiveConfig`
-            // of its own to reuse.
-            let text_cache = crate::commands::routing_classification::ClassificationTextCache::new(
-                runtime.paths(),
-                runtime.project().id().as_str(),
-            );
-            let text_key = glasshouse::routing::request::normalised_task_key(&request);
-            let resolution_tag = match (
-                UserConfig::load(runtime.paths()),
-                config::load_project_config(runtime.project()),
-            ) {
-                (Ok(user), Ok(project)) => {
-                    let gateway =
-                        config::GatewayCatalogue::for_paths(runtime.paths()).unwrap_or_default();
-                    let effective =
-                        EffectiveConfig::with_gateway(&user, project.as_ref(), &gateway);
-                    crate::commands::routing_classification::classification_cache_resolution_tag(
-                        &effective.routing_model_resolution().value,
-                    )
-                }
-                _ => {
-                    tracing::debug!(
-                        "could not re-read configuration for the classification text cache"
-                    );
-                    None
-                }
-            };
-            let no_fingerprint = glasshouse::routing::request::RoutingFingerprint::new(
-                None,
-                &[],
-                std::iter::empty::<String>(),
-            );
-            let cached = resolution_tag.as_deref().and_then(|tag| {
-                let record = text_cache.lookup(&text_key)?;
-                let now = glasshouse::provider::cache::now_unix_seconds();
-                record
-                    .is_reusable_for(now, &no_fingerprint, tag)
-                    .then(|| record.classification())
-                    .flatten()
-            });
-            let model_output = match cached {
-                Some(classification) => Some(classification),
-                None => match crate::commands::routing_classification::classify_with_routing_model(
-                    &runtime,
-                    &glasshouse::routing::request::RouterRequest::for_text(&request),
-                    // Line 1419: `glasshouse classify` has chosen no launch
-                    // profile — there is nothing here to protect.
-                    None,
-                ) {
-                    crate::commands::routing_classification::ClassificationAttempt::NotConfigured => None,
-                    crate::commands::routing_classification::ClassificationAttempt::Answered(classification) => {
-                        if let Some(tag) = resolution_tag.as_deref() {
-                            text_cache.store(
-                                glasshouse::routing::request::CachedClassification::new(
-                                    text_key.clone(),
-                                    no_fingerprint.clone(),
-                                    tag,
-                                    &classification,
-                                    glasshouse::provider::cache::now_unix_seconds(),
-                                ),
-                            );
-                        }
-                        Some(classification)
-                    }
-                    crate::commands::routing_classification::ClassificationAttempt::Failed(why) => {
-                        eprintln!("glasshouse: {why}; deterministic heuristics answered instead");
-                        None
-                    }
-                },
-            };
-            print!(
-                "{}",
-                glasshouse::routing::classify::report(&request, model_output)
-            );
-        }
-        Some(Command::Route {
-            moment,
-            to,
-            fresh,
-            now,
-            task,
-        }) => match crate::commands::route::route_report(
-            &runtime,
-            moment,
-            to.as_deref(),
-            *fresh,
-            *now,
-            task.as_deref(),
-        ) {
-            Ok(report) => print!("{report}"),
-            Err(err) => {
-                eprintln!("glasshouse: {err:#}");
-                return Ok(ExitCode::FAILURE);
-            }
-        },
-        Some(Command::RateRoute {
-            session,
-            verdict,
-            note,
-        }) => {
-            match crate::commands::route::rate_route(&runtime, session, *verdict, note.as_deref()) {
-                Ok(report) => print!("{report}"),
-                Err(err) => {
-                    eprintln!("glasshouse: {err:#}");
-                    return Ok(ExitCode::FAILURE);
-                }
-            }
-        }
-        Some(Command::RoutingCost {
+        Some(Command::Cost {
             hours,
             json,
             since,
             session,
         }) => {
-            let result = if *json {
-                crate::commands::routing_cost::routing_cost_json_report(
-                    &runtime,
-                    *hours,
-                    *since,
-                    session.as_deref(),
-                )
-            } else {
-                crate::commands::routing_cost::routing_cost_report(&runtime, *hours)
+            let result = match (*json, session.as_deref()) {
+                (true, session) => {
+                    crate::commands::cost::cost_json_report(&runtime, *hours, *since, session)
+                }
+                (false, Some(session)) => {
+                    crate::commands::cost::cost_session_report(&runtime, session)
+                }
+                (false, None) => crate::commands::cost::cost_report(&runtime, *hours, *since),
             };
             match result {
                 Ok(report) => print!("{report}"),
@@ -512,16 +382,6 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     }
                 }
             }
-            Some(SessionCommand::Reserve { session, clear }) => {
-                match crate::commands::sessions::reserve_override_session(&runtime, session, *clear)
-                {
-                    Ok(report) => print!("{report}"),
-                    Err(err) => {
-                        eprintln!("glasshouse: {err:#}");
-                        return Ok(ExitCode::FAILURE);
-                    }
-                }
-            }
             Some(SessionCommand::Restyle {
                 session,
                 profile,
@@ -559,22 +419,6 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             path.as_deref(),
             session.as_deref(),
             *release,
-            *list,
-        ) {
-            Ok(report) => print!("{report}"),
-            Err(err) => {
-                eprintln!("glasshouse: {err:#}");
-                return Ok(ExitCode::FAILURE);
-            }
-        },
-        Some(Command::TaskProgress {
-            session,
-            withdraw,
-            list,
-        }) => match crate::commands::sessions::task_progress_command(
-            &runtime,
-            session.as_deref(),
-            *withdraw,
             *list,
         ) {
             Ok(report) => print!("{report}"),

@@ -1,7 +1,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use crate::config::{ProviderConfig, RoutingModelChoice, UserConfig};
+use crate::config::{ProviderConfig, UserConfig};
 use crate::integrations::{IntegrationId, IntegrationStatus};
 
 use super::super::state::{IntegrationDetection, WizardState};
@@ -198,13 +198,6 @@ fn every_step_renders_at_80x24_without_panicking() {
         crossterm::event::KeyCode::Tab,
         crossterm::event::KeyModifiers::NONE,
     ));
-    assert_eq!(state.step(), Step::Routing);
-    render_at(&state, 80, 24); // Choice sub-mode
-
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Tab,
-        crossterm::event::KeyModifiers::NONE,
-    ));
     assert_eq!(state.step(), Step::Summary);
     render_at(&state, 80, 24);
 }
@@ -333,443 +326,23 @@ fn zero_area_does_not_panic() {
     render_at(&state, 0, 0);
 }
 
-/// The three offers of the routing step, each highlighted in turn.
-///
-/// A reopen highlights whatever is recorded, and nothing is here, so the
-/// screen opens on "Do later" — the Phase 2C line 4 default. Rendered at
-/// 200 columns as well as 80 because every one of these labels wraps at
-/// 80, and a wrapped label is a label a `contains` assertion can miss for
-/// reasons that have nothing to do with the code (practice §17).
-#[test]
-fn every_routing_choice_renders_with_the_cursor_on_the_one_selected() {
-    const LABELS: [&str; 3] = [
-        "Do later — deterministic routing heuristics until configured",
-        "Choose model — pin classification to one specific model",
-        "Automatic — the cheapest sufficiently fast configured resource",
-    ];
-
-    let mut state = advance_to_routing(routing_state(&["my-router"], None));
-    for (presses, selected) in LABELS.iter().enumerate() {
-        for width in [80, 200] {
-            let screen = rendered_lines(&state, width, 24);
-            assert!(
-                screen
-                    .iter()
-                    .any(|line| line.starts_with(&format!("> {selected}"))),
-                "after {presses} moves up at {width} columns the cursor is not on \
-                 `{selected}`:\n{}",
-                screen.join("\n")
-            );
-            for other in LABELS.iter().filter(|label| *label != selected) {
-                assert!(
-                    screen
-                        .iter()
-                        .any(|line| line.starts_with(&format!("  {other}"))),
-                    "`{other}` is not offered unselected at {width} columns:\n{}",
-                    screen.join("\n")
-                );
-            }
-        }
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Up,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-    }
-}
-
-/// "Choose model" needs two answers, and both screens render them: which
-/// configured provider, then which model of that provider's.
-#[test]
-fn the_routing_provider_picker_and_the_model_field_render() {
-    let mut state = advance_to_routing(routing_state(&["my-router"], None));
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Up,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    for width in [80, 200] {
-        let screen = rendered_lines(&state, width, 24);
-        assert!(
-            screen
-                .iter()
-                .any(|line| line.contains("Configured providers")),
-            "the provider picker has no heading at {width} columns:\n{}",
-            screen.join("\n")
-        );
-        assert!(
-            screen
-                .iter()
-                .any(|line| line.starts_with("> my-router") && line.contains("openrouter")),
-            "the provider picker shows no cursor, name and template at {width} \
-             columns:\n{}",
-            screen.join("\n")
-        );
-    }
-
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    for c in "haiku-cheap".chars() {
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(c),
-            crossterm::event::KeyModifiers::NONE,
-        ));
-    }
-    for width in [80, 200] {
-        let screen = rendered_lines(&state, width, 24);
-        assert!(
-            screen
-                .iter()
-                .any(|line| line.contains("Routing model to pin from `my-router`: haiku-cheap_")),
-            "the model field does not name the provider, the buffer and the cursor at \
-             {width} columns:\n{}",
-            screen.join("\n")
-        );
-    }
-
-    // An empty confirm is refused, and says so where the field is.
-    for _ in 0.."haiku-cheap".len() {
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Backspace,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-    }
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    for width in [80, 200] {
-        let screen = rendered_lines(&state, width, 24);
-        assert!(
-            screen
-                .iter()
-                .any(|line| line.contains("a model name is required to pin routing")),
-            "an empty model name is refused silently at {width} columns:\n{}",
-            screen.join("\n")
-        );
-    }
-}
-
-/// With no provider configured there is nothing to pin to, and the screen
-/// says which prerequisite is missing rather than dropping the option.
-///
-/// The full parenthetical is only asserted at 200 columns: at 80 it wraps
-/// mid-phrase, so the short assertion there is the single word that
-/// cannot be split.
-#[test]
-fn choose_model_says_why_it_is_unavailable_with_no_provider_configured() {
-    let mut state = advance_to_routing(routing_state(&[], None));
-
-    let narrow = rendered_lines(&state, 80, 24);
-    assert!(
-        narrow
-            .iter()
-            .any(|line| line.contains("Choose model") && line.contains("unavailable")),
-        "at 80 columns the Choose model row does not say it is unavailable:\n{}",
-        narrow.join("\n")
-    );
-    let wide = rendered_lines(&state, 200, 24);
-    assert!(
-        wide.iter().any(|line| line.contains(
-            "Choose model — pin classification to one specific model (unavailable: \
-             needs a configured provider)"
-        )),
-        "at 200 columns the Choose model row does not name the missing \
-         prerequisite:\n{}",
-        wide.join("\n")
-    );
-
-    // Selecting it explains itself instead of reading as a dead key.
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Up,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    assert_eq!(state.step(), Step::Routing);
-    assert!(
-        rendered_lines(&state, 80, 24)
-            .iter()
-            .any(|line| line.contains("Choose model needs a configured provider")),
-        "the refused press left no notice at 80 columns"
-    );
-    assert!(
-        rendered_lines(&state, 200, 24)
-            .iter()
-            .any(|line| line.contains(
-                "Choose model needs a configured provider, and none is configured yet. Go \
-             back with Esc to add one, or pick Automatic or Do later."
-            )),
-        "the refused press left no complete notice at 200 columns"
-    );
-}
-
-/// The degrade explanation from [`crate::config::RoutingFallback`] reaches
-/// the screen verbatim, on the routing step and again on the Summary.
-///
-/// Verbatim is the whole point: this sentence is written once, in
-/// configuration, so the wizard cannot invent a second account of the same
-/// degrade. Asserting on the whole of it needs 200 columns — at 80 it
-/// wraps across three rows, and the substring asserted there is chosen to
-/// sit inside the first of them.
-#[test]
-fn a_pinned_model_whose_provider_vanished_explains_itself_on_both_screens() {
-    let mut state = advance_to_routing(routing_state(
-        &[],
-        Some(RoutingModelChoice::Pinned {
-            provider: "vanished".to_owned(),
-            model: "haiku-cheap".to_owned(),
-        }),
-    ));
-
-    assert_routing_degrade_is_visible(&state, "the routing step");
-
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Tab,
-        crossterm::event::KeyModifiers::NONE,
-    ));
-    assert_eq!(state.step(), Step::Summary);
-    assert_routing_degrade_is_visible(&state, "the Summary");
-}
-
-/// Both screens are checked the same way, so neither can drift into
-/// paraphrasing while the other stays honest.
-fn assert_routing_degrade_is_visible(state: &WizardState, screen_name: &str) {
-    const WHOLE: &str = "routing model `haiku-cheap` names provider `vanished`, which is \
-                         not configured; requests are classified by deterministic routing \
-                         heuristics until that provider is configured again";
-
-    let narrow = rendered_lines(state, 80, 24);
-    assert!(
-        narrow
-            .iter()
-            .any(|line| line.contains("names provider `vanished`, which is not configured")),
-        "{screen_name} does not explain the vanished provider at 80 columns:\n{}",
-        narrow.join("\n")
-    );
-    assert!(
-        narrow
-            .iter()
-            .any(|line| line.contains("`haiku-cheap`") && line.contains("`vanished`")),
-        "{screen_name} does not name the pinned model and its provider at 80 \
-         columns:\n{}",
-        narrow.join("\n")
-    );
-
-    let wide = rendered_lines(state, 200, 40);
-    assert!(
-        wide.iter().any(|line| line.contains(WHOLE)),
-        "{screen_name} does not carry the degrade explanation verbatim at 200 \
-         columns:\n{}",
-        wide.join("\n")
-    );
-}
-
-/// The Summary reports every recorded routing state, and no longer claims
-/// that routing-model configuration is absent from this setup.
-///
-/// The `!contains` half is asserted at 200 columns as well as 80: a stale
-/// sentence that is merely truncated off a narrow screen is still in the
-/// build (practice §17).
-#[test]
-fn the_summary_reports_whichever_routing_model_is_recorded() {
-    let cases = [
-        (
-            Vec::new(),
-            None,
-            "Routing model: none configured; deterministic routing heuristics classify \
-             requests until one is, which is a working system rather than a gap.",
-        ),
-        (
-            Vec::new(),
-            Some(RoutingModelChoice::Deterministic),
-            "Routing model: deterministic-only, on purpose — no model is asked, and \
-             deterministic routing heuristics classify requests.",
-        ),
-        (
-            Vec::new(),
-            Some(RoutingModelChoice::Automatic),
-            "Routing model: automatic — the resource is chosen at the moment a decision \
-             is actually needed, not now.",
-        ),
-        (
-            vec!["my-router"],
-            Some(RoutingModelChoice::Pinned {
-                provider: "my-router".to_owned(),
-                model: "haiku-cheap".to_owned(),
-            }),
-            "Routing model: `haiku-cheap` from provider `my-router`.",
-        ),
-    ];
-
-    for (providers, routing, expected) in cases {
-        let mut state = advance_to_routing(routing_state(&providers, routing));
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Tab,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        assert_eq!(state.step(), Step::Summary);
-
-        let wide = rendered_lines(&state, 200, 40);
-        assert!(
-            wide.iter().any(|line| line.contains(expected)),
-            "the Summary does not report `{expected}`:\n{}",
-            wide.join("\n")
-        );
-        assert!(
-            wide.iter()
-                .any(|line| line.contains("The Glasshouse gateway is not part of this setup")),
-            "the Summary stopped saying the gateway is still out of scope:\n{}",
-            wide.join("\n")
-        );
-        for (width, height) in [(80, 24), (200, 40)] {
-            let screen = rendered_lines(&state, width, height);
-            assert!(
-                !screen
-                    .iter()
-                    .any(|line| line.contains("routing-model configuration are not part")),
-                "the Summary still claims routing-model configuration is out of scope, \
-                 at {width}x{height}:\n{}",
-                screen.join("\n")
-            );
-        }
-    }
-}
-
-/// Every sub-screen of the optional routing step, including the
-/// model-name text field and its inline error, renders without panicking
-/// at every terminal size this module already tests every other step at.
-#[test]
-fn every_routing_sub_screen_renders_without_panicking_at_every_size() {
-    for (width, height) in [(80, 24), (20, 5), (300, 100), (0, 0)] {
-        // No provider: the Choice screen with the unavailable wording,
-        // and the notice a refused "Choose model" leaves behind.
-        let mut bare = advance_to_routing(routing_state(&[], None));
-        render_at(&bare, width, height);
-        bare.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Up,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        bare.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        render_at(&bare, width, height); // Choice, with a notice
-
-        // A pinned model whose provider is gone: the longest string any
-        // of these screens can be asked to lay out.
-        let degraded = advance_to_routing(routing_state(
-            &[],
-            Some(RoutingModelChoice::Pinned {
-                provider: "vanished".to_owned(),
-                model: "haiku-cheap".to_owned(),
-            }),
-        ));
-        render_at(&degraded, width, height);
-
-        let mut state = advance_to_routing(routing_state(&["my-router"], None));
-        render_at(&state, width, height); // Choice
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Up,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        render_at(&state, width, height); // PickProvider
-
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        render_at(&state, width, height); // ModelInput, empty
-
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        render_at(&state, width, height); // ModelInput, refused and erroring
-
-        for c in "haiku-cheap".chars() {
-            state.handle_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(c),
-                crossterm::event::KeyModifiers::NONE,
-            ));
-        }
-        render_at(&state, width, height); // ModelInput, filled
-
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        render_at(&state, width, height); // Choice, with the pin recorded
-    }
-}
-
-/// A wizard seeded with `providers` already in configuration and
-/// `routing` already recorded, so the routing step's reopen behaviour and
-/// its degrade can both be reached without pressing a key.
-fn routing_state(providers: &[&str], routing: Option<RoutingModelChoice>) -> WizardState {
-    let detected = vec![IntegrationDetection {
-        id: IntegrationId::ClaudeCode,
-        status: IntegrationStatus::Configured,
-        executable: Some("/usr/bin/claude".into()),
-        version: Some("1.2.3".to_owned()),
-    }];
-    let mut config = UserConfig::default();
-    for name in providers {
-        config
-            .providers_mut()
-            .set(*name, ProviderConfig::new("openrouter"));
-    }
-    config.routing_mut().set_model(routing);
-    WizardState::new(
-        &detected,
-        &config,
-        "glasshouse".to_owned(),
-        "/home/user/glasshouse".into(),
-        "0.1.0".to_owned(),
-    )
-}
-
-/// Move a fresh wizard to the routing step without touching any earlier
-/// one, which is the path a user who tabs through the optional steps
-/// takes.
-fn advance_to_routing(state: WizardState) -> WizardState {
-    let mut state = advance_to_harnesses(state);
-    for _ in 0..3 {
-        state.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Tab,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-    }
-    assert_eq!(state.step(), Step::Routing);
-    state
-}
-
 /// The Summary's genuine worst case, at the size it promises to fit.
 ///
 /// Every integration in the catalogue detected with a realistic — that is,
-/// long — executable path, a configured provider, and a pinned routing
-/// model whose provider has vanished, so the four-row degrade explanation
-/// is on screen too. This is not a hypothetical: running the shipped
+/// long — executable path and a configured provider, so every row's own
+/// length is on screen. This is not a hypothetical: running the shipped
 /// binary on a machine with ten harnesses installed under a macOS
-/// temporary directory dropped the entire `Routing model:` line and the
-/// gateway note off the bottom, and nothing said so, because a wrapped
-/// paragraph simply stops drawing.
+/// temporary directory dropped rows off the bottom, and nothing said so,
+/// because a wrapped paragraph simply stops drawing.
 ///
-/// The screen has **no rows to spare** in this state: it is the ruling
-/// GH-SUMMARY-SCROLL implements. Nothing may be silently cut any more —
-/// the last body row must say how much is still below, `End` must bring
-/// the rest onto the screen, and the union of what both screens show must
-/// still be everything.
+/// GH-SUMMARY-SCROLL's ruling — nothing may be silently cut, the last body
+/// row must say how much is still below, `End` must bring the rest onto the
+/// screen, and the union of what both screens show must still be everything
+/// — is exercised at a height tight enough to force it: since the routing
+/// deletion (design-decisions, 2026-09-16) removed the routing-model line
+/// that used to make 80x24 the exact tight boundary, eleven real integration
+/// rows plus one provider and the gateway note now fit at 80x24 with rows to
+/// spare, so this state is rendered at a shorter screen in the test itself.
 fn worst_case_summary_state() -> WizardState {
     let long = "/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/agent-shims/\
                 DC30465E-5CC0-4172-A1E8-F17DB285B969";
@@ -786,43 +359,34 @@ fn worst_case_summary_state() -> WizardState {
     config
         .providers_mut()
         .set("openrouter", ProviderConfig::new("openrouter"));
-    config
-        .routing_mut()
-        .set_model(Some(RoutingModelChoice::Pinned {
-            provider: "vanished-router".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        }));
-    let mut state = WizardState::new(
+    let state = WizardState::new(
         &detected,
         &config,
         "glasshouse".to_owned(),
         "/home/user/glasshouse".into(),
         "0.1.0".to_owned(),
     );
-    let mut state = advance_to_routing({
+    let mut state = advance_to_harnesses(state);
+    for _ in 0..3 {
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
             crossterm::event::KeyModifiers::NONE,
         ));
-        state
-    });
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Tab,
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    }
     assert_eq!(state.step(), Step::Summary);
     state
 }
 
 #[test]
-fn every_summary_section_survives_the_worst_case_at_80x24() {
+fn every_summary_section_survives_the_worst_case_at_80x18() {
     let mut state = worst_case_summary_state();
 
-    let top = rendered_lines(&state, 80, 24);
+    let top = rendered_lines(&state, 80, 18);
     let top_text = top.join("\n");
 
     // Every integration is exactly one row, so eleven of them cost eleven
-    // rows however long the machine's paths happen to be.
+    // rows however long the machine's paths happen to be, and all eleven
+    // are still ahead of the point this screen height cuts off.
     for &id in IntegrationId::ALL {
         let name = id.display_name();
         assert_eq!(
@@ -832,9 +396,9 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
         );
     }
 
-    // The last body row (index 22: title at 0, footer at 23) announces
+    // The last body row (index 16: title at 0, footer at 17) announces
     // that more follows rather than silently dropping it.
-    let last_body_row = &top[22];
+    let last_body_row = &top[16];
     assert!(
         last_body_row.contains('\u{2193}') && last_body_row.contains("more row"),
         "the last body row must announce the rows below, got:\n{last_body_row:?}"
@@ -844,11 +408,11 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
         crossterm::event::KeyCode::End,
         crossterm::event::KeyModifiers::NONE,
     ));
-    let bottom = rendered_lines(&state, 80, 24);
+    let bottom = rendered_lines(&state, 80, 18);
     let bottom_text = bottom.join("\n");
 
     // The first body row (index 1: title is index 0) now announces what
-    // scrolled off above, and the routing lines and gateway note the top
+    // scrolled off above, and the providers and gateway note the top
     // screen could not fit are on screen.
     let first_body_row = &bottom[1];
     assert!(
@@ -858,12 +422,9 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
 
     let union = format!("{top_text}\n{bottom_text}");
     for required in [
-        "Routing model:",
-        "gpt-5.6-luna",
-        "vanished-router",
-        "deterministic routing heuristics",
-        "The Glasshouse gateway is not part of this setup yet.",
+        "Providers",
         "openrouter",
+        "The Glasshouse gateway is not part of this setup yet.",
     ] {
         assert!(
             union.contains(required),
@@ -876,11 +437,13 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
 /// as before this packet, and the scroll keys are no-ops.
 #[test]
 fn a_fitting_summary_has_no_indicator_and_ignores_scroll_keys() {
-    let mut state = advance_to_routing(sample_state());
-    state.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Tab,
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    let mut state = advance_to_harnesses(sample_state());
+    for _ in 0..3 {
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
     assert_eq!(state.step(), Step::Summary);
 
     let before = rendered_lines(&state, 80, 40);

@@ -303,8 +303,7 @@ impl Fixture {
                  provider = \"preflight-probe\"\n\n\
                  [profiles.parked]\nharness = \"claude-code\"\nenabled = false\n\n\
                  [profiles.parked.backend]\nkind = \"direct-provider\"\n\
-                 provider = \"preflight-probe\"\n\n\
-                 [routing]\nautomatic = false\n"
+                 provider = \"preflight-probe\"\n"
             ),
         )
         .expect("write user config");

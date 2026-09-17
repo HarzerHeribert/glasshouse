@@ -50,7 +50,7 @@ use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::provider::Provider;
 use glasshouse::routing::AssignedModel;
-use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{EvidenceLedger, Outcome};
 use glasshouse::secret::EnvironmentSecretStore;
 use serde_json::{Value, json};
 
@@ -549,11 +549,24 @@ fn head_and_body(response: &[u8]) -> (String, &[u8]) {
 
 fn wait_for_row(
     ledger: &EvidenceLedger,
-    query: ObservationQuery<'_>,
+    provider: &str,
+    model: &str,
+    route: Option<&str>,
+    harness: Option<&str>,
 ) -> Vec<glasshouse::routing::evidence::RoutingObservation> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = ledger.recent(query, 10).expect("read the ledger");
+        let rows: Vec<_> = ledger
+            .observations_in_window(i64::MAX, i64::MAX)
+            .expect("read the ledger")
+            .into_iter()
+            .filter(|row| {
+                row.provider == provider
+                    && row.model == model
+                    && row.route.as_deref() == route
+                    && row.harness.as_deref() == harness
+            })
+            .collect();
         if !rows.is_empty() || Instant::now() >= deadline {
             return rows;
         }
@@ -619,12 +632,10 @@ fn cache_control_is_carried_as_prompt_cache_key_and_the_read_ratio_still_reaches
 
     let rows = wait_for_row(
         &ledger.ledger,
-        ObservationQuery {
-            provider: "chat",
-            model: "claude-x",
-            route: Some("anthropic-messages->openai-chat"),
-            harness: Some("claude-code"),
-        },
+        "chat",
+        "claude-x",
+        Some("anthropic-messages->openai-chat"),
+        Some("claude-code"),
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));

@@ -8,7 +8,6 @@ impl SettingsState {
             integrations: rows.integrations,
             providers: rows.providers,
             profiles: rows.profiles,
-            routing: rows.routing,
             memory: rows.memory,
             subscriptions: rows.subscriptions,
             broker: rows.broker,
@@ -20,18 +19,15 @@ impl SettingsState {
             edits: HashMap::new(),
             provider_edits: HashMap::new(),
             profile_edits: HashMap::new(),
-            routing_edit: RoutingSettingsEdit::default(),
             memory_edit: MemorySettingsEdit::default(),
             path_input: None,
             confirm_project_write: false,
             confirm_credential_delete: None,
             provider_input: None,
             profile_input: None,
-            routing_input: None,
             provider_notice: None,
             account_notice: None,
             pending_probe: None,
-            last_disposable_choice: None,
         }
     }
 
@@ -86,23 +82,8 @@ impl SettingsState {
         &self.profiles
     }
 
-    pub fn routing(&self) -> &RoutingRow {
-        &self.routing
-    }
-
     pub fn memory(&self) -> &MemoryRow {
         &self.memory
-    }
-
-    /// The most recent disposable-job routing choice, for the Routing
-    /// section to render its reason from — see
-    /// [`SettingsState::last_disposable_choice`]'s own field doc.
-    pub fn last_disposable_choice(&self) -> Option<&DisposableChoice> {
-        self.last_disposable_choice.as_ref()
-    }
-
-    pub(super) fn record_disposable_choice(&mut self, choice: DisposableChoice) {
-        self.last_disposable_choice = Some(choice);
     }
 
     pub fn selected_harness(&self) -> usize {
@@ -225,31 +206,6 @@ impl SettingsState {
         })
     }
 
-    /// The active Routing-section editor, if any.
-    pub fn routing_input(&self) -> Option<RoutingInputView<'_>> {
-        let input = self.routing_input.as_ref()?;
-        let label = match input.purpose {
-            RoutingInputPurpose::Model => {
-                "Routing model (automatic, deterministic, or provider:model)"
-            }
-            RoutingInputPurpose::MaxLatency => "Maximum router latency (milliseconds)",
-            RoutingInputPurpose::MaxCost => "Maximum marginal cost (USD per decision)",
-            RoutingInputPurpose::PremiumReserve => "Premium reserve threshold (percent)",
-            RoutingInputPurpose::FreeOrder => {
-                "Free-resource order: provider:model, comma-separated"
-            }
-            RoutingInputPurpose::FreeDisabled => {
-                "Disabled free resources: provider:model, comma-separated"
-            }
-            RoutingInputPurpose::FreePin => "Pinned free resource: provider:model, or empty",
-        };
-        Some(RoutingInputView {
-            label,
-            buffer: input.buffer.as_str(),
-            error: input.error.as_deref(),
-        })
-    }
-
     /// Every pending harness edit, for the run loop to apply when saving.
     pub(super) fn edits(&self) -> Vec<SettingsEdit> {
         self.edits
@@ -284,10 +240,6 @@ impl SettingsState {
             .collect()
     }
 
-    pub(super) fn routing_edit(&self) -> Option<RoutingSettingsEdit> {
-        (!self.routing_edit.is_empty()).then(|| self.routing_edit.clone())
-    }
-
     pub(super) fn memory_edit(&self) -> Option<MemorySettingsEdit> {
         (!self.memory_edit.is_empty()).then(|| self.memory_edit.clone())
     }
@@ -316,14 +268,12 @@ impl SettingsState {
         self.integrations = rows.integrations;
         self.providers = rows.providers;
         self.profiles = rows.profiles;
-        self.routing = rows.routing;
         self.memory = rows.memory;
         self.subscriptions = rows.subscriptions;
         self.broker = rows.broker;
         self.edits.clear();
         self.provider_edits.clear();
         self.profile_edits.clear();
-        self.routing_edit = RoutingSettingsEdit::default();
         self.memory_edit = MemorySettingsEdit::default();
     }
 
@@ -336,9 +286,6 @@ impl SettingsState {
         }
         if self.profile_input.is_some() {
             return self.handle_profile_input_key(key);
-        }
-        if self.routing_input.is_some() {
-            return self.handle_routing_input_key(key);
         }
         if let Some(provider) = self.confirm_credential_delete.clone() {
             return match key.code {
@@ -517,40 +464,6 @@ impl SettingsState {
                 self.remove_selected_profile();
                 SettingsAction::Redraw
             }
-            KeyCode::Char('m') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::Model);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('l') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::MaxLatency);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('c') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::MaxCost);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('f') if self.section == SettingsSection::Routing => {
-                self.routing.prefer_free = !self.routing.prefer_free;
-                self.routing.prefer_free_layer = Layer::User;
-                self.routing_edit.prefer_free = Some(self.routing.prefer_free);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('p') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::PremiumReserve);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('o') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::FreeOrder);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('d') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::FreeDisabled);
-                SettingsAction::Redraw
-            }
-            KeyCode::Char('n') if self.section == SettingsSection::Routing => {
-                self.start_routing_input(RoutingInputPurpose::FreePin);
-                SettingsAction::Redraw
-            }
             // -------------------------------------------------------------
             // Subscriptions. Every arm here produces a **command to type**,
             // never a process: `glasshouse subscriptions login` inherits stdio
@@ -625,7 +538,7 @@ impl SettingsState {
                 self.selected_subscription =
                     (self.selected_subscription as i32 + delta).clamp(0, last) as usize;
             }
-            SettingsSection::Routing | SettingsSection::Memory => {}
+            SettingsSection::Memory => {}
         }
     }
 
@@ -1344,165 +1257,6 @@ impl SettingsState {
                 self.profile_edits.insert(typed, Some(config));
             }
         }
-    }
-
-    // -------------------------------------------------------------
-    // Routing
-    // -------------------------------------------------------------
-
-    fn start_routing_input(&mut self, purpose: RoutingInputPurpose) {
-        let buffer = match purpose {
-            RoutingInputPurpose::Model => match &self.routing.model {
-                RoutingModelChoice::Automatic => "automatic".to_owned(),
-                RoutingModelChoice::Deterministic => "deterministic".to_owned(),
-                RoutingModelChoice::Pinned { provider, model } => {
-                    format!("{provider}:{model}")
-                }
-            },
-            RoutingInputPurpose::MaxLatency => self.routing.max_latency.get().to_string(),
-            RoutingInputPurpose::MaxCost => format_usd(self.routing.max_cost),
-            RoutingInputPurpose::PremiumReserve => self.routing.premium_reserve.get().to_string(),
-            RoutingInputPurpose::FreeOrder => format_free_resource_list(&self.routing.free_order),
-            RoutingInputPurpose::FreeDisabled => {
-                format_free_resource_list(&self.routing.free_disabled)
-            }
-            RoutingInputPurpose::FreePin => self
-                .routing
-                .free_pin
-                .as_ref()
-                .map(format_free_resource_ref)
-                .unwrap_or_default(),
-        };
-        self.routing_input = Some(RoutingTextInput {
-            purpose,
-            buffer,
-            error: None,
-        });
-    }
-
-    fn handle_routing_input_key(&mut self, key: KeyEvent) -> SettingsAction {
-        match key.code {
-            KeyCode::Esc => {
-                self.routing_input = None;
-                SettingsAction::Redraw
-            }
-            KeyCode::Enter => {
-                self.confirm_routing_input();
-                SettingsAction::Redraw
-            }
-            KeyCode::Backspace => {
-                if let Some(input) = self.routing_input.as_mut() {
-                    input.buffer.pop();
-                    input.error = None;
-                }
-                SettingsAction::Redraw
-            }
-            KeyCode::Char(c) => {
-                if let Some(input) = self.routing_input.as_mut() {
-                    input.buffer.push(c);
-                    input.error = None;
-                }
-                SettingsAction::Redraw
-            }
-            _ => SettingsAction::None,
-        }
-    }
-
-    fn confirm_routing_input(&mut self) {
-        let Some(input) = self.routing_input.take() else {
-            return;
-        };
-        let typed = input.buffer.trim();
-        let result = match input.purpose {
-            RoutingInputPurpose::Model => self.apply_routing_model(typed),
-            RoutingInputPurpose::MaxLatency => typed
-                .parse::<u32>()
-                .map_err(|_| "latency must be a whole number of milliseconds".to_owned())
-                .and_then(|value| RouterLatencyMs::try_from(value).map_err(|err| err.to_string()))
-                .map(|value| {
-                    self.routing.max_latency = value;
-                    self.routing.max_latency_layer = Layer::User;
-                    self.routing_edit.max_latency = Some(value);
-                }),
-            RoutingInputPurpose::MaxCost => parse_usd_micro(typed).map(|value| {
-                self.routing.max_cost = value;
-                self.routing.max_cost_layer = Layer::User;
-                self.routing_edit.max_cost = Some(value);
-            }),
-            RoutingInputPurpose::PremiumReserve => typed
-                .parse::<u16>()
-                .map_err(|_| "reserve must be a whole-number percentage".to_owned())
-                .and_then(|value| {
-                    PremiumReservePercent::try_from(value).map_err(|err| err.to_string())
-                })
-                .map(|value| {
-                    self.routing.premium_reserve = value;
-                    self.routing.premium_reserve_layer = Layer::User;
-                    self.routing_edit.premium_reserve = Some(value);
-                }),
-            RoutingInputPurpose::FreeOrder => parse_free_resource_list(typed).map(|value| {
-                self.routing.free_order = value.clone();
-                self.routing.free_order_layer = Layer::User;
-                self.routing_edit.free_order = Some(value);
-            }),
-            RoutingInputPurpose::FreeDisabled => parse_free_resource_list(typed).map(|value| {
-                self.routing.free_disabled = value.clone();
-                self.routing.free_disabled_layer = Layer::User;
-                self.routing_edit.free_disabled = Some(value);
-            }),
-            RoutingInputPurpose::FreePin => {
-                let pin = if typed.is_empty() {
-                    Ok(None)
-                } else {
-                    parse_free_resource_ref(typed).map(Some)
-                };
-                pin.map(|value| {
-                    self.routing.free_pin = value.clone();
-                    self.routing.free_pin_layer = Layer::User;
-                    self.routing_edit.free_pin = Some(value);
-                })
-            }
-        };
-        if let Err(error) = result {
-            self.routing_input = Some(RoutingTextInput {
-                purpose: input.purpose,
-                buffer: input.buffer,
-                error: Some(error),
-            });
-        }
-    }
-
-    fn apply_routing_model(&mut self, typed: &str) -> Result<(), String> {
-        let choice = if typed.eq_ignore_ascii_case("automatic") {
-            RoutingModelChoice::Automatic
-        } else if typed.eq_ignore_ascii_case("deterministic") {
-            RoutingModelChoice::Deterministic
-        } else {
-            let Some((provider, model)) = typed.split_once(':') else {
-                return Err("use `automatic`, `deterministic`, or `provider:model`".to_owned());
-            };
-            let provider = provider.trim();
-            let model = model.trim();
-            if provider.is_empty() || model.is_empty() {
-                return Err("a pinned choice needs both a provider and model".to_owned());
-            }
-            if !self
-                .routing
-                .configured_providers
-                .iter()
-                .any(|configured| configured == provider)
-            {
-                return Err(format!("`{provider}` is not a configured provider"));
-            }
-            RoutingModelChoice::Pinned {
-                provider: provider.to_owned(),
-                model: model.to_owned(),
-            }
-        };
-        self.routing.model = choice.clone();
-        self.routing.model_layer = Layer::User;
-        self.routing_edit.model = Some(choice);
-        Ok(())
     }
 
     fn handle_path_input_key(&mut self, key: KeyEvent) -> SettingsAction {

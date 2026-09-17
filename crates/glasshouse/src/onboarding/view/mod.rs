@@ -16,9 +16,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 
 use super::state::{
-    BypassRowView, PathInputView, ProviderRow, ProviderStepView, ProviderTemplateRow,
-    RoutingChoice, RoutingProviderRow, RoutingSelectionView, RoutingStepView, RowView, Step,
-    WizardState,
+    BypassRowView, PathInputView, ProviderRow, ProviderStepView, ProviderTemplateRow, RowView,
+    Step, WizardState,
 };
 
 /// Draw the current step of `state` into `frame`.
@@ -49,7 +48,6 @@ pub fn render(state: &WizardState, frame: &mut Frame) {
         Step::Harnesses => render_harnesses(state, frame, body_area),
         Step::Bypass => render_bypass_step(state, frame, body_area),
         Step::Provider => render_provider_step(state, frame, body_area),
-        Step::Routing => render_routing_step(state, frame, body_area),
         Step::Summary => render_summary(state, frame, body_area),
     }
     render_footer(state, frame, footer_area, body_area);
@@ -61,7 +59,6 @@ fn render_title(state: &WizardState, frame: &mut Frame, area: Rect) {
         Step::Harnesses => "Glasshouse setup — harnesses & integrations",
         Step::Bypass => "Glasshouse setup — bypass acknowledgement (optional)",
         Step::Provider => "Glasshouse setup — provider (optional)",
-        Step::Routing => "Glasshouse setup — routing model (optional)",
         Step::Summary => "Glasshouse setup — review",
     };
     frame.render_widget(
@@ -379,182 +376,6 @@ fn render_provider_base_url(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-/// The optional routing-model step ([`Step::Routing`]): which model, if any,
-/// classifies a request before Glasshouse spends capacity on it, plus
-/// whichever sub-screen "Choose model" opened.
-///
-/// Deliberately the same shape as [`render_provider_step`] one step earlier —
-/// three offers, a picker, a text field — because the two optional steps are
-/// answered the same way and so should look and move the same way.
-fn render_routing_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    match state.routing_step() {
-        RoutingStepView::Choice {
-            selected,
-            recorded,
-            can_choose_model,
-            notice,
-        } => render_routing_choice(
-            selected,
-            &recorded,
-            can_choose_model,
-            notice.as_deref(),
-            frame,
-            area,
-        ),
-        RoutingStepView::PickProvider { options } => {
-            render_routing_providers(&options, frame, area)
-        }
-        RoutingStepView::ModelInput {
-            provider,
-            buffer,
-            error,
-        } => render_routing_model_input(&provider, &buffer, error.as_deref(), frame, area),
-    }
-}
-
-/// The three offers of [`RoutingChoice`], why the last key press did nothing,
-/// and what is recorded right now.
-///
-/// `can_choose_model` never removes the "Choose model" row. An option that
-/// vanishes reads as a bug in the wizard; an option that is present and says
-/// what it needs tells the user how to get it, which is why the unavailable
-/// wording names the missing prerequisite instead of the row simply not
-/// being drawn.
-fn render_routing_choice(
-    selected: RoutingChoice,
-    recorded: &RoutingSelectionView,
-    can_choose_model: bool,
-    notice: Option<&str>,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let choose_model = if can_choose_model {
-        "Choose model — pin classification to one specific model".to_owned()
-    } else {
-        "Choose model — pin classification to one specific model (unavailable: needs a \
-         configured provider)"
-            .to_owned()
-    };
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(
-            "Optional. Before spending premium agent capacity on a request, Glasshouse \
-             can ask one cheap, fast model to classify it and say which resource should \
-             handle it. Nothing is routed by this setting yet — it records the intent — \
-             and leaving it for later keeps a fully working system on deterministic \
-             routing heuristics.",
-        ),
-        Line::from(""),
-        choice_line(
-            "Automatic — the cheapest sufficiently fast configured resource, chosen when a \
-             decision is actually needed",
-            selected == RoutingChoice::Automatic,
-        ),
-        choice_line(&choose_model, selected == RoutingChoice::ChooseModel),
-        choice_line(
-            "Do later — deterministic routing heuristics until configured",
-            selected == RoutingChoice::DoLater,
-        ),
-    ];
-
-    // Yellow, not the red the input errors use: a notice reports a press that
-    // was refused for an ordinary reason, and nothing the user did was wrong.
-    // Red here would tell them they had made a mistake.
-    if let Some(notice) = notice {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            notice.to_owned(),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    lines.push(Line::from(""));
-    lines.extend(routing_selection_lines("Currently recorded:", recorded));
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-/// One sentence for whatever [`WizardState::routing_selection`] currently
-/// reports, prefixed by `label`.
-///
-/// Shared by the routing step and the Summary so the two cannot describe the
-/// same recorded choice differently. The
-/// [`RoutingSelectionView::PinnedUnavailable`] arm renders its `message`
-/// **verbatim** on its own line: that string is
-/// [`crate::config::RoutingFallback`]'s own explanation of the degrade, and
-/// restating it here in the wizard's words is exactly the drift the view type
-/// carries it to prevent.
-fn routing_selection_lines(label: &str, selection: &RoutingSelectionView) -> Vec<Line<'static>> {
-    let headline = match selection {
-        RoutingSelectionView::NotConfigured => "none configured; deterministic routing \
-             heuristics classify requests until one is, which is a working system rather \
-             than a gap."
-            .to_owned(),
-        RoutingSelectionView::Deterministic => "deterministic-only, on purpose — no model \
-             is asked, and deterministic routing heuristics classify requests."
-            .to_owned(),
-        RoutingSelectionView::Automatic => "automatic — the resource is chosen at the \
-             moment a decision is actually needed, not now."
-            .to_owned(),
-        RoutingSelectionView::Pinned { provider, model }
-        | RoutingSelectionView::PinnedUnavailable {
-            provider, model, ..
-        } => format!("`{model}` from provider `{provider}`."),
-    };
-    let mut lines = vec![Line::from(format!("{label} {headline}"))];
-    if let RoutingSelectionView::PinnedUnavailable { message, .. } = selection {
-        lines.push(Line::from(Span::styled(
-            message.clone(),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-    lines
-}
-
-/// The providers a pinned routing model may be chosen from — the same set
-/// [`WizardState::configured_providers`] reports, so a provider configured a
-/// step earlier in this same run is offered here immediately.
-fn render_routing_providers(options: &[RoutingProviderRow], frame: &mut Frame, area: Rect) {
-    let mut lines = vec![
-        Line::from("Configured providers — choose the one the routing model belongs to:"),
-        Line::from(""),
-    ];
-    for option in options {
-        let cursor = if option.selected { "> " } else { "  " };
-        let mut style = Style::default();
-        if option.selected {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        lines.push(Line::from(Span::styled(
-            format!("{cursor}{:<20} template {}", option.name, option.template),
-            style,
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-/// The model-name field, which names the provider being pinned to in its own
-/// prompt — a model name alone would not say who is being asked.
-fn render_routing_model_input(
-    provider: &str,
-    buffer: &str,
-    error: Option<&str>,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let mut lines = vec![Line::from(format!(
-        "Routing model to pin from `{provider}`: {buffer}_"
-    ))];
-    if let Some(error) = error {
-        lines.push(Line::from(Span::styled(
-            error.to_owned(),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
 /// Draw the Summary, scrolled to `state.summary_scroll()` and clamped to
 /// what actually fits — see [`render_summary`] for the overflow decision.
 fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -660,10 +481,6 @@ fn summary_lines(state: &WizardState, width: u16) -> Vec<Line<'static>> {
         }
     }
     lines.push(Line::from(""));
-    lines.extend(routing_selection_lines(
-        "Routing model:",
-        &state.routing_selection(),
-    ));
     // No blank separator before the gateway note — see
     // `every_summary_section_survives_the_worst_case_at_80x24`.
     lines.push(Line::from(
@@ -808,13 +625,6 @@ fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect, body_area: 
                 }
                 ProviderStepView::PickTemplate { .. } => "↑/↓ move   Enter/Space choose   Esc back",
                 ProviderStepView::BaseUrlInput { .. } => "Type URL   Enter confirm   Esc back",
-            },
-            Step::Routing => match state.routing_step() {
-                RoutingStepView::Choice { .. } => {
-                    "↑/↓ choose   Enter/Space select   Tab skip   Esc cancel"
-                }
-                RoutingStepView::PickProvider { .. } => "↑/↓ move   Enter/Space choose   Esc back",
-                RoutingStepView::ModelInput { .. } => "Type model   Enter confirm   Esc back",
             },
             Step::Summary => {
                 if summary_overflows(state, body_area.width, body_area.height) {

@@ -1460,27 +1460,6 @@ fn serialized_form_has_no_secret_capable_field() {
          widening this list"
     );
 
-    // `RoutingModelChoice::Pinned` — the newest stored shape, and the
-    // only variant of it that carries a payload. Both halves are NAMES:
-    // `provider` is a key into `ProviderTable` and `model` is a model
-    // name, exactly like `ProfileConfig`'s `backend`/`model` pair above.
-    // Turning either into an actual credential stays `SecretStore`'s job.
-    let pinned_routing = RoutingModelChoice::Pinned {
-        provider: "openrouter".to_owned(),
-        model: "gpt-5.6-luna".to_owned(),
-    };
-    let pinned_routing_value = toml::Value::try_from(&pinned_routing).unwrap();
-    let pinned_routing_table = pinned_routing_value.as_table().unwrap();
-    let mut pinned_routing_keys: Vec<&str> =
-        pinned_routing_table.keys().map(String::as_str).collect();
-    pinned_routing_keys.sort_unstable();
-    assert_eq!(
-        pinned_routing_keys,
-        vec!["kind", "model", "provider"],
-        "RoutingModelChoice::Pinned grew a field — confirm it cannot hold a credential \
-         before widening this list"
-    );
-
     // `ProviderConfig` — the shape that comes closest to a credential,
     // since it is the one a provider's key is configured through. Its
     // `credential_store` holds a `StoredCredentialRef`, which is two
@@ -1501,7 +1480,7 @@ fn serialized_form_has_no_secret_capable_field() {
         // by the same identifier, and neither half can hold a value.
         .set_model_ceilings(BTreeMap::from([(
             "nvidia/nemotron-nano-9b-v2:free".to_owned(),
-            ConfiguredWorkloadTier::new(crate::routing::classify::WorkloadTier::Leaf),
+            ConfiguredWorkloadTier::new(crate::config::WorkloadTier::Leaf),
         )]));
     let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
     let provider_table = provider_value.as_table().unwrap();
@@ -1729,8 +1708,8 @@ fn an_os_credential_reference_round_trips_through_configuration_without_its_valu
 /// truncation risk does not apply to a TOML file: nothing elides it) — a
 /// project config populated across every component table this module
 /// exposes (providers with headers and a credential store, profiles,
-/// pairing corrections, a response profile, routing), so a leak in any
-/// one of them would show up here rather than only in a narrow fixture.
+/// pairing corrections, a response profile), so a leak in any one of
+/// them would show up here rather than only in a narrow fixture.
 #[test]
 fn project_config_file_never_contains_a_planted_secret_value_across_every_table() {
     const VAR: &str = "GLASSHOUSE_PROJECT_CONFIG_TEST_ONLY_SECRET_VAR";
@@ -1767,12 +1746,6 @@ fn project_config_file_never_contains_a_planted_secret_value_across_every_table(
         .response_mut()
         .default_entry_mut()
         .set_preset(Some("audit".to_owned()));
-    config
-        .routing_mut()
-        .set_model(Some(RoutingModelChoice::Pinned {
-            provider: "wide".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-        }));
 
     // SAFETY: `VAR` is unique to this test and removed again below.
     // Planted so that a serializer which resolved the reference would

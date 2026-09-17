@@ -48,9 +48,9 @@ impl glasshouse::memory::ExtractionModel for NoExtractionModel {
 /// second channel. `complete` is delegated untouched.
 pub(crate) fn noting_withheld_credentials(
     model: Box<dyn glasshouse::memory::ExtractionModel>,
-    withheld: &[crate::commands::routing_classification::WithheldCredential],
+    withheld: &[crate::commands::shared::WithheldCredential],
 ) -> Box<dyn glasshouse::memory::ExtractionModel> {
-    match crate::commands::routing_classification::withheld_credential_notice(withheld) {
+    match crate::commands::shared::withheld_credential_notice(withheld) {
         Some(notice) => Box::new(CredentialWithheld {
             inner: model,
             notice,
@@ -77,7 +77,7 @@ impl glasshouse::memory::ExtractionModel for CredentialWithheld {
     }
 }
 
-/// `model`, with `routing_classification::consent_missing_notice`'s
+/// `model`, with `noting_missing_consent`'s
 /// sentence appended to its description; `complete` untouched.
 ///
 /// Shaped exactly like [`CredentialWithheld`] beside it: `describe` appends
@@ -260,9 +260,7 @@ pub(crate) fn run_extraction(
             // Map line 1769, opt-in: never fails and never changes `outcome`
             // — the extraction it describes has already run and already
             // been reported.
-            if crate::commands::routing_classification::memory_extraction_diagnostics_enabled(
-                runtime,
-            ) {
+            if crate::commands::shared::memory_extraction_diagnostics_enabled(runtime) {
                 glasshouse::memory::extract::diagnostics::append_diagnostics(runtime, &outcome);
             }
             Some(outcome)
@@ -449,9 +447,7 @@ fn record_extraction_observation(
     // rather than re-labelling them: `NewObservation::with_purpose`'s own doc
     // comment is the rule, and back-filling would make "this build recorded
     // nothing here" indistinguishable from "this build recorded a purpose".
-    let observation = observation.with_purpose(Some(
-        crate::commands::routing_classification::EXTRACTION_PURPOSE,
-    ));
+    let observation = observation.with_purpose(Some(crate::commands::shared::EXTRACTION_PURPOSE));
     let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         Ok(ledger) => ledger,
         Err(err) => {

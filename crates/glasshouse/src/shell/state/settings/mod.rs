@@ -17,6 +17,11 @@ impl ShellState {
     /// fresh [`crate::integrations::Discovery`] pass and the configuration
     /// currently on disk. This module never runs that discovery or reads a
     /// configuration file itself — see the module documentation.
+    ///
+    /// A thin wrapper over [`ShellState::open_settings_rows`], which is what
+    /// production calls: every row every section shows travels as one value,
+    /// so adding a section is a field rather than a positional argument at
+    /// four call sites.
     pub fn open_settings(
         &mut self,
         harnesses: Vec<HarnessRow>,
@@ -24,42 +29,12 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
     ) -> Action {
-        let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
-        self.open_settings_with_routing(
-            harnesses,
-            integrations,
-            providers,
-            profiles,
-            RoutingRow::defaults(configured_providers),
-            MemoryRow::defaults(),
-        )
-    }
-
-    /// Open Settings with the fully resolved routing-policy row and memory
-    /// row supplied by the run loop. Kept separate from
-    /// [`ShellState::open_settings`] so older in-module callers can construct
-    /// unrelated settings fixtures without repeating routing/memory defaults.
-    ///
-    /// A thin wrapper over [`ShellState::open_settings_rows`], which is what
-    /// production calls: every row every section shows travels as one value,
-    /// so adding a section is a field rather than a seventh positional
-    /// argument at four call sites.
-    pub fn open_settings_with_routing(
-        &mut self,
-        harnesses: Vec<HarnessRow>,
-        integrations: Vec<IntegrationRow>,
-        providers: Vec<ProviderRow>,
-        profiles: Vec<ProfileRow>,
-        routing: RoutingRow,
-        memory: MemoryRow,
-    ) -> Action {
         self.open_settings_rows(SettingsRows {
             harnesses,
             integrations,
             providers,
             profiles,
-            routing,
-            memory,
+            memory: MemoryRow::defaults(),
             ..SettingsRows::default()
         })
     }
@@ -98,36 +73,12 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
     ) {
-        let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
-        self.refresh_settings_with_routing(
-            harnesses,
-            integrations,
-            providers,
-            profiles,
-            RoutingRow::defaults(configured_providers),
-            MemoryRow::defaults(),
-        );
-    }
-
-    /// Refresh Settings with a freshly resolved routing-policy row and memory
-    /// row. A thin wrapper over [`ShellState::refresh_settings_rows`], for the
-    /// reason [`ShellState::open_settings_with_routing`] gives.
-    pub fn refresh_settings_with_routing(
-        &mut self,
-        harnesses: Vec<HarnessRow>,
-        integrations: Vec<IntegrationRow>,
-        providers: Vec<ProviderRow>,
-        profiles: Vec<ProfileRow>,
-        routing: RoutingRow,
-        memory: MemoryRow,
-    ) {
         self.refresh_settings_rows(SettingsRows {
             harnesses,
             integrations,
             providers,
             profiles,
-            routing,
-            memory,
+            memory: MemoryRow::defaults(),
             ..SettingsRows::default()
         });
     }
@@ -136,27 +87,6 @@ impl ShellState {
     pub fn refresh_settings_rows(&mut self, rows: SettingsRows) {
         if let Some(settings) = self.settings.as_mut() {
             settings.replace_rows(rows);
-        }
-    }
-
-    /// Record the most recent disposable-job routing choice, so the Routing
-    /// section can show why the free resource currently in use was chosen —
-    /// Phase 9I line 540.
-    ///
-    /// **This batch wires the display, not the feed.** Nothing in this
-    /// build calls this from a live router — there is no live router yet.
-    /// Feeding it from `crate::routing::disposable::DisposableRouting`'s
-    /// actual decisions, each time Glasshouse routes a disposable job, is
-    /// `lead-route`'s to wire once that production call site exists; see
-    /// this batch's report.
-    ///
-    /// A no-op when Settings is not open, matching every other
-    /// `*_with_routing` setter here — there is nowhere to hold the choice
-    /// otherwise, and the next [`ShellState::open_settings_with_routing`]
-    /// resolves a fresh [`RoutingRow`] anyway.
-    pub fn record_disposable_choice(&mut self, choice: DisposableChoice) {
-        if let Some(settings) = self.settings.as_mut() {
-            settings.record_disposable_choice(choice);
         }
     }
 
@@ -299,12 +229,6 @@ impl ShellState {
         self.settings.as_ref()?.account_notice()
     }
 
-    /// The independently staged routing fields, if this Settings session
-    /// changed at least one of them.
-    pub fn settings_routing_edit(&self) -> Option<RoutingSettingsEdit> {
-        self.settings.as_ref()?.routing_edit()
-    }
-
     /// The independently staged Memory field, if this Settings session
     /// changed it.
     pub fn settings_memory_edit(&self) -> Option<MemorySettingsEdit> {
@@ -356,7 +280,6 @@ pub struct SettingsRows {
     pub integrations: Vec<IntegrationRow>,
     pub providers: Vec<ProviderRow>,
     pub profiles: Vec<ProfileRow>,
-    pub routing: RoutingRow,
     pub memory: MemoryRow,
     pub subscriptions: Vec<SubscriptionRow>,
     pub broker: BrokerState,
@@ -369,7 +292,6 @@ impl Default for SettingsRows {
             integrations: Vec::new(),
             providers: Vec::new(),
             profiles: Vec::new(),
-            routing: RoutingRow::defaults(Vec::new()),
             memory: MemoryRow::defaults(),
             subscriptions: Vec::new(),
             broker: BrokerState::default(),
@@ -380,10 +302,11 @@ impl Default for SettingsRows {
 /// Which section of the Settings overlay has the cursor.
 ///
 /// Harnesses and Integrations shipped first. Providers and Launch Profiles
-/// followed once their configuration existed. Phase 2D adds Routing now that
-/// its policy fields are real, plus an explicitly transparent, read-only
-/// Memory section: memory itself is not in this build, so that tab offers no
-/// inert controls or speculative configuration.
+/// followed once their configuration existed, plus an explicitly transparent,
+/// read-only Memory section: memory itself is not in this build, so that tab
+/// offers no inert controls or speculative configuration. There is no
+/// Routing section any more (2026-09-16 ruling — Glasshouse never decides
+/// which model is used): the `[routing]` table it edited is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Harnesses,
@@ -391,20 +314,18 @@ pub enum SettingsSection {
     Providers,
     Subscriptions,
     LaunchProfiles,
-    Routing,
     Memory,
 }
 
 impl SettingsSection {
     /// Tab order. `next`/`previous` cycle through this, so adding a section
     /// only ever means inserting it here.
-    pub const ORDER: [SettingsSection; 7] = [
+    pub const ORDER: [SettingsSection; 6] = [
         SettingsSection::Harnesses,
         SettingsSection::Integrations,
         SettingsSection::Providers,
         SettingsSection::Subscriptions,
         SettingsSection::LaunchProfiles,
-        SettingsSection::Routing,
         SettingsSection::Memory,
     ];
 
@@ -419,7 +340,6 @@ impl SettingsSection {
             Self::Providers => "Providers",
             Self::Subscriptions => "Subscriptions",
             Self::LaunchProfiles => "Launch Profiles",
-            Self::Routing => "Routing",
             Self::Memory => "Memory",
         }
     }
@@ -552,120 +472,9 @@ pub struct ProfileRow {
     pub layer: Layer,
 }
 
-/// The effective Routing section and the provenance of each independently
-/// layered field. Configured-provider names are retained only to validate a
-/// pinned `provider:model` choice before it is staged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoutingRow {
-    pub model: RoutingModelChoice,
-    pub model_layer: Layer,
-    pub max_latency: RouterLatencyMs,
-    pub max_latency_layer: Layer,
-    pub max_cost: RouterCostMicroUsd,
-    pub max_cost_layer: Layer,
-    pub prefer_free: bool,
-    pub prefer_free_layer: Layer,
-    pub premium_reserve: PremiumReservePercent,
-    pub premium_reserve_layer: Layer,
-    /// Phase 9I line 536: the user's preferred order over free resources.
-    pub free_order: Vec<FreeResourceRef>,
-    pub free_order_layer: Layer,
-    /// Free resources the user has disabled.
-    pub free_disabled: Vec<FreeResourceRef>,
-    pub free_disabled_layer: Layer,
-    /// The user's pinned free resource, if any.
-    pub free_pin: Option<FreeResourceRef>,
-    pub free_pin_layer: Layer,
-    configured_providers: Vec<String>,
-}
-
-impl RoutingRow {
-    pub fn new(
-        model: Layered<RoutingModelChoice>,
-        max_latency: Layered<RouterLatencyMs>,
-        max_cost: Layered<RouterCostMicroUsd>,
-        prefer_free: Layered<bool>,
-        premium_reserve: Layered<PremiumReservePercent>,
-        configured_providers: Vec<String>,
-    ) -> Self {
-        Self {
-            model: model.value,
-            model_layer: model.layer,
-            max_latency: max_latency.value,
-            max_latency_layer: max_latency.layer,
-            max_cost: max_cost.value,
-            max_cost_layer: max_cost.layer,
-            prefer_free: prefer_free.value,
-            prefer_free_layer: prefer_free.layer,
-            premium_reserve: premium_reserve.value,
-            premium_reserve_layer: premium_reserve.layer,
-            free_order: Vec::new(),
-            free_order_layer: Layer::Default,
-            free_disabled: Vec::new(),
-            free_disabled_layer: Layer::Default,
-            free_pin: None,
-            free_pin_layer: Layer::Default,
-            configured_providers,
-        }
-    }
-
-    /// The same row, carrying the free-resource preferences resolved for it.
-    /// Kept as a builder rather than a wider [`RoutingRow::new`] so an
-    /// existing call site that has not been updated to resolve them still
-    /// compiles and gets [`Layer::Default`] empty preferences — see this
-    /// batch's report for the one call site (`shell::mod`'s `build_settings`)
-    /// that still needs to call this.
-    pub fn with_free_preferences(
-        mut self,
-        order: Layered<Vec<FreeResourceRef>>,
-        disabled: Layered<Vec<FreeResourceRef>>,
-        pin: Layered<Option<FreeResourceRef>>,
-    ) -> Self {
-        self.free_order = order.value;
-        self.free_order_layer = order.layer;
-        self.free_disabled = disabled.value;
-        self.free_disabled_layer = disabled.layer;
-        self.free_pin = pin.value;
-        self.free_pin_layer = pin.layer;
-        self
-    }
-
-    /// This row's three free-resource preferences, folded into the shape
-    /// [`crate::routing::disposable::DisposableRouting`] consumes — the
-    /// Settings-side counterpart to [`crate::config::RoutingConfig::free_preferences`].
-    pub fn free_preferences(&self) -> crate::routing::free::FreePreferences {
-        crate::routing::free::FreePreferences::new()
-            .with_order(
-                self.free_order
-                    .iter()
-                    .map(FreeResourceRef::to_key)
-                    .collect(),
-            )
-            .with_disabled(
-                self.free_disabled
-                    .iter()
-                    .map(FreeResourceRef::to_key)
-                    .collect(),
-            )
-            .with_pin(self.free_pin.as_ref().map(FreeResourceRef::to_key))
-    }
-
-    pub fn defaults(configured_providers: Vec<String>) -> Self {
-        Self::new(
-            Layered::new(RoutingModelChoice::Deterministic, Layer::Default),
-            Layered::new(RouterLatencyMs::DEFAULT, Layer::Default),
-            Layered::new(RouterCostMicroUsd::DEFAULT, Layer::Default),
-            Layered::new(true, Layer::Default),
-            Layered::new(PremiumReservePercent::DEFAULT, Layer::Default),
-            configured_providers,
-        )
-    }
-}
-
 /// The effective Memory section: the automatic post-turn memory-extraction
-/// trigger and the layer that supplied it, matching [`RoutingRow`]'s shape at
-/// one field instead of several. Only `memory_extraction` exists as a
-/// producer today — see the packet's "do not add a second memory setting"
+/// trigger and the layer that supplied it. Only `memory_extraction` exists as
+/// a producer today — see the packet's "do not add a second memory setting"
 /// for why this stays this small.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRow {
@@ -728,43 +537,8 @@ pub struct ProfileSettingsEdit {
     pub upsert: Option<ProfileConfig>,
 }
 
-/// Routing edits stay per-field so saving one preference never promotes the
-/// effective value of another field from its default or opposite layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RoutingSettingsEdit {
-    pub model: Option<RoutingModelChoice>,
-    pub max_latency: Option<RouterLatencyMs>,
-    pub max_cost: Option<RouterCostMicroUsd>,
-    pub prefer_free: Option<bool>,
-    pub premium_reserve: Option<PremiumReservePercent>,
-    /// `Some` when this session set a new order this session — including
-    /// `Some(Vec::new())`, an explicit clear.
-    pub free_order: Option<Vec<FreeResourceRef>>,
-    /// `Some` when this session set a new disabled list — see
-    /// [`RoutingSettingsEdit::free_order`].
-    pub free_disabled: Option<Vec<FreeResourceRef>>,
-    /// `Some(None)` when this session explicitly cleared the pin;
-    /// `Some(Some(_))` when it set one; `None` when untouched this session —
-    /// the same double-option shape `PendingEdit::executable` uses for the
-    /// same reason.
-    pub free_pin: Option<Option<FreeResourceRef>>,
-}
-
-impl RoutingSettingsEdit {
-    pub fn is_empty(&self) -> bool {
-        self.model.is_none()
-            && self.max_latency.is_none()
-            && self.max_cost.is_none()
-            && self.prefer_free.is_none()
-            && self.premium_reserve.is_none()
-            && self.free_order.is_none()
-            && self.free_disabled.is_none()
-            && self.free_pin.is_none()
-    }
-}
-
 /// A staged edit to the Memory section this Settings session, not yet
-/// written anywhere — [`RoutingSettingsEdit`]'s shape at one field.
+/// written anywhere.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemorySettingsEdit {
     pub memory_extraction: Option<bool>,
@@ -919,36 +693,6 @@ struct ProfileTextInput {
 /// rendering.
 pub struct ProfileInputView<'a> {
     pub label: String,
-    pub buffer: &'a str,
-    pub error: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RoutingInputPurpose {
-    Model,
-    MaxLatency,
-    MaxCost,
-    PremiumReserve,
-    /// Phase 9I line 536: `provider:model` pairs, comma-separated, in the
-    /// user's preferred order.
-    FreeOrder,
-    /// Same shape as [`RoutingInputPurpose::FreeOrder`], for the resources
-    /// the user has disabled.
-    FreeDisabled,
-    /// A single `provider:model`, or empty to clear the pin.
-    FreePin,
-}
-
-#[derive(Debug)]
-struct RoutingTextInput {
-    purpose: RoutingInputPurpose,
-    buffer: String,
-    error: Option<String>,
-}
-
-/// Read-only view of the active Routing-section field editor.
-pub struct RoutingInputView<'a> {
-    pub label: &'static str,
     pub buffer: &'a str,
     pub error: Option<&'a str>,
 }
@@ -1264,7 +1008,6 @@ pub struct SettingsState {
     integrations: Vec<IntegrationRow>,
     providers: Vec<ProviderRow>,
     profiles: Vec<ProfileRow>,
-    routing: RoutingRow,
     memory: MemoryRow,
     /// The subscription accounts this project can connect, and whether a
     /// broker binary exists to connect them with. Read once, off the run
@@ -1283,7 +1026,6 @@ pub struct SettingsState {
     /// Staged profile edits this session, keyed by name — see
     /// [`ProfileSettingsEdit`].
     profile_edits: HashMap<String, Option<ProfileConfig>>,
-    routing_edit: RoutingSettingsEdit,
     memory_edit: MemorySettingsEdit,
     path_input: Option<SettingsPathInput>,
     /// Whether the `W` confirmation prompt (design decision: "first shows
@@ -1300,7 +1042,6 @@ pub struct SettingsState {
     confirm_credential_delete: Option<String>,
     provider_input: Option<ProviderTextInput>,
     profile_input: Option<ProfileTextInput>,
-    routing_input: Option<RoutingTextInput>,
     /// The last provider notice this session, and which provider it was for
     /// — a connectivity result or a model refresh, never both. Cleared by any
     /// other key the general dispatcher in [`SettingsState::handle_key`]
@@ -1321,91 +1062,4 @@ pub struct SettingsState {
     /// [`ShellState::take_provider_probe_intent`], which is the only way one
     /// leaves this overlay.
     pending_probe: Option<ProviderProbeIntent>,
-    /// The most recent disposable-job routing choice, for Phase 9I line 540
-    /// — "show whether a free resource is being used because of user
-    /// preference, quota preservation, or fallback". Recorded by
-    /// [`ShellState::record_disposable_choice`]; there is no live router in
-    /// this build, so nothing here ever sets this on its own. See that
-    /// method's own doc for what still has to feed it.
-    last_disposable_choice: Option<DisposableChoice>,
-}
-
-/// Render exact micro-USD as a compact decimal dollar amount.
-pub fn format_usd(value: RouterCostMicroUsd) -> String {
-    let raw = value.get();
-    let dollars = raw / 1_000_000;
-    let fraction = raw % 1_000_000;
-    format!("{dollars}.{fraction:06}")
-}
-
-fn parse_usd_micro(text: &str) -> Result<RouterCostMicroUsd, String> {
-    let text = text.trim().strip_prefix('$').unwrap_or(text.trim());
-    if text.is_empty() || text.starts_with('-') {
-        return Err("cost must be a non-negative USD amount".to_owned());
-    }
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    if whole.is_empty()
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-        || fraction.len() > 6
-    {
-        return Err("cost must be USD with at most six decimal places".to_owned());
-    }
-    let whole = whole
-        .parse::<u32>()
-        .map_err(|_| "cost is too large".to_owned())?;
-    let fraction = format!("{fraction:0<6}")
-        .parse::<u32>()
-        .map_err(|_| "cost must be USD with at most six decimal places".to_owned())?;
-    let raw = whole
-        .checked_mul(1_000_000)
-        .and_then(|value| value.checked_add(fraction))
-        .ok_or_else(|| "cost is too large".to_owned())?;
-    RouterCostMicroUsd::try_from(raw).map_err(|err| err.to_string())
-}
-
-/// One `provider:model` field, as the Routing section's free-resource
-/// editors type it. Mirrors [`SettingsState::apply_routing_model`]'s own
-/// `provider:model` parsing for [`RoutingModelChoice::Pinned`], with the same
-/// deliberate omission: it does not require `provider` to already be a
-/// configured provider, because a free-resource preference — unlike a
-/// classifier pin — is allowed to name a provider not yet configured, and
-/// [`crate::config::RoutingConfig::free_resource_pin`]'s own doc is where
-/// that degrades visibly rather than failing.
-fn parse_free_resource_ref(typed: &str) -> Result<FreeResourceRef, String> {
-    let Some((provider, model)) = typed.split_once(':') else {
-        return Err(format!("`{typed}` must be `provider:model`"));
-    };
-    let provider = provider.trim();
-    let model = model.trim();
-    if provider.is_empty() || model.is_empty() {
-        return Err(format!(
-            "`{typed}` needs both a provider and a model, as `provider:model`"
-        ));
-    }
-    Ok(FreeResourceRef::new(provider, model))
-}
-
-/// A comma-separated list of `provider:model` fields, in the order typed —
-/// the shape both [`RoutingInputPurpose::FreeOrder`] and
-/// [`RoutingInputPurpose::FreeDisabled`] share.
-fn parse_free_resource_list(typed: &str) -> Result<Vec<FreeResourceRef>, String> {
-    typed
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(parse_free_resource_ref)
-        .collect()
-}
-
-fn format_free_resource_ref(entry: &FreeResourceRef) -> String {
-    format!("{}:{}", entry.provider(), entry.model())
-}
-
-fn format_free_resource_list(entries: &[FreeResourceRef]) -> String {
-    entries
-        .iter()
-        .map(format_free_resource_ref)
-        .collect::<Vec<_>>()
-        .join(",")
 }

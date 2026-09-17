@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 pub use inference_gateway::provider::budget::BudgetPeriod;
 
-/// A [`crate::routing::classify::WorkloadTier`] as it is written in a
+/// A [`crate::config::WorkloadTier`] as it is written in a
 /// configuration file, and the only place this crate turns a spelling back
 /// into that type.
 ///
@@ -25,11 +25,11 @@ pub use inference_gateway::provider::budget::BudgetPeriod;
 /// it and cannot drift.
 // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/provider.rs `ConfiguredWorkloadTier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfiguredWorkloadTier(crate::routing::classify::WorkloadTier);
-/// Every [`crate::routing::classify::WorkloadTier`], in the type's own order.
+pub struct ConfiguredWorkloadTier(crate::config::WorkloadTier);
+/// Every [`crate::config::WorkloadTier`], in the type's own order.
 /// Kept complete by [`workload_tier_ordinal`].
-pub(super) const WORKLOAD_TIER_SPELLINGS: [crate::routing::classify::WorkloadTier; 5] = {
-    use crate::routing::classify::WorkloadTier as T;
+pub(super) const WORKLOAD_TIER_SPELLINGS: [crate::config::WorkloadTier; 5] = {
+    use crate::config::WorkloadTier as T;
     [
         T::Deterministic,
         T::Leaf,
@@ -46,11 +46,11 @@ pub(super) const WORKLOAD_TIER_SPELLINGS: [crate::routing::classify::WorkloadTie
 /// `#[cfg(test)]` because the guard is the `match` itself and nothing in the
 /// shipped binary needs an ordinal. It is still a real gate: the local gate
 /// and `cargo clippy --all-targets` both compile this module's tests, so a
-/// sixth [`crate::routing::classify::WorkloadTier`] variant fails the build
+/// sixth [`crate::config::WorkloadTier`] variant fails the build
 /// there rather than becoming a spelling no configuration file can name.
 #[cfg(test)]
-pub(super) fn workload_tier_ordinal(tier: crate::routing::classify::WorkloadTier) -> usize {
-    use crate::routing::classify::WorkloadTier as T;
+pub(super) fn workload_tier_ordinal(tier: crate::config::WorkloadTier) -> usize {
+    use crate::config::WorkloadTier as T;
     match tier {
         T::Deterministic => 0,
         T::Leaf => 1,
@@ -60,11 +60,11 @@ pub(super) fn workload_tier_ordinal(tier: crate::routing::classify::WorkloadTier
     }
 }
 impl ConfiguredWorkloadTier {
-    pub fn new(tier: crate::routing::classify::WorkloadTier) -> Self {
+    pub fn new(tier: crate::config::WorkloadTier) -> Self {
         Self(tier)
     }
 
-    pub fn tier(self) -> crate::routing::classify::WorkloadTier {
+    pub fn tier(self) -> crate::config::WorkloadTier {
         self.0
     }
 
@@ -241,7 +241,7 @@ pub struct ProviderConfig {
     ///
     /// Keyed by the same model identifier [`ProviderConfig::free_models`] and
     /// [`ProviderConfig::metered_models`] name, and valued by
-    /// [`crate::routing::classify::WorkloadTier`]'s own spellings —
+    /// [`crate::config::WorkloadTier`]'s own spellings —
     /// `deterministic`, `leaf`, `standard`, `heavy`, `frontier` — parsed
     /// through [`ConfiguredWorkloadTier`], which refuses an unknown spelling
     /// at load rather than silently reading it as no ceiling at all. A
@@ -300,8 +300,8 @@ pub struct ProviderConfig {
 /// How long one provider's quota telemetry stays current — capability map
 /// line 1237's "provider-specific configurable age".
 ///
-/// Seconds, as a human-editable integer, matching
-/// [`RouterCostMicroUsd`]'s own reasoning about exactness in policy. There is
+/// Seconds, as a human-editable integer, matching the same reasoning about
+/// exactness in policy a micro-USD budget field applies. There is
 /// no one right value and that is the point of the line: a credit balance
 /// changes when somebody pays a bill and a requests-per-minute ceiling is a
 /// contract that changes when a plan does, so the same age would be wrong for
@@ -350,6 +350,118 @@ impl From<QuotaStaleAfterSeconds> for u32 {
         value.0
     }
 }
+/// The raw, on-disk shape [`CapacityBandThresholdsConfig`] validates itself
+/// out of. A private intermediate rather than a public one: nothing outside
+/// `serde`'s `try_from` machinery should ever hold an unvalidated set of
+/// thresholds.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawCapacityBandThresholds {
+    exhausted_percent: u8,
+    reserve_percent: u8,
+    tight_percent: u8,
+    healthy_percent: u8,
+}
+/// User-configurable capacity-band thresholds — capability map line 1270.
+///
+/// Four ascending percentages, validated as one unit at deserialization time
+/// via `#[serde(try_from = "RawCapacityBandThresholds")]` — the same
+/// fail-closed idiom [`QuotaStaleAfterSeconds`] uses for a single field,
+/// applied here across four so a non-monotonic set is refused at
+/// `UserConfig::load` / `load_project_config` time rather than sorted
+/// silently or discovered only when a band is computed. See
+/// [`crate::provider::quota::CapacityBandThresholds`], the domain type this
+/// converts to via [`CapacityBandThresholdsConfig::to_domain`].
+///
+/// Moved here from the deleted `config::routing_policy` (2026-09-16 ruling):
+/// capacity bands describe remaining quota, read by `glasshouse resources`,
+/// `glasshouse status` and `glasshouse entitlements`, never a routing
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCapacityBandThresholds")]
+pub struct CapacityBandThresholdsConfig {
+    exhausted_percent: u8,
+    reserve_percent: u8,
+    tight_percent: u8,
+    healthy_percent: u8,
+}
+impl TryFrom<RawCapacityBandThresholds> for CapacityBandThresholdsConfig {
+    type Error = QuotaValueError;
+
+    fn try_from(raw: RawCapacityBandThresholds) -> Result<Self, Self::Error> {
+        crate::provider::quota::CapacityBandThresholds::new(
+            raw.exhausted_percent,
+            raw.reserve_percent,
+            raw.tight_percent,
+            raw.healthy_percent,
+        )?;
+        Ok(Self {
+            exhausted_percent: raw.exhausted_percent,
+            reserve_percent: raw.reserve_percent,
+            tight_percent: raw.tight_percent,
+            healthy_percent: raw.healthy_percent,
+        })
+    }
+}
+impl From<crate::provider::quota::CapacityBandThresholds> for CapacityBandThresholdsConfig {
+    /// A domain value is already known-monotonic by its own constructor, so
+    /// this is a plain field copy rather than a second validation pass.
+    fn from(domain: crate::provider::quota::CapacityBandThresholds) -> Self {
+        Self {
+            exhausted_percent: domain.exhausted_percent(),
+            reserve_percent: domain.reserve_percent(),
+            tight_percent: domain.tight_percent(),
+            healthy_percent: domain.healthy_percent(),
+        }
+    }
+}
+impl CapacityBandThresholdsConfig {
+    /// The validated domain value — see
+    /// [`crate::provider::quota::CapacityBandThresholds::band_for_percent`].
+    pub fn to_domain(self) -> crate::provider::quota::CapacityBandThresholds {
+        crate::provider::quota::CapacityBandThresholds::new(
+            self.exhausted_percent,
+            self.reserve_percent,
+            self.tight_percent,
+            self.healthy_percent,
+        )
+        .expect("validated once already at deserialization")
+    }
+}
+/// Remaining premium capacity below which `glasshouse resources` and the
+/// dashboard treat a resource as protected — capability map line 1288.
+/// Zero disables the reserve and one hundred protects all remaining premium
+/// capacity.
+///
+/// Moved here from the deleted `config::routing_policy` (2026-09-16 ruling):
+/// this is a display/protection threshold for `EffectiveConfig::reserve_percent`,
+/// read by `glasshouse resources` and the shell dashboard, never a routing
+/// decision — nothing here chooses a destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub struct PremiumReservePercent(u8);
+impl PremiumReservePercent {
+    pub const DEFAULT: Self = Self(20);
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+impl TryFrom<u16> for PremiumReservePercent {
+    type Error = QuotaValueError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        if value <= 100 {
+            Ok(Self(value as u8))
+        } else {
+            Err(QuotaValueError::Reserve { value })
+        }
+    }
+}
+impl From<PremiumReservePercent> for u16 {
+    fn from(value: PremiumReservePercent) -> Self {
+        value.0.into()
+    }
+}
 /// The period a monetary budget covers — capability map line 1203's
 /// "monthly **or rolling**".
 ///
@@ -362,13 +474,14 @@ impl From<QuotaStaleAfterSeconds> for u32 {
 /// A spending ceiling the user set for one metered provider — capability map
 /// line 1203.
 ///
-/// # Not [`RouterCostMicroUsd`], and the difference is the whole line
+/// # Not a per-call price ceiling, and the difference is the whole line
 ///
-/// [`RouterCostMicroUsd`] caps the price of **one routing decision**. This
-/// caps **cumulative spend over a period**. A user who set the first to a
-/// tenth of a cent has said nothing at all about how many such calls they are
-/// willing to pay for in a month, which is why Phase 32A recorded that the
-/// existing field does not satisfy this line.
+/// A per-call price ceiling caps the price of **one routing decision** — a
+/// routing decision that no longer exists (design-decisions, 2026-09-16).
+/// This caps **cumulative spend over a period**. A user who set the first to
+/// a tenth of a cent has said nothing at all about how many such calls they
+/// are willing to pay for in a month, which is why Phase 32A recorded that
+/// the existing field does not satisfy this line.
 ///
 /// # What it does not do, stated rather than implied
 ///
@@ -385,9 +498,9 @@ pub struct MonetaryBudget {
     period: BudgetPeriod,
 }
 impl MonetaryBudget {
-    /// Ten thousand dollars. A unit-mistake guard in the same spirit as
-    /// [`RouterCostMicroUsd::MAX`]: somebody who writes `1000` meaning ten
-    /// dollars has made an error this cannot catch, but somebody who writes
+    /// Ten thousand dollars. A unit-mistake guard: somebody who writes
+    /// `1000` meaning ten dollars has made an error this cannot catch, but
+    /// somebody who writes
     /// a dollar figure where microdollars belong is off by a million and this
     /// does.
     pub const MAX_MICRO_USD: u64 = 10_000 * 1_000_000;
@@ -526,6 +639,10 @@ pub enum QuotaValueError {
     /// the same refusal.
     #[error("{0}")]
     BandThresholds(#[from] crate::provider::quota::CapacityBandThresholdsError),
+
+    /// [`PremiumReservePercent`] outside 0–100.
+    #[error("premium reserve must be between 0% and 100%, not {value}%")]
+    Reserve { value: u16 },
 }
 /// Why a stored [`ProviderConfig`] could not be turned into a
 /// [`crate::provider::Provider`].
@@ -619,15 +736,54 @@ impl StoredCredentialRef {
         }
     }
 }
+/// Model/resource facts a harness adapter has no business declaring, across
+/// the seven routing axes map lines 1383–1389 once described.
+///
+/// The routing session/scoring machinery that turned this into a resource's
+/// full capability description was deleted by the 2026-09-16 ruling
+/// (Glasshouse never decides which model is used); this struct survives as
+/// the typed form of [`ConfiguredModelFacts`], which
+/// [`ProviderConfig::resource_facts_of`] still builds so a caller can ask
+/// "did the user declare this axis for this model" without re-reading the
+/// config table by hand.
+///
+/// The default is [`Self::UNVERIFIED`] — nothing about a resource's facts is
+/// known until a caller attaches some.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceFacts {
+    pub code_edit: crate::harness::Declared<bool>,
+    pub shell_tool_use: crate::harness::Declared<bool>,
+    pub browser_use: crate::harness::Declared<bool>,
+    pub large_context: crate::harness::Declared<bool>,
+    pub fast_cheap_analysis: crate::harness::Declared<bool>,
+    pub repository_review: crate::harness::Declared<bool>,
+    pub mcp: crate::harness::Declared<bool>,
+}
+impl ResourceFacts {
+    pub const UNVERIFIED: Self = Self {
+        code_edit: crate::harness::Declared::Unverified,
+        shell_tool_use: crate::harness::Declared::Unverified,
+        browser_use: crate::harness::Declared::Unverified,
+        large_context: crate::harness::Declared::Unverified,
+        fast_cheap_analysis: crate::harness::Declared::Unverified,
+        repository_review: crate::harness::Declared::Unverified,
+        mcp: crate::harness::Declared::Unverified,
+    };
+}
+impl Default for ResourceFacts {
+    fn default() -> Self {
+        Self::UNVERIFIED
+    }
+}
 /// One model's declared resource facts, as stored under
 /// `[providers.<name>.model_facts.<model>]` — the serialisable, per-axis
-/// mirror of [`crate::routing::capability::ResourceFacts`]'s seven axes.
+/// mirror of [`crate::config::ResourceFacts`]'s seven axes.
 ///
 /// Every field optional and independent: `None` on an axis means the user
 /// has not declared it, exactly as an absent model in
 /// [`ProviderConfig::model_facts`] means the same thing one level up. See
 /// [`ProviderConfig::resource_facts_of`], the only place these become a
-/// [`crate::routing::capability::ResourceFacts`].
+/// [`crate::config::ResourceFacts`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfiguredModelFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -843,21 +999,17 @@ impl ProviderConfig {
 
     /// `model`'s declared resource facts on this provider — map line 1517's
     /// producer, turning [`ProviderConfig::model_facts`]'s per-axis
-    /// `Option<bool>`s into [`crate::routing::capability::ResourceFacts`]'s
+    /// `Option<bool>`s into [`crate::config::ResourceFacts`]'s
     /// `Declared<bool>`s. `layer` is which configuration layer is asking,
     /// for the evidence string's own `[providers.*.model_facts]` table.
     ///
     /// A model absent from [`ProviderConfig::model_facts`] answers
-    /// [`crate::routing::capability::ResourceFacts::UNVERIFIED`] outright.
+    /// [`crate::config::ResourceFacts::UNVERIFIED`] outright.
     /// An axis absent from a present model's table stays
     /// [`crate::harness::Declared::Unverified`] on that axis alone — a
     /// missing key never upgrades to `Verified`.
-    pub fn resource_facts_of(
-        &self,
-        model: &str,
-        layer: Layer,
-    ) -> crate::routing::capability::ResourceFacts {
-        use crate::routing::capability::ResourceFacts;
+    pub fn resource_facts_of(&self, model: &str, layer: Layer) -> crate::config::ResourceFacts {
+        use crate::config::ResourceFacts;
 
         let Some(config) = self.model_facts.get(model) else {
             return ResourceFacts::UNVERIFIED;
@@ -900,7 +1052,7 @@ impl ProviderConfig {
     /// [`ProviderConfig::cost_of`]'s own rule. There is no inference and no
     /// default: a model nobody named here answers `None`, which the router
     /// reads as *not established* rather than as a refusal.
-    pub fn ceiling_of(&self, model: &str) -> Option<crate::routing::classify::WorkloadTier> {
+    pub fn ceiling_of(&self, model: &str) -> Option<crate::config::WorkloadTier> {
         self.model_ceilings
             .get(model)
             .map(|configured| configured.tier())
@@ -1091,63 +1243,22 @@ fn unsafe_header_name_char(name: &str) -> Option<char> {
 fn unsafe_header_value_char(value: &str) -> Option<char> {
     value.chars().find(|c| c.is_control())
 }
-/// A free resource by name, as configuration stores it — the serialisable
-/// counterpart to [`crate::routing::free::FreeResourceKey`].
-///
-/// That type is frozen in `crate::routing` and derives neither `Serialize`
-/// nor `Deserialize`, the same reason [`StoredCredentialRef`] exists beside
-/// [`crate::secret::SecretRef`] rather than that type growing serde impls of
-/// its own: the shape a *reference* takes on disk is a configuration-schema
-/// decision, kept separate from the domain type routing policy reasons
-/// about. [`FreeResourceRef::to_key`] and [`FreeResourceRef::from_key`] are
-/// the only bridge between the two, so they cannot drift.
-///
-/// Two names — a provider and a model — and nothing else, for the same
-/// reason [`RoutingModelChoice::Pinned`] holds only names: both are as safe
-/// to write into a tracked configuration file as
-/// [`ProviderConfig::credential_env`]'s variable names already are.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FreeResourceRef {
-    provider: String,
-    model: String,
-}
-impl FreeResourceRef {
-    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: model.into(),
-        }
-    }
-
-    pub fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn to_key(&self) -> crate::routing::free::FreeResourceKey {
-        crate::routing::free::FreeResourceKey::new(self.provider.clone(), self.model.clone())
-    }
-
-    pub fn from_key(key: &crate::routing::free::FreeResourceKey) -> Self {
-        Self::new(key.provider.clone(), key.model.clone())
-    }
-}
 /// The provider and model a user has chosen to perform memory extraction —
 /// Phase 21's *"allow a configurable cheap or local model to perform memory
 /// extraction."*
 ///
-/// # Why this is its own field and not a reuse of the routing preferences
+/// # Why this is its own field and not a reuse of the (now deleted)
+/// free-routing preferences
 ///
-/// [`FreeResourceRef`] is the same two strings, and reusing it was the
-/// tempting move. It would have been wrong: the free-routing preferences say
-/// *which resource to prefer when Glasshouse routes*, and a user who has
-/// written them has not thereby asked Glasshouse to start making outbound
-/// requests from a hook that runs inside their coding session. This field is
-/// that request, made once and explicitly, and `None` — the default — is
-/// exactly today's behaviour.
+/// A `{provider, model}` pair is the same two strings the free-routing
+/// preferences used before the routing deletion (design-decisions,
+/// 2026-09-16), and reusing that type was the tempting move even then. It
+/// would have been wrong: the free-routing preferences said *which resource
+/// to prefer when Glasshouse routes*, and a user who had written them had not
+/// thereby asked Glasshouse to start making outbound requests from a hook
+/// that runs inside their coding session. This field is that request, made
+/// once and explicitly, and `None` — the default — is exactly today's
+/// behaviour.
 ///
 /// # Names only, exactly like every other provider field here
 ///

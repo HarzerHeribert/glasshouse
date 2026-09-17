@@ -254,7 +254,7 @@ fn an_unadopted_broker_names_the_step_that_actually_comes_first() {
 /// action is still reachable by its own key and still records a hotspot.
 ///
 /// The key half matters as much as the click half. A demotion that quietly
-/// unbound `d decisions` would look identical on screen to one that did not,
+/// unbound `k knowledge` would look identical on screen to one that did not,
 /// and the pill is defined as *the key a user could have typed instead* — so
 /// this replays each pill's keys through `ShellState` and refuses an
 /// `Action::None`.
@@ -361,7 +361,7 @@ fn the_demoted_actions_are_drawn_differently_from_the_primary_ones() {
     };
 
     let primary = style_of("n new");
-    let demoted = style_of("d decisions");
+    let demoted = style_of("k knowledge");
     assert_ne!(
         primary.fg, demoted.fg,
         "a primary action and a demoted one must not be the same colour, or the \
@@ -609,7 +609,7 @@ fn the_settings_tab_strip_never_hides_the_section_that_has_the_cursor() {
 #[test]
 fn clicking_a_settings_tab_is_the_tab_presses_that_reach_it() {
     let mut state = settings_open(SettingsRows::default());
-    let spot = clickable(&state, 160, 30, "Routing").expect("the Routing tab must be pressable");
+    let spot = clickable(&state, 160, 30, "Memory").expect("the Memory tab must be pressable");
     assert!(
         spot.keys().iter().all(|key| key.code == KeyCode::Tab),
         "reaching a later section is forward Tabs, exactly as typed"
@@ -617,10 +617,7 @@ fn clicking_a_settings_tab_is_the_tab_presses_that_reach_it() {
     for key in spot.keys() {
         state.handle_key(*key);
     }
-    assert_eq!(
-        state.settings().unwrap().section(),
-        SettingsSection::Routing
-    );
+    assert_eq!(state.settings().unwrap().section(), SettingsSection::Memory);
 }
 
 /// Not an assertion — a printer. `cargo test -- --nocapture --ignored

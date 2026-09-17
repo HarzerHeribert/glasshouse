@@ -1078,14 +1078,12 @@ pub(crate) fn brief_launch_session(
             return LaunchBriefing::Nothing;
         }
     };
-    let rerank_model =
-        crate::commands::routing_classification::disposable_rerank_model(runtime, session);
-    let diagnostics =
-        crate::commands::routing_classification::memory_retrieval_diagnostics_enabled(runtime)
-            .then_some(inject::DiagnosticsRequest {
-                runtime,
-                session: Some(session.as_str()),
-            });
+    let rerank_model = crate::commands::shared::disposable_rerank_model(runtime, session);
+    let diagnostics = crate::commands::shared::memory_retrieval_diagnostics_enabled(runtime)
+        .then_some(inject::DiagnosticsRequest {
+            runtime,
+            session: Some(session.as_str()),
+        });
     let outcome = match inject::select_briefing_traced(
         &project.store(),
         query,

@@ -242,10 +242,8 @@ impl fmt::Display for TaskContinuity {
 /// carries the gateway's own token counts (migration 24). But a copied token
 /// count would be a second source of truth — the same reason [`SessionContext`]
 /// itself gives migration 15 no field for one — so the estimate is not stored
-/// here either. It is read on demand by
-/// [`crate::routing::evidence::estimated_context_tokens`] over
-/// `routing_observations` and attached to
-/// [`crate::routing::session::SessionContextFacts`]. See `design-decisions.md`,
+/// here either. It is read on demand from `routing_observations` when
+/// something needs it. See `design-decisions.md`,
 /// *"Context size is read off the gateway's own exchange, never guessed"*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContext {

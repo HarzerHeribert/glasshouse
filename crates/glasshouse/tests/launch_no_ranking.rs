@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use clap::Parser;
-use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
 use glasshouse::{Cli, Runtime};
 
 struct Fixture {
@@ -144,9 +143,12 @@ fn no_flags_opens_a_fresh_session_every_time() {
 }
 
 /// REQUIRED BEHAVIOR 2: `--to <id>` continues exactly the session it names —
-/// no second session is recorded — and doing so writes none of the
-/// ranking-decision evaluation kinds a launch used to write when a ranking
-/// chose or displaced a destination: there is no more a ranking to record.
+/// no second session is recorded. The ranking-decision evaluation kinds a
+/// launch used to write when a ranking chose or displaced a destination
+/// (`RoutingOverrideDecided`, `RoutingContinuationDecided`,
+/// `SessionRouteDecided`, `FailoverPrevented`) are gone from
+/// `EvaluationKind` entirely along with the ranking that wrote them, so
+/// there is nothing left here to assert empty.
 ///
 /// Mutation (packet §16/§9): make `--to <session>` fall back to a fresh
 /// session instead of continuing it, and this test must fail — both on the
@@ -180,20 +182,4 @@ fn to_continues_exactly_the_named_session_and_writes_no_ranking_decision() {
         "`--to <id>` must continue that session rather than recording a second one: \
          {after:?}"
     );
-
-    let runtime = fixture.runtime();
-    let ledger = EvaluationObservations::open(&runtime).unwrap();
-    for kind in [
-        EvaluationKind::RoutingOverrideDecided,
-        EvaluationKind::RoutingContinuationDecided,
-        EvaluationKind::SessionRouteDecided,
-        EvaluationKind::FailoverPrevented,
-    ] {
-        let rows = ledger.recent_of_kind(kind, 10).unwrap();
-        assert!(
-            rows.is_empty(),
-            "a `--to` launch must write no ranking-decision evaluation row of kind \
-             {kind:?}, found: {rows:?}"
-        );
-    }
 }

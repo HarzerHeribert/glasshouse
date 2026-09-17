@@ -274,9 +274,9 @@ impl<'a> EffectiveConfig<'a> {
     /// then user, then [`Layer::Default`], matching every other lookup on
     /// this type except [`EffectiveConfig::bypass_acknowledged`].
     ///
-    /// Deliberately independent of [`EffectiveConfig::routing_model`] and
-    /// response-profile injection: each reads its own field, so disabling one
-    /// automatic behaviour never disables another. See
+    /// Deliberately independent of response-profile injection: each reads
+    /// its own field, so disabling one automatic behaviour never disables
+    /// another. See
     /// `tests::the_three_automatic_behaviours_disable_independently`.
     pub fn memory_extraction_enabled(&self) -> Layered<bool> {
         if let Some(value) = self.project.and_then(ProjectConfig::memory_extraction) {
@@ -785,173 +785,20 @@ impl<'a> EffectiveConfig<'a> {
         self.user.context_firewall().min_semantic_tokens()
     }
 
-    /// Resolve which routing model classifies requests, reporting which
-    /// layer decided it.
-    ///
-    /// Project first, then user, then [`Layer::Default`] — the ordinary
-    /// layering every lookup on this type uses except
-    /// [`EffectiveConfig::bypass_acknowledged`], which consults the user
-    /// layer alone. This is deliberately *not* that exception. A bypass
-    /// acknowledgement is a safety attestation a person makes about their
-    /// own machine, so a repository must not be able to pre-acknowledge one
-    /// on behalf of whoever cloned it. A routing-model choice is a
-    /// preference about which cheap classifier to ask, it grants nothing and
-    /// attests to nothing, and a project that wants its own — deterministic
-    /// only in a repository whose work is uniform, say — is making an
-    /// ordinary configuration statement. So the normal rule applies.
-    ///
-    /// The [`Layer::Default`] case is [`RoutingModelChoice::Deterministic`]:
-    /// with nothing recorded anywhere, deterministic heuristics classify,
-    /// which is exactly Phase 2C line 4.
-    pub fn routing_model(&self) -> Layered<RoutingModelChoice> {
-        if let Some(choice) = self.project.and_then(|p| p.routing().model()) {
-            return Layered::new(choice.clone(), Layer::Project);
-        }
-        if let Some(choice) = self.user.routing().model() {
-            return Layered::new(choice.clone(), Layer::User);
-        }
-        Layered::new(RoutingModelChoice::Deterministic, Layer::Default)
-    }
-
-    /// Maximum router latency, resolved per field so a project can override
-    /// this limit without copying any other routing preference.
-    pub fn max_router_latency(&self) -> Layered<RouterLatencyMs> {
-        if let Some(value) = self.project.and_then(|p| p.routing().max_router_latency()) {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().max_router_latency() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(RouterLatencyMs::DEFAULT, Layer::Default)
-    }
-
-    /// Maximum marginal cost of one routing decision, resolved per field.
-    pub fn max_router_cost(&self) -> Layered<RouterCostMicroUsd> {
-        if let Some(value) = self.project.and_then(|p| p.routing().max_marginal_cost()) {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().max_marginal_cost() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(RouterCostMicroUsd::DEFAULT, Layer::Default)
-    }
-
-    /// Whether zero-marginal-cost resources are preferred after capability,
-    /// health, rate-limit, and latency requirements are satisfied.
-    pub fn prefer_free_routing(&self) -> Layered<bool> {
-        if let Some(value) = self.project.and_then(|p| p.routing().prefer_free()) {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().prefer_free() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(true, Layer::Default)
-    }
-
-    /// Whether `glasshouse launch` may rank destinations at all — capability
-    /// map line 1712.
-    ///
-    /// Project over user over a default of `true`, like every other routing
-    /// preference: the ranking is what Glasshouse has always done, so the
-    /// default has to be the behaviour that existed before this switch did.
-    ///
-    /// `false` does not mean *"route badly"* — it means the launch path takes
-    /// no routing decision. What the person's own flags say still happens:
-    /// see `main.rs::launch_session`, which reads this before it opens
-    /// anything the ranking would have needed.
-    pub fn automatic_routing(&self) -> Layered<bool> {
-        if let Some(value) = self.project.and_then(|p| p.routing().automatic()) {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().automatic() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(true, Layer::Default)
-    }
-
-    /// The sessions the user overrode reserve protection for — capability
-    /// map line 1290 — resolved per field, project over user over the empty
-    /// default, exactly like [`Self::free_resource_disabled`].
-    ///
-    /// First layer wins outright rather than the two being unioned. A union
-    /// would mean a project could add sessions a user's own configuration
-    /// never named and the user had no single place to look to see what was
-    /// overridden; every other list on this type resolves the same way, and
-    /// this one is a *spending* control, which is the last place to invent a
-    /// second resolution rule.
-    pub fn reserve_override_sessions(&self) -> Layered<Vec<String>> {
-        if let Some(value) = self
-            .project
-            .and_then(|p| p.routing().reserve_override_sessions())
-        {
-            return Layered::new(value.to_vec(), Layer::Project);
-        }
-        if let Some(value) = self.user.routing().reserve_override_sessions() {
-            return Layered::new(value.to_vec(), Layer::User);
-        }
-        Layered::new(Vec::new(), Layer::Default)
-    }
-
-    /// The routing-model fallback chain — capability map lines 1423 and
-    /// 1795 — resolved per field, project over user over the empty default,
-    /// exactly like [`Self::free_resource_order`]. First layer wins outright
-    /// rather than the two being concatenated, for
-    /// [`Self::reserve_override_sessions`]'s reason: a chain is a list of
-    /// models Glasshouse may *call on the user's behalf*, and a project must
-    /// not be able to append one the user's own configuration never named.
-    pub fn routing_model_fallback(&self) -> Layered<Vec<FreeResourceRef>> {
-        if let Some(value) = self.project.and_then(|p| p.routing().model_fallback()) {
-            return Layered::new(value.to_vec(), Layer::Project);
-        }
-        if let Some(value) = self.user.routing().model_fallback() {
-            return Layered::new(value.to_vec(), Layer::User);
-        }
-        Layered::new(Vec::new(), Layer::Default)
-    }
-
-    /// Whether classification is confined to local inference — capability
-    /// map line 1427 — resolved per field; `false` when neither layer
-    /// decided.
-    pub fn classification_local_only(&self) -> Layered<bool> {
-        if let Some(value) = self
-            .project
-            .and_then(|p| p.routing().classification_local_only())
-        {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().classification_local_only() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(false, Layer::Default)
-    }
-
-    /// Premium remaining-capacity threshold below which reserve protection
-    /// applies, resolved per field.
-    pub fn premium_reserve(&self) -> Layered<PremiumReservePercent> {
-        if let Some(value) = self.project.and_then(|p| p.routing().premium_reserve()) {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self.user.routing().premium_reserve() {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(PremiumReservePercent::DEFAULT, Layer::Default)
-    }
-
     /// Capacity-band thresholds, resolved per field — capability map line
     /// 1270. [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] when
     /// neither layer recorded any, converted through
     /// [`CapacityBandThresholdsConfig::to_domain`] rather than re-validated
-    /// here: it was already validated once, at deserialization.
+    /// here: it was already validated once, at deserialization. A top-level
+    /// key since the 2026-09-16 ruling deleted the `[routing]` table it used
+    /// to live under — see [`UserConfig::capacity_band_thresholds`].
     pub fn capacity_band_thresholds(
         &self,
     ) -> Layered<crate::provider::quota::CapacityBandThresholds> {
-        if let Some(value) = self
-            .project
-            .and_then(|p| p.routing().capacity_band_thresholds())
-        {
+        if let Some(value) = self.project.and_then(|p| p.capacity_band_thresholds()) {
             return Layered::new(value.to_domain(), Layer::Project);
         }
-        if let Some(value) = self.user.routing().capacity_band_thresholds() {
+        if let Some(value) = self.user.capacity_band_thresholds() {
             return Layered::new(value.to_domain(), Layer::User);
         }
         Layered::new(
@@ -960,23 +807,18 @@ impl<'a> EffectiveConfig<'a> {
         )
     }
 
-    /// Routing score weights, resolved per field — capability map lines
-    /// 1357/1358. [`crate::routing::session::ScoreWeights::default`] when
-    /// neither layer recorded any — today's compile-time constants,
-    /// unchanged — converted through [`ScoreWeightsConfig::to_domain`] rather
-    /// than re-validated here: it was already validated once, at
-    /// deserialization.
-    pub fn score_weights(&self) -> Layered<crate::routing::session::ScoreWeights> {
-        if let Some(value) = self.project.and_then(|p| p.routing().score_weights()) {
-            return Layered::new(value.to_domain(), Layer::Project);
+    /// Premium remaining-capacity threshold below which reserve protection
+    /// applies, resolved per field — capability map line 1288. A top-level
+    /// key since the 2026-09-16 ruling, for [`Self::capacity_band_thresholds`]'s
+    /// reason.
+    pub fn premium_reserve(&self) -> Layered<PremiumReservePercent> {
+        if let Some(value) = self.project.and_then(|p| p.premium_reserve_percent()) {
+            return Layered::new(value, Layer::Project);
         }
-        if let Some(value) = self.user.routing().score_weights() {
-            return Layered::new(value.to_domain(), Layer::User);
+        if let Some(value) = self.user.premium_reserve_percent() {
+            return Layered::new(value, Layer::User);
         }
-        Layered::new(
-            crate::routing::session::ScoreWeights::default(),
-            Layer::Default,
-        )
+        Layered::new(PremiumReservePercent::DEFAULT, Layer::Default)
     }
 
     /// One resource's own protected reserve percentage — capability map line
@@ -987,49 +829,6 @@ impl<'a> EffectiveConfig<'a> {
         match configured.value.reserve_percent() {
             Some(value) => Layered::new(value, configured.layer),
             None => self.premium_reserve(),
-        }
-    }
-
-    /// The reserve policy for `scope` — capability map line 1577 — resolved
-    /// per field, project over user over
-    /// [`crate::routing::pressure::ReservePolicy::Protect`], the fail-closed
-    /// default for a spending protection. Per field, so a project that
-    /// records only the background policy inherits the user's interactive
-    /// one rather than resetting it.
-    pub fn reserve_policy(
-        &self,
-        scope: crate::routing::pressure::ReserveScope,
-    ) -> Layered<crate::routing::pressure::ReservePolicy> {
-        if let Some(value) = self
-            .project
-            .and_then(|p| p.routing().reserve())
-            .and_then(|reserve| reserve.for_scope(scope))
-        {
-            return Layered::new(value, Layer::Project);
-        }
-        if let Some(value) = self
-            .user
-            .routing()
-            .reserve()
-            .and_then(|reserve| reserve.for_scope(scope))
-        {
-            return Layered::new(value, Layer::User);
-        }
-        Layered::new(
-            crate::routing::pressure::ReservePolicy::default(),
-            Layer::Default,
-        )
-    }
-
-    /// Both scopes' policies at once, for a router that carries them whole.
-    pub fn reserve_policies(&self) -> crate::routing::pressure::ReservePolicies {
-        crate::routing::pressure::ReservePolicies {
-            interactive: self
-                .reserve_policy(crate::routing::pressure::ReserveScope::Interactive)
-                .value,
-            background: self
-                .reserve_policy(crate::routing::pressure::ReserveScope::Background)
-                .value,
         }
     }
 
@@ -1363,7 +1162,7 @@ impl<'a> EffectiveConfig<'a> {
     /// over user), exactly as [`EffectiveConfig::model_cost`] and
     /// [`EffectiveConfig::model_ceiling`] read beside it.
     ///
-    /// [`crate::routing::capability::ResourceFacts::UNVERIFIED`] when
+    /// [`crate::config::ResourceFacts::UNVERIFIED`] when
     /// neither layer configures the provider, or when the configuring layer
     /// declares no facts for this model — both are *not established*, the
     /// same "nobody has said" reading [`EffectiveConfig::model_ceiling`]'s
@@ -1372,7 +1171,7 @@ impl<'a> EffectiveConfig<'a> {
         &self,
         provider: &str,
         model: &str,
-    ) -> Layered<crate::routing::capability::ResourceFacts> {
+    ) -> Layered<crate::config::ResourceFacts> {
         if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
             return Layered::new(
                 config.resource_facts_of(model, Layer::Project),
@@ -1382,10 +1181,7 @@ impl<'a> EffectiveConfig<'a> {
         if let Some(config) = self.user.providers().get(provider) {
             return Layered::new(config.resource_facts_of(model, Layer::User), Layer::User);
         }
-        Layered::new(
-            crate::routing::capability::ResourceFacts::UNVERIFIED,
-            Layer::Default,
-        )
+        Layered::new(crate::config::ResourceFacts::UNVERIFIED, Layer::Default)
     }
 
     /// The highest workload tier `model` on `provider` is established to
@@ -1408,7 +1204,7 @@ impl<'a> EffectiveConfig<'a> {
         &self,
         provider: &str,
         model: &str,
-    ) -> Layered<Option<crate::routing::classify::WorkloadTier>> {
+    ) -> Layered<Option<crate::config::WorkloadTier>> {
         if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
             return Layered::new(
                 config.resolved_ceiling(model).hard_ceiling(),
@@ -1432,7 +1228,7 @@ impl<'a> EffectiveConfig<'a> {
         provider: &str,
         model: &str,
         query: &capability::CapabilityQuery<'_>,
-    ) -> Layered<Option<crate::routing::classify::WorkloadTier>> {
+    ) -> Layered<Option<crate::config::WorkloadTier>> {
         if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
             return Layered::new(
                 config.resolved_ceiling_for(model, query).hard_ceiling(),
@@ -1484,70 +1280,6 @@ impl<'a> EffectiveConfig<'a> {
             }
         }
         out
-    }
-
-    /// The user's preferred order over free resources, resolved per field —
-    /// Phase 9I line 536.
-    pub fn free_resource_order(&self) -> Layered<Vec<FreeResourceRef>> {
-        if let Some(value) = self.project.and_then(|p| p.routing().free_resource_order()) {
-            return Layered::new(value.to_vec(), Layer::Project);
-        }
-        if let Some(value) = self.user.routing().free_resource_order() {
-            return Layered::new(value.to_vec(), Layer::User);
-        }
-        Layered::new(Vec::new(), Layer::Default)
-    }
-
-    /// Free resources the user has disabled, resolved per field.
-    pub fn free_resource_disabled(&self) -> Layered<Vec<FreeResourceRef>> {
-        if let Some(value) = self
-            .project
-            .and_then(|p| p.routing().free_resource_disabled())
-        {
-            return Layered::new(value.to_vec(), Layer::Project);
-        }
-        if let Some(value) = self.user.routing().free_resource_disabled() {
-            return Layered::new(value.to_vec(), Layer::User);
-        }
-        Layered::new(Vec::new(), Layer::Default)
-    }
-
-    /// The user's pinned free resource, resolved per field.
-    pub fn free_resource_pin(&self) -> Layered<Option<FreeResourceRef>> {
-        if let Some(value) = self.project.and_then(|p| p.routing().free_resource_pin()) {
-            return Layered::new(Some(value.clone()), Layer::Project);
-        }
-        if let Some(value) = self.user.routing().free_resource_pin() {
-            return Layered::new(Some(value.clone()), Layer::User);
-        }
-        Layered::new(None, Layer::Default)
-    }
-
-    /// What will actually classify a request: the recorded choice from
-    /// [`EffectiveConfig::routing_model`], checked against the providers
-    /// that are configured right now.
-    ///
-    /// This never fails. A pinned model whose provider has since been
-    /// removed degrades to [`RoutingModelResolution::Heuristics`] carrying a
-    /// [`RoutingFallback`] that says which one went missing — see
-    /// [`RoutingModelChoice::resolve`] for why this is the one lookup here
-    /// that will not return an error. The [`Layer`] reported is the layer the
-    /// *choice* came from, not a claim about where the degrade was decided.
-    ///
-    /// A choice nothing was ever recorded for reports
-    /// [`RoutingFallback::NotConfigured`] rather than
-    /// [`RoutingFallback::DeterministicChosen`], so a user who declined the
-    /// wizard's routing step and a user who deliberately picked
-    /// deterministic-only are told different, accurate things.
-    pub fn routing_model_resolution(&self) -> Layered<RoutingModelResolution> {
-        let Layered { value, layer } = self.routing_model();
-        let mut resolution = value.resolve(&self.provider_names());
-        if layer == Layer::Default
-            && let RoutingModelResolution::Heuristics(reason) = &mut resolution
-        {
-            *reason = RoutingFallback::NotConfigured;
-        }
-        Layered::new(resolution, layer)
     }
 
     /// Each layer's `[pairing]` table, in the order corrections are applied

@@ -9,9 +9,7 @@ use crate::paths::RuntimePaths;
 use crate::project::Project;
 
 use super::*;
-use super::{
-    effective::*, entitlement::*, hooks::*, loading::*, profile::*, provider::*, routing_policy::*,
-};
+use super::{effective::*, entitlement::*, hooks::*, loading::*, profile::*, provider::*};
 
 /// Build a `Project` rooted at `root` for tests. `root` must already
 /// exist; a plain (non-Git) temp directory falls back to

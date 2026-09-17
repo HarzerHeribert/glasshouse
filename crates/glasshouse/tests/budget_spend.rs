@@ -6,16 +6,21 @@
 //! and `pricing.toml` rates, over the budget's own period
 //! (`provider::telemetry::budget_period_start`). This file plants both —
 //! ledger rows via a bootstrapped [`Runtime`], a real `pricing.toml` on
-//! disk — and drives `glasshouse resources` and `glasshouse route`, the
-//! same shape `tests/routing_pricing.rs` and `tests/entitlement_broker.rs`
-//! already use for `pricing.toml` and a real project ledger respectively.
+//! disk — and drives `glasshouse resources`.
+//!
+//! The destination-ranking (`glasshouse route`) and support-work-dispatch
+//! preview (`glasshouse resources --no-harness`'s "would select" line) this
+//! file used to exercise budget exhaustion through are both gone with the
+//! routing deletion (design-decisions, 2026-09-16); the exhaustion refusal
+//! itself survives at launch time (`commands::shared::entitlement_refusal_message`)
+//! and through the context-firewall reducer, proven below.
 //!
 //! Each test is its own `Binary`: sharing one across tests would let a
 //! ledger row planted for one budget's period leak into another's window.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,16 +65,6 @@ impl Binary {
             base,
             root,
         }
-    }
-
-    /// The gateway's own `gateway.toml`, beside Glasshouse's config —
-    /// where an account lives since the 2026-09-11 ruling.
-    /// `--data-dir`/`--config-dir` relocate the gateway with Glasshouse, so
-    /// this is the file the binary reads.
-    fn with_gateway(self, toml: &str) -> Self {
-        std::fs::write(self.base.join("config").join("gateway.toml"), toml)
-            .expect("write gateway.toml");
-        self
     }
 
     fn with_pricing(self, toml: &str) -> Self {
@@ -332,139 +327,6 @@ fn a_budget_with_no_ledger_rows_leaves_remaining_unmeasured() {
     assert!(
         said.contains("spend not counted (0 exchanges: 0 unread, 0 unpriced)"),
         "{said}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// (b) Priced rows at or over the budget: `glasshouse route` refuses the
-// destination by name with the budget reason, and a disposable/support-work
-// dispatch finds nothing configured rather than dialling the exhausted
-// provider.
-// ---------------------------------------------------------------------------
-
-fn two_provider_route_config() -> String {
-    format!(
-        "{}\n[providers.beta]\ntemplate = \"openrouter\"\ncredential_env = [\"{FREE_VAR}\"]\n\n\
-         [profiles.alpha]\nharness = \"claude-code\"\nexpected_protocol = \"anthropic-messages\"\n\n\
-         [profiles.alpha.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
-         [profiles.beta]\nharness = \"claude-code\"\nexpected_protocol = \"anthropic-messages\"\n\n\
-         [profiles.beta.backend]\nkind = \"direct-provider\"\nprovider = \"beta\"\n\n\
-         [entitlements.acct-alpha]\nallow_harnesses = [\"claude-code\"]\n",
-        provider_with_budget("alpha", VAR, 10_000_000),
-    )
-}
-
-/// The two accounts the routing fixture above states policy about.
-fn two_route_accounts() -> String {
-    format!(
-        "[accounts.acct-alpha]\nprovider = \"alpha\"\ncredential = {{ env = \"{VAR}\" }}\n\n\
-         [accounts.acct-beta]\nprovider = \"beta\"\ncredential = {{ env = \"{FREE_VAR}\" }}\n"
-    )
-}
-
-#[cfg(unix)]
-fn install_fake_harness(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-claude-code");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
-
-#[cfg(windows)]
-fn install_fake_harness(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-claude-code.cmd");
-    std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").unwrap();
-    path
-}
-
-#[test]
-fn glasshouse_route_refuses_the_exhausted_destination_by_name() {
-    let tmp = tempfile::tempdir().expect("tempdir for the fake harness");
-    let harness = install_fake_harness(tmp.path());
-    let escaped = harness.display().to_string().replace('\\', "\\\\");
-
-    let binary = Binary::with_config(&format!(
-        "[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n{}",
-        two_provider_route_config()
-    ))
-    .with_gateway(&two_route_accounts())
-    .with_pricing(&pricing_toml("alpha", "m", 6.0, 6.0));
-    // 1,000,000 input + 1,000,000 output @ $6/M each = $12 >= the $10 budget.
-    binary.plant_exchange("alpha", "m", 1_000_000, 1_000_000, 60);
-
-    let out = binary.glasshouse(&["route"]);
-    let said = Binary::both_streams(&out);
-    assert!(out.status.success(), "{said}");
-
-    assert!(
-        said.contains(
-            "entitlement `acct-alpha` does not serve any more work — its budget \
-             $10.000000 per calendar month is exhausted: $12.000000 counted spent"
-        ),
-        "the exhausted destination must be rejected by name with the budget reason:\n{said}"
-    );
-    // `beta` carries no budget at all, so it is never touched by this gate
-    // and the ranking still has somewhere to go.
-    assert!(
-        said.contains("fresh:claude-code:beta"),
-        "the unaffected provider must still be a live candidate:\n{said}"
-    );
-}
-
-#[test]
-fn a_support_work_dispatch_finds_nothing_configured_once_its_only_provider_is_exhausted() {
-    let binary = Binary::with_config(&format!(
-        "[routing]\nmodel = {{ kind = \"automatic\" }}\n\n{}",
-        provider_with_budget("alpha", VAR, 10_000_000)
-    ))
-    // Priced low on purpose: map line 1436's own classification-cost ceiling
-    // prices a small estimated request and must stay clear of it here, while
-    // the historical volume below still drives the *counted* spend well past
-    // the budget — the two are unrelated estimates over the same rate.
-    .with_pricing(&pricing_toml("alpha", "m", 1.0, 1.0));
-    binary.plant_exchange("alpha", "m", 6_000_000, 6_000_000, 60);
-
-    let out = binary.glasshouse(&["resources", "--no-harness"]);
-    let said = Binary::both_streams(&out);
-    assert!(out.status.success(), "{said}");
-
-    assert!(
-        said.contains(
-            "would select    nothing — no configured provider names a model for Glasshouse's \
-             own support work"
-        ),
-        "the exhausted provider's only candidate must be excluded before support work is \
-         chosen, the same way a disabled provider already is:\n{said}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// (e) A free-tier candidate is never excluded by a money budget.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn a_free_model_on_an_exhausted_provider_is_never_excluded() {
-    let config = format!(
-        "[routing]\nmodel = {{ kind = \"automatic\" }}\n\n\
-         [providers.alpha]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR}\"]\n\
-         free_models = [\"free-m\"]\nmetered_models = [\"m\"]\n\n\
-         [providers.alpha.quota]\nbudget = {{ amount_micro_usd = 10000000, \
-         period = \"calendar-month\" }}\n"
-    );
-    let binary = Binary::with_config(&config).with_pricing(&pricing_toml("alpha", "m", 6.0, 6.0));
-    // Over the $10 budget, same as the exhaustion tests above.
-    binary.plant_exchange("alpha", "m", 1_000_000, 1_000_000, 60);
-
-    let out = binary.glasshouse(&["resources", "--no-harness"]);
-    let said = Binary::both_streams(&out);
-    assert!(out.status.success(), "{said}");
-
-    assert!(
-        said.contains("would select    free-m on alpha"),
-        "a free candidate on the same exhausted provider must still be selectable:\n{said}"
     );
 }
 

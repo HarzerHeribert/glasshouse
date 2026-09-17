@@ -53,9 +53,7 @@ pub(super) fn section_tip(settings: &SettingsState) -> String {
                 .to_owned()
         }
         SettingsSection::Providers => {
-            "API keys you pay per token for. Press `a` to add one — that is the step a new \
-             install needs before routing can choose anything."
-                .to_owned()
+            "API keys you pay per token for. Press `a` to add one.".to_owned()
         }
         SettingsSection::Subscriptions => {
             subscription_tip(settings.subscriptions(), settings.broker())
@@ -63,11 +61,6 @@ pub(super) fn section_tip(settings: &SettingsState) -> String {
         SettingsSection::LaunchProfiles => {
             "Named launch recipes: which harness, which backend, which model. A profile \
              backed by the gateway is how a subscription pays for a session."
-                .to_owned()
-        }
-        SettingsSection::Routing => {
-            "How Glasshouse picks a destination when a profile does not name one. Ceilings \
-             refuse; they never silently downgrade."
                 .to_owned()
         }
         SettingsSection::Memory => {
@@ -133,16 +126,6 @@ pub(super) fn section_pills(settings: &SettingsState) -> Vec<Pill> {
             Pill::key("u", "duplicate", KeyCode::Char('u')),
             Pill::key("space", "enable", KeyCode::Char(' ')),
             Pill::key("d", "remove", KeyCode::Char('d')),
-        ],
-        SettingsSection::Routing => vec![
-            Pill::key("m", "model", KeyCode::Char('m')),
-            Pill::key("f", "prefer free", KeyCode::Char('f')),
-            Pill::key("c", "max cost", KeyCode::Char('c')),
-            Pill::key("l", "max latency", KeyCode::Char('l')),
-            Pill::key("p", "premium reserve", KeyCode::Char('p')),
-            Pill::key("o", "free order", KeyCode::Char('o')),
-            Pill::key("d", "free disabled", KeyCode::Char('d')),
-            Pill::key("n", "free pin", KeyCode::Char('n')),
         ],
         SettingsSection::Memory => vec![Pill::key("space", "extraction", KeyCode::Char(' '))],
     }

@@ -5,18 +5,23 @@
 //! user file — [`EffectiveConfig`] — never written except by explicit user
 //! consent, [`write_project_config_with_consent`]).
 //! The schema is deliberately tiny (Phase 49): a field belongs here once a
-//! user can actually make the decision it records. [`RoutingConfig`] and
-//! [`ProfileTable`] store only inert selections — never a resolved overlay,
-//! a health observation, a live price, or a credential; resolving happens
-//! in [`crate::profile`] and the later router, not here.
+//! user can actually make the decision it records. [`ProfileTable`] stores
+//! only inert selections — never a resolved overlay, a health observation, a
+//! live price, or a credential; resolving happens in [`crate::profile`], not
+//! here.
 //! No secrets here, structurally: [`IntegrationConfig`], [`ProfileConfig`]
 //! and [`ProviderConfig`] hold only names and references
 //! ([`StoredCredentialRef`]), never an API key or token (Phase 9E) —
 //! resolving one is `SecretStore`'s job, guarded structurally by
 //! `tests::serialized_form_has_no_secret_capable_field`.
 //! Phase 59 split this directory by concern: [`hooks`], [`profile`],
-//! [`provider`], [`entitlement`], [`routing_policy`], [`loading`] and
-//! [`effective`]; this file keeps only wiring, [`ConfigError`], re-exports.
+//! [`provider`], [`entitlement`], [`loading`] and [`effective`]; this file
+//! keeps only wiring, [`ConfigError`], re-exports. There is no `[routing]`
+//! table any more (2026-09-16 ruling, *Glasshouse never decides which model
+//! is used*): [`tier`] and [`job_kind`] keep the two small pieces of routing
+//! vocabulary configuration still names (a model's tier ceiling, an
+//! entitlement's job-kind gate), and `loading::parse_toml` refuses a file
+//! that still carries a `[routing]` or `[routing.reserve]` table.
 //! [`entitlement`] is split again along the gateway boundary:
 //! [`inference_gateway::entitlement`] holds what an account *is* and can serve —
 //! client-neutral, naming no harness, job kind or session — and
@@ -29,12 +34,13 @@ pub mod entitlement;
 pub mod firewall;
 pub mod gateway_store;
 pub mod hooks;
+pub mod job_kind;
 pub mod loading;
 pub mod pairing;
 pub mod profile;
 pub mod provider;
 pub mod response;
-pub mod routing_policy;
+pub mod tier;
 
 use std::io;
 use std::path::PathBuf;
@@ -57,20 +63,18 @@ pub use entitlement::{
 pub use gateway_store::{GATEWAY_OWNED_DIRECTORIES, GatewayCatalogue};
 pub use hooks::{IntegrationConfig, IntegrationTable};
 pub use inference_gateway::entitlement::{AccountEntry, ResolvedAccount};
+pub use job_kind::JobKind;
 pub use loading::{
     Layer, Layered, Layers, ProjectConfig, UserConfig, load_project_config, project_config_path,
     write_project_config_with_consent,
 };
 pub use profile::{ProfileApproval, ProfileBackend, ProfileConfig, ProfileTable};
 pub use provider::{
-    BudgetPeriod, ConfiguredWorkloadTier, ExtractionModelRef, FreeResourceRef, MonetaryBudget,
-    ProviderConfig, ProviderTable, QuotaOverride, QuotaStaleAfterSeconds, StoredCredentialRef,
+    BudgetPeriod, CapacityBandThresholdsConfig, ConfiguredWorkloadTier, ExtractionModelRef,
+    MonetaryBudget, PremiumReservePercent, ProviderConfig, ProviderTable, QuotaOverride,
+    QuotaStaleAfterSeconds, ResourceFacts, StoredCredentialRef,
 };
-pub use routing_policy::{
-    CapacityBandThresholdsConfig, PremiumReservePercent, ReservePoliciesConfig, RouterCostMicroUsd,
-    RouterLatencyMs, RoutingConfig, RoutingFallback, RoutingModelChoice, RoutingModelResolution,
-    ScoreWeightsConfig,
-};
+pub use tier::WorkloadTier;
 
 /// Errors from loading or saving Glasshouse configuration.
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +154,21 @@ pub enum ConfigError {
     /// `glasshouse migrate-gateway-state`, which moves them.
     #[error("configuration file `{path}`: {message}")]
     LegacyGatewayState { path: PathBuf, message: String },
+
+    /// A `[routing]` table is still present. Glasshouse never decides which
+    /// model is used (design-decisions.md, 2026-09-16 ruling) and no longer
+    /// reads this table.
+    ///
+    /// Refused rather than ignored, for [`Self::LegacyGatewayState`]'s own
+    /// reason: a build that silently dropped `[routing]` would leave a user
+    /// believing a preference they wrote — a pinned model, a reserve
+    /// threshold — was still in effect.
+    #[error(
+        "configuration file `{path}`: a `[routing]` table is present, but Glasshouse never decides \
+         which model is used (ruling 2026-09-16) and no longer reads this table; remove it. A \
+         `capacity_band_thresholds` or `premium_reserve_percent` you set now lives at the top level."
+    )]
+    RemovedRoutingTable { path: PathBuf },
 
     /// The gateway's own `gateway.toml` could not be read.
     #[error("could not read the gateway's configuration `{path}`: {message}")]

@@ -151,7 +151,7 @@ pub(crate) fn row_to_observation(
     let task_class_text: Option<String> = row.get("task_class")?;
     let task_class = task_class_text
         .as_deref()
-        .and_then(super::request::TaskClass::from_stored);
+        .and_then(super::TaskClass::from_stored);
 
     // Migration 24, and `task_class`'s arm above rather than
     // `failure_class`'s, for the reason that migration's own doc comment
@@ -263,19 +263,13 @@ mod signals;
 mod tests;
 
 pub use inference_gateway::routing::evidence::*;
-pub use joins::{
-    EffortShadow, EffortShadowRow, HeadroomReplayCounts, LONG_SIGNAL_HORIZON_SECONDS,
-    MIN_LEARNED_RESET_RECOVERIES, OutputEstimateAccuracy, RECENT_SIGNAL_HORIZON_SECONDS,
-    RouteResponsiveness, SeparationMeasure, SeparationReport, estimate_subscription_headroom,
-};
+pub use joins::{HeadroomReplayCounts, estimate_subscription_headroom};
 pub use ledger::{observation_sink, optional_observation_sink};
 pub use readers::{
-    ClassificationRecord, HarnessRequestStats, LatencyRecord, ObservationQuery,
-    ObservedEvidenceSource, ObservedIdentity, PurposeConsumption, RoutingOverhead, RoutingSummary,
-    SessionTranslationSavings, TranslationSavings, WallClockSummary,
+    ObservedIdentity, PurposeConsumption, RoutingOverhead, RoutingSummary,
+    SessionTranslationSavings,
 };
 pub use signals::{
-    CredentialSpend, CredentialThrottles, ThrottleScope, ThrottleScopes, classify_throttle_scope,
-    classify_throttle_scopes, correlate_routes, estimated_context_tokens, recent_credential_cost,
-    recent_credential_spend, recent_credential_throttles,
+    CredentialSpend, CredentialThrottles, recent_credential_cost, recent_credential_spend,
+    recent_credential_throttles,
 };

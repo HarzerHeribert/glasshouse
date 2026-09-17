@@ -1,18 +1,22 @@
-//! Phase 56A lines 1962, 1963, 1964 and 1973, plus line 1947's job-kind
-//! clause — the entitlement as the unit of capacity: a specific account with
-//! its own credential, several per vendor, five explicit layers, and a
-//! credential boundary between accounts.
+//! Phase 56A lines 1962, 1963, 1964 and 1973 — the entitlement as the unit
+//! of capacity: a specific account with its own credential, several per
+//! vendor, five explicit layers, and a credential boundary between accounts.
 //!
 //! Two halves, for the reason `tests/entitlements.rs` gives for its own. The
-//! first goes through the public configuration and routing API —
+//! first goes through the public configuration API —
 //! `EffectiveConfig::entitlements` / `entitlement_for` /
-//! `entitlement_resources` and `DisposableRouting::choose` — entered exactly
-//! as `main.rs` enters them. The second runs the shipped binary against
-//! `[entitlements.<name>]` tables it wrote itself: nothing in half one can
-//! fail on a build where `glasshouse status` stops listing configured
-//! accounts, or where a launch's child environment carries the *other*
-//! account's credential variable — and those are what this package wires.
-//! Practice §35.
+//! `entitlement_resources` — entered exactly as `main.rs` enters them. The
+//! second runs the shipped binary against `[entitlements.<name>]` tables it
+//! wrote itself: nothing in half one can fail on a build where `glasshouse
+//! status` stops listing configured accounts, or where a launch's child
+//! environment carries the *other* account's credential variable — and
+//! those are what this package wires. Practice §35.
+//!
+//! Line 1947's job-kind clause — `DisposableRouting::choose` consuming an
+//! entitlement's `deny_job_kinds`/`allow_job_kinds` rule — went with the
+//! router (design-decisions.md, 2026-09-16, "Glasshouse never decides which
+//! model is used"): its own tests and the production attach they proved
+//! through the shipped binary are gone with it.
 //!
 //! Fixture credentials here are obviously fake strings; every artifact a
 //! test can read (status output, launch stderr, a written config file, a
@@ -21,7 +25,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Instant;
 
 use clap::Parser as _;
 
@@ -35,11 +38,7 @@ use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::BackendResource;
 use glasshouse::project::Project;
 use glasshouse::provider::registry::ResourceKind;
-use glasshouse::routing::disposable::{
-    DisposableCandidate, DisposableRouting, JobKind, NoResource,
-};
-use glasshouse::routing::free::{FreePool, FreePreferences};
-use glasshouse::routing::{Cost, CredentialId, Entitlement, EntitlementRules};
+use glasshouse::routing::EntitlementRules;
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
 // Splitting a pre-2026-09-11 fixture into Glasshouse's `config.toml` and the
@@ -618,145 +617,6 @@ fn one_vendor_and_protocol_stand_behind_two_credentials() {
     );
 }
 
-// --- line 1947's job-kind clause: the disposable router consumes the rule --
-
-fn free_candidate(provider: &str, model: &str) -> DisposableCandidate {
-    DisposableCandidate::new(
-        provider,
-        model,
-        CredentialId::new(
-            provider,
-            SecretRef::Environment {
-                var: format!("{}_KEY", provider.to_uppercase().replace('-', "_")),
-            },
-        ),
-        Cost::Free,
-    )
-}
-
-/// **The rule reaches the decision.** A candidate whose entitlement denies
-/// this job kind is never chosen — in either order, so the walk order cannot
-/// be what decided it — and the choice's own explanation names the
-/// entitlement and the job kind exactly as the session router's rejection
-/// names an entitlement and a harness.
-#[test]
-fn an_entitlement_that_denies_the_job_kind_is_not_a_candidate_and_is_named() {
-    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
-    let no_eval =
-        free_candidate("alpha-probe", "model-one").with_entitlement(Some(Entitlement::new(
-            "no-eval",
-            EntitlementRules::UNRESTRICTED.deny_job_kinds([JobKind::Evaluation]),
-        )));
-    let open = free_candidate("beta-probe", "model-two").with_entitlement(Some(Entitlement::new(
-        "open-account",
-        EntitlementRules::UNRESTRICTED,
-    )));
-
-    for candidates in [
-        vec![no_eval.clone(), open.clone()],
-        vec![open.clone(), no_eval.clone()],
-    ] {
-        let choice = routing
-            .choose(
-                JobKind::Evaluation,
-                &candidates,
-                &FreePool::new(),
-                Instant::now(),
-                None,
-            )
-            .expect("the open account serves");
-        assert_eq!(choice.provider(), "beta-probe");
-        let explanation = choice.explanation().render();
-        assert!(
-            explanation.contains("entitlement `no-eval` does not serve the `evaluation` job kind"),
-            "the refusal names the entitlement and the job kind:\n{explanation}"
-        );
-    }
-
-    // The same two candidates, a job kind nobody denies: the first free
-    // candidate in the user's order wins exactly as before, and no refusal
-    // is invented for the explanation.
-    let choice = routing
-        .choose(
-            JobKind::Classification,
-            &[no_eval, open],
-            &FreePool::new(),
-            Instant::now(),
-            None,
-        )
-        .expect("both serve classification");
-    assert_eq!(choice.provider(), "alpha-probe");
-    assert!(
-        !choice.explanation().render().contains("entitlement rule"),
-        "{}",
-        choice.explanation().render()
-    );
-}
-
-/// **A stated allow-list admits only its members** — the other way a rule
-/// denies a job kind — and a candidate with no entitlement is never refused
-/// by one: nobody's rule can refuse what nobody's rule describes.
-#[test]
-fn an_allow_list_omitting_the_job_kind_refuses_it_and_no_entitlement_never_does() {
-    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
-    let classify_only =
-        free_candidate("alpha-probe", "model-one").with_entitlement(Some(Entitlement::new(
-            "classify-only",
-            EntitlementRules::UNRESTRICTED.allow_job_kinds([JobKind::Classification]),
-        )));
-    let unnamed = free_candidate("beta-probe", "model-two");
-
-    let choice = routing
-        .choose(
-            JobKind::MemoryExtraction,
-            &[classify_only, unnamed],
-            &FreePool::new(),
-            Instant::now(),
-            None,
-        )
-        .expect("the unnamed candidate serves");
-    assert_eq!(choice.provider(), "beta-probe");
-    assert!(
-        choice.explanation().render().contains(
-            "entitlement `classify-only` does not serve the `memory extraction` job kind"
-        ),
-        "the spelling is JobKind::as_str's own, the one a rule is written in: {}",
-        choice.explanation().render()
-    );
-}
-
-/// **When every candidate's entitlement refuses, the error says so** —
-/// naming each entitlement and the job kind — rather than misreporting the
-/// pool as exhausted, which would send the user chasing quota instead of
-/// their own rule.
-#[test]
-fn every_candidate_refused_names_every_entitlement_and_the_job_kind() {
-    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
-    let only = free_candidate("alpha-probe", "model-one").with_entitlement(Some(Entitlement::new(
-        "no-eval",
-        EntitlementRules::UNRESTRICTED.deny_job_kinds([JobKind::Evaluation]),
-    )));
-
-    let err = routing
-        .choose(
-            JobKind::Evaluation,
-            &[only],
-            &FreePool::new(),
-            Instant::now(),
-            None,
-        )
-        .expect_err("nothing is left to serve");
-    let NoResource::EntitlementDeniesEveryCandidate { reasons } = &err else {
-        panic!("the refusal must name the rule, not the pool: {err:?}");
-    };
-    assert_eq!(reasons.len(), 1);
-    assert!(
-        reasons[0].contains("entitlement `no-eval` does not serve the `evaluation` job kind"),
-        "{reasons:?}"
-    );
-    assert!(err.to_string().contains("refuses this job kind"), "{err}");
-}
-
 // ===========================================================================
 // Half two — the shipped binary: `glasshouse status` lists the pool, and a
 // launch's child environment carries only the serving account's variable.
@@ -1141,20 +1001,13 @@ fn a_launch_under_one_entitlement_never_carries_the_other_accounts_variable() {
 /// plain native launch — carries *neither* account's variable: a session
 /// charged to no account has no business holding any account's key.
 ///
-/// Since map line 372 closed (2026-09-01), an unpinned launch under
-/// automatic routing — the default — ranks every enabled profile
-/// destination, the per-account ones included, so the ranking may
-/// legitimately land on an account and carry that account's credential into
-/// the launch it now serves (the previous test proves exactly that scrub).
-/// This test's premise is the *other* path — a session no entitlement
-/// serves — so it turns automatic routing off (map line 1712's own switch),
-/// which keeps the unpinned launch native.
+/// `glasshouse launch` with no destination flag opens the native entry
+/// unconditionally now (design-decisions.md, 2026-09-16, "Glasshouse never
+/// decides which model is used") — no automatic-routing toggle left to turn
+/// off.
 #[test]
 fn a_launch_no_entitlement_serves_carries_no_accounts_variable() {
-    let binary = Binary::with_config(&format!(
-        "{}\n[routing]\nautomatic = false\n",
-        pool_config()
-    ));
+    let binary = Binary::with_config(&pool_config());
 
     let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
     let said = Binary::both_streams(&out);
@@ -1169,41 +1022,6 @@ fn a_launch_no_entitlement_serves_carries_no_accounts_variable() {
             && !child_env.contains(VALUE_B),
         "a native session inherited a configured account's credential:\n{child_env}"
     );
-}
-
-/// **The production attach, through the shipped binary — practice §35.** The
-/// half-one tests build their own candidates, so none of them would notice
-/// `main.rs::disposable_candidates` ceasing to attach entitlements. This one
-/// would: `glasshouse resources`' routing-model block reports what the real
-/// automatic-classification decision — the same `disposable_candidates` +
-/// `choose` path the shipped binary classifies with — would select, and with
-/// the only configured candidate's entitlement denying `classification`, it
-/// must report nothing to select and name the entitlement and the job kind.
-#[test]
-fn the_shipped_binary_attaches_entitlements_to_support_work_candidates() {
-    let config = format!(
-        "\n\
-         [routing]\nmodel = {{ kind = \"automatic\" }}\n\n\
-         [providers.alpha-probe]\ntemplate = \"openai-compatible\"\n\
-         base_url = \"http://127.0.0.1:9/v1\"\n\
-         credential_env = [\"{VAR_A}\"]\nfree_models = [\"a-free-model\"]\n\n\
-         [entitlements.no-classify]\nvendor = \"openrouter\"\nprovider = \"alpha-probe\"\n\
-         credential = {{ env = \"{VAR_A}\" }}\ndeny_job_kinds = [\"classification\"]\n"
-    );
-    let binary = Binary::with_config(&config);
-    let out = binary.glasshouse(&["resources", "--no-harness"]);
-    let said = Binary::both_streams(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(
-        said.contains("would select    nothing"),
-        "an entitlement-refused candidate must not be selectable:\n{said}"
-    );
-    assert!(
-        said.contains("entitlement `no-classify` does not serve the `classification` job kind"),
-        "the refusal names the entitlement and the job kind, from the shipped binary's own \
-         candidate list:\n{said}"
-    );
-    assert!(!said.contains(VALUE_A), "{said}");
 }
 
 // ===========================================================================

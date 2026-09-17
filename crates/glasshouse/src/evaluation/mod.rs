@@ -26,14 +26,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Runtime;
 use crate::database::{EVALUATION_KINDS, PROJECT_ID_KEY};
 
-mod joins;
 mod kinds;
 mod readers;
 #[cfg(test)]
 mod tests;
 mod writer;
 
-pub use joins::*;
 pub use kinds::*;
 pub use readers::*;
 pub use writer::*;
@@ -484,8 +482,8 @@ pub fn now_unix() -> i64 {
 }
 
 /// The `subject` a completed turn is recorded under —
-/// [`EvaluationKind::RoutingOutcomeObserved`]'s vocabulary, spelled once so
-/// the writer below and the two readers above cannot drift apart.
+/// [`EvaluationKind::TurnOutcomeObserved`]'s vocabulary, spelled once so the
+/// writer and the memory-quality readers cannot drift apart.
 const TURN_COMPLETED: &str = "completed";
 /// The `subject` a failed turn is recorded under.
 const TURN_FAILED: &str = "failed";

@@ -14,11 +14,11 @@
 //!   fall through the reserve policy's old `== Heavy` / `!= Heavy` equalities
 //!   (capability map lines 1289, 1290, and 1292's distant-reset complement).
 
+use glasshouse::config::WorkloadTier;
 use glasshouse::provider::quota::{
     CapacityBand, RESET_DISTANT_SECONDS, RESET_IMMINENT_SECONDS, ReserveDecisionInputs,
     evaluate_reserve_spend,
 };
-use glasshouse::routing::classify::WorkloadTier;
 
 fn base_inputs() -> ReserveDecisionInputs {
     ReserveDecisionInputs {

@@ -28,7 +28,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
-use crate::config::{Layer, RoutingModelChoice};
+use crate::config::Layer;
 use crate::provider::discovery::ProbeOutcome;
 use crate::pty::TerminalSize;
 use crate::session::{
@@ -39,7 +39,7 @@ use crate::session::{
 use super::state::{
     Chrome, ESCAPE_CHORD, FOCUS_CHORD, KnowledgeSection, MemoryDetail, Mode, Overlay,
     OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection, SettingsState,
-    ShellState, ViewportGrid, format_usd,
+    ShellState, ViewportGrid,
 };
 
 /// Control mode's fixed vertical chrome: title, root, session bar, viewport,
@@ -180,9 +180,6 @@ pub(super) fn render_recording(state: &ShellState, frame: &mut Frame, sink: &mut
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
-        Some(Overlay::RouteEvidence) => render_route_evidence(state, frame, area),
-        Some(Overlay::RouteHealth) => render_route_health(state, frame, area),
-        Some(Overlay::RouteDecisions) => render_route_decisions(state, frame, area),
         Some(Overlay::ProjectMemory) => render_project_memory(state, frame, area),
         None => {}
     }
@@ -657,24 +654,6 @@ fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
             lines.push(Line::from(line.clone()));
         }
     }
-    // Line 1661 — the currently selected routing model and its recent
-    // latency. Built by `shell::build_project_overview_routing`, which always
-    // has something honest to say (a model name, or why there is not one) —
-    // an empty string here means only the test fixtures above that never set
-    // one, never a real overview the run loop opened.
-    if let Some(routing) = state
-        .project_overview()
-        .map(crate::shell::state::ProjectOverviewState::routing)
-        .filter(|line| !line.is_empty())
-    {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "ROUTING MODEL",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(routing.to_owned()));
-    }
-
     if let Some(note) = state.project_overview().and_then(|o| o.memory_note()) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -1007,319 +986,6 @@ fn render_project_memory(state: &ShellState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Phase 47, map lines 1762 and 1764: a compact table of the distinct
-/// routing identities this project's gateway has actually recorded.
-///
-/// **Deliberately three columns, not line 1762's seven.** SAMPLES and WINDOW
-/// are the two of the line's seven this producer can supply at all — the
-/// other five have no producer on this gateway — plus CONTEXT for line
-/// 1764; rendering any of the five absent figures would be a fabricated
-/// measurement, which this phase's "observability without spectacle"
-/// heading forbids (see `no_fabricated_columns_appear_in_the_route_evidence_table`
-/// below). CONTEXT shows exactly what
-/// [`crate::shell::state::RouteEvidenceRow::context_state`] carries
-/// (`"warm"`, `"cold"`, or `"unknown"`) — today, in real production data,
-/// every row reads `"unknown"`, and this table shows that plainly rather
-/// than omitting the column or guessing.
-///
-/// History: design-decisions.md, "Trims: the remaining module docs, second
-/// packet", `render_route_evidence`.
-fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 84, 60);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" route evidence ")
-        .border_style(Style::default().fg(state.theme().accent()))
-        .style(Style::default().bg(Color::Reset));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let mut lines = Vec::new();
-    let evidence = state.route_evidence();
-    let rows = evidence
-        .map(crate::shell::state::RouteEvidenceState::rows)
-        .unwrap_or_default();
-
-    lines.push(Line::from(Span::styled(
-        format!(
-            "  {:<20} {:<20} {:<16} {:<8} {:<8} {}",
-            "PROVIDER", "MODEL", "ROUTE", "SAMPLES", "CONTEXT", "WINDOW"
-        ),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no routing evidence recorded yet",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        let now = crate::provider::cache::now_unix_seconds();
-        for row in rows {
-            let (window_start, window_end) = (row.window_start_unix, row.window_end_unix);
-            lines.push(Line::from(format!(
-                "  {:<20} {:<20} {:<16} {:<8} {:<8} {}",
-                row.provider,
-                row.model,
-                row.route.as_deref().unwrap_or("(no route)"),
-                row.sample_count,
-                row.context_state,
-                describe_window(now, window_start, window_end),
-            )));
-        }
-    }
-
-    if let Some(note) = evidence.and_then(crate::shell::state::RouteEvidenceState::note) {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            note.to_owned(),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Why Glasshouse routed its own recent support jobs the way it did.
-///
-/// This draws stored text and computes nothing: the rationale on screen is
-/// the sentence `main.rs::disposable_extraction_model` rendered at the
-/// moment it decided, carried through unchanged. This is the same invariant
-/// [`crate::shell::state::RouteDecisionRow`] documents — the decision
-/// behind a row is a `crate::routing::disposable::DisposableChoice`, which
-/// nothing outside its own module can construct, so there is no version of
-/// this function that could re-derive a field the producer did not write.
-/// What was not recorded is drawn as *not recorded*, never a blank column.
-/// Newest decisions are at the top so a long list clips the oldest, the
-/// same trade `render_route_health` makes for many resources.
-///
-/// History: design-decisions.md, "Trims: the remaining module docs, second
-/// packet", `render_route_decisions`.
-fn render_route_decisions(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 84, 60);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" routing decisions ")
-        .border_style(Style::default().fg(state.theme().accent()))
-        .style(Style::default().bg(Color::Reset));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let decisions = state.route_decisions();
-    let rows = decisions
-        .map(crate::shell::state::RouteDecisionsState::rows)
-        .unwrap_or_default();
-
-    let mut lines = Vec::new();
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no routing decision has been recorded yet",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        let now = crate::provider::cache::now_unix_seconds();
-        for row in rows {
-            let session = row.session_id.as_deref().unwrap_or("(no session recorded)");
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {} — {}, for session {session}",
-                    row.job,
-                    describe_age(now, row.observed_at_unix)
-                ),
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
-            match row.rationale.as_deref() {
-                Some(rationale) => {
-                    for line in rationale.lines() {
-                        lines.push(Line::from(format!("    {}", line.trim_end())));
-                    }
-                }
-                None => lines.push(Line::from(Span::styled(
-                    "    (no rationale recorded)",
-                    Style::default().fg(Color::DarkGray),
-                ))),
-            }
-            lines.push(Line::from(""));
-        }
-    }
-
-    if let Some(note) = decisions.and_then(crate::shell::state::RouteDecisionsState::note) {
-        lines.push(Line::from(Span::styled(
-            note.to_owned(),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The observation window `(start, end)` in words, using real recorded
-/// timestamps — never a placeholder. A single-sample identity has `start ==
-/// end` and says how long ago that one observation was; a wider window says
-/// both ends, so two identities with different windows read differently.
-fn describe_window(now: i64, start: i64, end: i64) -> String {
-    if start == end {
-        describe_age(now, end)
-    } else {
-        format!("{} – {}", describe_age(now, start), describe_age(now, end))
-    }
-}
-
-/// Phase 47, map line 1765: *"show route health, immediate availability,
-/// cadence, quota reset, and failure-domain evidence as separate concepts."*
-/// Every resource gets **five labelled lines**, one per concept, with no
-/// summary word computed across them, because the five genuinely disagree
-/// in ordinary operation: a refused-credential resource is *unavailable*
-/// while its failure streak reads zero; a paced resource is *available
-/// later* and perfectly healthy. `crate::provider::resources::render_health`
-/// prints the first three as one `status` word today — the shape this
-/// function exists not to reproduce
-/// (`route_health_keeps_line_1765s_five_concepts_on_separate_lines` fails if
-/// it ever does). Every value comes straight from a field
-/// [`crate::shell::state::RouteHealthRow`] already carries; the three
-/// concepts depending on headers most providers never send print `unknown`,
-/// never `0` or an estimate. The caches are keyed by provider
-/// (installation-scoped, not project-scoped, and the header line says so),
-/// and failure-domain evidence can never read `independent` (its only
-/// producer cannot return it), so the line says what absent evidence means.
-///
-/// History: design-decisions.md, "Trims: the remaining module docs, second
-/// packet", `render_route_health`.
-fn render_route_health(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 84, 70);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" route health ")
-        .border_style(Style::default().fg(state.theme().accent()))
-        .style(Style::default().bg(Color::Reset));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let mut lines = vec![Line::from(Span::styled(
-        "  observed by this installation's gateways, per provider — not scoped to this project",
-        Style::default().fg(Color::DarkGray),
-    ))];
-
-    let rows = state
-        .route_health()
-        .map(crate::shell::state::RouteHealthState::rows)
-        .unwrap_or_default();
-
-    if rows.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  no gateway exchange has been observed for any resource yet",
-            Style::default().fg(Color::DarkGray),
-        )));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-        return;
-    }
-
-    let now = crate::provider::cache::now_unix_seconds();
-    for row in rows {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {} / {} ({})",
-                row.provider, row.model, row.credential_label
-            ),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-
-        // 1. Route health. A streak, and it says so: `consecutive_failures`
-        //    resets to zero on any success, so calling it a total would be a
-        //    number more precise than the evidence behind it.
-        lines.push(Line::from(format!(
-            "    route health           {} consecutive failure(s) since the last success; \
-             credential rejected: {}",
-            row.consecutive_failures,
-            yes_no(row.credential_rejected),
-        )));
-
-        // 2. Immediate availability. The producer's own answer, kept apart
-        //    from the health above because the two disagree in both
-        //    directions.
-        lines.push(Line::from(format!(
-            "    immediate availability {}",
-            if row.available_now {
-                "yes — may be scheduled right now"
-            } else {
-                "no — not schedulable right now"
-            }
-        )));
-
-        // 3. Cadence: two pacing facts owned by two parties, neither derived
-        //    from the other.
-        lines.push(Line::from(format!(
-            "    cadence                glasshouse pacing: {}; provider stated: {}",
-            match row.cooling_down_until_unix {
-                Some(until) if until > now =>
-                    format!("cooling down, ends {}", describe_deadline(now, until)),
-                Some(_) => "cooldown elapsed".to_owned(),
-                None => "none".to_owned(),
-            },
-            match (row.stated_limit, row.stated_window_seconds) {
-                (Some(limit), Some(window)) => format!("{limit} request(s) per {window}s"),
-                (Some(limit), None) => format!("{limit} request(s) per an unknown window"),
-                (None, Some(window)) => format!("an unknown ceiling per {window}s"),
-                (None, None) => "unknown".to_owned(),
-            }
-        )));
-
-        // 4. Quota reset: the provider's own clock, on its own line.
-        lines.push(Line::from(format!(
-            "    quota reset            {}",
-            match row.quota_resets_at_unix {
-                Some(at) => format!("{} (unix {at})", describe_deadline(now, at)),
-                None => "unknown — no response has stated one".to_owned(),
-            }
-        )));
-
-        // 5. Failure-domain evidence, in `FailureDomain`'s own vocabulary,
-        //    and never claiming independence.
-        lines.push(Line::from(format!(
-            "    failure domain         {} — {} other observed resource(s) on `{}`; a different \
-             provider is `unknown`, never `independent`",
-            row.failure_domain, row.failure_domain_peers, row.provider,
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-/// `yes` or `no`, so a boolean fact reads as one rather than as `true`.
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
-/// A future instant in words — [`describe_age`]'s forward twin.
-///
-/// Separate from `describe_age` rather than folded into it: that function
-/// treats a timestamp ahead of `now` as a **clock fault**, which is right for
-/// a reading that was supposedly observed in the past and wrong for a deadline
-/// that is supposed to be ahead. One function answering both would have to
-/// guess which it was holding.
-fn describe_deadline(now: i64, at: i64) -> String {
-    let seconds = at.saturating_sub(now);
-    if seconds <= 0 {
-        return "already elapsed".to_owned();
-    }
-    let (count, unit) = match seconds {
-        1..=59 => (seconds, "second"),
-        60..=3_599 => (seconds / 60, "minute"),
-        3_600..=86_399 => (seconds / 3_600, "hour"),
-        _ => (seconds / 86_400, "day"),
-    };
-    let plural = if count == 1 { "" } else { "s" };
-    format!("in {count} {unit}{plural}")
-}
-
 /// How many recently completed workers the project overview shows.
 ///
 /// Not the same bound as [`super::state::ACTIVITY_ROWS`]: that list is every
@@ -1539,8 +1205,6 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect, sink: &mut
         labeled_text_input_lines(&input.label, &input.buffer, input.error)
     } else if let Some(input) = settings.profile_input() {
         labeled_text_input_lines(&input.label, input.buffer, input.error)
-    } else if let Some(input) = settings.routing_input() {
-        labeled_text_input_lines(input.label, input.buffer, input.error)
     } else if let Some((name, outcome)) = settings.provider_test_result() {
         provider_test_result_lines(name, outcome)
     } else if let Some((name, refresh)) = settings.provider_models_result() {
@@ -1585,7 +1249,6 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect, sink: &mut
             settings_actions::render_subscription_rows(settings, frame, list_area, state.theme());
         }
         SettingsSection::LaunchProfiles => render_profile_rows(settings, frame, list_area),
-        SettingsSection::Routing => render_routing(settings, frame, list_area),
         SettingsSection::Memory => render_memory(settings, frame, list_area),
     }
 
@@ -1997,96 +1660,6 @@ fn render_profile_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) 
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_routing(settings: &SettingsState, frame: &mut Frame, area: Rect) {
-    let routing = settings.routing();
-    let model = match &routing.model {
-        RoutingModelChoice::Automatic => "automatic".to_owned(),
-        RoutingModelChoice::Deterministic => "deterministic heuristics".to_owned(),
-        RoutingModelChoice::Pinned { provider, model } => format!("{provider}:{model}"),
-    };
-    let prefer_free = if routing.prefer_free { "yes" } else { "no" };
-    let mut lines = vec![
-        Line::from(format!(
-            "  Routing model             {model} {}",
-            layer_label(routing.model_layer)
-        )),
-        Line::from(format!(
-            "  Maximum router latency    {} ms {}",
-            routing.max_latency.get(),
-            layer_label(routing.max_latency_layer)
-        )),
-        Line::from(format!(
-            "  Maximum marginal cost     ${} per decision {}",
-            format_usd(routing.max_cost),
-            layer_label(routing.max_cost_layer)
-        )),
-        Line::from(format!(
-            "  Prefer free resources     {prefer_free} {}",
-            layer_label(routing.prefer_free_layer)
-        )),
-        Line::from(Span::styled(
-            "    Applied only after capability, health, rate-limit, and latency checks pass.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(format!(
-            "  Protect premium capacity  below {}% remaining {}",
-            routing.premium_reserve.get(),
-            layer_label(routing.premium_reserve_layer)
-        )),
-        Line::from(""),
-        Line::from(format!(
-            "  Free resource order      {} {}",
-            free_resource_list_label(&routing.free_order),
-            layer_label(routing.free_order_layer)
-        )),
-        Line::from(format!(
-            "  Disabled free resources  {} {}",
-            free_resource_list_label(&routing.free_disabled),
-            layer_label(routing.free_disabled_layer)
-        )),
-        Line::from(format!(
-            "  Pinned free resource     {} {}",
-            routing
-                .free_pin
-                .as_ref()
-                .map(|pin| format!("{}:{}", pin.provider(), pin.model()))
-                .unwrap_or_else(|| "(none)".to_owned()),
-            layer_label(routing.free_pin_layer)
-        )),
-    ];
-    if let Some(choice) = settings.last_disposable_choice() {
-        lines.push(Line::from(format!(
-            "  Free resource in use     {} on {} — {}",
-            choice.model(),
-            choice.provider(),
-            choice.reason()
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  m model   l latency   c cost   f prefer-free   p premium reserve   o free order   \
-         d disabled   n pin",
-        Style::default().fg(Color::DarkGray),
-    )));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-/// A comma-separated `provider:model` list for the Routing section, or a
-/// plain sentence when there is nothing to show — matching
-/// [`provider_models_line`]'s "none cached" phrasing for the same reason: an
-/// empty field reads as missing data, not as a deliberate empty list.
-fn free_resource_list_label(entries: &[crate::config::FreeResourceRef]) -> String {
-    if entries.is_empty() {
-        "(none)".to_owned()
-    } else {
-        entries
-            .iter()
-            .map(|entry| format!("{}:{}", entry.provider(), entry.model()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 fn render_memory(settings: &SettingsState, frame: &mut Frame, area: Rect) {

@@ -1,7 +1,6 @@
 //! `commands::sessions` -- moved verbatim from `main.rs` (Phase 59 decomposition).
 
 use glasshouse::Runtime;
-use glasshouse::config::UserConfig;
 use glasshouse::guardrails::AssumptionStore;
 use glasshouse::integrations::cmux;
 use glasshouse::session::{
@@ -181,140 +180,6 @@ fn claims_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
         let _ = writeln!(out);
     }
     Ok(Some(out))
-}
-
-/// The declarations block for the session overview and `glasshouse
-/// task-progress --list`, or `None` when nothing is declared.
-fn task_progress_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
-    use std::fmt::Write as _;
-
-    let declared = store.active_task_progress()?;
-    if declared.is_empty() {
-        return Ok(None);
-    }
-
-    // Display only, and the same wall-clock seconds `format_age` reads a
-    // line below — the row's own clock is the store's, and this introduces
-    // no second one for it.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
-
-    let mut out = String::new();
-    let _ = writeln!(out, "{:<12}  {:<12}  EXPIRES IN", "TASK NEARLY", "DECLARED");
-    for declaration in &declared {
-        let remaining = declaration.expires_at - now;
-        let _ = writeln!(
-            out,
-            "{:<12}  {:<12}  {}",
-            crate::commands::shared::short_id(&declaration.session_id),
-            crate::commands::shared::format_age(declaration.declared_at),
-            format_remaining(remaining),
-        );
-    }
-    Ok(Some(out))
-}
-
-/// `EXPIRES IN`, in the coarsest unit that still says something useful.
-///
-/// A declaration people can see expiring is the point: the horizon is what
-/// stops a statement outliving the task it described, so an overview that
-/// showed only *"declared"* would hide the half of the design that keeps it
-/// honest.
-fn format_remaining(seconds: i64) -> String {
-    match seconds {
-        s if s <= 0 => "expired".to_owned(),
-        s if s < 60 => format!("{s}s"),
-        s => format!("{}m", s / 60),
-    }
-}
-
-/// `glasshouse task-progress` — the producer of
-/// `provider::quota::ReserveDecisionInputs::task_nearly_complete`, capability
-/// map lines 1294 and 1610.
-///
-/// # Why a person types this
-///
-/// The field this writes is the **first** branch the reserve policy takes,
-/// outranking every other signal including the user's own override. Nothing
-/// in this build can observe task progress — a turn boundary is not a task
-/// boundary — and every available proxy reports "almost complete" for work
-/// that has merely been running a while, which is precisely the long-running
-/// work a protected reserve exists to keep serving. So a value Glasshouse
-/// invented would invert the policy rather than approximate it, and the only
-/// honest source is somebody saying so on purpose about one named session.
-///
-/// A seam, not a feature: everything it decides is decided in
-/// `session::store::progress`, and a caller that wants the declaration reads
-/// that store directly rather than this verb.
-pub(crate) fn task_progress_command(
-    runtime: &Runtime,
-    session: Option<&str>,
-    withdraw: bool,
-    list: bool,
-) -> anyhow::Result<String> {
-    let sessions = ProjectSessions::open(runtime)?;
-    let store = sessions.store();
-
-    if list {
-        return Ok(match task_progress_block(&store)? {
-            Some(block) => block,
-            None => format!(
-                "No task declared nearly complete in {}.\n",
-                runtime.project().name()
-            ),
-        });
-    }
-
-    // `clap` requires `--session` unless `--list`; stated here rather than
-    // assumed, because an argument definition is not a proof.
-    let Some(session) = session else {
-        anyhow::bail!(
-            "`glasshouse task-progress` needs `--session <id>`; `--list` needs no session"
-        );
-    };
-    let id = store.resolve_id(session)?;
-    let short = crate::commands::shared::short_id(&id);
-
-    if withdraw {
-        return Ok(if store.withdraw_task_progress(&id)? {
-            format!("glasshouse: session {short} withdrew its task-progress declaration\n")
-        } else {
-            format!("glasshouse: session {short} had declared no task progress\n")
-        });
-    }
-
-    let declared = store.declare_task_nearly_complete(&id)?;
-    let minutes = (declared.expires_at - declared.renewed_at) / 60;
-    Ok(format!(
-        "glasshouse: session {short}'s current task is declared nearly complete; a crossed \
-         quota reserve alone will not move this work for the next {minutes}m\n"
-    ))
-}
-
-/// The sessions that currently declare their task nearly complete, for the
-/// routers — capability map lines 1294 and 1610.
-///
-/// **Best-effort on purpose.** A project database that cannot be opened
-/// yields an empty set, which is *nothing declared*, which is byte-identical
-/// to the behaviour every routing path had before this line had a producer.
-/// The alternative — failing a routing decision because a declaration could
-/// not be read — would let an unreadable database deny work that has nothing
-/// to do with task progress.
-pub(crate) fn declared_task_progress_sessions(
-    runtime: &Runtime,
-) -> std::collections::BTreeSet<String> {
-    let Ok(sessions) = ProjectSessions::open(runtime) else {
-        return std::collections::BTreeSet::new();
-    };
-    match sessions.store().sessions_declaring_task_nearly_complete() {
-        Ok(declared) => declared,
-        Err(err) => {
-            tracing::debug!(error = %err, "could not read declared task progress");
-            std::collections::BTreeSet::new()
-        }
-    }
 }
 
 /// `glasshouse claim` — the deliberate entry point for map line 2392 while
@@ -582,109 +447,25 @@ pub(crate) fn session_detail(
     drop(store);
     drop(sessions);
     out.push_str(&assumption_section(runtime, &id));
-    out.push_str(&routing_rationale_section(runtime, &id));
     if debug {
         out.push_str(&prompt_cache_debug_section(runtime, &id));
     }
     Ok(out)
 }
 
-/// `sessions show`'s `routing rationale` block, map line 1757 — the
-/// session's newest [`glasshouse::evaluation::EvaluationKind::SessionRouteDecided`]
-/// row, one line per contribution, in recorded order.
-///
-/// `-` for a session with no row — started before this build recorded one,
-/// or spawned through the machine door, which is not routed — matching
-/// every other field [`session_detail`] prints for nothing recorded. An
-/// explanation with no contributions still has a row, so the heading prints
-/// and no contribution line follows: the decision happened even when
-/// nothing weighed in.
-fn routing_rationale_section(runtime: &Runtime, id: &glasshouse::session::SessionId) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    let mut line = |label: &str, value: &str| {
-        let _ = writeln!(out, "{label:<19}{value}");
-    };
-
-    let row = glasshouse::evaluation::EvaluationObservations::open(runtime)
-        .ok()
-        .and_then(|ledger| ledger.session_route_for(id.as_str()).ok())
-        .flatten();
-    let Some(row) = row else {
-        line("routing rationale", "-");
-        return out;
-    };
-
-    line("routing rationale", row.subject.as_deref().unwrap_or("-"));
-    let contributions = row
-        .detail
-        .as_deref()
-        .map(glasshouse::evaluation::route_contributions)
-        .unwrap_or_default();
-    let width = contributions
-        .iter()
-        .map(|contribution| contribution.name.len())
-        .max()
-        .unwrap_or(0);
-    for contribution in &contributions {
-        line(
-            "",
-            &format!(
-                "  {:<width$}  {:+.3}  {}",
-                contribution.name, contribution.magnitude, contribution.evidence
-            ),
-        );
-    }
-    out
-}
-
-/// `sessions show <id> --debug`'s cache-temperature view, map line 1760.
-///
-/// Two readings, kept apart rather than blended into one number: (a) the
-/// router's own `prompt-cache state` contribution
-/// ([`glasshouse::routing::session::prompt_cache_state`]) from this
-/// session's newest recorded rationale — the estimate the router made
-/// *before* any of this session's exchanges happened — and (b) the
-/// cached-input share this project's ledger actually holds over this
-/// session's own translated exchanges, from
+/// `sessions show <id> --debug`'s cache-temperature view, map line 1760: the
+/// cached-input share this project's ledger holds over this session's own
+/// translated exchanges, from
 /// [`glasshouse::routing::evidence::EvidenceLedger::cached_share_for_session`].
 ///
-/// The trailing sentence is fixed and always printed: this build observes
-/// neither a provider cache's presence nor its lifetime (see
-/// `prompt_cache_state`'s own doc comment), so (a) is an estimate and (b) is
-/// what providers reported on exchanges that came after it, never a
-/// measurement of the same cache the estimate describes.
+/// **Glasshouse deletes its router** (design-decisions.md, 2026-09-16), so
+/// this no longer prints a launch-time estimate beside the measured share —
+/// only what providers actually reported.
 fn prompt_cache_debug_section(runtime: &Runtime, id: &glasshouse::session::SessionId) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
     out.push_str("\nprompt-cache estimate (1760):\n");
-
-    let estimate = glasshouse::evaluation::EvaluationObservations::open(runtime)
-        .ok()
-        .and_then(|ledger| ledger.session_route_for(id.as_str()).ok())
-        .flatten()
-        .and_then(|row| {
-            row.detail
-                .as_deref()
-                .map(glasshouse::evaluation::route_contributions)
-        })
-        .and_then(|contributions| {
-            contributions
-                .into_iter()
-                .find(|contribution| contribution.name == "prompt-cache state")
-        });
-    match estimate {
-        Some(contribution) => {
-            let _ = writeln!(
-                out,
-                "  the router's estimate at launch: {:+.3}  {}",
-                contribution.magnitude, contribution.evidence
-            );
-        }
-        None => out.push_str("  no routing rationale recorded for this session\n"),
-    }
 
     let share = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
         .ok()
@@ -707,12 +488,6 @@ fn prompt_cache_debug_section(runtime: &Runtime, id: &glasshouse::session::Sessi
             "  no translated exchange has reported cached-input tokens for this session\n",
         ),
     }
-
-    out.push_str(
-        "  the share above is what providers reported on this session's own exchanges; the \
-         estimate above was made before any of them — an estimate and its evidence, never a \
-         measurement of the provider's cache\n",
-    );
     out
 }
 
@@ -899,66 +674,6 @@ pub(crate) fn tag_session(
             "Session {} has no purpose tag.\n",
             crate::commands::shared::short_id(&record.id)
         ),
-    })
-}
-
-/// Capability map line 1290: *"allow the user to override reserve protection
-/// for a specific task or session"* — the user-facing half.
-///
-/// # The scope is the whole point
-///
-/// The override is recorded as a **session identifier**, never as a flag.
-/// There is no argument here that means "every session", and
-/// [`glasshouse::routing::disposable::ReserveOverride`] has no constructor
-/// that could express one: an override covering everything would be the
-/// protected reserve disabled, which is a different capability from the one
-/// this line asks for and a worse one, because the reserve exists to stop
-/// background jobs exhausting the quota an interactive session needs.
-///
-/// The identifier is resolved through the session store first, so what lands
-/// in the configuration is the canonical id rather than whatever prefix was
-/// typed — the hook path that later reads it has resolved its own id the same
-/// way, and two spellings of one session must not fail to match.
-// History: design-decisions.md, "Trims: commands module docs, third packet", sessions.rs `reserve_override_session`.
-pub(crate) fn reserve_override_session(
-    runtime: &Runtime,
-    session: &str,
-    clear: bool,
-) -> anyhow::Result<String> {
-    let sessions = ProjectSessions::open(runtime)?;
-    let store = sessions.store();
-    let id = store.resolve_id(session)?;
-    let id = id.to_string();
-
-    let mut user = UserConfig::load(runtime.paths())?;
-    let mut granted: Vec<String> = user
-        .routing()
-        .reserve_override_sessions()
-        .map(<[String]>::to_vec)
-        .unwrap_or_default();
-    granted.retain(|recorded| recorded != &id);
-    if !clear {
-        granted.push(id.clone());
-    }
-    // `Some(vec![])` rather than `None` once the user has touched this: an
-    // empty list is "this layer says no sessions", which is a decision, and
-    // `None` is "this layer never decided", which would defer to a project
-    // layer the user has just tried to overrule. See the field's own doc.
-    user.routing_mut()
-        .set_reserve_override_sessions(Some(granted));
-    user.save(runtime.paths())?;
-
-    let short = &id[..id.len().min(8)];
-    Ok(if clear {
-        format!(
-            "Session {short} no longer overrides reserve protection; its background jobs are \
-             subject to the protected reserve again.\n"
-        )
-    } else {
-        format!(
-            "Session {short} may now spend protected quota reserve. No other session is \
-             affected, and `glasshouse sessions reserve {short} --clear` withdraws it.\n"
-        )
     })
 }
 

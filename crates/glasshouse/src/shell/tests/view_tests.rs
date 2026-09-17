@@ -102,18 +102,20 @@ fn five_sessions() -> ShellState {
     )
 }
 
-/// The sixteen actions control mode advertises, each as the text its pill
+/// The thirteen actions control mode advertises, each as the text its pill
 /// paints. One list, so "on screen" and "clickable" are asserted about the
 /// same set rather than about two lists that can drift.
 ///
-/// **Sixteen, not fifteen**: `c connect` was added because connecting an
+/// **Thirteen, not sixteen**: `c connect` was added because connecting an
 /// account is the first thing a new install must do and there was no key for
-/// it at all. The three that lead the bar are listed first, in the order they
-/// are drawn; the rest are the demoted run, and *demoted* is why they are
-/// still in this list — `hotspot::Pill::subordinate` changes a colour and
-/// nothing else, so every one of them must still be drawn and still be
-/// clickable at eighty columns.
-const CONTROL_ACTIONS: [&str; 16] = [
+/// it at all, and `h health`/`r routes`/`d decisions` left with the routing
+/// deletion (design-decisions, 2026-09-16) — their overlays and
+/// `handle_control_key` arms are gone. The three that lead the bar are listed
+/// first, in the order they are drawn; the rest are the demoted run, and
+/// *demoted* is why they are still in this list —
+/// `hotspot::Pill::subordinate` changes a colour and nothing else, so every
+/// one of them must still be drawn and still be clickable at eighty columns.
+const CONTROL_ACTIONS: [&str; 13] = [
     "n new",
     "c connect",
     "s settings",
@@ -122,9 +124,6 @@ const CONTROL_ACTIONS: [&str; 16] = [
     "p project",
     "e events",
     "t theme:",
-    "h health",
-    "r routes",
-    "d decisions",
     "k knowledge",
     "M memory",
     "N headless",
@@ -1250,7 +1249,7 @@ fn compact_views_and_diagnostic_overlays_keep_readable_text() {
     // "knowledge-graph visualization" is exactly what a `Gauge` or
     // `Sparkline` would be reaching for here.
     state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
+    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
     screens.push(rendered(&state, 100, 30));
     state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -1268,27 +1267,6 @@ fn compact_views_and_diagnostic_overlays_keep_readable_text() {
         KnowledgeSection::default(),
         None,
     );
-    screens.push(rendered(&state, 100, 30));
-    // Phase 47 line 1771 is a standing property, so every diagnostic
-    // surface added afterwards has to re-prove it. This one is line
-    // 1765's, and a "route health" display is exactly where somebody
-    // would reach for a `Gauge`.
-    state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    state.open_route_health(vec![crate::shell::state::RouteHealthRow {
-        provider: "anyrouter".to_owned(),
-        credential_label: "anyrouter/API_KEY".to_owned(),
-        model: "claude-opus-4-1".to_owned(),
-        consecutive_failures: 2,
-        credential_rejected: false,
-        available_now: true,
-        cooling_down_until_unix: None,
-        stated_limit: Some(300),
-        stated_window_seconds: Some(60),
-        quota_resets_at_unix: None,
-        failure_domain: "unknown".to_owned(),
-        failure_domain_peers: 0,
-    }]);
     screens.push(rendered(&state, 100, 30));
 
     for screen in screens {
@@ -1973,7 +1951,7 @@ fn the_project_overview_separates_orchestrator_and_workers_by_role_and_lifecycle
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
         crate::shell::state::Action::OpenProjectOverview
     );
-    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
+    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
 
     let text = rendered(&state, 120, 40);
     assert!(text.contains("orchestrator"), "orchestrator row:\n{text}");
@@ -1993,7 +1971,7 @@ fn the_project_overview_separates_orchestrator_and_workers_by_role_and_lifecycle
 fn the_project_overview_says_so_when_a_section_has_nothing() {
     let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
     state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
+    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
 
     let text = rendered(&state, 120, 40);
     assert!(text.contains("no session is designated"), "{text}");
@@ -2024,7 +2002,6 @@ fn the_project_overview_shows_resource_capacity_the_run_loop_handed_it() {
             Vec::new(),
             0,
             vec!["  openrouter (remote)  plenty 82% [measured], reset in 3600s".to_owned()],
-            String::new(),
             None,
         );
 
@@ -2051,7 +2028,6 @@ fn an_unknown_resource_never_shows_a_number_at_a_realistic_and_a_wide_width() {
             Vec::new(),
             0,
             vec!["  some-provider (remote)  capacity unknown".to_owned()],
-            String::new(),
             None,
         );
 
@@ -2059,84 +2035,6 @@ fn an_unknown_resource_never_shows_a_number_at_a_realistic_and_a_wide_width() {
         assert!(text.contains("capacity unknown"), "width {width}:\n{text}");
         assert!(!text.contains('%'), "width {width}:\n{text}");
     }
-}
-
-/// Map line 1661: the run loop's routing line reaches the screen as its
-/// own labelled section, at a realistic width and a wide one (practice
-/// §17), and fits an 80-column terminal without corrupting the rest of
-/// the overview.
-#[test]
-fn the_project_overview_shows_the_routing_line_the_run_loop_handed_it() {
-    for (width, height) in [(80, 40), (120, 40), (400, 40)] {
-        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
-        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(
-            Vec::new(),
-            Vec::new(),
-            0,
-            Vec::new(),
-            "  routing model  anyrouter:claude-opus-4-1, recent latency median 340ms, \
-                 p95 410ms (12 sample(s))"
-                .to_owned(),
-            None,
-        );
-
-        let text = rendered(&state, width, height);
-        assert!(text.contains("ROUTING MODEL"), "width {width}:\n{text}");
-        assert!(
-            flattened(&text).contains("anyrouter:claude-opus-4-1"),
-            "width {width}:\n{text}"
-        );
-        assert!(
-            flattened(&text).contains("median 340ms"),
-            "width {width}:\n{text}"
-        );
-    }
-}
-
-/// Ruling 1, at the view: an unknown latency reads `unknown`, never a
-/// fabricated `0ms` — the same honesty rule
-/// [`an_unknown_resource_never_shows_a_number_at_a_realistic_and_a_wide_width`]
-/// proves for resources, proven here for the routing line specifically
-/// because it is a different builder and a different render branch.
-#[test]
-fn the_routing_lines_unknown_latency_never_reads_as_zero() {
-    for (width, height) in [(80, 40), (120, 40), (400, 40)] {
-        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
-        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(
-            Vec::new(),
-            Vec::new(),
-            0,
-            Vec::new(),
-            "  routing model  anyrouter:claude-opus-4-1, recent latency unknown — not \
-                 enough observations yet"
-                .to_owned(),
-            None,
-        );
-
-        let text = rendered(&state, width, height);
-        assert!(
-            flattened(&text).contains("recent latency unknown"),
-            "width {width}:\n{text}"
-        );
-        assert!(!text.contains("0ms"), "width {width}:\n{text}");
-        assert!(!text.contains("0 ms"), "width {width}:\n{text}");
-    }
-}
-
-/// The routing section is absent when the run loop never set anything —
-/// the fixtures elsewhere in this module that pass `String::new()`
-/// because the routing line is not what they are testing, distinct from
-/// a real overview the run loop opened.
-#[test]
-fn the_project_overview_omits_the_routing_section_when_nothing_was_handed_to_it() {
-    let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
-    state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
-
-    let text = rendered(&state, 120, 40);
-    assert!(!text.contains("ROUTING MODEL"), "{text}");
 }
 
 /// Map lines 1655 and 1656: decisions/constraints and unresolved todos
@@ -2152,7 +2050,6 @@ fn the_project_overview_shows_memory_the_run_loop_handed_it() {
         vec!["todo: wire the shell into main".to_owned()],
         3,
         Vec::new(),
-        String::new(),
         None,
     );
 
@@ -2184,7 +2081,6 @@ fn a_project_memory_read_failure_still_opens_with_an_honest_note() {
         Vec::new(),
         0,
         Vec::new(),
-        String::new(),
         Some("project memory unavailable: disk full".to_owned()),
     );
 
@@ -2714,7 +2610,6 @@ fn the_project_overview_never_shows_a_lifetime_token_or_spend_total() {
         vec!["todo: close the rest next round".to_owned()],
         2,
         Vec::new(),
-        String::new(),
         None,
     );
 
@@ -2810,7 +2705,7 @@ fn the_lifetime_total_scan_is_crlf_agnostic_and_can_say_no() {
 fn the_project_overview_footer_names_its_own_key() {
     let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
     state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
+    state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
     let text = rendered(&state, 120, 40);
     assert!(
         text.contains("esc back to session"),
@@ -2958,710 +2853,16 @@ fn e_opens_and_esc_closes_the_session_events_overlay() {
     assert_eq!(state.overlay(), None);
 }
 
-fn route_row(
-    provider: &str,
-    model: &str,
-    route: Option<&str>,
-    context_state: &str,
-    sample_count: usize,
-    window_start_unix: i64,
-    window_end_unix: i64,
-) -> crate::shell::state::RouteEvidenceRow {
-    crate::shell::state::RouteEvidenceRow {
-        provider: provider.to_owned(),
-        model: model.to_owned(),
-        route: route.map(str::to_owned),
-        context_state: context_state.to_owned(),
-        sample_count,
-        window_start_unix,
-        window_end_unix,
-    }
-}
-
-/// Acceptance test 4: the table renders sample count and window from
-/// real recorded data, and two identities with different counts render
-/// differently.
-#[test]
-fn the_route_evidence_table_renders_sample_count_and_window_and_distinguishes_identities() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    let now = crate::provider::cache::now_unix_seconds();
-    state.open_route_evidence(
-        vec![
-            route_row(
-                "anyrouter",
-                "claude-opus-4-1",
-                Some("anthropic-messages"),
-                "unknown",
-                5,
-                now - 3_600,
-                now - 60,
-            ),
-            route_row(
-                "openai-router",
-                "gpt-5",
-                None,
-                "unknown",
-                1,
-                now - 30,
-                now - 30,
-            ),
-        ],
-        None,
-    );
-
-    let text = rendered(&state, 120, 24);
-    assert!(text.contains("anyrouter"), "{text}");
-    assert!(text.contains("claude-opus-4-1"), "{text}");
-    assert!(text.contains("anthropic-messages"), "{text}");
-    assert!(text.contains('5'), "{text}");
-    assert!(text.contains("openai-router"), "{text}");
-    assert!(text.contains("gpt-5"), "{text}");
-    assert!(
-        text.contains("(no route)"),
-        "an identity with no recorded route must say so honestly:\n{text}"
-    );
-
-    let rows: Vec<&str> = text
-        .lines()
-        .filter(|line| line.contains("anyrouter") || line.contains("openai-router"))
-        .collect();
-    assert_eq!(rows.len(), 2);
-    assert_ne!(
-        rows[0], rows[1],
-        "two identities with different counts and windows must render differently:\n{text}"
-    );
-}
-
-/// Acceptance test 5, capability map line 1764: an `Unknown` row renders
-/// as `unknown`, neither omitted nor dressed up as a measurement.
-#[test]
-fn the_route_evidence_table_renders_unknown_context_state_plainly() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(
-        vec![route_row(
-            "anyrouter",
-            "m",
-            Some("anthropic-messages"),
-            "unknown",
-            5,
-            1_000,
-            1_000,
-        )],
-        None,
-    );
-
-    let text = rendered(&state, 120, 24);
-    assert!(text.contains("unknown"), "{text}");
-}
-
-/// Acceptance test 6, and practice §17: the rendered table names no
-/// TTFC/TTFT/throughput/rounds-per-minute column, at a viewport wide
-/// enough that such a column *would* have been visible rather than
-/// clipped off-screen for the wrong reason.
-#[test]
-fn no_fabricated_columns_appear_in_the_route_evidence_table() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(
-        vec![route_row(
-            "anyrouter",
-            "claude-opus-4-1",
-            Some("anthropic-messages"),
-            "unknown",
-            5,
-            1_000,
-            1_050,
-        )],
-        None,
-    );
-
-    for (width, height) in [(120, 24), (400, 30)] {
-        let text = rendered(&state, width, height).to_lowercase();
-        for forbidden in [
-            "ttfc",
-            "ttft",
-            "throughput",
-            "rounds per minute",
-            "rounds/min",
-            "decode",
-        ] {
-            assert!(
-                !text.contains(forbidden),
-                "map line 1762: no fabricated `{forbidden}` column, width {width}:\n{text}"
-            );
-        }
-    }
-}
-
-/// Acceptance test 7, empty half: an empty ledger renders an honest
-/// empty state, the same convention every other overlay section here
-/// uses.
-#[test]
-fn the_route_evidence_table_says_so_when_there_is_no_evidence_yet() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(Vec::new(), None);
-
-    let text = rendered(&state, 120, 24);
-    assert!(text.contains("no routing evidence recorded yet"), "{text}");
-}
-
-// -----------------------------------------------------------------
-// The routing-decisions overlay — the reader half of the disposable
-// routing sink. Every test here hands the view a row it invented, so
-// none of them says anything about whether the run loop reads the
-// ledger; that is `tests/disposable_route_sink.rs`'s job, and practice
-// §35 is why the split is deliberate rather than an omission.
-// -----------------------------------------------------------------
-
-fn decision_row(
-    job: &str,
-    session: Option<&str>,
-    rationale: Option<&str>,
-    observed_at_unix: i64,
-) -> crate::shell::state::RouteDecisionRow {
-    crate::shell::state::RouteDecisionRow {
-        observed_at_unix,
-        job: job.to_owned(),
-        session_id: session.map(str::to_owned),
-        rationale: rationale.map(str::to_owned),
-    }
-}
-
-/// The whole stored rationale reaches the screen — the heading *and* the
-/// named contributions under it.
-///
-/// The heading alone would be a view that says which resource won and
-/// not one reason it did, which is the shape map line 1766 asks this not
-/// to be. Asserted at a wide viewport too, per practice §17: a
-/// contribution line is long, and a match that only survives at 400
-/// columns is a layout finding rather than a rendering one.
-#[test]
-fn the_routing_decisions_view_draws_the_whole_stored_rationale() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-    state.open_route_decisions(
-        vec![decision_row(
-            "memory extraction",
-            Some("session-abc"),
-            Some(
-                "a-free-model on a-provider — free, used by user preference\n  \
-                     +1.000  cost — free — line 530 prefers free capacity\n  \
-                     +0.000  user pin — the user pinned this exact free resource",
-            ),
-            1_000,
-        )],
-        None,
-    );
-
-    for (width, height) in [(120, 30), (400, 30)] {
-        let text = rendered(&state, width, height);
-        assert!(text.contains("memory extraction"), "width {width}:\n{text}");
-        assert!(text.contains("session-abc"), "width {width}:\n{text}");
-        assert!(text.contains("a-free-model"), "width {width}:\n{text}");
-        assert!(
-            text.contains("user preference"),
-            "the reason the policy gave must be on screen, width {width}:\n{text}"
-        );
-        assert!(
-            text.contains("line 530 prefers free capacity"),
-            "a decision drawn without its contributions is an outcome, not a \
-                 rationale, width {width}:\n{text}"
-        );
-        assert!(
-            text.contains("user pin"),
-            "every contribution is drawn, not only the first, width {width}:\n{text}"
-        );
-    }
-}
-
-/// A row the producer could not fill says so, at both widths — practice
-/// §17, and map line 1294's rule that an absent value is drawn as absent
-/// rather than as an empty column a reader would take for a value.
-#[test]
-fn a_routing_decision_with_nothing_recorded_says_so_rather_than_drawing_a_blank() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-    state.open_route_decisions(
-        vec![decision_row("memory extraction", None, None, 1_000)],
-        None,
-    );
-
-    for (width, height) in [(120, 24), (400, 24)] {
-        let text = rendered(&state, width, height);
-        assert!(
-            text.contains("(no session recorded)"),
-            "width {width}:\n{text}"
-        );
-        assert!(
-            text.contains("(no rationale recorded)"),
-            "width {width}:\n{text}"
-        );
-    }
-}
-
-/// The empty half: a project that has recorded no decision is told so,
-/// which is the honest and most common answer rather than a failure.
-#[test]
-fn the_routing_decisions_view_says_so_when_nothing_is_recorded() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-    state.open_route_decisions(Vec::new(), None);
-
-    let text = rendered(&state, 120, 24);
-    assert!(
-        text.contains("no routing decision has been recorded yet"),
-        "{text}"
-    );
-}
-
-/// The failure half: an unreadable ledger still opens the overlay with an
-/// honest note, the same contract
-/// `a_route_evidence_read_failure_still_opens_with_an_honest_note` proves
-/// for its own view.
-#[test]
-fn a_routing_decisions_read_failure_still_opens_with_an_honest_note() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-    state.open_route_decisions(
-        Vec::new(),
-        Some("routing decisions unavailable: disk full".to_owned()),
-    );
-
-    let text = rendered(&state, 120, 24);
-    assert!(
-        text.contains("routing decisions unavailable: disk full"),
-        "{text}"
-    );
-}
-
-/// Reached only by its own key, never on the screen a user sees without
-/// asking — asserted at both widths per practice §17.
-#[test]
-fn routing_decisions_are_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
-    let state = sample();
-    for (width, height) in [(100, 24), (400, 24)] {
-        let text = rendered(&state, width, height);
-        assert!(
-            !text.contains("routing decisions"),
-            "the default screen must not show the routing-decisions overlay, \
-                 width {width}:\n{text}"
-        );
-    }
-}
-
-/// The overlay's own footer, and the control-mode footer advertising `d`
-/// — the same pair `the_route_evidence_footer_names_its_own_key` proves.
-#[test]
-fn the_routing_decisions_footer_names_its_own_key() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-    state.open_route_decisions(Vec::new(), None);
-    let text = rendered(&state, 120, 24);
-    assert!(
-        text.contains("esc back to session"),
-        "routing decisions footer:\n{text}"
-    );
-
-    // 170 for the reason `the_status_bar_always_shows_the_key_bindings`
-    // records: the control row is exactly 168 columns now.
-    let control_text = rendered(&sample(), 170, 24);
-    assert!(
-        control_text.contains("d decisions"),
-        "control-mode footer must advertise the key:\n{control_text}"
-    );
-}
-
-/// Acceptance test 7, failure half: a read failure still opens the
-/// overlay with an honest note — the same contract
-/// `a_project_knowledge_read_failure_still_opens_with_an_honest_note`
-/// proves for the project-knowledge view.
-#[test]
-fn a_route_evidence_read_failure_still_opens_with_an_honest_note() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(
-        Vec::new(),
-        Some("routing evidence unavailable: disk full".to_owned()),
-    );
-
-    let text = rendered(&state, 120, 24);
-    assert!(
-        text.contains("routing evidence unavailable: disk full"),
-        "{text}"
-    );
-}
-
-/// Map line 1770 for this overlay specifically: reached only by its own
-/// key, never present on the screen a user sees without asking for it —
-/// asserted at both widths per practice §17.
-#[test]
-fn route_evidence_is_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
-    let state = sample();
-    for (width, height) in [(100, 24), (400, 24)] {
-        let text = rendered(&state, width, height);
-        assert!(
-            !text.contains("route evidence"),
-            "the default screen must not show the route-evidence overlay, \
-                 width {width}:\n{text}"
-        );
-    }
-}
-
-/// The overlay's own footer, and the control-mode footer advertising the
-/// key that opens it — the same pair `the_session_events_footer_...`
-/// proves for `e`/`Overlay::SessionEvents`.
-#[test]
-fn the_route_evidence_footer_names_its_own_key() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(Vec::new(), None);
-    let text = rendered(&state, 120, 24);
-    assert!(
-        text.contains("esc back to session"),
-        "route evidence footer:\n{text}"
-    );
-
-    let control_text = rendered(&sample(), 120, 24);
-    assert!(
-        control_text.contains("r routes"),
-        "control-mode footer must advertise the key:\n{control_text}"
-    );
-}
-
-/// `r` toggles like every other overlay key: pressing it again while open
-/// closes it, exactly as `e`/`Overlay::SessionEvents` already does.
-#[test]
-fn r_opens_and_esc_closes_the_route_evidence_overlay() {
-    use crate::shell::Action;
-
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-    state.open_route_evidence(Vec::new(), None);
-    assert_eq!(
-        state.overlay(),
-        Some(crate::shell::state::Overlay::RouteEvidence)
-    );
-
-    assert_eq!(
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        Action::Redraw
-    );
-    assert_eq!(state.overlay(), None);
-}
-
-// -----------------------------------------------------------------
-// Phase 47 line 1765 — route health, immediate availability, cadence,
-// quota reset and failure-domain evidence as SEPARATE concepts.
-// -----------------------------------------------------------------
-
-/// The rendered screen with the popup's own border columns dropped and
-/// runs of whitespace collapsed, so a phrase the `Wrap` broke across two
-/// rows can still be asserted on.
-///
-/// Needed because line 1765 wants five *labelled* concepts and the labels
-/// plus their evidence are longer than a realistic popup is wide. The
-/// per-line assertions below deliberately use the **raw** text instead —
-/// "these two concepts are not on the same line" is a claim about lines,
-/// and flattening would make it unfalsifiable.
-fn flattened(text: &str) -> String {
-    text.replace('│', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// A healthy, available, entirely unstated resource — the state a fresh
-/// installation actually observes. Every test below starts here and
-/// overrides only the fields its own case is about, with struct-update
-/// syntax, so what a case is *testing* is visible at its call site.
-fn health_row(provider: &str, model: &str) -> crate::shell::state::RouteHealthRow {
-    crate::shell::state::RouteHealthRow {
-        provider: provider.to_owned(),
-        credential_label: format!("{provider}/API_KEY"),
-        model: model.to_owned(),
-        consecutive_failures: 0,
-        credential_rejected: false,
-        available_now: true,
-        cooling_down_until_unix: None,
-        stated_limit: None,
-        stated_window_seconds: None,
-        quota_resets_at_unix: None,
-        failure_domain: "unknown".to_owned(),
-        failure_domain_peers: 0,
-    }
-}
-
-/// **Line 1765's whole content.** Five labelled concepts, five separate
-/// lines, for a resource where they genuinely disagree: healthy (zero
-/// failures) yet unavailable (credential refused), paced by Glasshouse
-/// while the provider's own reset is at a different time.
-///
-/// Rendered at a realistic width and a wide one (practice §17), because a
-/// label that happened to clip off-screen would make this pass for the
-/// wrong reason.
-#[test]
-fn route_health_keeps_line_1765s_five_concepts_on_separate_lines() {
-    let now = crate::provider::cache::now_unix_seconds();
-    for (width, height) in [(120, 40), (400, 40)] {
-        let mut state = sample();
-        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-        // Never failed, yet unavailable; paced by Glasshouse until a
-        // different instant from the provider's own reset. 330 s, not 300:
-        // `describe_deadline` floors to whole minutes against its own clock
-        // read, so at exactly 300 s one slow second rendered "4 minutes" —
-        // three times in one week on hosted runners (waves 137–138). The
-        // 30 s of slack keeps the assertion below at "5 minutes".
-        state.open_route_health(vec![crate::shell::state::RouteHealthRow {
-            credential_rejected: true,
-            available_now: false,
-            cooling_down_until_unix: Some(now + 330),
-            stated_limit: Some(300),
-            stated_window_seconds: Some(60),
-            quota_resets_at_unix: Some(now + 1_800),
-            failure_domain: "shared".to_owned(),
-            failure_domain_peers: 1,
-            ..health_row("anyrouter", "claude-opus-4-1")
-        }]);
-        let text = rendered(&state, width, height);
-
-        for concept in [
-            "route health",
-            "immediate availability",
-            "cadence",
-            "quota reset",
-            "failure domain",
-        ] {
-            assert!(
-                text.contains(concept),
-                "line 1765 names `{concept}` and it must be its own labelled \
-                     concept, width {width}:\n{text}"
-            );
-        }
-
-        // Each concept on its own line: no line may carry two of the five
-        // labels, which is exactly what collapsing them would produce.
-        for line in text.lines() {
-            let found = [
-                "route health",
-                "immediate availability",
-                "cadence",
-                "quota reset",
-                "failure domain",
-            ]
-            .iter()
-            .filter(|concept| line.contains(*concept))
-            .count();
-            assert!(
-                found <= 1,
-                "two of line 1765's concepts were folded onto one line, \
-                     width {width}:\n{line}"
-            );
-        }
-
-        // And the five really do disagree here, which is the point: a
-        // single status word could not have carried all of this.
-        let flat = flattened(&text);
-        assert!(
-            flat.contains("0 consecutive failure(s)"),
-            "the failure streak must be shown as a streak, width {width}:\n{text}"
-        );
-        assert!(
-            flat.contains("credential rejected: yes"),
-            "a refused credential is a health fact of its own, \
-                 width {width}:\n{text}"
-        );
-        assert!(
-            flat.contains("not schedulable right now"),
-            "availability must be its own answer, width {width}:\n{text}"
-        );
-        assert!(
-            flat.contains("300 request(s) per 60s"),
-            "the provider-stated cadence must be shown, width {width}:\n{text}"
-        );
-        assert!(
-            flat.contains("cooling down, ends in 5 minutes"),
-            "glasshouse's own pacing is a separate clock from the \
-                 provider's, width {width}:\n{text}"
-        );
-    }
-}
-
-/// **The honesty half.** A provider that has stated no rate-limit headers
-/// at all — which is most of them — must read `unknown`, never `0` and
-/// never an invented reset. Line 1765 sits under a phase whose whole
-/// heading is about not presenting a number the evidence does not carry.
-#[test]
-fn route_health_says_unknown_rather_than_zero_for_what_no_provider_stated() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    // The default is the entirely-unstated case, which is the point.
-    state.open_route_health(vec![health_row("openrouter", "some-free-model")]);
-    let text = rendered(&state, 120, 40);
-    let flat = flattened(&text);
-
-    assert!(
-        flat.contains("quota reset unknown — no response has stated one"),
-        "an unstated quota reset must read `unknown`:\n{text}"
-    );
-    assert!(
-        flat.contains("provider stated: unknown"),
-        "an unstated cadence must read `unknown`:\n{text}"
-    );
-    assert!(
-        flat.contains("glasshouse pacing: none"),
-        "no cooldown must read `none`, not an elapsed deadline:\n{text}"
-    );
-    // The three unstated concepts must not have been filled in with a
-    // number: `0` would read as a measurement, which is the whole of what
-    // this phase is named after not doing.
-    for invented in ["quota reset in", "per 0s", "0 request(s)"] {
-        assert!(
-            !flat.contains(invented),
-            "an unstated value was rendered as `{invented}`:\n{text}"
-        );
-    }
-}
-
-/// `crate::routing::domain::FailureDomain::Independent` is a state this
-/// build cannot earn — nothing does the temporal correlation it would
-/// need — so no fixture, and no future edit, may make this view print it.
-/// Proved at a wide viewport per practice §17, because an absence
-/// assertion is only as strong as the screen it renders into.
-#[test]
-fn route_health_never_claims_two_resources_are_independent() {
-    for (width, height) in [(120, 40), (400, 40)] {
-        let mut state = sample();
-        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-        state.open_route_health(vec![
-            crate::shell::state::RouteHealthRow {
-                consecutive_failures: 2,
-                failure_domain: "shared".to_owned(),
-                failure_domain_peers: 1,
-                ..health_row("anyrouter", "model-a")
-            },
-            health_row("openrouter", "model-b"),
-        ]);
-        let flat = flattened(&rendered(&state, width, height));
-        assert!(
-            flat.contains("never `independent`"),
-            "the view must say what the absence of evidence does not mean, \
-                 width {width}:\n{flat}"
-        );
-        // The only permitted occurrence is inside that refusal.
-        assert_eq!(
-            flat.matches("independent").count(),
-            flat.matches("never `independent`").count(),
-            "`independent` may appear only inside the sentence refusing it, \
-                 width {width}:\n{flat}"
-        );
-    }
-}
-
-/// The empty state, which is what a fresh installation actually shows:
-/// honest words, not a table of zeroes.
-#[test]
-fn route_health_says_so_when_no_gateway_exchange_has_been_observed() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    state.open_route_health(Vec::new());
-    let text = rendered(&state, 120, 30);
-    assert!(
-        text.contains("no gateway exchange has been observed"),
-        "an empty cache must say so:\n{text}"
-    );
-}
-
-/// The scope label, which is a fact about these caches and not decoration:
-/// they live under the installation's data directory, keyed by provider,
-/// so a reading written while a gateway served another project is visible
-/// here. A view that let a reader assume otherwise would be the spectacle
-/// this phase is named after.
-#[test]
-fn route_health_labels_its_own_installation_wide_scope() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    state.open_route_health(Vec::new());
-    let text = rendered(&state, 120, 30);
-    assert!(
-        text.contains("not scoped to this project"),
-        "the view must name its own scope:\n{text}"
-    );
-}
-
-/// Map line 1770 for this overlay: reached only by its own key, never on
-/// the default screen — at both widths, per practice §17.
-#[test]
-fn route_health_is_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
-    let state = sample();
-    for (width, height) in [(100, 24), (400, 24)] {
-        let text = rendered(&state, width, height);
-        assert!(
-            !text.contains("immediate availability"),
-            "the default screen must not show the route-health overlay, \
-                 width {width}:\n{text}"
-        );
-    }
-}
-
-/// The overlay's own footer, and the control-mode footer advertising `h`.
-#[test]
-fn the_route_health_footer_names_its_own_key() {
-    let mut state = sample();
-    state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    state.open_route_health(Vec::new());
-    let text = rendered(&state, 132, 24);
-    assert!(
-        text.contains("esc back to session"),
-        "route health footer:\n{text}"
-    );
-
-    let control_text = rendered(&sample(), 132, 24);
-    assert!(
-        control_text.contains("h health"),
-        "control-mode footer must advertise the key:\n{control_text}"
-    );
-}
-
-/// `h` opens it and `esc` closes it, the same toggle every other overlay
-/// key already has.
-#[test]
-fn h_opens_and_esc_closes_the_route_health_overlay() {
-    use crate::shell::Action;
-
-    let mut state = sample();
-    assert_eq!(
-        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
-        Action::OpenRouteHealth
-    );
-    state.open_route_health(Vec::new());
-    assert_eq!(
-        state.overlay(),
-        Some(crate::shell::state::Overlay::RouteHealth)
-    );
-
-    assert_eq!(
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        Action::Redraw
-    );
-    assert_eq!(state.overlay(), None);
-}
-
 #[cfg(test)]
 mod settings_tests {
-    use crate::config::{
-        Layered, PremiumReservePercent, ProfileConfig, ProviderConfig, RouterCostMicroUsd,
-        RouterLatencyMs, RoutingModelChoice,
-    };
+    use crate::config::{Layered, ProfileConfig, ProviderConfig};
     use crate::integrations::{IntegrationId, IntegrationStatus};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::super::super::state::{
-        HarnessRow, IntegrationRow, MemoryRow, ProfileRow, ProviderRow, RoutingRow,
+        HarnessRow, IntegrationRow, MemoryRow, ProfileRow, ProviderRow,
     };
     use super::*;
 
@@ -3884,59 +3085,26 @@ mod settings_tests {
         state
     }
 
-    /// Routing shows every policy with its own provenance and explains the
-    /// conditions on the free-resource preference. Memory shows its one real
-    /// setting and layer the same way, and a toggle both changes the value
-    /// and promotes its layer to `(user)` — the placeholder "not available"
-    /// text this test used to require is the defect Phase 2D line 190 closes.
+    /// Memory shows its one real setting and layer, and a toggle both
+    /// changes the value and promotes its layer to `(user)` — the
+    /// placeholder "not available" text this test used to require is the
+    /// defect Phase 2D line 190 closes.
     #[test]
-    fn routing_and_memory_sections_render_their_complete_honest_states() {
-        let routing = RoutingRow::new(
-            Layered::new(
-                RoutingModelChoice::Pinned {
-                    provider: "my-router".to_owned(),
-                    model: "openai/gpt-5-mini".to_owned(),
-                },
-                Layer::Project,
-            ),
-            Layered::new(RouterLatencyMs::try_from(800).unwrap(), Layer::User),
-            Layered::new(RouterCostMicroUsd::try_from(2_500).unwrap(), Layer::Default),
-            Layered::new(false, Layer::Project),
-            Layered::new(PremiumReservePercent::try_from(12).unwrap(), Layer::User),
-            vec!["my-router".to_owned()],
-        );
+    fn the_memory_section_renders_its_complete_honest_state() {
         // Premise, per §17: the memory row starts disabled at the project
         // layer, so a later assertion that a toggle changed it to "yes" and
         // `(user)` actually proves the toggle did something.
         let memory = MemoryRow::new(Layered::new(false, Layer::Project));
         let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
-        state.open_settings_with_routing(
-            harness_rows(),
-            integration_rows(),
-            provider_rows(),
-            profile_rows(),
-            routing,
+        state.open_settings_rows(crate::shell::state::SettingsRows {
+            harnesses: harness_rows(),
+            integrations: integration_rows(),
+            providers: provider_rows(),
+            profiles: profile_rows(),
             memory,
-        );
-        tab_to(&mut state, SettingsSection::Routing);
-        let routing_text = rendered(&state, 120, 32);
-        for expected in [
-            "my-router:openai/gpt-5-mini",
-            "800 ms",
-            "$0.002500",
-            "health, rate-limit, and latency",
-            "below 12%",
-            "(project)",
-            "(user)",
-            "(default)",
-        ] {
-            assert!(
-                routing_text.contains(expected),
-                "missing {expected:?}:\n{routing_text}"
-            );
-        }
-
-        state.handle_key(press(KeyCode::Tab));
+            ..Default::default()
+        });
+        tab_to(&mut state, SettingsSection::Memory);
         let memory_text = rendered(&state, 120, 32);
         assert!(memory_text.contains("Memory"), "{memory_text}");
         assert!(memory_text.contains("no (project)"), "{memory_text}");

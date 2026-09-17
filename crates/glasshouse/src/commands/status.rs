@@ -143,53 +143,7 @@ pub(crate) fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
         }
     }
 
-    let _ = writeln!(out, "{}", last_routing_decision_line(runtime));
-
     Ok(out)
-}
-
-/// `status`'s one-line summary of the newest routed launch — map line 1766:
-/// the destination and its three largest contributions by absolute
-/// magnitude, ties kept in recorded order, fewer printed when fewer exist.
-/// *none recorded* for a project with no routed launch yet.
-fn last_routing_decision_line(runtime: &Runtime) -> String {
-    let row = glasshouse::evaluation::EvaluationObservations::open(runtime)
-        .ok()
-        .and_then(|ledger| ledger.latest_session_route().ok())
-        .flatten();
-    let Some(row) = row else {
-        return "last routing decision: none recorded".to_owned();
-    };
-
-    let destination = row.subject.as_deref().unwrap_or("-");
-    let mut contributions = row
-        .detail
-        .as_deref()
-        .map(glasshouse::evaluation::route_contributions)
-        .unwrap_or_default();
-    contributions.sort_by(|a, b| b.magnitude.abs().total_cmp(&a.magnitude.abs()));
-    let factors: Vec<String> = contributions
-        .iter()
-        .take(3)
-        .map(|contribution| format!("{} {:+.3}", contribution.name, contribution.magnitude))
-        .collect();
-    let factors_part = if factors.is_empty() {
-        String::new()
-    } else {
-        format!(" — {}", factors.join(", "))
-    };
-    let session: String = row
-        .session_id
-        .as_deref()
-        .unwrap_or("-")
-        .chars()
-        .take(12)
-        .collect();
-
-    format!(
-        "last routing decision: {destination}{factors_part} ({}, session {session})",
-        crate::commands::shared::format_age(row.observed_at)
-    )
 }
 
 /// Map line 2006's savings figure: an honest aggregate over every entry the

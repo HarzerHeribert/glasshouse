@@ -19,16 +19,58 @@ use std::path::Path;
 
 use clap::Parser;
 
-use glasshouse::config::pairing::ObservationSource;
-use glasshouse::harness::WireProtocol;
-use glasshouse::integrations::IntegrationId;
-use glasshouse::routing::AssignedModel;
 use glasshouse::routing::evidence::{
     ContextState, CostConfidence, EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation,
-    ObservationQuery, ObservedCost, ObservedEvidenceSource, Outcome,
+    ObservedCost, Outcome, RoutingObservation, RoutingSummary,
 };
-use glasshouse::routing::pairing::{EvidenceKey, ServingRoute};
 use glasshouse::{Cli, Runtime};
+
+/// Local stand-in for the ledger's own (now-internal) `ObservationQuery`:
+/// this file filters exactly these four fields client-side against
+/// [`EvidenceLedger::observations_in_window`], the successor to the deleted
+/// `EvidenceLedger::recent`.
+#[derive(Debug, Clone, Copy)]
+struct ObservationQuery<'a> {
+    provider: &'a str,
+    model: &'a str,
+    route: Option<&'a str>,
+    harness: Option<&'a str>,
+}
+
+fn recent(
+    ledger: &EvidenceLedger,
+    query: ObservationQuery<'_>,
+    _limit: usize,
+) -> Vec<RoutingObservation> {
+    ledger
+        .observations_in_window(i64::MAX, i64::MAX)
+        .expect("read the ledger")
+        .into_iter()
+        .filter(|row| {
+            row.provider == query.provider
+                && row.model == query.model
+                && row.route.as_deref() == query.route
+                && row.harness.as_deref() == query.harness
+        })
+        .collect()
+}
+
+/// Every fixture in this file plants only [`ContextState::Unknown`] rows for
+/// each identity, so `summarize_latest_for_model` — which summarizes
+/// whichever `(route, harness, context_state)` an identity was most recently
+/// observed under, the successor to the deleted `EvidenceLedger::summarize`
+/// — always resolves to the one context state that exists.
+fn summarize(
+    ledger: &EvidenceLedger,
+    query: ObservationQuery<'_>,
+    _context: ContextState,
+    now_unix: i64,
+    window_seconds: i64,
+) -> Option<RoutingSummary> {
+    ledger
+        .summarize_latest_for_model(query.provider, query.model, now_unix, window_seconds)
+        .expect("read the ledger")
+}
 
 /// A bootstrapped project inside `base`, sharing `base`'s data and config
 /// roots — the same idiom `tests/events_log.rs` and `src/checkpoint/store.rs`
@@ -104,17 +146,16 @@ fn a_recorded_observation_survives_the_process_that_recorded_it() {
 
     let reopened = fixture.reopen();
     let ledger = EvidenceLedger::open(&reopened).unwrap();
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "anyrouter",
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));
 }
@@ -132,18 +173,17 @@ fn two_projects_never_share_a_routing_observation() {
         .record(synthetic_observation(1_000, Outcome::Succeeded), 1_000)
         .unwrap();
 
-    let beta_rows = EvidenceLedger::open(&beta.runtime)
-        .unwrap()
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let beta_ledger = EvidenceLedger::open(&beta.runtime).unwrap();
+    let beta_rows = recent(
+        &beta_ledger,
+        ObservationQuery {
+            provider: "anyrouter",
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert!(beta_rows.is_empty());
 }
 
@@ -168,19 +208,19 @@ fn a_summary_reflects_exactly_the_observations_recorded_in_its_window() {
             .unwrap();
     }
 
-    let summary = ledger
-        .summarize(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            ContextState::Unknown,
-            10_000,
-            100_000,
-        )
-        .unwrap();
+    let summary = summarize(
+        &ledger,
+        ObservationQuery {
+            provider: "anyrouter",
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        },
+        ContextState::Unknown,
+        10_000,
+        100_000,
+    )
+    .unwrap();
     let failure_rate = summary.failure_rate.expect("the minimum sample was met");
     assert_eq!(failure_rate.sample_count(), MIN_SAMPLE_FOR_SUMMARY);
     assert_eq!(
@@ -228,7 +268,7 @@ fn an_old_failure_does_not_contribute_to_a_recent_failure_rate() {
 
     // Assert the premise (§17) before the absence: both blocks are really
     // in the table, and the old block is really recorded as failures.
-    let all_rows = ledger.recent(query, 100).unwrap();
+    let all_rows = recent(&ledger, query, 100);
     assert_eq!(
         all_rows.len(),
         MIN_SAMPLE_FOR_SUMMARY * 2,
@@ -247,9 +287,14 @@ fn an_old_failure_does_not_contribute_to_a_recent_failure_rate() {
     // at `now_unix`, containing none of the old failures.
     let now_unix = recent_start + (MIN_SAMPLE_FOR_SUMMARY as i64 - 1) * 100;
     let window_seconds = now_unix - recent_start;
-    let summary = ledger
-        .summarize(query, ContextState::Unknown, now_unix, window_seconds)
-        .unwrap();
+    let summary = summarize(
+        &ledger,
+        query,
+        ContextState::Unknown,
+        now_unix,
+        window_seconds,
+    )
+    .unwrap();
 
     let failure_rate = summary.failure_rate.expect("the minimum sample was met");
     assert_eq!(
@@ -299,14 +344,14 @@ fn another_resources_failures_are_not_this_resources_failures() {
     // Assert the premise: the other identity's failures are genuinely
     // recorded and genuinely visible before asserting this identity can't
     // see them.
-    let sonnet_summary = ledger
-        .summarize(
-            sonnet_query,
-            ContextState::Unknown,
-            now_unix,
-            window_seconds,
-        )
-        .unwrap();
+    let sonnet_summary = summarize(
+        &ledger,
+        sonnet_query,
+        ContextState::Unknown,
+        now_unix,
+        window_seconds,
+    )
+    .unwrap();
     let sonnet_failure_rate = sonnet_summary
         .failure_rate
         .expect("the minimum sample was met");
@@ -322,9 +367,14 @@ fn another_resources_failures_are_not_this_resources_failures() {
         route: Some("anthropic-messages"),
         harness: Some("claude-code"),
     };
-    let opus_summary = ledger
-        .summarize(opus_query, ContextState::Unknown, now_unix, window_seconds)
-        .unwrap();
+    let opus_summary = summarize(
+        &ledger,
+        opus_query,
+        ContextState::Unknown,
+        now_unix,
+        window_seconds,
+    )
+    .unwrap();
     let opus_failure_rate = opus_summary
         .failure_rate
         .expect("the minimum sample was met");
@@ -335,93 +385,11 @@ fn another_resources_failures_are_not_this_resources_failures() {
     );
 }
 
-/// [`ObservedEvidenceSource`] — design decision 6's replacement for
-/// `NoObservations` — reachable and correct from outside the crate,
-/// against a real [`EvidenceKey`] built the way `crate::config::pairing`
-/// would build one.
-#[test]
-fn observed_evidence_source_is_reachable_from_outside_the_crate() {
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
-
-    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
-        let at = 1_000 + i as i64;
-        ledger
-            .record(synthetic_observation(at, Outcome::Succeeded), at)
-            .unwrap();
-    }
-
-    let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode.slug(),
-        "default",
-        AssignedModel::named("claude-opus-4-1"),
-        ServingRoute {
-            provider: Some("anyrouter".to_owned()),
-            gateway: None,
-            protocol: Some(WireProtocol::AnthropicMessages),
-        },
-    );
-    let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
-    let observed = source
-        .observed(&key)
-        .expect("five successes must produce evidence");
-    assert_eq!(observed.task_success_rate, Some(1.0));
-}
-
-/// The reachability test above only ever records successes, so it cannot
-/// show that a recorded failure moves [`ObservedEvidence::task_success_rate`]
-/// at all — a bug that always reported `1.0` would still pass it. This proves
-/// the fraction actually reflects recorded failures, not just presence.
-#[test]
-fn observed_evidence_source_reflects_recorded_failures() {
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
-
-    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
-        let at = 1_000 + i as i64 * 100;
-        ledger
-            .record(synthetic_observation(at, Outcome::Succeeded), at)
-            .unwrap();
-    }
-    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
-        let at = 1_000 + (MIN_SAMPLE_FOR_SUMMARY as i64 + i as i64) * 100;
-        ledger
-            .record(synthetic_observation(at, Outcome::Failed), at)
-            .unwrap();
-    }
-
-    let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode.slug(),
-        "default",
-        AssignedModel::named("claude-opus-4-1"),
-        ServingRoute {
-            provider: Some("anyrouter".to_owned()),
-            gateway: None,
-            protocol: Some(WireProtocol::AnthropicMessages),
-        },
-    );
-    let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
-    let observed = source
-        .observed(&key)
-        .expect("ten observations must produce evidence");
-    assert_eq!(
-        observed.task_success_rate,
-        Some(0.5),
-        "half of the recorded observations were failures"
-    );
-    assert!(
-        observed.reliable_observation_count > 0,
-        "the recorded observations must actually count toward reliability"
-    );
-}
-
 /// Batch 43's `observed_identities` — the enumeration link batch 42 found
 /// missing (practice §71) — reachable and correct from outside the crate:
-/// [`EvidenceLedger::recent`] and [`EvidenceLedger::summarize`] both require
-/// the caller to already name an identity, and this is the one public method
-/// that answers which identities this project has actually recorded.
+/// [`EvidenceLedger::observations_in_window`] requires the caller to already
+/// name an identity, and this is the one public method that answers which
+/// identities this project has actually recorded.
 #[test]
 fn observed_identities_is_reachable_from_outside_the_crate_and_returns_real_rows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -505,7 +473,7 @@ fn a_recorded_observation_yields_duration_ms_and_a_real_median() {
         harness: Some("claude-code"),
     };
 
-    let rows = ledger.recent(query, 10).unwrap();
+    let rows = recent(&ledger, query, 10);
     assert_eq!(rows.len(), MIN_SAMPLE_FOR_SUMMARY);
     for row in &rows {
         assert_eq!(
@@ -515,9 +483,7 @@ fn a_recorded_observation_yields_duration_ms_and_a_real_median() {
         );
     }
 
-    let summary = ledger
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+    let summary = summarize(&ledger, query, ContextState::Unknown, 10_000, 100_000).unwrap();
     let median = summary
         .median_duration_ms
         .expect("five timed observations must produce a real latency reading");
@@ -558,7 +524,7 @@ fn an_old_latency_outlier_does_not_skew_the_recent_median() {
 
     // Assert the premise (§17) before the absence: the old outlier is
     // genuinely in the table and genuinely has a much larger duration.
-    let raw = ledger.recent(query, 100).unwrap();
+    let raw = recent(&ledger, query, 100);
     assert_eq!(
         raw.len(),
         MIN_SAMPLE_FOR_SUMMARY + 1,
@@ -566,9 +532,7 @@ fn an_old_latency_outlier_does_not_skew_the_recent_median() {
     );
 
     let now_unix = 100_000 + MIN_SAMPLE_FOR_SUMMARY as i64;
-    let summary = ledger
-        .summarize(query, ContextState::Unknown, now_unix, 1_000)
-        .unwrap();
+    let summary = summarize(&ledger, query, ContextState::Unknown, now_unix, 1_000).unwrap();
     let median = summary
         .median_duration_ms
         .expect("the recent, in-window observations alone must clear the minimum sample");
@@ -604,9 +568,7 @@ fn below_the_minimum_sample_the_latency_summary_is_unknown_not_zero() {
         route: Some("anthropic-messages"),
         harness: Some("claude-code"),
     };
-    let summary = ledger
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+    let summary = summarize(&ledger, query, ContextState::Unknown, 10_000, 100_000).unwrap();
     assert!(
         summary.median_duration_ms.is_none(),
         "four observations is below MIN_SAMPLE_FOR_SUMMARY, so the reading must be unknown, not a computed zero"
@@ -641,20 +603,17 @@ fn recent_latency_never_crosses_a_project_boundary() {
 
     // Assert the premise (§17): alpha's own summary is a real reading before
     // asserting beta can't see it.
-    let alpha_summary = alpha_ledger
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+    let alpha_summary =
+        summarize(&alpha_ledger, query, ContextState::Unknown, 10_000, 100_000).unwrap();
     assert!(
         alpha_summary.median_duration_ms.is_some(),
         "alpha genuinely recorded enough timed observations for a reading"
     );
 
-    let beta_summary = EvidenceLedger::open(&beta.runtime)
-        .unwrap()
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+    let beta_ledger = EvidenceLedger::open(&beta.runtime).unwrap();
+    let beta_summary = summarize(&beta_ledger, query, ContextState::Unknown, 10_000, 100_000);
     assert!(
-        beta_summary.median_duration_ms.is_none(),
+        beta_summary.is_none_or(|summary| summary.median_duration_ms.is_none()),
         "a sibling project's database must never contribute to this project's latency summary"
     );
 }
@@ -688,17 +647,16 @@ fn a_recorded_cost_survives_the_process_that_recorded_it() {
 
     let reopened = fixture.reopen();
     let ledger = EvidenceLedger::open(&reopened).unwrap();
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "anyrouter",
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cost,
@@ -723,17 +681,16 @@ fn an_observation_with_no_cost_leaves_the_column_absent() {
     }
 
     let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let rows = recent(
+        &ledger,
+        ObservationQuery {
+            provider: "anyrouter",
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        },
+        10,
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cost, None,

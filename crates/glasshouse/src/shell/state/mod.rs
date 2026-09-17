@@ -18,8 +18,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
 use crate::config::{
-    FreeResourceRef, Layer, Layered, PremiumReservePercent, ProfileApproval, ProfileBackend,
-    ProfileConfig, ProviderConfig, RouterCostMicroUsd, RouterLatencyMs, RoutingModelChoice,
+    Layer, Layered, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig,
     StoredCredentialRef,
 };
 use crate::events::{LifecycleEvent, MessageOrigin, RecordedEvent, TurnOutcome};
@@ -28,7 +27,6 @@ use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
 use crate::provider::cache::ModelCatalogue;
 use crate::provider::discovery::{ProbeOutcome, ProbeTarget};
-use crate::routing::disposable::DisposableChoice;
 use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
 use crate::secret::{SecretRef, SecretStore};
 use crate::session::{SessionDisposition, SessionId, SessionPresentation, SessionRecord};
@@ -36,7 +34,6 @@ use crate::session::{SessionDisposition, SessionId, SessionPresentation, Session
 mod knowledge;
 mod launch_choice;
 mod overview;
-mod route;
 mod settings;
 
 #[cfg(test)]
@@ -46,17 +43,12 @@ mod tests;
 pub use knowledge::{KnowledgeSection, MemoryDetail, ProjectKnowledgeState, ProjectMemoryState};
 pub use launch_choice::ProfileChoice;
 pub use overview::{OverviewState, ProjectOverviewState};
-pub use route::{
-    RouteDecisionRow, RouteDecisionsState, RouteEvidenceRow, RouteEvidenceState, RouteHealthRow,
-    RouteHealthState,
-};
 pub use settings::{
     AccountCommand, BrokerState, HarnessRow, IntegrationRow, MemoryRow, MemorySettingsEdit,
     ModelRefresh, ProbeKind, ProfileInputView, ProfileRow, ProfileSettingsEdit, ProviderInputView,
     ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow, ProviderSettingsEdit,
-    ReachabilityCheck, RoutingInputView, RoutingRow, RoutingSettingsEdit, SettingsEdit,
-    SettingsPathInputView, SettingsRows, SettingsSection, SettingsState, SubscriptionRow,
-    format_usd, subscription_tip,
+    ReachabilityCheck, SettingsEdit, SettingsPathInputView, SettingsRows, SettingsSection,
+    SettingsState, SubscriptionRow, subscription_tip,
 };
 
 // Brought into `state`'s own namespace, unexported, purely so `state::tests`'s
@@ -115,12 +107,6 @@ pub enum Overlay {
     /// source commit and lifecycle state. See [`ProjectKnowledgeState`] for
     /// the data behind it.
     ProjectKnowledge,
-    /// Phase 47 lines 1762 and 1764: a compact table of the distinct
-    /// `(provider, model, route)` identities this project's own gateway has
-    /// actually routed, with each identity's sample count, observation
-    /// window and context state (warm, cold, or unknown). Deliberately
-    /// narrow — see [`RouteEvidenceRow`] for exactly which columns this
-    /// build can honestly show and why the rest have no producer yet.
     /// Which harness to start, when more than one is enabled and Glasshouse
     /// therefore refuses to guess. It is the *answer* to
     /// `SelectionError::Ambiguous`, not a menu offered up front: with one
@@ -131,10 +117,6 @@ pub enum Overlay {
     /// explicit choice because selecting a billed provider must never be a
     /// side effect of pressing `n`.
     ProfileChoice,
-    /// Read-only, like [`Overlay::ProjectOverview`] and
-    /// [`Overlay::SessionEvents`]. See [`RouteEvidenceState`] for the data
-    /// behind it.
-    RouteEvidence,
     /// The project's raw memory — every [`crate::memory::MemoryKind`], at
     /// every [`crate::memory::MemoryStatus`], unfiltered and ungrouped. Map
     /// line 234: "allow the user to open a project-memory view from the
@@ -147,33 +129,6 @@ pub enum Overlay {
     /// shape as `ProjectKnowledge` — see [`ProjectMemoryState`] for the data
     /// behind it.
     ProjectMemory,
-    /// Phase 47 line 1765: what a local gateway has observed about each free
-    /// resource, with **route health, immediate availability, cadence, quota
-    /// reset and failure-domain evidence kept as five separate concepts** —
-    /// never folded into one status word, which is what the line forbids and
-    /// what `crate::provider::resources`'s own `render_health` does today,
-    /// on a single line, for three of the five.
-    ///
-    /// [`Overlay::RouteEvidence`]'s sibling: that table answers *which*
-    /// identities this gateway has actually routed, this one answers what is
-    /// known right now about whether each of them can serve. Read-only, like
-    /// every overlay above it. See [`RouteHealthState`] for the data behind
-    /// it, and [`RouteHealthRow`] for why "unknown" is a real answer in
-    /// three of the five concepts.
-    RouteHealth,
-    /// Why Glasshouse routed its own recent support jobs the way it did —
-    /// the disposable-routing rationales `glasshouse hook` records in
-    /// [`crate::evaluation`] once per completed turn.
-    ///
-    /// [`Overlay::RouteEvidence`]'s and [`Overlay::RouteHealth`]'s sibling,
-    /// and the one that answers a different question from both: those two are
-    /// about the *gateway* — which identities it routed, and what is known
-    /// about their health — and this one is about a decision Glasshouse made
-    /// for itself, with the named contributions behind it. Read-only, like
-    /// every overlay above it. See [`RouteDecisionsState`], and
-    /// [`RouteDecisionRow`] for why the rationale is text rather than a
-    /// reconstructed choice.
-    RouteDecisions,
 }
 
 /// Who currently owns the keyboard.
@@ -377,41 +332,12 @@ pub enum Action {
     /// open, the same contract [`Action::OpenProjectOverview`] already
     /// keeps. Phase 25, map lines 1098-1107.
     OpenProjectKnowledge,
-    /// Open the route-evidence table. Reading the routing evidence ledger
-    /// (`crate::routing::evidence::EvidenceLedger`) is file I/O this module
-    /// deliberately does not hold — the run loop reads it and calls
-    /// [`ShellState::open_route_evidence`], reporting a read failure back
-    /// through its own note rather than refusing to open, the same contract
-    /// [`Action::OpenProjectOverview`] and [`Action::OpenProjectKnowledge`]
-    /// already keep. Phase 47, map lines 1762 and 1764.
-    OpenRouteEvidence,
     /// Open the project-memory view. Reading project memory is file I/O this
     /// module deliberately does not hold — the run loop reads it and calls
     /// [`ShellState::open_project_memory`], reporting a read failure back
     /// through its own note rather than refusing to open, the same contract
     /// [`Action::OpenProjectKnowledge`] already keeps. Map line 234.
     OpenProjectMemory,
-    /// Open the route-health view. Reading the two gateway telemetry caches
-    /// (`crate::provider::telemetry::GatewayHealthCache` and
-    /// `GatewayQuotaCache`) is file I/O this module deliberately does not
-    /// hold — the run loop reads them and calls
-    /// [`ShellState::open_route_health`].
-    ///
-    /// **No error arm, unlike [`Action::OpenRouteEvidence`].** Both caches
-    /// are documented as returning no error ever: an absent, unreadable,
-    /// truncated or wrong-version file reads as *nothing observed*, which is
-    /// a complete answer this view can render honestly. There is therefore
-    /// no failure for a note to report, and adding one would be a field
-    /// nothing sets. Phase 47, map line 1765.
-    OpenRouteHealth,
-    /// Open the routing-decisions view. Reading the evaluation ledger
-    /// (`crate::evaluation::EvaluationObservations`) is file I/O this module
-    /// deliberately does not hold — the run loop reads it and calls
-    /// [`ShellState::open_route_decisions`], reporting a read failure back
-    /// through its own note rather than refusing to open, the same contract
-    /// [`Action::OpenRouteEvidence`] keeps and for the same reason: that
-    /// ledger is SQLite and really can fail to open.
-    OpenRouteDecisions,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -690,18 +616,8 @@ pub struct ShellState {
     /// The project-knowledge view's own data, or `None` when it is not open —
     /// the same split as `project_overview`.
     project_knowledge: Option<ProjectKnowledgeState>,
-    /// The route-evidence table's own data, or `None` when it is not open —
-    /// the same split as `project_overview` and `project_knowledge`.
-    route_evidence: Option<RouteEvidenceState>,
-    /// The route-health view's own data, or `None` when it is not open — the
-    /// same split as `route_evidence`.
-    route_health: Option<RouteHealthState>,
-    /// The routing-decisions view's own data, or `None` when it is not open —
-    /// the same split as `route_evidence`.
-    route_decisions: Option<RouteDecisionsState>,
     /// The project-memory view's own data, or `None` when it is not open —
-    /// the same split as `project_overview`, `project_knowledge` and
-    /// `route_evidence`.
+    /// the same split as `project_overview` and `project_knowledge`.
     project_memory: Option<ProjectMemoryState>,
     /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
     /// See [`ShellState::note_events`].
@@ -766,9 +682,6 @@ impl ShellState {
             overview: None,
             project_overview: None,
             project_knowledge: None,
-            route_evidence: None,
-            route_health: None,
-            route_decisions: None,
             project_memory: None,
             activity: Vec::new(),
         }
@@ -1037,9 +950,6 @@ impl ShellState {
         self.overview = None;
         self.project_overview = None;
         self.project_knowledge = None;
-        self.route_evidence = None;
-        self.route_health = None;
-        self.route_decisions = None;
         self.project_memory = None;
         Action::Redraw
     }
@@ -1163,24 +1073,6 @@ impl ShellState {
             return self.handle_project_knowledge_key(key, had_status);
         }
 
-        // Read-only, like the project overview and session events above:
-        // nothing to act on, so only its own close key is claimed.
-        if self.overlay == Some(Overlay::RouteEvidence) {
-            return self.handle_route_evidence_key(key, had_status);
-        }
-
-        // Read-only, exactly like `RouteEvidence` above and for the same
-        // reason: it is a table with nothing on it to act on.
-        if self.overlay == Some(Overlay::RouteHealth) {
-            return self.handle_route_health_key(key, had_status);
-        }
-
-        // Read-only for the same reason again: a list of decisions already
-        // made has nothing on it to act on.
-        if self.overlay == Some(Overlay::RouteDecisions) {
-            return self.handle_route_decisions_key(key, had_status);
-        }
-
         // The same cursor-and-drill-down shape as `ProjectKnowledge` above,
         // over one unfiltered list instead of five curated sections.
         if self.overlay == Some(Overlay::ProjectMemory) {
@@ -1253,18 +1145,6 @@ impl ShellState {
             KeyCode::Char('p') => Action::OpenProjectOverview,
             KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),
-            KeyCode::Char('r') => Action::OpenRouteEvidence,
-            // `h` for health, and it was free: every other `Char` binding in
-            // this table is listed above and below, and no overlay handler
-            // claims `h` either — the overlay handlers that run instead of
-            // this one claim only their own close key (and, for the two with
-            // a cursor, Up/Down/Enter).
-            KeyCode::Char('h') => Action::OpenRouteHealth,
-            // `d` for decisions, and it was free: no binding in this table
-            // used it, and the only other `Char('d')` in this file is inside
-            // the Settings overlay's own handler, which runs instead of this
-            // one and never falls through to it.
-            KeyCode::Char('d') => Action::OpenRouteDecisions,
             // Capital, not lowercase `m`: that letter is already the
             // Overview's own "begin sending text" key (`handle_overview_key`'s
             // `Char('m') if !ctrl`), and giving the same key a second,

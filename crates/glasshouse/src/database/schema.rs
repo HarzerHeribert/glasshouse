@@ -53,24 +53,12 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 12] = [
 /// One entry per landed producer. Variants are added as producers land, never
 /// in advance: an enum written before its writers is the same mistake as a
 /// table written before its counts.
-pub(crate) const EVALUATION_KINDS: [&str; 18] = [
+pub(crate) const EVALUATION_KINDS: [&str; 6] = [
     "memory_retrieved",
     "memory_retrieval_miss",
-    "disposable_route_decided",
-    "routing_override_decided",
-    "routing_continuation_decided",
-    "routing_cost_class_observed",
-    "routing_evidence_observed",
-    "routing_outcome_observed",
-    "routing_tier_observed",
-    "failover_prevented",
     "memory_rated",
     "memory_revalidated",
     "turn_outcome_observed",
-    "session_route_decided",
-    "routing_consumption_estimated",
-    "reserve_availability_observed",
-    "routing_rated",
     "memory_extraction_observed",
 ];
 
@@ -106,12 +94,12 @@ pub(super) const FAILURE_CLASSES: [&str; 9] = [
 ///
 /// **Deliberately not a SQL `CHECK`**, for [`FAILURE_CLASSES`]' reasons, and
 /// with one more of its own: the production reader
-/// (`crate::routing::request::TaskClass::from_stored`) answers `None` for an
+/// (`crate::routing::TaskClass::from_stored`) answers `None` for an
 /// unrecognised word rather than failing the row, so a `CHECK` would be the
 /// *only* thing in the system that could refuse one — and it would refuse it
 /// at the writer, on a future build's own valid class.
 ///
-/// Five entries, in [`crate::routing::request::TaskClass`]'s declaration
+/// Five entries, in [`crate::routing::TaskClass`]'s declaration
 /// order, pinned against it by
 /// `every_task_class_the_type_supports_is_one_the_schema_records`.
 ///

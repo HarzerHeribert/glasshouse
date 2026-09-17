@@ -1086,7 +1086,7 @@ pub(crate) fn memory_commit(runtime: &Runtime, session: Option<&str>) -> anyhow:
         }
     };
 
-    let model = crate::commands::routing_classification::disposable_extraction_model(runtime, &id);
+    let model = crate::commands::shared::disposable_extraction_model(runtime, &id);
     let Some(outcome) = crate::commands::memory_extraction::run_extraction(
         runtime,
         &id,

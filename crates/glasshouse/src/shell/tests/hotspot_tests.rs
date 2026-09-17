@@ -112,11 +112,13 @@ fn the_reserved_height_is_the_height_the_bar_wraps_to() {
 /// The ranking is real on screen and costs no action.
 ///
 /// The user's complaint was hierarchy, not count — *"5 million buttons"* over
-/// a bar where the one act a new install needs looked exactly like `d
-/// decisions`. Both halves are asserted here because fixing the first by
+/// a bar where the one act a new install needs looked exactly like `k
+/// knowledge`. Both halves are asserted here because fixing the first by
 /// deleting actions would be the 168-column clip returning: the primary run
 /// leads, every primary pill is drawn plainly rather than subordinate, and the
-/// list still holds every action.
+/// list still holds every action — `h health`, `r routes` and `d decisions`
+/// excepted, which left with the routing deletion (design-decisions,
+/// 2026-09-16) rather than being demoted.
 #[test]
 fn the_primary_actions_lead_the_bar_and_nothing_is_dropped_to_make_room() {
     let pills = control_pills(Theme::default());
@@ -135,9 +137,6 @@ fn the_primary_actions_lead_the_bar_and_nothing_is_dropped_to_make_room() {
         "o overview",
         "p project",
         "e events",
-        "h health",
-        "r routes",
-        "d decisions",
         "k knowledge",
         "M memory",
         "N headless",

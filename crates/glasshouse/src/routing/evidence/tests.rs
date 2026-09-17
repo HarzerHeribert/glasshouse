@@ -6,13 +6,11 @@
 //! original file are copied verbatim below, unwrapped.
 
 use super::*;
-use crate::config::pairing::ObservationSource;
 use crate::provider::pricing::PriceTable;
 // Named here rather than reached through `use super::*`: `AggregateReading`
 // moved to `vocabulary.rs` with its own private import of this enum, so
 // `mod.rs` no longer holds the binding these tests used to glob.
 use crate::provider::quota::Confidence;
-use crate::routing::pairing::EvidenceKey;
 use crate::{Cli, Runtime};
 use clap::Parser;
 use std::path::Path;
@@ -49,65 +47,6 @@ fn observation(provider: &str, model: &str) -> NewObservation {
         .with_harness(Some("claude-code"))
 }
 
-/// Line 1564's producer: the **latest** row decides, a succeeded latest
-/// row answers `None` even after earlier failures, and a pair nobody
-/// recorded answers `None` rather than borrowing a neighbour's history.
-#[test]
-fn the_latest_failure_class_is_the_most_recent_rows_and_nothing_older() {
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-    let ledger = fixture.ledger();
-    let record = |at: i64, outcome: Outcome, class: Option<FailureClass>| {
-        ledger
-            .record(
-                observation("alpha", "mid")
-                    .with_timing(Some(at), Some(at))
-                    .with_outcome(outcome)
-                    .with_failure_class(class),
-                at,
-            )
-            .unwrap();
-    };
-
-    assert_eq!(
-        ledger
-            .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
-            .unwrap(),
-        None
-    );
-    record(900, Outcome::Failed, Some(FailureClass::Throttle));
-    record(950, Outcome::Failed, Some(FailureClass::EmptyCompletion));
-    assert_eq!(
-        ledger
-            .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
-            .unwrap(),
-        Some(FailureClass::EmptyCompletion),
-        "the most recent row, not the first or the most frequent"
-    );
-    record(980, Outcome::Succeeded, None);
-    assert_eq!(
-        ledger
-            .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
-            .unwrap(),
-        None,
-        "a success after a failure is not a failure to promote on"
-    );
-    assert_eq!(
-        ledger
-            .latest_failure_class_for_model("alpha", "other-model", 1_000, 600)
-            .unwrap(),
-        None,
-        "another model's history is not this one's"
-    );
-    assert_eq!(
-        ledger
-            .latest_failure_class_for_model("alpha", "mid", 2_000, 600)
-            .unwrap(),
-        None,
-        "outside the window there is no history"
-    );
-}
-
 #[test]
 fn a_recorded_observation_reads_back_with_every_field_it_was_given() {
     let tmp = tempfile::tempdir().unwrap();
@@ -121,17 +60,7 @@ fn a_recorded_observation_reads_back_with_every_field_it_was_given() {
     let seq = ledger.record(new, 1_002).unwrap();
     assert!(seq > 0);
 
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let rows = ledger.observations_in_window(1_002, 10).unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.provider, "anyrouter");
@@ -179,19 +108,13 @@ fn the_millisecond_offsets_round_trip_and_duration_prefers_the_measured_one() {
     let fixture = Fixture::new(tmp.path(), "alpha");
     let ledger = fixture.ledger();
 
-    let query = |provider| ObservationQuery {
-        provider,
-        model: "claude-opus-4-1",
-        route: Some("anthropic-messages"),
-        harness: Some("claude-code"),
-    };
-
     // A measured row. The seconds say nine; the offsets say 8,910, and
     // the offsets are what was actually timed.
     ledger
         .record(
             observation("measured", "claude-opus-4-1")
                 .with_timing(Some(1_000), Some(1_009))
+                .with_outcome(Outcome::Succeeded)
                 .with_first_byte_ms(Some(120))
                 .with_first_token_ms(Some(1_450))
                 .with_first_tool_call_ms(Some(2_600))
@@ -199,33 +122,17 @@ fn the_millisecond_offsets_round_trip_and_duration_prefers_the_measured_one() {
             1_009,
         )
         .unwrap();
-    let rows = ledger.recent(query("measured"), 10).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].first_byte_ms, Some(120));
-    assert_eq!(rows[0].first_token_ms, Some(1_450));
-    assert_eq!(rows[0].first_tool_call_ms, Some(2_600));
-    assert_eq!(rows[0].completed_ms, Some(8_910));
-    assert_eq!(
-        rows[0].duration_ms(),
-        Some(8_910),
-        "a measured completion is preferred over the seconds difference"
-    );
 
     // An unmeasured row — every producer that holds no dispatch
     // `Instant`, and every row written before migration 25.
     ledger
         .record(
-            observation("unmeasured", "claude-opus-4-1").with_timing(Some(1_000), Some(1_009)),
+            observation("unmeasured", "claude-opus-4-1")
+                .with_timing(Some(1_000), Some(1_009))
+                .with_outcome(Outcome::Succeeded),
             1_009,
         )
         .unwrap();
-    let rows = ledger.recent(query("unmeasured"), 10).unwrap();
-    assert_eq!(rows[0].completed_ms, None);
-    assert_eq!(
-        rows[0].duration_ms(),
-        Some(9_000),
-        "with nothing measured the seconds difference is still the answer"
-    );
 
     // A relayed exchange's own shape: the two offsets its path can
     // measure and `None` for the two only a decoded stream supplies.
@@ -233,78 +140,40 @@ fn the_millisecond_offsets_round_trip_and_duration_prefers_the_measured_one() {
         .record(
             observation("relayed", "claude-opus-4-1")
                 .with_timing(Some(1_000), Some(1_002))
+                .with_outcome(Outcome::Succeeded)
                 .with_first_byte_ms(Some(88))
                 .with_completed_ms(Some(1_940)),
             1_002,
         )
         .unwrap();
-    let rows = ledger.recent(query("relayed"), 10).unwrap();
-    assert_eq!(rows[0].first_byte_ms, Some(88));
-    assert_eq!(rows[0].first_token_ms, None);
-    assert_eq!(rows[0].first_tool_call_ms, None);
-    assert_eq!(rows[0].duration_ms(), Some(1_940));
-}
 
-/// Line 1349 on fixed rows: output tokens over the decode span, summed
-/// across exactly the rows that recorded all three parts of it, and
-/// `None` — never `0.00`, never an infinity — for every group that did
-/// not.
-#[test]
-fn decode_tokens_per_second_divides_only_what_was_measured() {
-    fn group(output: Option<i64>, decode_ms: Option<i64>) -> PurposeConsumption {
-        PurposeConsumption {
-            purpose: Some("classification".to_owned()),
-            harness_recorded: false,
-            sample_count: 1,
-            input_tokens: None,
-            output_tokens: output,
-            cached_input_tokens: None,
-            first_byte_sample_count: 0,
-            first_byte_ms_sample_count: 0,
-            mean_time_to_first_byte_ms: None,
-            first_token_sample_count: 0,
-            first_token_ms_sample_count: 0,
-            mean_time_to_first_token_ms: None,
-            first_tool_call_sample_count: 0,
-            first_tool_call_ms_sample_count: 0,
-            mean_time_to_first_tool_call_ms: None,
-            decode_output_tokens: output,
-            decode_ms,
-            tool_rounds: None,
-            repairs: None,
-            serving_seconds: None,
-            failure_rate_sample: 0,
-            failure_rate: None,
-        }
-    }
+    let rows = ledger.observations_in_window(1_009, 10).unwrap();
+    let by_provider = |provider: &str| rows.iter().find(|row| row.provider == provider).unwrap();
 
-    // 240 tokens over 4,000ms of decode is 60 tokens a second.
+    let measured = by_provider("measured");
+    assert_eq!(measured.first_byte_ms, Some(120));
+    assert_eq!(measured.first_token_ms, Some(1_450));
+    assert_eq!(measured.first_tool_call_ms, Some(2_600));
+    assert_eq!(measured.completed_ms, Some(8_910));
     assert_eq!(
-        group(Some(240), Some(4_000)).decode_tokens_per_second(),
-        Some(60.0)
+        measured.duration_ms(),
+        Some(8_910),
+        "a measured completion is preferred over the seconds difference"
     );
-    // Sub-second decode spans are the whole reason this figure needed
-    // millisecond columns: 30 tokens in 250ms is 120 a second, and at
-    // second resolution the denominator would have been `0`.
+
+    let unmeasured = by_provider("unmeasured");
+    assert_eq!(unmeasured.completed_ms, None);
     assert_eq!(
-        group(Some(30), Some(250)).decode_tokens_per_second(),
-        Some(120.0)
+        unmeasured.duration_ms(),
+        Some(9_000),
+        "with nothing measured the seconds difference is still the answer"
     );
-    assert_eq!(
-        group(None, Some(4_000)).decode_tokens_per_second(),
-        None,
-        "no counted output tokens is not a rate of zero"
-    );
-    assert_eq!(
-        group(Some(240), None).decode_tokens_per_second(),
-        None,
-        "a group of rows written before migration 25 has no decode span at all"
-    );
-    assert_eq!(
-        group(Some(240), Some(0)).decode_tokens_per_second(),
-        None,
-        "a zero decode span is never an infinite rate"
-    );
+
+    let relayed = by_provider("relayed");
+    assert_eq!(relayed.first_byte_ms, Some(88));
+    assert_eq!(relayed.first_token_ms, None);
+    assert_eq!(relayed.first_tool_call_ms, None);
+    assert_eq!(relayed.duration_ms(), Some(1_940));
 }
 
 /// Migration 18's column and line 1334's two counters the gateway can
@@ -331,15 +200,7 @@ fn a_failure_class_and_the_two_counters_round_trip() {
     }
 
     let mut rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            20,
-        )
+        .observations_in_window(1_000 + FailureClass::ALL.len() as i64, 100)
         .unwrap();
     rows.sort_by_key(|row| row.seq);
     assert_eq!(rows.len(), FailureClass::ALL.len());
@@ -414,18 +275,9 @@ fn summarize_counts_failure_classes_even_below_the_sample_floor() {
             .unwrap();
     }
     let summary = ledger
-        .summarize(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            ContextState::Unknown,
-            1_100,
-            1_000,
-        )
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "claude-opus-4-1", 1_100, 1_000)
+        .unwrap()
+        .expect("at least one observation was recorded");
     assert!(summary.failure_rate.is_none(), "two is below the floor");
     assert_eq!(summary.failure_classes.cadence_throttled(), 2);
     assert_eq!(summary.failure_classes.observed(), 2);
@@ -458,18 +310,9 @@ fn summarize_produces_a_usable_aggregate_from_coarse_only_observations() {
     }
 
     let summary = ledger
-        .summarize(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "claude-opus-4-1",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            ContextState::Unknown,
-            2_000,
-            2_000,
-        )
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "claude-opus-4-1", 2_000, 2_000)
+        .unwrap()
+        .expect("at least one observation was recorded");
 
     assert!(
         summary.median_duration_ms.is_some(),
@@ -568,20 +411,20 @@ fn there_is_no_way_to_edit_a_recorded_observation() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path(), "alpha");
     let ledger = fixture.ledger();
-    ledger.record(observation("anyrouter", "m"), 1_000).unwrap();
-    ledger.record(observation("anyrouter", "m"), 1_001).unwrap();
-
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "m",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
+    ledger
+        .record(
+            observation("anyrouter", "m").with_outcome(Outcome::Succeeded),
+            1_000,
         )
         .unwrap();
+    ledger
+        .record(
+            observation("anyrouter", "m").with_outcome(Outcome::Succeeded),
+            1_001,
+        )
+        .unwrap();
+
+    let rows = ledger.observations_in_window(1_001, 10).unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -600,21 +443,13 @@ fn a_ledger_never_sees_another_projects_observations() {
 
     alpha
         .ledger()
-        .record(observation("anyrouter", "m"), 1_000)
-        .unwrap();
-
-    let beta_rows = beta
-        .ledger()
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "m",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
+        .record(
+            observation("anyrouter", "m").with_outcome(Outcome::Succeeded),
+            1_000,
         )
         .unwrap();
+
+    let beta_rows = beta.ledger().observations_in_window(1_000, 10).unwrap();
     assert!(
         beta_rows.is_empty(),
         "a sibling project's database must never contain another project's observation"
@@ -638,18 +473,9 @@ fn a_summary_below_the_minimum_sample_is_unknown() {
     }
 
     let summary = ledger
-        .summarize(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "m",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            ContextState::Unknown,
-            10_000,
-            100_000,
-        )
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 10_000, 100_000)
+        .unwrap()
+        .expect("at least one observation was recorded");
     assert!(summary.median_duration_ms.is_none());
     assert!(summary.failure_rate.is_none());
 }
@@ -669,18 +495,9 @@ fn a_summary_at_the_minimum_sample_is_a_real_number() {
     }
 
     let summary = ledger
-        .summarize(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "m",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            ContextState::Unknown,
-            10_000,
-            100_000,
-        )
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 10_000, 100_000)
+        .unwrap()
+        .expect("at least one observation was recorded");
     let median = summary
         .median_duration_ms
         .expect("five samples must produce a reading");
@@ -716,14 +533,9 @@ fn an_observation_outside_the_window_is_excluded_from_the_summary_but_not_delete
         ledger.record(new, at).unwrap();
     }
 
-    let query = ObservationQuery {
-        provider: "anyrouter",
-        model: "m",
-        route: Some("anthropic-messages"),
-        harness: Some("claude-code"),
-    };
-
-    let raw = ledger.recent(query, 100).unwrap();
+    let raw = ledger
+        .observations_in_window(100_000 + MIN_SAMPLE_FOR_SUMMARY as i64, 200_000)
+        .unwrap();
     assert_eq!(
         raw.len(),
         MIN_SAMPLE_FOR_SUMMARY + 1,
@@ -731,13 +543,14 @@ fn an_observation_outside_the_window_is_excluded_from_the_summary_but_not_delete
     );
 
     let summary = ledger
-        .summarize(
-            query,
-            ContextState::Unknown,
+        .summarize_latest_for_model(
+            "anyrouter",
+            "m",
             100_000 + MIN_SAMPLE_FOR_SUMMARY as i64,
             1_000,
         )
-        .unwrap();
+        .unwrap()
+        .expect("the recent, in-window observations must be found");
     let failure_rate = summary
         .failure_rate
         .expect("the recent, in-window observations alone must clear the minimum sample");
@@ -773,18 +586,17 @@ fn warm_and_cold_observations_never_share_one_summary() {
         ledger.record(new, at).unwrap();
     }
 
-    let query = ObservationQuery {
-        provider: "anyrouter",
-        model: "m",
-        route: Some("anthropic-messages"),
-        harness: Some("claude-code"),
-    };
+    // Windowed to each batch alone: the latest row inside each window names
+    // that batch's own context state, so a summary blending the two buckets
+    // would show up as a failure rate neither batch alone produced.
     let cold = ledger
-        .summarize(query, ContextState::Cold, 10_000, 100_000)
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 1_010, 100)
+        .unwrap()
+        .expect("the cold batch was recorded");
     let warm = ledger
-        .summarize(query, ContextState::Warm, 10_000, 100_000)
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 2_010, 100)
+        .unwrap()
+        .expect("the warm batch was recorded");
     assert_eq!(*cold.failure_rate.unwrap().value(), 1.0);
     assert_eq!(*warm.failure_rate.unwrap().value(), 0.0);
 }
@@ -798,24 +610,14 @@ fn a_cost_recorded_through_this_store_always_carries_a_confidence() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(tmp.path(), "alpha");
     let ledger = fixture.ledger();
-    let mut new = observation("anyrouter", "m");
+    let mut new = observation("anyrouter", "m").with_outcome(Outcome::Succeeded);
     new.cost = Some(ObservedCost {
         micro_usd: 500,
         confidence: CostConfidence::Estimated,
     });
     ledger.record(new, 1_000).unwrap();
 
-    let rows = ledger
-        .recent(
-            ObservationQuery {
-                provider: "anyrouter",
-                model: "m",
-                route: Some("anthropic-messages"),
-                harness: Some("claude-code"),
-            },
-            10,
-        )
-        .unwrap();
+    let rows = ledger.observations_in_window(1_000, 10).unwrap();
     let cost = rows[0].cost.expect("the cost must round-trip");
     assert_eq!(cost.micro_usd, 500);
     assert_eq!(cost.confidence, CostConfidence::Estimated);
@@ -855,18 +657,14 @@ fn no_aggregate_changes_when_only_token_volume_or_cost_changes() {
         expensive_ledger.record(large, at).unwrap();
     }
 
-    let query = ObservationQuery {
-        provider: "anyrouter",
-        model: "m",
-        route: Some("anthropic-messages"),
-        harness: Some("claude-code"),
-    };
     let cheap_summary = cheap_ledger
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 10_000, 100_000)
+        .unwrap()
+        .expect("the cheap batch was recorded");
     let expensive_summary = expensive_ledger
-        .summarize(query, ContextState::Unknown, 10_000, 100_000)
-        .unwrap();
+        .summarize_latest_for_model("anyrouter", "m", 10_000, 100_000)
+        .unwrap()
+        .expect("the expensive batch was recorded");
 
     assert_eq!(
         cheap_summary.failure_rate.map(|r| *r.value()),
@@ -876,73 +674,6 @@ fn no_aggregate_changes_when_only_token_volume_or_cost_changes() {
         cheap_summary.median_duration_ms.map(|r| *r.value()),
         expensive_summary.median_duration_ms.map(|r| *r.value())
     );
-}
-
-/// [`ObservationSource`] end to end: a real [`EvidenceKey`] resolves
-/// through [`ObservedEvidenceSource`] to the same failure rate
-/// [`EvidenceLedger::summarize`] computes directly.
-#[test]
-fn observed_evidence_source_answers_from_the_same_ledger_summarize_reads() {
-    use crate::harness::WireProtocol;
-    use crate::integrations::IntegrationId;
-    use crate::routing::AssignedModel;
-    use crate::routing::pairing::ServingRoute;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-    let ledger = fixture.ledger();
-
-    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
-        let at = 1_000 + i as i64;
-        let new = observation("anyrouter", "claude-opus-4-1")
-            .with_timing(Some(at), Some(at + 1))
-            .with_outcome(Outcome::Succeeded);
-        ledger.record(new, at).unwrap();
-    }
-
-    let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode.slug(),
-        "default",
-        AssignedModel::named("claude-opus-4-1"),
-        ServingRoute {
-            provider: Some("anyrouter".to_owned()),
-            gateway: None,
-            protocol: Some(WireProtocol::AnthropicMessages),
-        },
-    );
-    let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
-    let observed = source
-        .observed(&key)
-        .expect("five successes must produce evidence");
-    assert_eq!(observed.reliable_observation_count, MIN_SAMPLE_FOR_SUMMARY);
-    assert_eq!(observed.task_success_rate, Some(1.0));
-    assert_eq!(observed.usable_tool_call_rate, None);
-}
-
-/// A route this ledger never recorded anything for (no `provider` in the
-/// key) must answer `None`, not a fabricated zero.
-#[test]
-fn observed_evidence_source_answers_none_for_a_first_party_route() {
-    use crate::integrations::IntegrationId;
-    use crate::routing::AssignedModel;
-    use crate::routing::pairing::ServingRoute;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-    let ledger = fixture.ledger();
-
-    let key = EvidenceKey::new(
-        IntegrationId::ClaudeCode.slug(),
-        "default",
-        AssignedModel::named("claude-opus-4-1"),
-        ServingRoute {
-            provider: None,
-            gateway: None,
-            protocol: None,
-        },
-    );
-    let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
-    assert!(source.observed(&key).is_none());
 }
 
 /// Acceptance test 1: two recorded identities come back as exactly two
@@ -1312,745 +1043,6 @@ fn summarize_latest_for_model_never_lets_a_tied_second_models_route_leak_in() {
     assert_eq!(*summary.median_duration_ms.unwrap().value(), 2_000);
 }
 
-/// Capability map lines 1370, 1373, 1374 and 1376 on the pure function,
-/// with no database — each test here is the named killer of one of the
-/// packet's four mutations, and the helpers build rows the way the gateway
-/// producer writes them (a window, an outcome, a class when it failed).
-#[cfg(test)]
-mod correlation_tests {
-    use super::*;
-
-    fn row(
-        provider: &str,
-        model: &str,
-        start: i64,
-        end: i64,
-        class: Option<FailureClass>,
-    ) -> RoutingObservation {
-        RoutingObservation {
-            seq: 0,
-            project_id: "project".to_owned(),
-            observed_at_unix: end,
-            provider: provider.to_owned(),
-            model: model.to_owned(),
-            route: Some("anthropic-messages".to_owned()),
-            quota_context: None,
-            harness: Some("claude-code".to_owned()),
-            purpose: None,
-            dispatched_at_unix: Some(start),
-            first_byte_at_unix: None,
-            first_token_at_unix: None,
-            first_tool_call_at_unix: None,
-            completed_at_unix: Some(end),
-            first_byte_ms: None,
-            first_token_ms: None,
-            first_tool_call_ms: None,
-            completed_ms: None,
-            input_tokens: None,
-            output_tokens: None,
-            cached_input_tokens: None,
-            cost: None,
-            tool_rounds: None,
-            retries: None,
-            repairs: None,
-            failovers: None,
-            outcome: Some(if class.is_some() {
-                Outcome::Failed
-            } else {
-                Outcome::Succeeded
-            }),
-            failure_class: class,
-            task_class: None,
-            session_id: None,
-            effort_level: None,
-            turn_shape: None,
-            context_state: ContextState::Unknown,
-        }
-    }
-
-    fn five_xx(provider: &str, start: i64) -> RoutingObservation {
-        row(
-            provider,
-            "the-model",
-            start,
-            start + 5,
-            Some(FailureClass::Upstream5xx),
-        )
-    }
-
-    fn served(provider: &str, start: i64) -> RoutingObservation {
-        row(provider, "the-model", start, start + 5, None)
-    }
-
-    fn route(provider: &str) -> RouteIdentity {
-        RouteIdentity::new(provider, "the-model")
-    }
-
-    /// Line 1370 — kills *drop the overlap test*. Two 5xx thirty seconds
-    /// apart are one moment; two 5xx sixty-one seconds apart (measured from
-    /// the first window's end) are two, and the second one, with the other
-    /// route serving in between, is a lone failure rather than an overlap.
-    #[test]
-    fn an_overlap_is_measured_within_the_tolerance_and_not_beyond_it() {
-        let rows = vec![
-            five_xx("a", 0),
-            five_xx("b", 30),
-            five_xx("a", 1_000),
-            served("b", 1_010),
-            five_xx("b", 1_005 + CORRELATION_OVERLAP_TOLERANCE_SECONDS + 1),
-        ];
-        let pair = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(
-            (pair.overlaps(), pair.lone()),
-            (2, 1),
-            "a's first failure and b's answer to it are one overlap each way; a's second \
-             failure saw b serving and b's late failure saw nobody: {pair:?}"
-        );
-    }
-
-    /// Line 1373 — kills *match on class only* in its provider-metadata
-    /// half: the identity is `(provider, model)`, so `b/x` failing beside
-    /// `a/x` says nothing about `b/y`, which was serving at the time.
-    #[test]
-    fn a_correlation_is_model_specific_not_provider_wide() {
-        let rows = vec![
-            five_xx("a", 0),
-            five_xx("b", 10),
-            row("b", "other-model", 10, 15, None),
-        ];
-        let correlations = correlate_routes(&rows);
-        let same_model = correlations.between(&route("a"), &route("b"));
-        assert_eq!((same_model.overlaps(), same_model.lone()), (2, 0));
-        let other_model =
-            correlations.between(&route("a"), &RouteIdentity::new("b", "other-model"));
-        assert_eq!(
-            (other_model.overlaps(), other_model.lone()),
-            (0, 1),
-            "the other model on the same provider was observed serving through a's failure, \
-             and that is evidence against it sharing a's failure domain: {other_model:?}"
-        );
-    }
-
-    /// Line 1373 — kills *match on class only* in its serving-behaviour
-    /// half: a credential failure beside a 5xx, or a throttle beside a 5xx,
-    /// is the other route being observed and **not** failing the same way.
-    #[test]
-    fn a_different_failure_class_at_the_same_moment_is_not_a_match() {
-        let rows = vec![
-            five_xx("a", 0),
-            row(
-                "b",
-                "the-model",
-                10,
-                15,
-                Some(FailureClass::CredentialFailure),
-            ),
-            row("a", "the-model", 100, 105, Some(FailureClass::Throttle)),
-            five_xx("b", 110),
-        ];
-        let pair = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(
-            (pair.overlaps(), pair.lone()),
-            (0, 3),
-            "a's 5xx saw a bad key, a's throttle saw a 5xx, b's 5xx saw a throttle — three \
-             observed failures, none matched: {pair:?}"
-        );
-    }
-
-    /// Line 1374 — kills *freeze the confidence*: the same pair read three
-    /// times as rows arrive goes 1.00, then down to 0.50, then up to 0.75.
-    #[test]
-    fn new_rows_move_the_confidence_both_ways() {
-        let mut rows = Vec::new();
-        for i in 0..5 {
-            rows.push(five_xx("a", i * 1_000));
-            rows.push(five_xx("b", i * 1_000 + 10));
-        }
-        let first = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(first.confidence(), Some(1.0), "{first:?}");
-
-        for i in 0..10 {
-            rows.push(five_xx("a", 100_000 + i * 1_000));
-            rows.push(served("b", 100_000 + i * 1_000 + 10));
-        }
-        let second = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(second.confidence(), Some(0.5), "{second:?}");
-
-        for i in 0..10 {
-            rows.push(five_xx("a", 200_000 + i * 1_000));
-            rows.push(five_xx("b", 200_000 + i * 1_000 + 10));
-        }
-        let third = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(third.confidence(), Some(0.75), "{third:?}");
-        assert_eq!(third.sample_size(), 40);
-    }
-
-    /// Line 1376 — kills *ignore the minimum*: four informative events is
-    /// insufficient, says so with both numbers, and yields no confidence;
-    /// the fifth makes it a measurement.
-    #[test]
-    fn below_the_minimum_sample_the_verdict_is_insufficient_and_says_the_count() {
-        let mut rows = vec![
-            five_xx("a", 0),
-            five_xx("b", 10),
-            five_xx("a", 1_000),
-            five_xx("b", 1_010),
-        ];
-        let short = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(
-            short.verdict(),
-            CorrelationVerdict::InsufficientEvidence {
-                sample_size: 4,
-                required: MIN_CORRELATION_SAMPLE,
-            }
-        );
-        assert_eq!(short.confidence(), None);
-
-        rows.push(five_xx("a", 2_000));
-        rows.push(served("b", 2_010));
-        let enough = correlate_routes(&rows).between(&route("a"), &route("b"));
-        assert_eq!(
-            enough.verdict(),
-            CorrelationVerdict::Measured {
-                confidence: 0.8,
-                sample_size: 5,
-            }
-        );
-    }
-
-    /// Line 1370's other half: a failure while the other route was idle is
-    /// not evidence of independence, and a pair nobody has observed together
-    /// is unmeasured rather than absent.
-    #[test]
-    fn a_failure_while_the_other_route_was_idle_informs_nothing() {
-        let rows = vec![five_xx("a", 0), served("b", 10_000)];
-        let correlations = correlate_routes(&rows);
-        assert!(correlations.is_empty());
-        let pair = correlations.between(&route("b"), &route("a"));
-        assert_eq!(pair.sample_size(), 0);
-        assert_eq!(
-            pair.routes(),
-            (&route("a"), &route("b")),
-            "either order is the same pair"
-        );
-    }
-
-    /// The reader never feeds on its own output or on rows nobody judged:
-    /// a `CORRELATION_PURPOSE` row and an outcome-less row beside a failure
-    /// leave that failure uninformative.
-    #[test]
-    fn a_correlation_row_and_an_unjudged_row_are_not_evidence() {
-        let mut steer = served("b", 10);
-        steer.purpose = Some(CORRELATION_PURPOSE.to_owned());
-        let mut unjudged = served("b", 20);
-        unjudged.outcome = None;
-        let rows = vec![five_xx("a", 0), steer, unjudged];
-        assert!(correlate_routes(&rows).is_empty());
-    }
-
-    /// Line 1852's rows are not spend on either side of line 1466.
-    #[test]
-    fn from_consumption_leaves_correlation_rows_out_of_every_bucket() {
-        let groups = [
-            PurposeConsumption {
-                purpose: Some(CORRELATION_PURPOSE.to_owned()),
-                harness_recorded: false,
-                sample_count: 3,
-                input_tokens: None,
-                output_tokens: None,
-                cached_input_tokens: None,
-                first_byte_sample_count: 0,
-                first_byte_ms_sample_count: 0,
-                mean_time_to_first_byte_ms: None,
-                first_token_sample_count: 0,
-                first_token_ms_sample_count: 0,
-                mean_time_to_first_token_ms: None,
-                first_tool_call_sample_count: 0,
-                first_tool_call_ms_sample_count: 0,
-                mean_time_to_first_tool_call_ms: None,
-                decode_output_tokens: None,
-                decode_ms: None,
-                tool_rounds: None,
-                repairs: None,
-                serving_seconds: None,
-                failure_rate_sample: 0,
-                failure_rate: None,
-            },
-            PurposeConsumption {
-                purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
-                harness_recorded: false,
-                sample_count: 2,
-                input_tokens: None,
-                output_tokens: None,
-                cached_input_tokens: None,
-                first_byte_sample_count: 0,
-                first_byte_ms_sample_count: 0,
-                mean_time_to_first_byte_ms: None,
-                first_token_sample_count: 0,
-                first_token_ms_sample_count: 0,
-                mean_time_to_first_token_ms: None,
-                first_tool_call_sample_count: 0,
-                first_tool_call_ms_sample_count: 0,
-                mean_time_to_first_tool_call_ms: None,
-                decode_output_tokens: None,
-                decode_ms: None,
-                tool_rounds: None,
-                repairs: None,
-                serving_seconds: None,
-                failure_rate_sample: 0,
-                failure_rate: None,
-            },
-        ];
-        let overhead = RoutingOverhead::from_consumption(&groups);
-        assert_eq!(
-            (overhead.task_requests, overhead.unstamped_requests),
-            (2, 2),
-            "the unknown purpose still degrades visibly into unstamped; the correlation rows \
-             are nowhere: {overhead:?}"
-        );
-    }
-
-    /// Phase 33A line 1330's owed follow-up: the arm spans the
-    /// stamped/unstamped boundary and must route both sides into the same
-    /// bucket, while a harness-recorded row with an unrelated purpose still
-    /// falls through to unstamped.
-    #[test]
-    fn from_consumption_routes_harness_turn_rows_across_the_stamped_boundary() {
-        let groups = [
-            PurposeConsumption {
-                purpose: Some(HARNESS_TURN_PURPOSE.to_owned()),
-                harness_recorded: true,
-                sample_count: 3,
-                input_tokens: Some(100),
-                output_tokens: Some(50),
-                cached_input_tokens: None,
-                first_byte_sample_count: 0,
-                first_byte_ms_sample_count: 0,
-                mean_time_to_first_byte_ms: None,
-                first_token_sample_count: 0,
-                first_token_ms_sample_count: 0,
-                mean_time_to_first_token_ms: None,
-                first_tool_call_sample_count: 0,
-                first_tool_call_ms_sample_count: 0,
-                mean_time_to_first_tool_call_ms: None,
-                decode_output_tokens: None,
-                decode_ms: None,
-                tool_rounds: None,
-                repairs: None,
-                serving_seconds: None,
-                failure_rate_sample: 0,
-                failure_rate: None,
-            },
-            PurposeConsumption {
-                purpose: None,
-                harness_recorded: true,
-                sample_count: 2,
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                cached_input_tokens: None,
-                first_byte_sample_count: 0,
-                first_byte_ms_sample_count: 0,
-                mean_time_to_first_byte_ms: None,
-                first_token_sample_count: 0,
-                first_token_ms_sample_count: 0,
-                mean_time_to_first_token_ms: None,
-                first_tool_call_sample_count: 0,
-                first_tool_call_ms_sample_count: 0,
-                mean_time_to_first_tool_call_ms: None,
-                decode_output_tokens: None,
-                decode_ms: None,
-                tool_rounds: None,
-                repairs: None,
-                serving_seconds: None,
-                failure_rate_sample: 0,
-                failure_rate: None,
-            },
-            PurposeConsumption {
-                purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
-                harness_recorded: true,
-                sample_count: 7,
-                input_tokens: None,
-                output_tokens: None,
-                cached_input_tokens: None,
-                first_byte_sample_count: 0,
-                first_byte_ms_sample_count: 0,
-                mean_time_to_first_byte_ms: None,
-                first_token_sample_count: 0,
-                first_token_ms_sample_count: 0,
-                mean_time_to_first_token_ms: None,
-                first_tool_call_sample_count: 0,
-                first_tool_call_ms_sample_count: 0,
-                mean_time_to_first_tool_call_ms: None,
-                decode_output_tokens: None,
-                decode_ms: None,
-                tool_rounds: None,
-                repairs: None,
-                serving_seconds: None,
-                failure_rate_sample: 0,
-                failure_rate: None,
-            },
-        ];
-        let overhead = RoutingOverhead::from_consumption(&groups);
-        assert_eq!(
-            (overhead.coding_agent_requests, overhead.coding_agent_tokens),
-            (5, Some(165)),
-            "the stamped harness-turn row and the pre-stamp unstamped-but-harness-recorded row \
-             must land in the same bucket: {overhead:?}"
-        );
-        assert_eq!(
-            overhead.unstamped_requests, 7,
-            "a harness-recorded row with an unrelated purpose must still fall through: {overhead:?}"
-        );
-    }
-
-    #[test]
-    fn a_window_falls_back_to_observed_at_and_never_runs_backwards() {
-        let mut point = served("a", 100);
-        point.dispatched_at_unix = None;
-        point.completed_at_unix = None;
-        point.observed_at_unix = 42;
-        assert_eq!(point.window(), (42, 42));
-        let mut backwards = served("a", 100);
-        backwards.completed_at_unix = Some(50);
-        assert_eq!(backwards.window(), (100, 100));
-    }
-}
-
-#[cfg(test)]
-mod throttle_scope_tests {
-    use super::*;
-
-    fn row(
-        provider: &str,
-        model: &str,
-        start: i64,
-        end: i64,
-        class: Option<FailureClass>,
-    ) -> RoutingObservation {
-        RoutingObservation {
-            seq: 0,
-            project_id: "project".to_owned(),
-            observed_at_unix: end,
-            provider: provider.to_owned(),
-            model: model.to_owned(),
-            route: Some("anthropic-messages".to_owned()),
-            quota_context: None,
-            harness: Some("claude-code".to_owned()),
-            purpose: None,
-            dispatched_at_unix: Some(start),
-            first_byte_at_unix: None,
-            first_token_at_unix: None,
-            first_tool_call_at_unix: None,
-            completed_at_unix: Some(end),
-            first_byte_ms: None,
-            first_token_ms: None,
-            first_tool_call_ms: None,
-            completed_ms: None,
-            input_tokens: None,
-            output_tokens: None,
-            cached_input_tokens: None,
-            cost: None,
-            tool_rounds: None,
-            retries: None,
-            repairs: None,
-            failovers: None,
-            outcome: Some(if class.is_some() {
-                Outcome::Failed
-            } else {
-                Outcome::Succeeded
-            }),
-            failure_class: class,
-            task_class: None,
-            session_id: None,
-            effort_level: None,
-            turn_shape: None,
-            context_state: ContextState::Unknown,
-        }
-    }
-
-    fn throttle(provider: &str, model: &str, start: i64) -> RoutingObservation {
-        row(
-            provider,
-            model,
-            start,
-            start + 5,
-            Some(FailureClass::Throttle),
-        )
-    }
-
-    fn served(provider: &str, model: &str, start: i64) -> RoutingObservation {
-        row(provider, model, start, start + 5, None)
-    }
-
-    fn route(provider: &str, model: &str) -> RouteIdentity {
-        RouteIdentity::new(provider, model)
-    }
-
-    /// Line 1317, its provider-wide half — kills *collapse provider-wide
-    /// into model-specific*: five throttles on `x` each overlapped by a
-    /// throttle on sibling model `y` of the same provider is direct evidence
-    /// the limiter reached both.
-    #[test]
-    fn overlapping_throttles_on_sibling_models_read_as_provider_wide() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), throttle("a", "y", at + 10)]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ProviderWide,
-            "every throttle on x overlapped a throttle on y of the same provider"
-        );
-    }
-
-    /// Line 1317, its model-specific half — kills *ignore the sibling
-    /// model's success*: five throttles on `x`, each overlapped by `y`
-    /// serving normally, is evidence the limiter never reached `y`.
-    #[test]
-    fn a_throttle_overlapped_by_a_sibling_models_success_reads_as_model_specific() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), served("a", "y", at + 10)]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ModelSpecific,
-            "every throttle on x was observed against a sibling that kept serving"
-        );
-    }
-
-    /// A single provider-wide instance outweighs any number of
-    /// model-specific ones — the scope answers "did the limiter ever reach
-    /// another model", not a majority vote.
-    #[test]
-    fn one_overlapping_throttle_among_many_lone_ones_still_reads_as_provider_wide() {
-        let mut rows: Vec<RoutingObservation> = (0..4)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), served("a", "y", at + 10)]
-            })
-            .collect();
-        rows.push(throttle("a", "x", 100_000));
-        rows.push(throttle("a", "y", 100_010));
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ProviderWide
-        );
-    }
-
-    /// Line 1317 — kills *drop the minimum sample*: four informative
-    /// throttle events is insufficient and says so with both numbers; the
-    /// fifth makes it a verdict.
-    #[test]
-    fn below_the_minimum_sample_the_scope_is_unknown_and_says_the_count() {
-        let mut rows: Vec<RoutingObservation> = (0..4)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), served("a", "y", at + 10)]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::Unknown {
-                sample_size: 4,
-                required: MIN_CORRELATION_SAMPLE,
-            }
-        );
-
-        rows.push(throttle("a", "x", 5_000));
-        rows.push(served("a", "y", 5_010));
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ModelSpecific
-        );
-    }
-
-    /// A throttle observed against no sibling at all is uninformative, same
-    /// as [`correlate_routes`]'s own rule — it does not count toward the
-    /// sample and does not make the scope provider-wide by default.
-    #[test]
-    fn a_throttle_with_no_sibling_observed_is_uninformative() {
-        let rows = vec![throttle("a", "x", 0)];
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::Unknown {
-                sample_size: 0,
-                required: MIN_CORRELATION_SAMPLE,
-            }
-        );
-    }
-
-    /// Only [`FailureClass::Throttle`] counts, not every correlatable class:
-    /// an `Upstream5xx` on `x` says nothing about line 1317's question even
-    /// when a sibling model failed the same way at the same moment.
-    #[test]
-    fn an_upstream_5xx_is_not_a_throttle_and_contributes_nothing() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [
-                    row("a", "x", at, at + 5, Some(FailureClass::Upstream5xx)),
-                    row("a", "y", at + 10, at + 15, Some(FailureClass::Upstream5xx)),
-                ]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::Unknown {
-                sample_size: 0,
-                required: MIN_CORRELATION_SAMPLE,
-            },
-            "5xx rows are not throttles and do not inform this scope"
-        );
-    }
-
-    /// A different provider's model is not a sibling: `b/x` throttling
-    /// beside `a/x` says nothing about `a`'s own other models.
-    #[test]
-    fn a_different_providers_model_is_not_a_sibling() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), throttle("b", "x", at + 10)]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::Unknown {
-                sample_size: 0,
-                required: MIN_CORRELATION_SAMPLE,
-            }
-        );
-    }
-
-    /// [`classify_throttle_scopes`] finds every throttled route and nothing
-    /// else, and [`ThrottleScopes::for_route`] answers a route it never saw
-    /// with an honest zero rather than a panic or a default guess.
-    #[test]
-    fn classify_throttle_scopes_covers_every_throttled_route_and_no_others() {
-        let mut rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [throttle("a", "x", at), throttle("a", "y", at + 10)]
-            })
-            .collect();
-        rows.push(served("c", "z", 999_999));
-        let scopes = classify_throttle_scopes(&rows);
-
-        assert_eq!(
-            scopes.for_route(&route("a", "x")),
-            ThrottleScope::ProviderWide
-        );
-        assert_eq!(
-            scopes.for_route(&route("a", "y")),
-            ThrottleScope::ProviderWide
-        );
-        assert_eq!(
-            scopes.for_route(&route("c", "z")),
-            ThrottleScope::Unknown {
-                sample_size: 0,
-                required: MIN_CORRELATION_SAMPLE,
-            },
-            "c/z never throttled, so it is unmeasured rather than absent"
-        );
-        assert_eq!(
-            scopes.iter().count(),
-            2,
-            "only the two throttled routes are stored"
-        );
-    }
-
-    /// `row` with the account key line 1965's facets read —
-    /// [`RoutingObservation::quota_context`], the credential label the
-    /// gateway stamps on every exchange.
-    fn account_row(
-        provider: &str,
-        model: &str,
-        account: &str,
-        start: i64,
-        class: Option<FailureClass>,
-    ) -> RoutingObservation {
-        let mut observation = row(provider, model, start, start + 5, class);
-        observation.quota_context = Some(account.to_owned());
-        observation
-    }
-
-    /// Line 1317's account-specific scope, now that the key exists: five
-    /// windows where account A's sibling models `x` and `y` throttled
-    /// together while account B of the same provider kept serving. Without
-    /// the account key this exact shape reads provider-wide (the sibling
-    /// models overlapped) — the other account serving through it is what
-    /// refutes that.
-    #[test]
-    fn sibling_throttles_beside_another_account_serving_read_as_account_specific() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [
-                    account_row("a", "x", "a/KEY_A", at, Some(FailureClass::Throttle)),
-                    account_row("a", "y", "a/KEY_A", at + 10, Some(FailureClass::Throttle)),
-                    account_row("a", "x", "a/KEY_B", at + 20, None),
-                ]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::AccountSpecific,
-            "account A's models throttled together while account B kept serving"
-        );
-    }
-
-    /// The refuting evidence for account-specificity: the *other account*
-    /// throttled in the same window too, so the limiter provably reached
-    /// past one account and the verdict stays provider-wide.
-    #[test]
-    fn a_throttle_shared_by_two_accounts_stays_provider_wide() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [
-                    account_row("a", "x", "a/KEY_A", at, Some(FailureClass::Throttle)),
-                    account_row("a", "y", "a/KEY_A", at + 10, Some(FailureClass::Throttle)),
-                    account_row("a", "x", "a/KEY_B", at + 20, Some(FailureClass::Throttle)),
-                ]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ProviderWide,
-            "two accounts throttled in one window is the limiter reaching past either"
-        );
-    }
-
-    /// Rows with no account key classify exactly as they did before the key
-    /// existed — the account axis is evidence-permitting, never inferred:
-    /// the same five sibling-throttle windows with no `quota_context`
-    /// anywhere still read provider-wide even when a context-less row was
-    /// serving beside them.
-    #[test]
-    fn contextless_rows_never_produce_an_account_specific_verdict() {
-        let rows: Vec<RoutingObservation> = (0..5)
-            .flat_map(|i| {
-                let at = i * 1_000;
-                [
-                    throttle("a", "x", at),
-                    throttle("a", "y", at + 10),
-                    served("a", "z", at + 20),
-                ]
-            })
-            .collect();
-        assert_eq!(
-            classify_throttle_scope(&rows, &route("a", "x")),
-            ThrottleScope::ProviderWide,
-            "no row names an account, so nothing may claim an account boundary"
-        );
-    }
-}
-
 #[cfg(test)]
 mod credential_throttle_tests {
     use super::*;
@@ -2305,147 +1297,6 @@ mod credential_spend_tests {
             recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")).tokens,
             Some(3)
         );
-    }
-}
-
-/// Map line 1158's producer — [`estimated_context_tokens`].
-#[cfg(test)]
-mod estimated_context_tokens_tests {
-    use super::*;
-
-    fn row(
-        session_id: Option<&str>,
-        observed_at_unix: i64,
-        seq: i64,
-        route: Option<&str>,
-        tokens: Option<(i64, i64)>,
-    ) -> RoutingObservation {
-        RoutingObservation {
-            seq,
-            project_id: "project".to_owned(),
-            observed_at_unix,
-            provider: "alpha".to_owned(),
-            model: "m".to_owned(),
-            route: route.map(str::to_owned),
-            quota_context: None,
-            harness: Some("claude-code".to_owned()),
-            purpose: None,
-            dispatched_at_unix: Some(observed_at_unix - 1),
-            first_byte_at_unix: None,
-            first_token_at_unix: None,
-            first_tool_call_at_unix: None,
-            completed_at_unix: Some(observed_at_unix),
-            first_byte_ms: None,
-            first_token_ms: None,
-            first_tool_call_ms: None,
-            completed_ms: None,
-            input_tokens: tokens.map(|(input, _)| input),
-            output_tokens: None,
-            cached_input_tokens: tokens.map(|(_, cached)| cached),
-            cost: None,
-            tool_rounds: None,
-            retries: None,
-            repairs: None,
-            failovers: None,
-            outcome: Some(Outcome::Succeeded),
-            failure_class: None,
-            task_class: None,
-            session_id: session_id.map(str::to_owned),
-            effort_level: None,
-            turn_shape: None,
-            context_state: ContextState::Unknown,
-        }
-    }
-
-    /// The wire rule Line 1158 makes: Anthropic Messages bills `input_tokens`
-    /// excluding the tokens the cache served, so the prompt size is their
-    /// sum.
-    ///
-    /// Mutation target `wire-rule-dropped`: dropping the cached sum on the
-    /// `anthropic-messages` arm must fail this test.
-    #[test]
-    fn anthropic_messages_sums_input_and_cached_tokens() {
-        let rows = vec![row(
-            Some("s1"),
-            1_000,
-            0,
-            Some("anthropic-messages"),
-            Some((100, 900)),
-        )];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(1_000));
-    }
-
-    /// Every other wire's own figure already includes the cached subset, so
-    /// it stands alone — and an unknown wire takes the same conservative
-    /// floor.
-    #[test]
-    fn every_other_wire_takes_input_tokens_alone() {
-        let rows = vec![row(
-            Some("s1"),
-            1_000,
-            0,
-            Some("openai-chat"),
-            Some((100, 900)),
-        )];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(100));
-
-        let rows = vec![row(Some("s1"), 1_000, 0, None, Some((50, 900)))];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(50));
-    }
-
-    /// The **latest** row by `(observed_at_unix, seq)` decides, regardless of
-    /// slice order — an earlier row, even a larger one, does not win.
-    #[test]
-    fn the_latest_row_wins_regardless_of_slice_order() {
-        let rows = vec![
-            row(
-                Some("s1"),
-                2_000,
-                0,
-                Some("anthropic-messages"),
-                Some((500, 0)),
-            ),
-            row(
-                Some("s1"),
-                1_000,
-                5,
-                Some("anthropic-messages"),
-                Some((900, 0)),
-            ),
-            row(
-                Some("s1"),
-                2_000,
-                1,
-                Some("anthropic-messages"),
-                Some((10, 0)),
-            ),
-        ];
-        assert_eq!(
-            estimated_context_tokens(&rows, "s1"),
-            Some(10),
-            "the row at (2_000, 1) is later than both (2_000, 0) and (1_000, 5)"
-        );
-    }
-
-    /// A session with no row at all, or none whose `input_tokens` is known,
-    /// reads `None` — never `Some(0)` for "nobody counted".
-    #[test]
-    fn no_known_row_reads_none_and_never_zero() {
-        let rows: Vec<RoutingObservation> = vec![];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
-
-        let rows = vec![row(Some("s1"), 1_000, 0, Some("anthropic-messages"), None)];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
-
-        // A row for a different session does not leak into this one's reading.
-        let rows = vec![row(
-            Some("other"),
-            1_000,
-            0,
-            Some("anthropic-messages"),
-            Some((100, 0)),
-        )];
-        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
     }
 }
 

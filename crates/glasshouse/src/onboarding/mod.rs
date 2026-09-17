@@ -3,16 +3,11 @@
 //! On first launch this detects supported harnesses and useful local tools,
 //! shows what was found, and lets the user enable or ignore each before the
 //! normal interface opens: a welcome, the integration list, an optional
-//! bypass-acknowledgement step, an optional provider step, and an optional
-//! routing-model step, then a summary.
-//!
-//! The routing-model step offers exactly Phase 2C's three choices —
-//! Automatic, Choose model, Do later — and *records which one the user
-//! picked*, as a reference (provider, model, never a credential; see
-//! [`crate::config::RoutingModelChoice`]); it does not classify anything or
-//! build a fallback chain (Phases 34B/34C). "Do later" leaves deterministic
-//! routing heuristics in charge; the provider step configures from a
-//! built-in template and stops there (the gateway is Phase 9D).
+//! bypass-acknowledgement step, and an optional provider step, then a
+//! summary. There is no routing-model step any more (2026-09-16 ruling —
+//! Glasshouse never decides which model is used); the provider step
+//! configures from a built-in template and stops there (the gateway is
+//! Phase 9D).
 //!
 //! The state machine ([`state::WizardState`]), the rendering, and the event
 //! loop ([`run`]) are separate; only [`run`] touches a terminal. History:
