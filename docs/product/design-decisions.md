@@ -5567,3 +5567,24 @@ On the five ideas drawn from oh-my-pi and its peers: "no, I don't like adding ro
 ## No Gemini subscription reuse — the user, 2026-09-17 (evening)
 
 Asked how oh-my-pi reaches sixty providers (a few wire protocols over a data table, the vendors' own OAuth flows re-implemented, and other CLIs' credential stores read), the user ruled on the one that matters: "Gemini deliberately prohibits third-party use and it can lead to account freezing." So Phase 73 takes keyed APIs only: Gemini through its paid API key on Google's OpenAI-compatible endpoint (no `google-generative-ai` protocol, no `.gemini` credential reading, no Antigravity login), and no Copilot login either, whose terms restrict third-party clients the same way. The gateway once had a Gemini subscription and the user removed it for exactly this reason ("we had Gemini subs but I removed it because of that") — do not bring it back. The gateway's existing subscription broker for Anthropic and OpenAI logins stays as the user's own choice; nothing new of that kind is added.
+
+## The supervisor stays, and the cheap tier is enough to run it — the user, 2026-09-17
+
+Watching today's dogfooding run (session `tlitep-13fv`: 247 turns, 120 cells, 11.8M tokens, sixty
+cells of reading before the first write), the user on the supervisor: *"Ah yeah I like supervisor
+idea. And little helpers on Luna should be enough for measuring guidance"*.
+
+So the supervisor is a kept part of Pane, not an experiment, and it runs on the helper tier. Two
+consequences, both already true in code as of `74980fb8`:
+
+- `[supervisor]` with no model of its own uses `[helpers] model`. `enabled` already defaulted to
+  true and `every` to 4 cells, so a session that configures a helper tier now gets a supervisor
+  looking every four cells without asking for one. Nothing else reads a second model name.
+- The startup line names the model and the interval (`supervisor: gpt-5.6-luna, looking every 4
+  cell(s)`) instead of a single `off (no model)` that scrolls away — the run showed that line once,
+  four hours before the loop it would have caught.
+
+The supervisor's authority is unchanged and deliberately small: it sees the compressed trajectory
+the rollout already records — each cell's first line, its outcome, its calls — never a preview's
+bytes or a payload, and its one decision becomes a nudge line in the next request. It interrupts
+nothing and grants nothing.
