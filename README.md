@@ -138,12 +138,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1385 closed** · **103 active committed open** (93%)
+`█████████████████████████████████████░░░` **1387 closed** · **103 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (98 of 122 active phases complete)</summary>
+<summary>Per-phase breakdown (99 of 123 active phases complete)</summary>
 
 **glasshouse** `█████████████████████████████████████░░░` 757/803
 
@@ -214,7 +214,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 60 — Parallel-session file coordination | 16/16 ✅ |
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 
-**gateway** `██████████████████████████████████████░░` 391/405
+**gateway** `██████████████████████████████████████░░` 393/407
 
 | Phase | Done |
 |---|---|
@@ -251,6 +251,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 68 — Gateway: successors named by the 2026-09-16 cleanup | 2/2 ✅ |
 | Phase 73 — Gateway: any provider by configuration | 0/3 |
+| Phase 74 — The model chooses what it delegates to | 2/2 ✅ |
 
 **boundary** `████████████████████████████████████████` 100/100
 

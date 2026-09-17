@@ -2688,3 +2688,13 @@ every Anthropic- or OpenAI-compatible endpoint; what is missing is the convenien
 ☐ Ship a preset list of providers — name, base URL, protocol, the environment variable a key comes from — so `[providers.openrouter]`, `deepseek`, `groq`, `together`, `mistral`, `xai`, `fireworks`, `ollama` and their like need only a key, and `inference-gateway providers list` prints what is configured, what is preset, and what each reaches.
 ☐ Discover models per configured provider through the protocol's own listing (`GET /v1/models` and its equivalents), cached briefly, so Pane's picker and `/model` offer what an account can actually reach and no model name is compiled in.
 ☐ Add a provider and its key without editing TOML: `inference-gateway providers add <name> --base-url … --protocol … --key-from-env VAR` writing `[providers.<name>]` and the key to the store, and a row in Pane's `/settings` that calls it.
+
+Phase 74 — The model chooses what it delegates to
+
+The user's ruling of 2026-09-17: a model should be handed the list of models it can reach with their
+Artificial Analysis intelligence index attached, "so it can choose"; the figures belong to the gateway
+("this way gateway hold backed data about models intelligence and cost per task and so on"), baked in
+at install or update, and refreshable by a key the user supplies themselves.
+
+☑ Hold the published model measurements in the gateway: a snapshot baked into the binary at build time, an overlay the user's own Artificial Analysis key fills that wins figure by figure, and `inference-gateway models [--json] [--filter] [--import]` to serve and refresh them, carrying cost fields beside intelligence and coding.
+☑ Tell the model, in the `agent` declaration, which models this session can delegate to and how strong each is — strongest first, unmeasured last rather than as a zero, bounded with a count of the rest — and say that a higher index costs more, so a separable question goes to the cheapest model that can answer it; `[agents] mode = "off"` lists nothing and says subagents are refused, `pinned` names the pinned model and still lists the alternatives.
