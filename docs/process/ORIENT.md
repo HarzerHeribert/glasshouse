@@ -206,6 +206,7 @@ to do, and the orchestrator should follow its own rule.
 - **§89** — stage by pathspec, always; the hook refuses the sweep
 - **§90** — a "recorded limit" that says the tests bypass the real path is the defect, not a footnote
 - **§91** — two ordered runs cannot attribute a load-sensitive red; interleave against an unmodified baseline
+- **§92** — in-session or a fork first; a worktree worker only for a long, parallel, file-disjoint build (user ruling 2026-09-17)
 
 ## Recent checkpoints
 
