@@ -128,6 +128,14 @@ pub struct DecisionsConfig {
     /// Confidence at or above which a `read_only` intent proposes `explore`
     /// for one request, in `execute`, unpinned (2639). `0.5..=1.0`.
     pub mode_above: f64,
+    /// A scout candidate's own relevance noul at or below which it is left
+    /// out of what the Scout is served (2644). `0.0..=0.5`.
+    pub scout_relevance_below: f64,
+    /// A helper result's own noul at or below which its record carries the
+    /// one line that it may not answer what was asked (2645) -- the same
+    /// floor for the preflight Scout's own result and the completion gate's
+    /// fresh checker. `0.0..=0.5`.
+    pub helper_no_below: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -145,6 +153,8 @@ impl Default for DecisionsConfig {
             judge_no_below: 0.10,
             drift_no_below: 0.10,
             mode_above: 0.85,
+            scout_relevance_below: 0.10,
+            helper_no_below: 0.10,
         }
     }
 }
@@ -806,6 +816,10 @@ const DRIFT_NO_BELOW_MIN: f64 = 0.0;
 const DRIFT_NO_BELOW_MAX: f64 = 0.5;
 const MODE_ABOVE_MIN: f64 = 0.5;
 const MODE_ABOVE_MAX: f64 = 1.0;
+const SCOUT_RELEVANCE_BELOW_MIN: f64 = 0.0;
+const SCOUT_RELEVANCE_BELOW_MAX: f64 = 0.5;
+const HELPER_NO_BELOW_MIN: f64 = 0.0;
+const HELPER_NO_BELOW_MAX: f64 = 0.5;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -825,6 +839,8 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "judge_no_below",
             "drift_no_below",
             "mode_above",
+            "scout_relevance_below",
+            "helper_no_below",
         ]
         .contains(&key.as_str())
         {
@@ -1004,6 +1020,38 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let scout_relevance_below = match table.get("scout_relevance_below") {
+        None => defaults.scout_relevance_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `scout_relevance_below` must be a number".to_string())?;
+            if !(SCOUT_RELEVANCE_BELOW_MIN..=SCOUT_RELEVANCE_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `scout_relevance_below` must be between {SCOUT_RELEVANCE_BELOW_MIN} and {SCOUT_RELEVANCE_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
+    let helper_no_below = match table.get("helper_no_below") {
+        None => defaults.helper_no_below,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `helper_no_below` must be a number".to_string())?;
+            if !(HELPER_NO_BELOW_MIN..=HELPER_NO_BELOW_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `helper_no_below` must be between {HELPER_NO_BELOW_MIN} and {HELPER_NO_BELOW_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -1017,6 +1065,8 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         judge_no_below,
         drift_no_below,
         mode_above,
+        scout_relevance_below,
+        helper_no_below,
     })
 }
 
@@ -1335,5 +1385,31 @@ mod completion_threshold_tests {
         let error =
             PaneConfig::parse_profile("[decisions]\ndrift_no_below = 0.6\n", None).unwrap_err();
         assert!(error.contains("drift_no_below"), "{error}");
+    }
+
+    /// 2644/2645: the Scout's relevance floor and the helper judge's floor
+    /// are `[decisions]` keys now, refused out of range like every other
+    /// floor in this table.
+    #[test]
+    fn the_helper_floors_default_and_are_refused_out_of_range() {
+        let defaults = DecisionsConfig::default();
+        assert_eq!(defaults.scout_relevance_below, 0.10);
+        assert_eq!(defaults.helper_no_below, 0.10);
+
+        let config = PaneConfig::parse_profile(
+            "[decisions]\nmodel = \"jev-latest\"\nscout_relevance_below = 0.2\n\
+             helper_no_below = 0.3\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.decisions.scout_relevance_below, 0.2);
+        assert_eq!(config.decisions.helper_no_below, 0.3);
+
+        let error = PaneConfig::parse_profile("[decisions]\nscout_relevance_below = 0.6\n", None)
+            .unwrap_err();
+        assert!(error.contains("scout_relevance_below"), "{error}");
+        let error =
+            PaneConfig::parse_profile("[decisions]\nhelper_no_below = 0.6\n", None).unwrap_err();
+        assert!(error.contains("helper_no_below"), "{error}");
     }
 }

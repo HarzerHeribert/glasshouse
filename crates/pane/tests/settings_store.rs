@@ -988,6 +988,26 @@ fn mode_proposal_and_explore_overlay_keys_are_known_and_validated() {
     assert!(error.contains("modes.explore.foo"), "{error}");
 }
 
+/// 2644/2645: the Scout's relevance floor and the helper judge's floor are
+/// registered and validate through the same runtime parser as every other
+/// `[decisions]` key, out of range refused the same way.
+#[test]
+fn scout_relevance_and_helper_judge_floors_are_known_and_validated() {
+    assert!(registry::spec("decisions.scout_relevance_below").is_some());
+    assert!(registry::spec("decisions.helper_no_below").is_some());
+
+    assert!(registry::validate("decisions.scout_relevance_below", "0.6").is_err());
+    assert_eq!(
+        registry::validate("decisions.scout_relevance_below", "0.2").expect("in range"),
+        toml::Value::Float(0.2)
+    );
+    assert!(registry::validate("decisions.helper_no_below", "0.6").is_err());
+    assert_eq!(
+        registry::validate("decisions.helper_no_below", "0.2").expect("in range"),
+        toml::Value::Float(0.2)
+    );
+}
+
 #[test]
 fn the_global_file_holds_no_project_only_keys() {
     let temp = Temp::new("globalkeys");

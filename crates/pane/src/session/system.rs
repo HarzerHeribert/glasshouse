@@ -441,14 +441,27 @@ pub(super) fn preflight_block(
     let decisions_active = decisions.mode != crate::config::DecisionMode::Off;
     let decisions_apply = decisions.mode == crate::config::DecisionMode::On;
     let decision_model = decisions.model.clone();
-    let rank_candidates = (decisions_active && decision_model.is_some())
-        .then(|| crate::helpers::discover_scout_candidates(session.profile, 40));
+    // The pool ranked is `prepare_scout`'s own term-matched walk, never a
+    // separate directory walk: `helper_context.rs` does no model work by
+    // its own invariant, so the ranking happens here, over what that walk
+    // already found, rather than inside it.
+    let scout_pool = (decisions_active && decision_model.is_some()).then(|| {
+        crate::helper_context::prepare(
+            crate::helper_context::HelperRole::Scout,
+            task,
+            session.profile,
+            &token,
+        )
+    });
+    let rank_candidates = scout_pool.as_ref().map(|prepared| {
+        crate::helpers::scout_candidates_from_evidence(&prepared.evidence, session.profile, 40)
+    });
     let rank = match (&rank_candidates, decision_model.as_deref()) {
         (Some(candidates), Some(decision_model)) => Some((
             candidates.as_slice(),
             crate::helpers::ScoutRankRoute {
                 model: decision_model,
-                floor: crate::helpers::DEFAULT_SCOUT_RELEVANCE_BELOW,
+                floor: decisions.scout_relevance_below,
                 apply: decisions_apply,
             },
         )),
@@ -459,7 +472,7 @@ pub(super) fn preflight_block(
             .as_deref()
             .map(|decision_model| crate::helpers::HelperJudge {
                 model: decision_model,
-                floor: crate::helpers::DEFAULT_HELPER_NO_BELOW,
+                floor: decisions.helper_no_below,
                 apply: decisions_apply,
             })
     } else {
@@ -500,6 +513,12 @@ pub(super) fn preflight_block(
         .ranking
         .as_ref()
         .map(crate::helpers::ScoutRanking::note);
+    if let Some(ranking) = &judged.ranking {
+        output::helpers_ranking(ranking);
+    }
+    if let Some((noul, latency_ms)) = judged.judge {
+        output::helpers_checked(noul, decisions.helper_no_below, latency_ms);
+    }
     if record.outcome.cancelled {
         session.interrupt.consumed();
     }

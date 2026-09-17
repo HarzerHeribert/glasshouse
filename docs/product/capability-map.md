@@ -2641,6 +2641,6 @@ the sandbox profile and the person decide. Nothing here is a capability the mode
 ☑ Ask diff-hygiene questions with the completion question in one request — tests for the changed behaviour, files outside the request, debugging leftovers, deleted tests, changed public signatures — each decisive answer one finding held once, in between the checker as today.
 ☑ Decide the acceptance list's judge items with the decision model when it is confident, and send only the undecided ones to the fresh checker.
 ☑ Ask, before an effectful cell runs, whether it does what the plan's current step says, and hold once on a confident no.
-☐ Rank the Scout's candidate files by one relevance question per file and read the relevant ones first.
-☐ Check a helper's result against what was asked before it reaches the main model, and say so in one line when it does not.
+☑ Rank the Scout's candidate files by one relevance question per file and read the relevant ones first.
+☑ Check a helper's result against what was asked before it reaches the main model, and say so in one line when it does not.
 ☐ Measure the decision model's effect: one request set run with decisions off, shadow and on, compared on checker findings, verified claims, spared checker runs, holds and false holds, tokens and time — recorded before any threshold becomes a default.

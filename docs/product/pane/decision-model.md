@@ -110,6 +110,8 @@ hygiene, hygiene_findings, judged}`, `null` when the question was never
 asked (no model, or `mode = off`); `hygiene` is `null` when `state` is
 `"answer"`.
 
+The fresh checker's own return is judged too (2644/2645, `scout_relevance_below`/`helper_no_below`), carried alongside as `decisions.helpers: {ranked, skipped, checked, flagged, latency_ms}` -- `little-helpers.md`.
+
 ## 6. Not decided here
 
 Supervisor vocabulary — the remaining candidate the map's Phase 66

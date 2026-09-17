@@ -570,21 +570,18 @@ question as much as a routing one.
 ## Ranking a Scout's candidates, and judging what came back (Phase 69)
 
 Map 2644 and 2645. With `[decisions] model` set and `mode = on`, before the
-Scout is served its brief, Pane asks one `noul` per candidate file --
-`{path, head}`, the first ~40 lines -- in one request, and orders them by
-descending relevance; a candidate below `scout_relevance_below` (default
-0.10) is left out entirely, so the Scout is served the relevant ones first
-and never sees the rest. When any helper on that path returns, Pane asks one
-more `noul` -- does the result answer what was asked -- and at or below
-`helper_no_below` (default 0.10) appends one line to the record: the
-helper's own answer is never withheld, edited or rerun. `mode = shadow`
-asks and counts both questions and changes nothing; no model, `mode = off`,
-or a failed or slow decision leaves a helper exactly as today.
-`crates/pane/src/helpers.rs::{rank_scout_candidates, run_judged,
-preflight_judged}`. **Both floors are shipped as constants, not `[decisions]`
-keys** -- `config.rs` parses that table exclusively and rejects an unknown
-key, and this round's packet forbade editing it; wiring them into
-`pane.toml` is a follow-up.
+Scout reads, Pane ranks `helper_context.rs :: prepare_scout`'s own
+term-matched pool (never a separate walk) by one `noul` per file, dropping
+one at or below `scout_relevance_below` (default 0.10). When the Scout's own
+result returns, and separately when the completion gate's fresh checker
+returns, one more `noul` over `{asked, result}` -- at or below
+`helper_no_below` (default 0.10) appends one line, never withholding,
+editing or rerunning the answer. Both are now `[decisions]` keys, not
+constants. `mode = shadow` asks and counts, changing nothing; no model,
+`off`, or a failed/slow decision leaves a helper as today. Telemetry
+`decisions.helpers: {ranked, skipped, checked, flagged, latency_ms}`.
+`crates/pane/src/helpers.rs::{rank_scout_candidates,
+scout_candidates_from_evidence, run_judged, check_completion_judged}`.
 
 ## Open, not decided here
 

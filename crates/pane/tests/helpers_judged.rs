@@ -11,9 +11,10 @@
 
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
+use pane::helper_context::{HelperRole, prepare};
 use pane::helpers::{
     HelperCall, HelperContext, HelperJudge, HelperRoute, REDUCER, ScoutCandidate, ScoutRankRoute,
-    rank_scout_candidates, run_judged,
+    rank_scout_candidates, run_judged, scout_candidates_from_evidence,
 };
 use pane::sandbox::profile::Profile;
 use pane::tools::invoke::CancellationToken;
@@ -257,6 +258,76 @@ fn a_timeout_leaves_todays_order() {
     assert_eq!(ranking, None, "a timed-out decision ranks nothing");
 }
 
+/// The pool `rank_scout_candidates` ranks is `helper_context::prepare`'s own
+/// term-matched walk, never a separate directory walk: the file that never
+/// matched a task term is never offered to the ranking question at all,
+/// whatever its place in the walk's own directory order (`aaa_*` sorts
+/// first; it is the one left out).
+#[test]
+fn the_ranked_pool_is_prepare_scouts_term_matched_walk() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = Fixture::new("term-matched-pool");
+    std::fs::write(
+        fixture.root.join("aaa_unrelated.rs"),
+        "fn totally_unrelated() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.root.join("zzz_timeout_handler.rs"),
+        "fn handle_timeout() { /* the timeout retry lives here */ }\n",
+    )
+    .unwrap();
+    let profile = fixture.profile();
+    let token = CancellationToken::new();
+    let prepared = prepare(
+        HelperRole::Scout,
+        "find the timeout retry logic",
+        &profile,
+        &token,
+    );
+    let candidates = scout_candidates_from_evidence(&prepared.evidence, &profile, 40);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zzz_timeout_handler.rs"],
+        "only the file the walk actually matched a task term in is a candidate, \
+         and the untouched file never appears despite sorting first: {candidates:?}"
+    );
+
+    let (url, _messages, systemone) = fake(
+        "unused",
+        SystemOne {
+            answers: BTreeMap::from([("0".to_string(), 0.94)]),
+            delay: None,
+        },
+    );
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &url);
+    }
+    let ranking = rank_scout_candidates(
+        "find the timeout retry logic",
+        &candidates,
+        ScoutRankRoute {
+            model: "jev-latest",
+            floor: 0.10,
+            apply: true,
+        },
+    )
+    .expect("a scripted answer for the one candidate ranks");
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    assert_eq!(ranking.ranked, 1, "{ranking:?}");
+    assert_eq!(
+        ranking.kept,
+        vec![("zzz_timeout_handler.rs".to_string(), 0.94)],
+        "{ranking:?}"
+    );
+    assert_eq!(systemone.load(Ordering::SeqCst), 1);
+}
+
 // ---------------------------------------------------------------------
 // 2645 -- judging a helper's own result
 // ---------------------------------------------------------------------
@@ -288,6 +359,7 @@ fn call_reducer(fixture: &Fixture, judge: Option<HelperJudge<'_>>) -> HelperCall
         context,
         judge,
     )
+    .0
 }
 
 /// A confident no (0.05, at or below the 0.10 floor) carries the line and

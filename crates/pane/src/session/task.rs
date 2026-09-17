@@ -874,13 +874,36 @@ impl TaskState {
                     &findings,
                     &crate::acceptance::judge_texts(&self.acceptance),
                 );
-                if let Some(record) = crate::helpers::check_completion(
+                // The checker is judged with the same one `noul` as the
+                // preflight Scout's own result (2645), gated the same way
+                // that judge is: a decision model configured and `mode` not
+                // `off`. `apply` carries `mode = on` versus `shadow`.
+                let decisions_active = decisions_config.model.is_some()
+                    && decisions_config.mode != crate::config::DecisionMode::Off;
+                let checker_judge = decisions_active.then(|| crate::helpers::HelperJudge {
+                    model: decisions_config
+                        .model
+                        .as_deref()
+                        .expect("decisions_active checked model.is_some()"),
+                    floor: decisions_config.helper_no_below,
+                    apply: decisions_config.mode == crate::config::DecisionMode::On,
+                });
+                let token = invoke::CancellationToken::new();
+                let helper_context = crate::helpers::HelperContext {
+                    profile: session.profile,
+                    glasshouse: session.glasshouse,
+                    session: session.id,
+                    token: &token,
+                };
+                if let Some((record, judged)) = crate::helpers::check_completion_judged(
                     &evidence,
                     crate::helpers::HelperRoute { model, effort },
-                    session.profile,
-                    session.glasshouse,
-                    session.id,
+                    helper_context,
+                    checker_judge,
                 ) {
+                    if let Some((noul, latency_ms)) = judged {
+                        output::helpers_checked(noul, decisions_config.helper_no_below, latency_ms);
+                    }
                     let verdict = record
                         .outcome
                         .text

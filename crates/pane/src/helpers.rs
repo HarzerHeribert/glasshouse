@@ -937,35 +937,35 @@ pub fn acceptance_list(
     })
 }
 
-/// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted.
-pub fn check_completion(
+/// CHECKER at `CallSite::CompletionGate` -- before a completion is accepted
+/// -- plus the result judge (2645) on the checker's own return: the same
+/// one `noul` the preflight Scout's own result is judged with, never
+/// withholding, truncating or rerunning the checker's findings. `judge:
+/// None` is byte-identical to this call with no judge at all. The second
+/// element of the pair is the judge's own `(noul, latency_ms)`, for a
+/// caller's telemetry -- `None` under [`judge_outcome`]'s own conditions.
+pub fn check_completion_judged(
     evidence: &str,
     route: HelperRoute<'_>,
-    profile: &crate::sandbox::profile::Profile,
-    glasshouse: &crate::glasshouse::Glasshouse,
-    session: &crate::contract::SessionId,
-) -> Option<HelperRecord> {
+    context: HelperContext<'_>,
+    judge: Option<HelperJudge<'_>>,
+) -> Option<(HelperRecord, Option<(f64, u64)>)> {
     let spec = HELPERS
         .iter()
         .find(|spec| spec.call_sites.contains(&CallSite::CompletionGate))?;
-    let call = run(
-        spec,
-        route,
-        evidence,
-        profile,
-        glasshouse,
-        session,
-        &crate::tools::invoke::CancellationToken::new(),
-    );
-    Some(HelperRecord {
-        helper: spec.name.to_string(),
-        verb: spec.verb.to_string(),
-        asked: bounded_ask(evidence),
-        outcome: call.outcome,
-        turns: call.turns,
-        looked: call.looked,
-        usage: call.usage,
-    })
+    let (call, judged) = run_judged(spec, route, evidence, context, judge);
+    Some((
+        HelperRecord {
+            helper: spec.name.to_string(),
+            verb: spec.verb.to_string(),
+            asked: bounded_ask(evidence),
+            outcome: call.outcome,
+            turns: call.turns,
+            looked: call.looked,
+            usage: call.usage,
+        },
+        judged,
+    ))
 }
 
 /// The recap `[helpers] completion = "recap"` asks for: one or two sentences
@@ -998,15 +998,6 @@ fn bounded_ask(input: &str) -> String {
 // record after it finishes. A failed, slow or absent decision leaves
 // either exactly as it is today.
 // ---------------------------------------------------------------------
-
-/// The floor a scout candidate's own relevance noul must clear to be kept
-/// (2644), and the mirror floor for [`HelperJudge`] (2645). Both keys
-/// belong under `[decisions]`, which only `config.rs` parses this round and
-/// rejects an unknown key -- this package could not add them there without
-/// editing a file another package owns this round, so these are the
-/// shipped defaults until that lands (see this task's own report).
-pub const DEFAULT_SCOUT_RELEVANCE_BELOW: f64 = 0.10;
-pub const DEFAULT_HELPER_NO_BELOW: f64 = 0.10;
 
 /// How many lines of a candidate's head the ranking question sees.
 const RANK_HEAD_LINES: usize = 40;
@@ -1218,60 +1209,48 @@ fn scout_ranking_section(ranking: &ScoutRanking) -> String {
     section
 }
 
-/// A small, bounded, best-effort pool of files under `profile`'s root for
-/// [`rank_scout_candidates`] to rank -- an unreadable file or directory is
-/// skipped rather than failing the caller. Deliberately independent of
-/// `helper_context.rs`'s own project walk, which does no model work by
-/// design and is not this package's to extend with one.
-pub fn discover_scout_candidates(
+/// The candidates [`rank_scout_candidates`] ranks for a Scout call: the
+/// distinct paths [`crate::helper_context::prepare`]'s own task-term walk
+/// actually matched (`EvidenceKind::Match`), in the order it found them --
+/// never a separate directory walk, and never any model work inside
+/// `helper_context.rs` itself, which does none by design. A file the walk
+/// never matched is never offered to the ranking question at all, whatever
+/// its place in the walk's own directory order.
+///
+/// Each kept path's head is re-read here, bounded the same way
+/// [`bounded_head`] bounds it elsewhere -- `prepare`'s own evidence carries
+/// only the matched line, not a head -- from `profile`'s root; an
+/// unreadable path is skipped rather than failing the caller. Every path
+/// came from `prepare`'s own walk, so it already cleared that walk's
+/// permission and root checks; nothing here reaches further than the Scout
+/// would reach on its own.
+pub fn scout_candidates_from_evidence(
+    evidence: &[crate::helper_context::Evidence],
     profile: &crate::sandbox::profile::Profile,
     max_files: usize,
 ) -> Vec<ScoutCandidate> {
-    const SKIP_DIRS: [&str; 6] = [
-        ".git",
-        "target",
-        "node_modules",
-        ".worktrees",
-        "dist",
-        "build",
-    ];
-    const MAX_NODES: usize = 512;
+    let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
-    let mut stack = vec![profile.root().to_path_buf()];
-    let mut visited = 0usize;
-    'walk: while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for item in evidence {
+        if item.kind != crate::helper_context::EvidenceKind::Match {
+            continue;
+        }
+        let Some((path, _line)) = item.subject.rsplit_once(':') else {
             continue;
         };
-        for entry in entries.flatten() {
-            visited += 1;
-            if visited >= MAX_NODES {
-                break 'walk;
-            }
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if candidates.len() >= max_files {
-                break 'walk;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let relative = path
-                .strip_prefix(profile.root())
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            candidates.push(ScoutCandidate {
-                path: relative,
-                head: bounded_head(&text),
-            });
+        if !seen.insert(path.to_string()) {
+            continue;
         }
+        if candidates.len() >= max_files {
+            break;
+        }
+        let Ok(text) = std::fs::read_to_string(profile.root().join(path)) else {
+            continue;
+        };
+        candidates.push(ScoutCandidate {
+            path: path.to_string(),
+            head: bounded_head(&text),
+        });
     }
     candidates
 }
@@ -1300,11 +1279,15 @@ pub struct HelperJudge<'a> {
 
 /// Asks whether `outcome`'s text answers `asked`, and on a confident no
 /// under `judge.apply`, appends one line to `outcome.text` -- never
-/// replacing, truncating or rerunning it. Returns the noul answer, or
-/// `None` when there was nothing to judge (the call already failed or was
-/// cancelled) or the question itself failed, timed out or came back
-/// unparseable.
-fn judge_outcome(asked: &str, outcome: &mut HelperOutcome, judge: HelperJudge<'_>) -> Option<f64> {
+/// replacing, truncating or rerunning it. Returns the noul answer and the
+/// question's own latency, or `None` when there was nothing to judge (the
+/// call already failed or was cancelled) or the question itself failed,
+/// timed out or came back unparseable.
+fn judge_outcome(
+    asked: &str,
+    outcome: &mut HelperOutcome,
+    judge: HelperJudge<'_>,
+) -> Option<(f64, u64)> {
     if !outcome.ok {
         return None;
     }
@@ -1317,6 +1300,7 @@ fn judge_outcome(asked: &str, outcome: &mut HelperOutcome, judge: HelperJudge<'_
     )];
     let answers = decide::decide(judge.model, state, &questions).ok()?;
     let decision = answers.decisions.into_iter().find(|d| d.key == "judge")?;
+    let latency_ms = decision.latency_ms;
     let Answer::Noul(noul) = decision.answer else {
         return None;
     };
@@ -1325,20 +1309,22 @@ fn judge_outcome(asked: &str, outcome: &mut HelperOutcome, judge: HelperJudge<'_
             "\n\ndecision: this result may not answer what was asked ({noul:.2})"
         ));
     }
-    Some(noul)
+    Some((noul, latency_ms))
 }
 
 /// [`run`] plus one judge question on what it returned (2645). `judge:
 /// None` is byte-identical to [`run`] -- no model configured, `mode = off`,
 /// or the caller chooses not to ask. Never withholds or reruns the call:
-/// the judge only reads `call.outcome` after it is already decided.
+/// the judge only reads `call.outcome` after it is already decided. The
+/// second element is the judge's own `(noul, latency_ms)`, for a caller's
+/// telemetry -- `None` under the same conditions as [`judge_outcome`].
 pub fn run_judged(
     spec: &HelperSpec,
     route: HelperRoute<'_>,
     input: &str,
     context: HelperContext<'_>,
     judge: Option<HelperJudge<'_>>,
-) -> HelperCall {
+) -> (HelperCall, Option<(f64, u64)>) {
     let mut call = run(
         spec,
         route,
@@ -1348,18 +1334,19 @@ pub fn run_judged(
         context.session,
         context.token,
     );
-    if let Some(judge) = judge {
-        judge_outcome(input, &mut call.outcome, judge);
-    }
-    call
+    let judged = judge.and_then(|judge| judge_outcome(input, &mut call.outcome, judge));
+    (call, judged)
 }
 
 /// What [`preflight_judged`] answers with: the same record [`preflight`]
 /// returns, plus the ranking that shaped what the Scout was served (`None`
-/// when nothing was ranked).
+/// when nothing was ranked) and the judge's own `(noul, latency_ms)` on the
+/// Scout's returned result (`None` under [`judge_outcome`]'s own
+/// conditions).
 pub struct PreflightJudged {
     pub record: HelperRecord,
     pub ranking: Option<ScoutRanking>,
+    pub judge: Option<(f64, u64)>,
 }
 
 /// [`preflight`] plus the candidate ranking (2644) and the result judge
@@ -1395,13 +1382,17 @@ pub fn preflight_judged(
         ..HelperRecord::default()
     };
     progress(&record);
-    let call = run_judged(spec, route, &effective_input, context, judge);
+    let (call, judged) = run_judged(spec, route, &effective_input, context, judge);
     record.outcome = call.outcome;
     record.turns = call.turns;
     record.looked = call.looked;
     record.usage = call.usage;
     progress(&record);
-    Some(PreflightJudged { record, ranking })
+    Some(PreflightJudged {
+        record,
+        ranking,
+        judge: judged,
+    })
 }
 
 #[cfg(test)]

@@ -65,6 +65,13 @@ fn question_key(body_text: &str) -> String {
         "satisfied".to_string()
     } else if questions.contains_key("drift") {
         "drift".to_string()
+    } else if questions.contains_key("judge") {
+        "judge".to_string()
+    } else if !questions.is_empty() && questions.keys().all(|key| key.parse::<usize>().is_ok()) {
+        // A Scout ranking request (2644): one `noul` per candidate, keyed by
+        // the candidate's own index, so its key set is never one of the
+        // fixed names above.
+        "rank".to_string()
     } else {
         "intent".to_string()
     }
@@ -86,7 +93,7 @@ fn providers(
     intent: Vec<Decision>,
     completion: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
-    providers_with_drift(cells, intent, completion, vec![])
+    providers_full(cells, intent, completion, vec![], vec![], vec![])
 }
 
 /// [`providers`] plus a fourth scripted queue for the drift question's own
@@ -97,6 +104,33 @@ fn providers_with_drift(
     intent: Vec<Decision>,
     completion: Vec<Decision>,
     drift: Vec<Decision>,
+) -> (String, Recorded, Recorded, Recorded) {
+    providers_full(cells, intent, completion, drift, vec![], vec![])
+}
+
+/// [`providers`] plus scripted queues for the Scout's own ranking question
+/// (2644, numeric candidate-index keys) and a judge question (2645, either
+/// call site the judge reaches). An unscripted judge question defaults to a
+/// confident yes (`checker_judge_answer(0.94)`), so a test scripting only
+/// `rank` (or neither) keeps seeing a helper's own result byte-identical to
+/// before this feature landed.
+fn providers_with_rank_and_judge(
+    cells: Vec<Value>,
+    intent: Vec<Decision>,
+    completion: Vec<Decision>,
+    rank: Vec<Decision>,
+    judge: Vec<Decision>,
+) -> (String, Recorded, Recorded, Recorded) {
+    providers_full(cells, intent, completion, vec![], judge, rank)
+}
+
+fn providers_full(
+    cells: Vec<Value>,
+    intent: Vec<Decision>,
+    completion: Vec<Decision>,
+    drift: Vec<Decision>,
+    judge: Vec<Decision>,
+    rank: Vec<Decision>,
 ) -> (String, Recorded, Recorded, Recorded) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -111,6 +145,8 @@ fn providers_with_drift(
         let mut intent: std::collections::VecDeque<Decision> = intent.into_iter().collect();
         let mut completion: std::collections::VecDeque<Decision> = completion.into_iter().collect();
         let mut drift: std::collections::VecDeque<Decision> = drift.into_iter().collect();
+        let mut judge: std::collections::VecDeque<Decision> = judge.into_iter().collect();
+        let mut rank: std::collections::VecDeque<Decision> = rank.into_iter().collect();
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
@@ -161,6 +197,12 @@ fn providers_with_drift(
                     "drift" => drift
                         .pop_front()
                         .unwrap_or_else(|| Decision::Answer(drift_answer(0.50))),
+                    "judge" => judge
+                        .pop_front()
+                        .unwrap_or_else(|| Decision::Answer(checker_judge_answer(0.94))),
+                    "rank" => rank
+                        .pop_front()
+                        .unwrap_or_else(|| Decision::Answer(rank_answer(&[("0", 0.94)]))),
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
@@ -298,6 +340,39 @@ fn drift_answer(noul: f64) -> Value {
             }
         },
         "usage": {"input_tokens": 30, "output_tokens": 8},
+    })
+}
+
+/// The completion gate's fresh-checker judge question's answer alone
+/// (2645) -- always a single-key request over `{asked, result}`, keyed
+/// `"judge"` exactly as the preflight Scout's own result-judge is (the same
+/// one `noul` both call sites are judged with).
+fn checker_judge_answer(noul: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "judge": {
+                "type": "noul",
+                "noul": noul,
+            }
+        },
+        "usage": {"input_tokens": 20, "output_tokens": 5},
+    })
+}
+
+/// A Scout ranking request's answer (2644): one `noul` per candidate index
+/// key -- unlike every other question in this file, the key set depends on
+/// how many candidates the ranking named, so this builds the map from
+/// `(key, noul)` pairs instead of naming one fixed key.
+fn rank_answer(scores: &[(&str, f64)]) -> Value {
+    let answers: serde_json::Map<String, Value> = scores
+        .iter()
+        .map(|(key, noul)| ((*key).to_string(), json!({"type": "noul", "noul": noul})))
+        .collect();
+    json!({
+        "model": "jev-latest",
+        "answers": Value::Object(answers),
+        "usage": {"input_tokens": 20, "output_tokens": 5},
     })
 }
 
@@ -1239,6 +1314,133 @@ fn a_yes_never_removes_a_mechanical_finding() {
             .contains("missing.txt"),
         "{completion}"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- the fresh checker's own result, judged (2645) --------------------------
+
+/// A confident no (0.05, at or below the default 0.10 floor) on the fresh
+/// checker's own return carries the one line, and the checker's own finding
+/// is delivered exactly as it would be with no judge at all -- never
+/// withheld, truncated or rerun.
+#[test]
+fn a_confident_no_checker_judge_carries_the_line_and_leaves_the_finding_intact() {
+    let root = root("checker-judge-no");
+    write_config(&root, DECISIONS_ON_WITH_CHECKER);
+    let (endpoint, messages, decisions, _headers) = providers_with_rank_and_judge(
+        vec![
+            cell("c1", "return \"done\";"),
+            prose("does not hold: the diff misses the retry path"),
+            cell("c2", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.55))],
+        vec![],
+        vec![Decision::Answer(checker_judge_answer(0.05))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("a flagged checker still finishes the task");
+    let bodies = messages.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "the task turn, the checker's own request, then the held retry"
+    );
+    assert!(
+        bodies[2].contains("does not hold: the diff misses the retry path"),
+        "the checker's own finding is never withheld: {}",
+        bodies[2]
+    );
+    assert!(
+        bodies[2].contains("decision: this result may not answer what was asked (0.05)"),
+        "a confident no carries the line: {}",
+        bodies[2]
+    );
+    let helpers_telemetry = &result["telemetry"]["decisions"]["helpers"];
+    assert_eq!(helpers_telemetry["checked"], 1, "{helpers_telemetry}");
+    assert_eq!(helpers_telemetry["flagged"], 1, "{helpers_telemetry}");
+    assert_eq!(
+        decisions.lock().unwrap().len(),
+        3,
+        "the intent question, the completion question, and the checker's own judge"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A confident yes (0.9) on the fresh checker's own return carries nothing.
+/// Also kills the `helper_no_below`-comparison mutation: widening the floor
+/// to `<= 1.0` would flag this case too.
+#[test]
+fn a_confident_yes_checker_judge_carries_nothing() {
+    let root = root("checker-judge-yes");
+    write_config(&root, DECISIONS_ON_WITH_CHECKER);
+    let (endpoint, messages, _decisions, _headers) = providers_with_rank_and_judge(
+        vec![
+            cell("c1", "return \"done\";"),
+            prose("does not hold: the diff misses the retry path"),
+            cell("c2", "return \"done\";"),
+        ],
+        vec![],
+        vec![Decision::Answer(completion_answer(0.55))],
+        vec![],
+        vec![Decision::Answer(checker_judge_answer(0.9))],
+    );
+    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
+        .expect("an unflagged checker still finishes the task");
+    let bodies = messages.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert!(
+        bodies[2].contains("does not hold: the diff misses the retry path"),
+        "{}",
+        bodies[2]
+    );
+    assert!(
+        !bodies[2].contains("decision:"),
+        "a confident yes carries nothing: {}",
+        bodies[2]
+    );
+    let helpers_telemetry = &result["telemetry"]["decisions"]["helpers"];
+    assert_eq!(helpers_telemetry["checked"], 1, "{helpers_telemetry}");
+    assert_eq!(helpers_telemetry["flagged"], 0, "{helpers_telemetry}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `decisions.helpers` counts a Scout ranking (2644) and the judge it also
+/// runs on the Scout's own returned result (2645, unconditional whenever a
+/// decision model is configured and `mode` is not `off`) -- the checker
+/// path's own check is proven separately above, with `completion_check`
+/// off here so only the Scout's self-check contributes to `checked`.
+#[test]
+fn decisions_helpers_telemetry_counts_the_scouts_ranking_and_its_own_judge() {
+    let root = root("helpers-ranking-telemetry");
+    write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
+    std::fs::write(
+        root.join("retry.rs"),
+        "fn handle_timeout() { /* timeout retry code lives here */ }\n",
+    )
+    .unwrap();
+    let (endpoint, _messages, _decisions, _headers) = providers_with_rank_and_judge(
+        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![Decision::Answer(decision_answer_with_complexity(
+            "read_only",
+            0.94,
+            "needs_exploration",
+            0.90,
+        ))],
+        vec![],
+        vec![Decision::Answer(rank_answer(&[("0", 0.94)]))],
+        vec![Decision::Answer(checker_judge_answer(0.9))],
+    );
+    let result = exec_bounded(&root, &endpoint, "please find the timeout retry code", None)
+        .expect("the scout runs, ranked and judged, then the task's own turn");
+    let helpers_telemetry = &result["telemetry"]["decisions"]["helpers"];
+    assert_eq!(helpers_telemetry["ranked"], 1, "{helpers_telemetry}");
+    assert_eq!(helpers_telemetry["skipped"], 0, "{helpers_telemetry}");
+    assert_eq!(
+        helpers_telemetry["checked"], 1,
+        "the scout's own result is judged too (2645): {helpers_telemetry}"
+    );
+    assert_eq!(helpers_telemetry["flagged"], 0, "{helpers_telemetry}");
     let _ = std::fs::remove_dir_all(root);
 }
 

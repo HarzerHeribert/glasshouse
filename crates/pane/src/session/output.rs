@@ -179,6 +179,23 @@ struct Telemetry {
     acceptance: Option<Value>,
     capsule: Option<Value>,
     decisions: Option<Value>,
+    /// Every candidate a Scout ranking answered (2644), across the whole
+    /// session -- counted here rather than on `TaskState` because the
+    /// ranking runs in `preflight_block`, before a task exists to carry it.
+    helpers_ranked: u32,
+    /// Candidates a Scout ranking answered below the floor (2644).
+    helpers_skipped: u32,
+    /// Judged helper returns, from either call site the judge reaches: the
+    /// preflight Scout's own result and the completion gate's fresh
+    /// checker (2645).
+    helpers_checked: u32,
+    /// Judged returns whose `noul` crossed the floor -- counted the same in
+    /// `shadow` and `on`, since `shadow` asks and counts every question
+    /// this project's decisions make.
+    helpers_flagged: u32,
+    /// Total latency of every ranking and judge request folded into the
+    /// four counters above.
+    helpers_latency_ms: u64,
 }
 
 impl Default for Telemetry {
@@ -217,6 +234,11 @@ impl Default for Telemetry {
             acceptance: None,
             capsule: None,
             decisions: None,
+            helpers_ranked: 0,
+            helpers_skipped: 0,
+            helpers_checked: 0,
+            helpers_flagged: 0,
+            helpers_latency_ms: 0,
         }
     }
 }
@@ -454,8 +476,35 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
         },
         "acceptance": telemetry.acceptance,
         "capsule": telemetry.capsule,
-        "decisions": telemetry.decisions,
+        "decisions": decisions_value(telemetry),
     })
+}
+
+/// `telemetry.decisions` with `helpers: {ranked, skipped, checked, flagged,
+/// latency_ms}` folded in (2644, 2645). Those five counters live on
+/// [`Telemetry`] itself rather than `TaskState`: the Scout's own ranking
+/// happens in `preflight_block`, before a task exists to carry it, so they
+/// are recorded here at the point they happen ([`helpers_ranking`],
+/// [`helpers_checked`]) and merged in at render time instead of round-
+/// tripping through the per-task `decisions_telemetry` this forwards
+/// otherwise verbatim.
+fn decisions_value(telemetry: &Telemetry) -> Value {
+    let Some(mut decisions) = telemetry.decisions.clone() else {
+        return Value::Null;
+    };
+    if let Some(object) = decisions.as_object_mut() {
+        object.insert(
+            "helpers".to_string(),
+            json!({
+                "ranked": telemetry.helpers_ranked,
+                "skipped": telemetry.helpers_skipped,
+                "checked": telemetry.helpers_checked,
+                "flagged": telemetry.helpers_flagged,
+                "latency_ms": telemetry.helpers_latency_ms,
+            }),
+        );
+    }
+    decisions
 }
 
 fn by_origin(telemetry: &Telemetry, render: impl Fn(&OriginStats) -> Value) -> Value {
@@ -927,6 +976,42 @@ pub(super) fn decisions(value: Option<Value>) {
     STATE.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
             state.telemetry.decisions = Some(value);
+        }
+    });
+}
+
+/// Counts one Scout candidate ranking (2644): every candidate the question
+/// actually answered, however many of them cleared the floor, plus the
+/// request's own latency -- folded into `decisions.helpers` at render time
+/// ([`decisions_value`]).
+pub(super) fn helpers_ranking(ranking: &crate::helpers::ScoutRanking) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            let telemetry = &mut state.telemetry;
+            telemetry.helpers_ranked = telemetry.helpers_ranked.saturating_add(ranking.ranked);
+            telemetry.helpers_skipped = telemetry.helpers_skipped.saturating_add(ranking.skipped);
+            telemetry.helpers_latency_ms = telemetry
+                .helpers_latency_ms
+                .saturating_add(ranking.latency_ms);
+        }
+    });
+}
+
+/// Counts one judged helper return (2645), from either call site the judge
+/// reaches -- the preflight Scout's own result or the completion gate's
+/// fresh checker. `flagged` is the judge's own signal (`noul <= floor`),
+/// counted the same in `shadow` and `on`: `shadow` asks and counts every
+/// question this project's decisions make, and never changes what a
+/// helper's own result carries.
+pub(super) fn helpers_checked(noul: f64, floor: f64, latency_ms: u64) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            let telemetry = &mut state.telemetry;
+            telemetry.helpers_checked = telemetry.helpers_checked.saturating_add(1);
+            if noul <= floor {
+                telemetry.helpers_flagged = telemetry.helpers_flagged.saturating_add(1);
+            }
+            telemetry.helpers_latency_ms = telemetry.helpers_latency_ms.saturating_add(latency_ms);
         }
     });
 }
