@@ -876,16 +876,20 @@ fn ran_out_of_time(options: &AgentOptions, started: std::time::Instant) -> bool 
 ///
 /// **The deadline is asked first, and that ordering is the attribution.**
 /// `bg::arm_deadline` enforces a deadline by cancelling the job's token, so
-/// an expiry and a `/stop` arrive at this loop as the same flag; asking the
-/// clock first is what lets the parent read *ran out of time* instead of a
-/// bare cancellation it cannot act on. Both call sites ask through here so
-/// the two cannot answer differently.
+/// an expiry and a `/stop` would otherwise arrive at this loop as the same
+/// flag. The token says which it was — the canceller knows, and this loop's
+/// own clock cannot: it starts a thread-spawn after the one the deadline was
+/// armed from, so it under-reports elapsed time by that gap and read a
+/// genuine expiry as a bare cancellation whenever the expiry landed inside
+/// it. The local clock stays as the answer for a deadline this loop passed
+/// before the arming thread woke up. Both call sites ask through here so the
+/// two cannot answer differently.
 fn stopped_by(
     options: &AgentOptions,
     started: std::time::Instant,
     token: &CancellationToken,
 ) -> Option<&'static str> {
-    if ran_out_of_time(options, started) {
+    if token.timed_out() || ran_out_of_time(options, started) {
         return Some("deadline");
     }
     token.is_cancelled().then_some("cancelled")
@@ -1161,6 +1165,35 @@ mod tests {
         assert_eq!(
             stopped_by(&untimed, std::time::Instant::now(), &fresh),
             None
+        );
+    }
+
+    /// The race the Linux sweep found on 2026-09-18: `arm_deadline`'s clock
+    /// starts a thread-spawn before this loop's, so an expiry can arrive
+    /// while the loop's own clock still has time left. The reason comes off
+    /// the token, so the gap no longer decides what the parent is told.
+    #[test]
+    fn an_expiry_this_loops_own_clock_has_not_reached_is_still_a_deadline() {
+        let timed = AgentOptions {
+            turns: None,
+            deadline: Some(std::time::Duration::from_secs(3600)),
+            model: "m".to_string(),
+            effort: crate::wire::Effort::default(),
+        };
+        let token = CancellationToken::new();
+        token.cancel_for_deadline();
+        // The loop started just now: `ran_out_of_time` is false by an hour.
+        assert_eq!(
+            stopped_by(&timed, std::time::Instant::now(), &token),
+            Some("deadline")
+        );
+
+        // A `/stop` on the same job is still a plain cancellation.
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        assert_eq!(
+            stopped_by(&timed, std::time::Instant::now(), &stopped),
+            Some("cancelled")
         );
     }
 }

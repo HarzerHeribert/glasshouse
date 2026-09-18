@@ -408,7 +408,6 @@ fn write_cell(
 
 pub use args::SessionArgs;
 
-
 /// Parses `args` (everything after `pane session`) and runs it.
 pub fn dispatch(args: &[String]) -> Result<(), String> {
     let parsed = SessionArgs::try_parse_from(

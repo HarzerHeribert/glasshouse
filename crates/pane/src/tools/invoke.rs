@@ -89,7 +89,14 @@ const CANCEL_POLL: Duration = Duration::from_millis(20);
 /// Cloning is cheap and every clone names the same flag, which is what lets
 /// the holder keep one while the call borrows another.
 #[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken(Arc<Cancellation>);
+
+/// The flag and, when there was one, the reason it was raised.
+#[derive(Debug, Default)]
+struct Cancellation {
+    cancelled: AtomicBool,
+    timed_out: AtomicBool,
+}
 
 impl CancellationToken {
     /// A fresh, un-cancelled token.
@@ -101,11 +108,33 @@ impl CancellationToken {
     /// and there is no way back: a token is one call's decision, not a
     /// reusable switch.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// [`cancel`](Self::cancel), attributed to a wall clock that ran out.
+    ///
+    /// **The canceller states the reason; an observer never re-derives it
+    /// from a clock of its own.** A deadline is armed from one instant and
+    /// the loop it stops starts its own a thread-spawn later, so a loop
+    /// asking whether *its* clock had run out answered `cancelled` for every
+    /// expiry that landed in the gap between the two — measured 2026-09-18 on
+    /// the Linux sweep, where a subagent given 400 ms reported a bare
+    /// cancellation after 101 turns.
+    ///
+    /// The reason is stored before the flag, so no observer can see the
+    /// cancellation without it.
+    pub fn cancel_for_deadline(&self) {
+        self.0.timed_out.store(true, Ordering::SeqCst);
+        self.cancel();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Whether [`cancel_for_deadline`](Self::cancel_for_deadline) raised it.
+    pub fn timed_out(&self) -> bool {
+        self.0.timed_out.load(Ordering::SeqCst)
     }
 }
 

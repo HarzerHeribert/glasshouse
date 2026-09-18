@@ -432,7 +432,8 @@ impl Gate {
         let Some(decisions) = self.decisions.clone() else {
             return;
         };
-        if decisions.mode == crate::config::DecisionMode::Off || self.ladder.rung() != crate::permissions::Rung::Auto
+        if decisions.mode == crate::config::DecisionMode::Off
+            || self.ladder.rung() != crate::permissions::Rung::Auto
         {
             return;
         }
@@ -677,7 +678,8 @@ mod tests {
     #[test]
     fn a_line_vouched_against_is_put_to_the_person() {
         let (gate, requests) = gate_with_a_model(Rung::Auto);
-        gate.vouched.remember("rm -rf /var/tmp/x".to_string(), false);
+        gate.vouched
+            .remember("rm -rf /var/tmp/x".to_string(), false);
         let asking = std::thread::spawn(move || gate.admit(bash("rm -rf /var/tmp/x"), || false));
         let request = requests
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -728,7 +730,8 @@ mod tests {
     #[test]
     fn a_line_already_answered_is_not_asked_again() {
         let (gate, _requests) = gate_with_a_model(Rung::Auto);
-        gate.vouched.remember("already --answered".to_string(), true);
+        gate.vouched
+            .remember("already --answered".to_string(), true);
         // Reaching the model would block for the decision timeout against a
         // name that does not resolve; returning at once is the assertion.
         let started = Instant::now();

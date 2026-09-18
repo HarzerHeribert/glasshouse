@@ -898,6 +898,7 @@ fn no_model_means_no_approval_hint_request() {
 
 /// The ladder decides which calls reach a person at all, and a `full`
 /// session installs no gate — so these run against the gate itself.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod ladder {
     use super::*;
     use pane::permissions::{Ladder, Rung};
@@ -905,7 +906,6 @@ mod ladder {
     /// `auto` runs ordinary work and asks about the rest — in one cell, so
     /// the two answers are the same session's.
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn auto_runs_what_reads_and_asks_about_what_it_cannot_place() {
         let fixture = Fixture::new();
         let (gate, requests) = Gate::channel(Ladder::new(Rung::Auto));
@@ -936,7 +936,6 @@ mod ladder {
     /// teaches retrying. A denial is the session's answer for that exact
     /// call, and the second attempt is refused without asking again.
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn a_refusal_is_the_sessions_answer_and_is_not_asked_a_second_time() {
         let fixture = Fixture::new();
         let (gate, requests) = Gate::channel(Ladder::new(Rung::Manual));
@@ -970,7 +969,6 @@ mod ladder {
     /// Deterministic by construction: the move happens on the responder
     /// thread, while the cell is stopped inside the first confirmation.
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn a_rung_moved_while_a_cell_waits_binds_that_cells_next_call() {
         let fixture = Fixture::new();
         let ladder = Ladder::new(Rung::AcceptEdits);

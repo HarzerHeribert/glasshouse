@@ -339,9 +339,9 @@ pub fn agent_with_config(
 ) -> String {
     // **The wall clock is the bound, and it is armed once.** `arm_deadline`
     // is what stops a provider call that hangs, because it cancels the token
-    // from outside the loop; `AgentOptions::deadline` is the same duration
-    // read by the loop itself, so an expiry is reported as `deadline` rather
-    // than as a bare cancellation. One value, two enforcement points.
+    // from outside the loop. It cancels *for the deadline*, and that is how
+    // the expiry is reported as `deadline`: the loop reads the reason off the
+    // token rather than measuring a second clock that started later.
     let deadline_ms = options
         .deadline
         .map(|deadline| u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX));
@@ -455,7 +455,7 @@ fn arm_deadline(session: SessionId, handle: String, token: CancellationToken, ms
                 summary(&format!("{handle} reached its {ms} ms deadline")),
             ),
         );
-        token.cancel();
+        token.cancel_for_deadline();
     });
 }
 
