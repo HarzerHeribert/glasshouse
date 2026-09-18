@@ -503,8 +503,17 @@ pub struct SessionArgs {
     /// Ask before admitted foreground file/shell tools. O allows once, S
     /// remembers this exact call, D denies. Web, MCP, background and agents
     /// are excluded; this never grants additional permissions.
+    ///
+    /// The alias for `--permissions manual`, kept because it shipped first.
     #[arg(long)]
     pub ask_approval: bool,
+
+    /// How often you are asked: `manual`, `accept-edits`, `auto` (default)
+    /// or `full`. Shift-Tab cycles it in a live session and `/permissions`
+    /// sets one. A rung never widens a grant.
+    #[arg(long, value_parser = |w: &str| crate::permissions::Rung::parse(w)
+        .ok_or("manual, accept-edits, auto or full"))]
+    pub permissions: Option<crate::permissions::Rung>,
 
     /// Start in planning mode: reads run, no change executes. Same as `--mode plan`.
     #[arg(long)]
@@ -644,11 +653,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
         .iter()
         .map(|path| crate::images::load(&args.root, path))
         .collect::<Result<Vec<_>, _>>()?;
-    if args.ask_approval
-        && (args.task.is_some() || !io::stdin().is_terminal() || !io::stdout().is_terminal())
-    {
-        return Err("--ask-approval requires an interactive terminal session; scripted calls cannot approve themselves".into());
-    }
     if args.dangerously_bypass_os_sandbox && !args.yolo {
         return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit".into());
     }
@@ -712,6 +716,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
         .and_then(toml::Value::as_str)
         .and_then(wire::Effort::parse)
         .unwrap_or_default();
+
+    let ladder = startup::ladder(&args, &loaded_settings.values)?;
     // An explicit `--model` wins, then the model this project was last left
     // on. There is no compiled-in request-model fallback: starting without a
     // concrete choice would make Pane silently spend against a model the
@@ -727,6 +733,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     if config.borrow().decisions.model.is_none() && !terminal {
         session_println!("decisions: off (no model)");
     }
+    session_println!("{}", startup::permissions_line(&ladder));
 
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
     // for the session's life. Reloading a persisted configuration must never
@@ -847,6 +854,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                     let mut state = tui::ScreenState {
                         model: started_on.clone(),
                         mode: initial_mode,
+                        permissions: ladder.clone(),
                         effort: initial_effort,
                         settings_root: Some(args.root.clone()),
                         settings_profile: args.profile.clone(),
@@ -875,22 +883,15 @@ fn run(args: SessionArgs) -> Result<(), String> {
             None
         };
 
-    let approval_gate = if args.ask_approval {
-        // The approval hint (F4, decision-model.md): the gate is session-scoped
-        // and outlives any one task, so its model and mode are attached once,
-        // here, exactly like `[decisions]` is read once at session start.
-        let decisions = config.borrow().decisions.clone();
-        interactive
-            .as_ref()
-            .map(ui::LiveUi::approval_gate)
-            .map(|gate| gate.with_decisions(decisions.model, decisions.mode))
-    } else {
-        None
-    };
+    // `full` asks nothing, so it needs no gate at all and pays nothing for
+    // one. Every other rung installs the gate and decides per call whether
+    // it reaches a person (`permissions::judge`).
+    let approval_gate = startup::approval_gate(&ladder, &config.borrow(), interactive.as_ref());
     let session = Session {
         selected_profile: args.profile.clone(),
         pending_images: RefCell::new(images),
         approval_gate,
+        ladder: Some(ladder.clone()),
         inbox: RefCell::new(crate::events::inbox::Inbox::discover(
             &glasshouse,
             profile.root(),
@@ -956,6 +957,9 @@ struct Session<'a> {
     selected_profile: Option<String>,
     pending_images: RefCell<Vec<Block>>,
     approval_gate: Option<crate::approval::Gate>,
+    /// The live permission rung, when this session has one. `None` only for
+    /// the constructed sessions in tests that never ask anybody anything.
+    ladder: Option<crate::permissions::Ladder>,
     inbox: RefCell<crate::events::inbox::Inbox>,
     window: RefCell<Window>,
     messages:
@@ -1224,8 +1228,12 @@ fn run_task(
     }
     transcript.notebook.handlers.clear();
     transcript.notebook.preflight = None;
+    // Moves made while the last task ran reach the file here, at the boundary:
+    // the UI thread that made them writes nothing itself.
+    rollout.record_moves(session.ladder.as_ref());
     let (mode, started) = (session.mode.get(), std::time::SystemTime::now());
     let result = run_task_inner(task, session, transcript, rollout);
+    rollout.record_moves(session.ladder.as_ref());
     if mode == RequestMode::Plan
         && let Some(plan) = modes::written_plan(session.profile.root(), started)
     {
@@ -3125,6 +3133,7 @@ mod tests {
             selected_profile: None,
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,
+            ladder: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),

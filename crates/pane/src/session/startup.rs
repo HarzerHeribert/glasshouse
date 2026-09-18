@@ -27,7 +27,103 @@ struct Listing {
     accounts: Vec<ServedAccount>,
 }
 
-/// The gateway's cached account listing; empty when there is no gateway.
+/// Which rung a session starts on, and whether it has anybody to ask.
+///
+/// The flag, then the saved rung, then the default — one place decides it.
+/// `--ask-approval` is the alias for the strictest rung and is folded in
+/// here; naming both with different rungs is ambiguous and is refused rather
+/// than silently resolved.
+///
+/// A rung that confirms edits or every command line cannot function with
+/// nobody at the keyboard: its first call would wait ten minutes and then be
+/// denied, so it is refused at startup instead. `auto` asks rarely enough to
+/// degrade instead, which is what keeps every scripted run working exactly
+/// as it does today.
+pub(super) fn ladder(
+    args: &SessionArgs,
+    values: &toml::Value,
+) -> Result<crate::permissions::Ladder, String> {
+    use crate::permissions::Rung;
+    if args.ask_approval && args.permissions.is_some_and(|rung| rung != Rung::Manual) {
+        return Err(
+            "--ask-approval is the alias for --permissions manual; naming both with different rungs is ambiguous"
+                .into(),
+        );
+    }
+    let rung = args
+        .permissions
+        .or_else(|| args.ask_approval.then_some(Rung::Manual))
+        .or_else(|| {
+            crate::settings_session::value(values, "permissions.mode")
+                .and_then(toml::Value::as_str)
+                .and_then(Rung::parse)
+        })
+        .unwrap_or_default();
+    let attended = args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
+    if rung.needs_a_person() && !attended {
+        return Err(format!(
+            "--permissions {} requires an interactive terminal session; scripted calls cannot approve themselves",
+            rung.name()
+        ));
+    }
+    let ladder = crate::permissions::Ladder::new(rung);
+    Ok(if attended {
+        ladder
+    } else {
+        ladder.unattended()
+    })
+}
+
+/// The gate the ladder's asking rungs need, and nothing for the one that
+/// never asks.
+///
+/// `full` asks nothing, so it needs no gate at all and pays nothing for one.
+/// Every other rung installs the gate and decides per call whether it
+/// reaches a person (`permissions::judge`). The approval hint (F4,
+/// decision-model.md): the gate is session-scoped and outlives any one task,
+/// so its model and mode are attached once, here, exactly like
+/// `[decisions]` is read once at session start.
+pub(super) fn approval_gate(
+    ladder: &crate::permissions::Ladder,
+    config: &crate::config::PaneConfig,
+    interactive: Option<&ui::LiveUi>,
+) -> Option<crate::approval::Gate> {
+    if !ladder.rung().ever_asks() {
+        return None;
+    }
+    let decisions = config.decisions.clone();
+    interactive
+        .map(|ui| ui.approval_gate(ladder.clone()))
+        .map(|gate| gate.with_decisions(decisions.model, decisions.mode))
+        .map(|gate| gate.with_read_only(config.modes.explore.commands.clone()))
+}
+
+/// The rung this session starts on, and what it means in one clause.
+///
+/// **A session with nobody at the keyboard says so.** An asking rung there
+/// runs what it would have confirmed — the profile is still the boundary —
+/// and a person reading a log afterwards must be able to tell that from a
+/// session where they answered.
+pub(super) fn permissions_line(ladder: &crate::permissions::Ladder) -> String {
+    let rung = ladder.rung();
+    let what = match rung {
+        crate::permissions::Rung::Manual => "every admitted file and shell call is confirmed",
+        crate::permissions::Rung::AcceptEdits => "edits run, every command line is confirmed",
+        crate::permissions::Rung::Auto => {
+            "edits run, a command that only reads runs, anything else is confirmed"
+        }
+        crate::permissions::Rung::Full => {
+            "nothing is confirmed; the sandbox profile is the only boundary"
+        }
+    };
+    let unattended = if ladder.is_unattended() && rung.ever_asks() {
+        " — no terminal to ask at, so what would be confirmed runs"
+    } else {
+        ""
+    };
+    format!("permissions: {} — {what}{unattended}", rung.name())
+}
+
 /// The startup line naming who is watching this session.
 ///
 /// **Off is worth one line; on is worth one too.** A session that cannot say
@@ -59,6 +155,7 @@ pub(super) fn supervisor_line(
     }
 }
 
+/// The gateway's cached account listing; empty when there is no gateway.
 pub(super) fn served_accounts(gateway: &Gateway) -> Vec<ServedAccount> {
     gateway
         .run(&["entitlements", "--json"], None)

@@ -22,6 +22,7 @@ pub mod helpers;
 pub mod images;
 pub mod manifest;
 pub mod models;
+pub mod permissions;
 pub mod preflight;
 pub mod progress;
 pub mod project;

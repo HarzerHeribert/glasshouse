@@ -992,6 +992,29 @@ fn rollback_confirmation(
 }
 
 fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, String> {
+    // `/permissions <rung>` moves the ladder; every other argument is a
+    // pattern edit, which is what this command has always been. One command
+    // because a person asking "what am I allowed to do" means both.
+    if let Some(rung) = argument
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .and_then(crate::permissions::Rung::parse)
+    {
+        let Some(ladder) = session.ladder.as_ref() else {
+            return Err(format!(
+                "this session has no live permission ladder; start it with --permissions {}",
+                rung.name()
+            ));
+        };
+        let was = ladder.rung();
+        ladder.set(rung);
+        return Ok(format!(
+            "permissions: {} → {} (Shift-Tab cycles; {} of the four rungs ask)",
+            was.name(),
+            rung.name(),
+            crate::permissions::Rung::NAMES.len() - 1
+        ));
+    }
     let saved = crate::settings_session::permissions(&session.project.root, argument)?;
     Ok(format!(
         "Effective current session (immutable): {} path rules · {} command patterns · {} MCP patterns\n{saved}",
@@ -1149,6 +1172,7 @@ mod tests {
             selected_profile: None,
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,
+            ladder: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, &root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),
@@ -1221,6 +1245,7 @@ mod tests {
             selected_profile: selected.map(str::to_string),
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,
+            ladder: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),
             messages: std::rc::Rc::new(RefCell::new(std::collections::HashMap::new())),

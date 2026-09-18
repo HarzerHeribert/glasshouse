@@ -728,6 +728,70 @@ fn a_slash_command_is_answered_without_a_request() {
     }
 }
 
+/// The default rung, and what a session with nobody at the keyboard does
+/// with an asking one.
+///
+/// A scripted run is the case this must not break: `auto` is the default, so
+/// every existing scripted invocation keeps working exactly as it did — the
+/// startup line says which rung, and says plainly that there is no terminal
+/// to ask at, so a log read afterwards cannot be mistaken for a session
+/// where somebody answered.
+#[test]
+fn a_session_with_no_flag_starts_on_auto_and_says_it_cannot_ask() {
+    let root = scratch_dir("permissions-default");
+    let rollout = root.join("rollout.jsonl");
+    let base_url = refused_base_url();
+
+    let output = run_session(&root, &rollout, "sess-rung", "/handles", &base_url, None);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("permissions: auto"),
+        "auto is the default rung: {stdout}"
+    );
+    assert!(
+        stdout.contains("no terminal to ask at"),
+        "a scripted session says so rather than pretending someone answered: {stdout}"
+    );
+}
+
+/// The rungs that confirm ordinary work refuse to start where nobody can
+/// answer, rather than stalling on their first call for ten minutes.
+#[test]
+fn an_asking_rung_refuses_a_scripted_session() {
+    let root = scratch_dir("permissions-scripted");
+    let rollout = root.join("rollout.jsonl");
+    let base_url = refused_base_url();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pane"))
+        .args([
+            "session",
+            "--root",
+            root.to_str().unwrap(),
+            "--rollout",
+            rollout.to_str().unwrap(),
+            "--session",
+            "sess-manual",
+            "--task",
+            "/handles",
+            "--permissions",
+            "manual",
+        ])
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .output()
+        .expect("pane runs");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("requires an interactive terminal session"),
+        "manual cannot function unattended and says so: {combined}"
+    );
+}
+
 #[test]
 fn handles_command_reports_the_recorded_preview() {
     let root = scratch_dir("unbuilt-root");

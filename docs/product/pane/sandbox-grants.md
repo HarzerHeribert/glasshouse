@@ -756,8 +756,9 @@ the project boundary, and the sandbox is what must change.
 
 ## 8. Foreground exact-call approval
 
-`--ask-approval` installs `Runtime::with_approval_gate` in a live terminal
-session. It can only delay or deny a registered foreground file/shell call that the existing
+`--permissions manual` (and its alias `--ask-approval`) installs
+`Runtime::with_approval_gate` in a live terminal
+session; §10's ladder decides which admitted calls reach it at all. It can only delay or deny a registered foreground file/shell call that the existing
 immutable profile already admits. Missing grants, explicit denies and
 never-grantable actions remain refusals and never reach its request channel.
 It does not interpret `permissions.ask`, modify settings, add an OS grant,
@@ -851,3 +852,67 @@ probe it, and Windows refuses to exec a program the *session* could write.
   beside the fixed read-only list) feed `ModeOverlay::new(writable,
   commands)`, compiled once per session; an absolute or outside-the-root
   glob makes nothing writable, exactly as an unconfigured glob would.
+
+## 10. The permission ladder — how often the person is asked
+
+A second axis, orthogonal to §9's request modes: a mode decides what a
+**request** may do, the ladder decides how much of what is already admissible
+reaches a **person** before it runs. `crates/pane/src/permissions.rs` holds it.
+**A rung can never widen a grant.** Every call a rung lets through has already
+passed `Profile::check`, the mode overlay and the never-grantable set of §4;
+every refusal above stays a refusal on every rung, `full` included.
+
+Four rungs, in cycle order — `manual`, `accept-edits`, `auto`, `full`:
+
+- **`manual`** — every admitted foreground file and shell call is confirmed.
+  This is exactly what `--ask-approval` did before the ladder existed, and
+  that flag is now an alias for this rung.
+- **`accept-edits`** — `read`/`write`/`edit` and the other registered file
+  tools run; every `bash` line is confirmed.
+- **`auto`** (the default) — edits run; a `bash` line the judgement below can
+  vouch for runs; anything else is confirmed.
+- **`full`** — nothing is confirmed, so no gate is installed at all. The
+  profile and the OS layer are the only boundary. (Lifting OS confinement on
+  this rung is a separate, future package; it is not here.)
+
+Chosen by `--permissions <rung>`, the `permissions.mode` setting,
+`/permissions <rung>`, or **Shift-Tab**, which cycles the rung and wraps.
+Shift-Tab no longer changes the request mode — `/mode` and the status field's
+click still do that — and the status line names both: `execute · auto ·
+effort medium`. Every move is written to the rollout as its own line kind, so
+`resume` skips it rather than replaying a rung the person has since left.
+
+**The judgement under `auto` is a static reader, not a model.** `judge_command`
+segments the line the way §9's explore mode does — one shared reader,
+`sandbox::modes::command_reads_only` — and vouches for a segment only when its
+program is in the read-only list of §9 or in `DEVELOPMENT_COMMANDS` (the
+ordinary build and inspect verbs: `cargo check/test/build/fmt/clippy`, `sed -n`,
+and their kin). Anything else is confirmed, not refused. The two lists stay
+separate on purpose: `explore` must not gain the power to run arbitrary test
+code because the ladder learned to admit `cargo`.
+
+**One line gets one answer for the whole session.** `Judged` remembers the
+first answer for an exact action — a gate that says no and then yes on a retry
+teaches retrying. Only a person's or a model's answer is remembered; a static
+verdict is not, so moving *down* a rung mid-task takes effect immediately
+rather than leaving the departed rung's allowances behind.
+
+**A session with no terminal.** `manual` and `accept-edits` confirm calls an
+ordinary session makes constantly, so a scripted run on either is refused at
+startup by name. `auto` degrades instead: what it would have confirmed runs,
+and the startup line says so — `permissions: auto — … — no terminal to ask at,
+so what would be confirmed runs`. Every existing scripted run therefore keeps
+working unchanged.
+
+Measured against the real corpus of 57 command lines this project's own
+sessions ran (`permissions::tests::the_real_corpus_runs_its_ordinary_work_and_asks_about_the_rest`):
+under §9's read-only list alone **6 run and 51 ask**; with
+`DEVELOPMENT_COMMANDS`, **23 run**. The remaining 34 are deliberate classes —
+quote-blind segmentation (§9's refusing direction), path-qualified programs,
+`VAR=x` prefixes, and genuinely mutating commands.
+
+CONTRACT
+behaviour:  How often a person is asked is a named rung, separate from the request mode, defaulting to `auto` and cycled by Shift-Tab.
+invariant:  A rung only ever removes a question; it never admits a call the profile, the mode or the never-grantable set refused, and one exact action gets one answer per session.
+path:       `crates/pane/src/permissions.rs` judges, `approval.rs`'s `Gate::admit` consults it before the remembered set, and `session.rs` installs the gate only when the rung `ever_asks()`.
+test:       `crates/pane/tests/approval_boundary.rs::ladder::a_refusal_is_the_sessions_answer_and_is_not_asked_a_second_time` — the second attempt at a denied action is answered from the first rather than asked again.

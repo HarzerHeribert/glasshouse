@@ -190,6 +190,9 @@ pub struct ScreenState {
     pub settings_profile: Option<String>,
     pub settings_models: Vec<String>,
     pub mode: Mode,
+    /// The permission rung, shared live with the approval gate: Shift-Tab
+    /// moves it from this thread while a task runs.
+    pub permissions: crate::permissions::Ladder,
     pub effort: crate::wire::Effort,
     pub status_line: StatusLine,
     pub panel: Option<Panel>,
@@ -1172,7 +1175,16 @@ pub(crate) fn render_screen_with_geometry(
         None => NOT_CONNECTED,
     };
     let width = usize::from(regions.status.width);
-    let mode = format!("{} · effort {}", state.mode.name(), state.effort.name());
+    // The request mode, the rung, and the effort, in that order: what this
+    // request may do, how often you are asked, how hard the model thinks.
+    // The rung is here rather than in the sidebar because a person in `full`
+    // must never be able to forget it, and the sidebar can be hidden.
+    let mode = format!(
+        "{} · {} · effort {}",
+        state.mode.name(),
+        state.permissions.rung().name(),
+        state.effort.name()
+    );
     let identity = format!(" {} · {}", abbreviate(model, 28), abbreviate(project, 24));
     let posture_head = format!(
         " sandbox {} · net:{}",

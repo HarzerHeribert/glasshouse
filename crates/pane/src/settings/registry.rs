@@ -72,6 +72,10 @@ const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 /// runtime's `execute`; both are accepted, and `build` is what is written.
 const MODES: &[&str] = &["build", "plan"];
 const AGENT_MODES: &[&str] = &["auto", "off", "pinned"];
+
+/// The permission ladder's rungs, in cycle order, spelled once in
+/// `permissions::Rung::NAMES` so the panel and Shift-Tab cannot disagree.
+const PERMISSION_RUNGS: &[&str] = &crate::permissions::Rung::NAMES;
 const COMPLETION: &[&str] = &["silent", "recap"];
 const PREFLIGHT_SCOPE: &[&str] = &["auto", "always"];
 const DECISION_MODES: &[&str] = &["off", "shadow", "on"];
@@ -171,6 +175,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     // -- presentation, curated and Pane-owned -----------------------------
+    SettingSpec {
+        key: "permissions.mode",
+        label: "Permission rung",
+        description: "How often you are asked: `manual`, `accept-edits`, `auto` or `full`. Shift-Tab cycles it live; it never widens a grant.",
+        kind: Kind::Choice,
+        choices: PERMISSION_RUNGS,
+        basic: true,
+        restart: false,
+    },
     SettingSpec {
         key: "ui.theme",
         label: "Theme",

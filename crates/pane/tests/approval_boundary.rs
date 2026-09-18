@@ -64,7 +64,9 @@ fn returned(outcome: &CellOutcome, expected: &str) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn once_resumes_the_suspended_call_without_replaying_an_earlier_effect() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let earlier = fixture.0.join("earlier");
     let target = fixture.0.join("target");
     let observed_earlier = earlier.clone();
@@ -111,7 +113,9 @@ fn once_resumes_the_suspended_call_without_replaying_an_earlier_effect() {
 #[test]
 fn session_decisions_match_all_canonical_arguments_and_summaries_hide_values() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let root = fixture.0.clone();
     let responder = std::thread::spawn(move || {
         let first = requests.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -155,7 +159,9 @@ fn session_decisions_match_all_canonical_arguments_and_summaries_hide_values() {
 #[test]
 fn explicit_denies_never_grantable_actions_and_missing_grants_never_reach_the_gate() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let mut runtime = fixture
         .runtime(Some(
             r#"{"permissions":{"allow":["Bash"],"deny":["Write(blocked)","Bash(echo *)"]}}"#,
@@ -196,7 +202,9 @@ fn an_unattached_runtime_stays_fail_closed_for_missing_grants() {
 fn a_disconnected_host_and_a_dropped_request_deny_without_an_effect() {
     for drop_request in [false, true] {
         let fixture = Fixture::new();
-        let (gate, requests) = Gate::channel();
+        let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+            pane::permissions::Rung::Manual,
+        ));
         let responder = std::thread::spawn(move || {
             if drop_request {
                 drop(requests.recv_timeout(Duration::from_secs(5)).unwrap());
@@ -217,7 +225,9 @@ fn a_disconnected_host_and_a_dropped_request_deny_without_an_effect() {
 #[test]
 fn cancellation_denies_the_pending_call_and_rejects_a_late_session_answer() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let token = CancellationToken::new();
     let cancelled = token.clone();
     let (finished, completion) = mpsc::channel();
@@ -248,7 +258,9 @@ fn cancellation_denies_the_pending_call_and_rejects_a_late_session_answer() {
 #[test]
 fn human_approval_wait_pauses_the_cell_clock_and_then_resumes_the_write() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         std::thread::sleep(Duration::from_millis(350));
@@ -279,7 +291,9 @@ fn human_approval_wait_pauses_the_cell_clock_and_then_resumes_the_write() {
 #[test]
 fn approval_resumes_remaining_compute_budget_instead_of_resetting_it() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         std::thread::sleep(Duration::from_millis(500));
@@ -316,7 +330,9 @@ fn approval_resumes_remaining_compute_budget_instead_of_resetting_it() {
 #[test]
 fn an_allow_once_is_consumed_even_when_the_execution_fails() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let responder = std::thread::spawn(move || {
         let first = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         let action = first.action().clone();
@@ -339,7 +355,9 @@ fn an_allow_once_is_consumed_even_when_the_execution_fails() {
 #[test]
 fn subagents_do_not_prompt_even_when_a_host_attaches_a_gate() {
     let fixture = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let mut runtime = fixture.runtime(None).with_approval_gate(gate).as_subagent();
     let outcome = runtime.run_cell(
         r#"write({path: "target", content: "base profile grants this"});
@@ -359,7 +377,9 @@ fn a_symlink_retargeted_during_the_wait_invalidates_the_answer() {
     std::fs::write(fixture.0.join("original"), "original").unwrap();
     std::fs::write(fixture.0.join("other"), "other").unwrap();
     std::os::unix::fs::symlink("original", fixture.0.join("link")).unwrap();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let root = fixture.0.clone();
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -399,7 +419,9 @@ fn a_non_utf8_canonical_path_is_refused_before_a_lossy_key_can_be_approved() {
         .join(std::ffi::OsString::from_vec(b"private-\xff".to_vec()));
     std::fs::write(&target, "untouched").unwrap();
     std::os::unix::fs::symlink(&target, fixture.0.join("link")).unwrap();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let mut runtime = fixture.runtime(None).with_approval_gate(gate);
     let outcome = runtime.run_cell(
         r#"try { write({path: "link", content: "no"}); }
@@ -415,7 +437,9 @@ fn a_non_utf8_canonical_path_is_refused_before_a_lossy_key_can_be_approved() {
 fn remembered_actions_do_not_cross_roots_or_override_a_later_profiles_deny() {
     let first = Fixture::new();
     let second = Fixture::new();
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let first_root = first.0.clone();
     let second_root = second.0.clone();
     let responder = std::thread::spawn(move || {
@@ -460,7 +484,9 @@ fn answering_the_gate_does_not_expand_the_os_sandbox() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8(unconfined.stdout).unwrap(), "leaked");
-    let (gate, requests) = Gate::channel();
+    let (gate, requests) = Gate::channel(pane::permissions::Ladder::new(
+        pane::permissions::Rung::Manual,
+    ));
     let responder = std::thread::spawn(move || {
         let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(request.action().tool(), "bash");
@@ -868,4 +894,115 @@ fn no_model_means_no_approval_hint_request() {
     );
     app.send(b"o");
     app.contains("done");
+}
+
+/// The ladder decides which calls reach a person at all, and a `full`
+/// session installs no gate — so these run against the gate itself.
+mod ladder {
+    use super::*;
+    use pane::permissions::{Ladder, Rung};
+
+    /// `auto` runs ordinary work and asks about the rest — in one cell, so
+    /// the two answers are the same session's.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn auto_runs_what_reads_and_asks_about_what_it_cannot_place() {
+        let fixture = Fixture::new();
+        let (gate, requests) = Gate::channel(Ladder::new(Rung::Auto));
+        let responder = std::thread::spawn(move || {
+            let asked = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+            let shown = asked.action().confirmation().text;
+            assert!(shown.contains("deploy"), "the person sees the real call");
+            assert!(asked.respond(Decision::AllowOnce));
+            requests
+        });
+        let mut runtime = fixture
+            .runtime(Some(r#"{"permissions":{"allow":["Bash"]}}"#))
+            .with_approval_gate(gate.clone());
+        let outcome = runtime.run_cell(
+            r#"bash({command: "git status --short"});
+               bash({command: "sh deploy"});
+               return "both";"#,
+        );
+        returned(&outcome, "both");
+        let left = responder.join().unwrap();
+        assert!(
+            left.try_recv().is_err(),
+            "exactly one of the two calls reached the person"
+        );
+    }
+
+    /// The rule the user named: a gate that answers differently on a retry
+    /// teaches retrying. A denial is the session's answer for that exact
+    /// call, and the second attempt is refused without asking again.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_refusal_is_the_sessions_answer_and_is_not_asked_a_second_time() {
+        let fixture = Fixture::new();
+        let (gate, requests) = Gate::channel(Ladder::new(Rung::Manual));
+        let responder = std::thread::spawn(move || {
+            let asked = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(asked.respond(Decision::Deny));
+            requests
+        });
+        let mut runtime = fixture
+            .runtime(Some(r#"{"permissions":{"allow":["Bash"]}}"#))
+            .with_approval_gate(gate.clone());
+        let outcome = runtime.run_cell(
+            r#"let denied = 0;
+               for (const _ of [1, 2]) {
+                 try { bash({command: "sh deploy"}); } catch (e) { denied += 1; }
+               }
+               return String(denied);"#,
+        );
+        returned(&outcome, "2");
+        let left = responder.join().unwrap();
+        assert!(
+            left.try_recv().is_err(),
+            "the second attempt was answered from the first, not asked again"
+        );
+    }
+
+    /// Moving the rung while a cell is suspended in the gate binds the very
+    /// next call of that same cell — which is why the rung is an atomic the
+    /// gate reads per call, not an input the turn loop reads between turns.
+    ///
+    /// Deterministic by construction: the move happens on the responder
+    /// thread, while the cell is stopped inside the first confirmation.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_rung_moved_while_a_cell_waits_binds_that_cells_next_call() {
+        let fixture = Fixture::new();
+        let ladder = Ladder::new(Rung::AcceptEdits);
+        let (gate, requests) = Gate::channel(ladder.clone());
+        let moved = ladder.clone();
+        let responder = std::thread::spawn(move || {
+            let asked = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+            // The person reaches for Shift-Tab while the confirmation is up.
+            moved.set(Rung::Full);
+            assert!(asked.respond(Decision::AllowOnce));
+            requests
+        });
+        let mut runtime = fixture
+            .runtime(Some(r#"{"permissions":{"allow":["Bash"]}}"#))
+            .with_approval_gate(gate.clone());
+        let outcome = runtime.run_cell(
+            r#"bash({command: "sh one"});
+               bash({command: "sh two"});
+               return "both";"#,
+        );
+        returned(&outcome, "both");
+        assert_eq!(ladder.rung(), Rung::Full);
+        let left = responder.join().unwrap();
+        assert!(
+            left.try_recv().is_err(),
+            "the second call ran under the new rung without asking"
+        );
+        let moves = ladder.drain_moves();
+        assert_eq!(moves.len(), 1, "the move is recorded once");
+        assert_eq!(
+            (moves[0].from, moves[0].to),
+            (Rung::AcceptEdits, Rung::Full)
+        );
+    }
 }

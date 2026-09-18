@@ -191,8 +191,11 @@ pub(super) struct LiveUi {
 impl LiveUi {
     /// Forwards suspended exact actions to the terminal owner. Closing the
     /// terminal drops pending requests and denies their waiting callbacks.
-    pub(super) fn approval_gate(&self) -> crate::approval::Gate {
-        let (gate, receiver) = crate::approval::Gate::channel();
+    pub(super) fn approval_gate(
+        &self,
+        ladder: crate::permissions::Ladder,
+    ) -> crate::approval::Gate {
+        let (gate, receiver) = crate::approval::Gate::channel(ladder);
         let updates = self.updates.clone();
         thread::spawn(move || {
             for request in receiver {
@@ -571,8 +574,26 @@ fn open_cell(state: &mut ScreenState, notebook: &Notebook, cell: usize) {
     }
 }
 
-/// The input Shift-Tab and a click on the mode field both send, or the
-/// sentence both show instead while a task is running.
+/// Shift-Tab: one rung along the permission ladder, and the line that says
+/// where it landed.
+///
+/// **It takes effect at once, task or no task.** The ladder is an atomic the
+/// approval gate reads on the session thread, so a person who moves *down*
+/// mid-task is asked about the very next call; moving *up* is their own act
+/// and the ladder records it for the rollout.
+fn rung_change(ladder: &crate::permissions::Ladder) -> String {
+    let moved = ladder.cycle();
+    format!(
+        "permissions {} — Shift-Tab cycles, /permissions <rung> sets one",
+        moved.to.name()
+    )
+}
+
+/// The input a click on the mode field sends, or the sentence it shows
+/// instead while a task is running.
+///
+/// Shift-Tab no longer sends this — it moves the permission rung — so the
+/// request mode's keyboard route is `/mode`, which this input is.
 fn mode_change(busy: bool, mode: tui::Mode) -> Result<String, &'static str> {
     if busy {
         return Err("Change mode after the current task finishes.");
@@ -1288,13 +1309,13 @@ fn run(
                     }
                 }
                 if key.code == KeyCode::BackTab {
-                    match mode_change(busy, state.mode) {
-                        Ok(input) => {
-                            busy = true;
-                            let _ = answers.inputs.send(Input::Submit(input));
-                        }
-                        Err(refusal) => state.notice = Some(refusal.into()),
-                    }
+                    // The permission rung, not the request mode: this is the
+                    // one a person reaches for constantly, and — unlike a
+                    // request mode, which is a new request — it must move
+                    // *while* a task runs, because that is when someone
+                    // notices they are on the wrong rung. The request mode
+                    // keeps `/mode` and its own sidebar field.
+                    state.notice = Some(rung_change(&state.permissions));
                     continue;
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2025,8 +2046,16 @@ mod tests {
         );
     }
 
+    /// The request mode's click and its keyboard route.
+    ///
+    /// **Shift-Tab is no longer that route.** It moves the permission rung
+    /// (`rung_change`), which is the control a person reaches for
+    /// constantly, while the request mode is set once at the start of a
+    /// piece of work. The mode keeps `/mode`, and the click on its field
+    /// submits exactly that — so the pair this test exists to pin is intact,
+    /// with the key on the other side of it changed.
     #[test]
-    fn clicking_the_mode_field_sends_what_shift_tab_sends() {
+    fn clicking_the_mode_field_sends_what_slash_mode_sends() {
         let state = ScreenState::default();
         let (geometry, _) = render_geometry(&state, &Conversation::default(), &Notebook::default());
         let hit = (0..30)
@@ -2037,12 +2066,48 @@ mod tests {
         assert_eq!(
             mode_change(false, state.mode),
             Ok(format!("/mode {}", state.mode.next().name())),
-            "the click and Shift-Tab submit the same input"
+            "the click submits the same input `/mode` does"
         );
         assert_eq!(
             mode_change(true, state.mode),
             Err("Change mode after the current task finishes."),
             "and both refuse the same way while a task runs"
+        );
+    }
+
+    /// Shift-Tab walks the permission ladder and wraps, and it does not
+    /// touch the request mode.
+    #[test]
+    fn shift_tab_moves_the_rung_and_leaves_the_request_mode_alone() {
+        let state = ScreenState {
+            permissions: crate::permissions::Ladder::new(crate::permissions::Rung::Manual),
+            ..ScreenState::default()
+        };
+        let mode_before = state.mode;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let line = rung_change(&state.permissions);
+            assert!(
+                line.starts_with("permissions "),
+                "it says where it landed: {line}"
+            );
+            seen.push(state.permissions.rung());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                crate::permissions::Rung::AcceptEdits,
+                crate::permissions::Rung::Auto,
+                crate::permissions::Rung::Full,
+                crate::permissions::Rung::Manual,
+            ],
+            "one rung per press, wrapping to where it started"
+        );
+        assert_eq!(state.mode, mode_before, "the request mode is untouched");
+        assert_eq!(
+            state.permissions.drain_moves().len(),
+            4,
+            "every move is recorded for the rollout"
         );
     }
 

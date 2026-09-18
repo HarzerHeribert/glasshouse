@@ -175,6 +175,39 @@ fn the_status_line_names_the_model_the_project_the_sandbox_and_the_connection() 
         }
     }
 }
+/// The rung is on the status line, beside the request mode, at every width
+/// this test draws — a person in `full` must not be able to forget it, and
+/// the sidebar they can hide is not where that belongs.
+#[test]
+fn the_status_line_names_the_permission_rung_beside_the_request_mode() {
+    for rung in [
+        pane::permissions::Rung::Manual,
+        pane::permissions::Rung::Auto,
+        pane::permissions::Rung::Full,
+    ] {
+        let mut state = state();
+        state.permissions = pane::permissions::Ladder::new(rung);
+        for width in [80, 120, 200] {
+            let rendered = text(&draw(
+                width,
+                24,
+                &state,
+                &conversation(),
+                &Notebook::default(),
+            ));
+            assert!(
+                rendered.contains(rung.name()),
+                "the rung `{}` at width {width}: {rendered}",
+                rung.name()
+            );
+            assert!(
+                rendered.contains(state.mode.name()),
+                "and the request mode is still there: {rendered}"
+            );
+        }
+    }
+}
+
 #[test]
 fn gateway_provenance_does_not_invent_a_billing_status() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

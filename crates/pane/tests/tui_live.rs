@@ -835,13 +835,19 @@ fn double_ctrl_c_restores_the_terminal_before_exit() {
 }
 
 #[test]
-fn shift_tab_cycles_through_explore_into_a_plan_mode_that_reads() {
+fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
+    // Shift-Tab is the ladder's key now, not the request mode's: it moves the
+    // rung and leaves the mode where it was. The two axes are independent —
+    // `sandbox-grants.md` §10 — and this is the live proof of it.
+    app.contains("auto");
     app.send(b"\x1b[Z");
+    app.contains("permissions full");
+    app.send(b"/mode explore\r");
     app.contains("Mode: explore");
-    app.send(b"\x1b[Z");
+    app.send(b"/mode plan\r");
     app.contains("Mode: plan");
     app.send(b"plan this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -854,7 +860,7 @@ fn shift_tab_cycles_through_explore_into_a_plan_mode_that_reads() {
     // Plan runs cells under the plan narrowing (map line 2638): a cell that
     // changes nothing runs, and writes are refused by the profile.
     app.contains("LIVE RESULT INTACT");
-    app.send(b"\x1b[Z");
+    app.send(b"/mode execute\r");
     app.contains("Mode: execute");
     app.send(b"/context\r");
     app.contains("Next request:");

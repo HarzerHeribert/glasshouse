@@ -244,6 +244,21 @@ impl Drop for Pending {
 pub struct Gate {
     requests: mpsc::Sender<Request>,
     remembered: Arc<Mutex<BTreeSet<Action>>>,
+    /// Answers a person gave: allow-for-session, and refusals.
+    ///
+    /// **Only answers that could have been given differently are kept.** A
+    /// static verdict is recomputed on every call because it is already
+    /// deterministic — and because remembering it would make a person who
+    /// moves *down* the ladder mid-task keep the permissions of the rung
+    /// they left.
+    judged: Arc<crate::permissions::Judged<Action>>,
+    /// Which rung this session is on, live: the key handler moves it from
+    /// the UI thread while a task runs.
+    ladder: crate::permissions::Ladder,
+    /// `[modes] commands` — the person's own extra read-only segment
+    /// patterns, honoured by the ladder exactly as a narrowing mode honours
+    /// them.
+    read_only: Arc<Vec<String>>,
     wait_clock: Option<Arc<WaitClock>>,
     decisions: Option<Decisions>,
     /// The current task's request text, attached to the clone a `Runtime`
@@ -253,18 +268,34 @@ pub struct Gate {
 }
 
 impl Gate {
-    pub fn channel() -> (Self, mpsc::Receiver<Request>) {
+    pub fn channel(ladder: crate::permissions::Ladder) -> (Self, mpsc::Receiver<Request>) {
         let (requests, receiver) = mpsc::channel();
         (
             Self {
                 requests,
                 remembered: Arc::new(Mutex::new(BTreeSet::new())),
+                judged: Arc::new(crate::permissions::Judged::default()),
+                ladder,
+                read_only: Arc::new(Vec::new()),
                 wait_clock: None,
                 decisions: None,
                 task: None,
             },
             receiver,
         )
+    }
+
+    /// The rung this gate is judging on, shared with whatever moves it.
+    pub fn ladder(&self) -> &crate::permissions::Ladder {
+        &self.ladder
+    }
+
+    /// Attaches `[modes] commands`, the person's own extra read-only segment
+    /// patterns, once at session start.
+    #[must_use]
+    pub fn with_read_only(mut self, patterns: Vec<String>) -> Self {
+        self.read_only = Arc::new(patterns);
+        self
     }
 
     /// Attaches the `[decisions]` model and mode once, at session start
@@ -322,9 +353,20 @@ impl Gate {
             .unwrap_or_default()
     }
 
+    /// Whether this already-admitted call may run, asking the person when
+    /// the rung says to.
+    ///
+    /// The order is the whole policy: an answer already given stands, then
+    /// the rung judges, and only a judgement of *ask* reaches a person. A
+    /// session with no terminal to ask at runs what it would have asked
+    /// about — the profile is still the boundary, and refusing instead would
+    /// break every scripted run for a question nobody is there to answer.
     pub(crate) fn admit(&self, action: Action, stopped: impl Fn() -> bool) -> bool {
         if stopped() {
             return false;
+        }
+        if let Some(answer) = self.judged.answer(&action) {
+            return answer && !stopped();
         }
         let Ok(remembered) = self.remembered.lock() else {
             return false;
@@ -333,6 +375,23 @@ impl Gate {
             return !stopped();
         }
         drop(remembered);
+        match crate::permissions::judge(
+            self.ladder.rung(),
+            action.tool(),
+            action.arguments(),
+            &self.read_only,
+        ) {
+            crate::permissions::Verdict::Runs => return !stopped(),
+            crate::permissions::Verdict::Refuse(_) => {
+                self.judged.remember(action, false);
+                return false;
+            }
+            crate::permissions::Verdict::Ask(_) => {
+                if self.ladder.is_unattended() {
+                    return !stopped();
+                }
+            }
+        }
         let _waiting = self.wait_clock.as_ref().map(WaitClock::pause);
         let waiting_started = Instant::now();
         let pending = Arc::new(AtomicBool::new(true));
@@ -424,6 +483,8 @@ impl Gate {
                         return false;
                     }
                     return match decision {
+                        // Once is once: not remembered, because the person
+                        // said so.
                         Decision::AllowOnce => true,
                         Decision::AllowForSession => {
                             let Ok(mut remembered) = self.remembered.lock() else {
@@ -432,7 +493,13 @@ impl Gate {
                             remembered.insert(action);
                             true
                         }
-                        Decision::Deny => false,
+                        // Remembered, so that asking again cannot turn a no
+                        // into a yes: a gate that answers differently on a
+                        // retry teaches retrying.
+                        Decision::Deny => {
+                            self.judged.remember(action, false);
+                            false
+                        }
                     };
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return false,

@@ -87,7 +87,19 @@ pub const READ_ONLY_COMMANDS: [&str; 20] = [
     "ps", "env", "which", "pwd", "echo", "date", "uname",
 ];
 
-const GIT_READ_ONLY: [&str; 6] = ["status", "log", "diff", "show", "blame", "ls-files"];
+/// `rev-parse` joined the list on 2026-09-18: it resolves names and prints
+/// them, writes nothing, and a session that cannot run it cannot find out
+/// where its own repository is (measured in a real session, which ran
+/// `git status --short && git rev-parse --show-toplevel && pwd`).
+const GIT_READ_ONLY: [&str; 7] = [
+    "status",
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "ls-files",
+    "rev-parse",
+];
 
 /// The configurable half of a mode: extra writable globs for `explore` and
 /// extra read-only command patterns for both narrowing modes.
@@ -216,12 +228,36 @@ impl Narrowing {
     /// run, never on the line as one string.
     pub(super) fn command_refusal(&self, command_line: &str) -> Option<String> {
         let mode = self.mode.name();
-        if cfg!(windows) {
-            return Some(format!(
-                "mode {mode}: the command tool runs cmd.exe on Windows, whose line this check does not parse, so no command runs in {mode} mode"
-            ));
-        }
-        let refuse = |why: String| Some(format!("mode {mode}: {why}; the shell is read-only"));
+        command_reads_only(command_line, &self.commands).map(|why| {
+            if cfg!(windows) {
+                format!("mode {mode}: {why}, so no command runs in {mode} mode")
+            } else {
+                format!("mode {mode}: {why}; the shell is read-only")
+            }
+        })
+    }
+}
+
+/// Why this command line cannot be vouched for as reading only, or `None`
+/// when every segment a shell would run reads.
+///
+/// **Two callers, one reader.** A narrowing mode refuses what this names
+/// ([`Narrowing::command_refusal`]); the permission ladder asks the person
+/// about it instead ([`crate::permissions::judge_command`]). The two differ
+/// in what they do with the answer and not in the answer, so they share the
+/// reader rather than keeping two lists that could drift.
+///
+/// `extra` is the caller's own list of admitted segment patterns
+/// (`cargo metadata*`), matched before the built-in [`READ_ONLY_COMMANDS`].
+pub(crate) fn command_reads_only(command_line: &str, extra: &[String]) -> Option<String> {
+    if cfg!(windows) {
+        return Some(
+            "the command tool runs cmd.exe on Windows, whose line this check does not parse"
+                .to_string(),
+        );
+    }
+    {
+        let refuse = Some;
         for segment in command_segments(command_line) {
             if segment.contains("<(") || segment.contains(">(") {
                 return refuse(format!("`{segment}` runs a process substitution"));
@@ -243,8 +279,7 @@ impl Narrowing {
                     }
                 }
             }
-            if self
-                .commands
+            if extra
                 .iter()
                 .any(|pattern| match_segment(pattern, skip_leading_redirects(&segment), false))
             {
