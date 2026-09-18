@@ -1,0 +1,4103 @@
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhdgv-hl — resume it with:  pane --resume tlhdgv-hl
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhdgv-hl — resume it with:  pane --resume tlhdgv-hl
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling heck v0.5.0
+   Compiling allocator-api2 v0.2.21
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling foldhash v0.2.0
+   Compiling ident_case v1.0.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling unicode-width v0.2.2
+   Compiling either v1.18.0
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling generic-array v0.14.7
+   Compiling static_assertions v1.1.0
+   Compiling rustix v1.1.4
+   Compiling instability v0.3.10
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling zeroize v1.9.0
+   Compiling castaway v0.2.4
+   Compiling typenum v1.20.1
+   Compiling scopeguard v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling critical-section v1.2.0
+   Compiling indoc v2.0.7
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling untrusted v0.9.0
+   Compiling darling_core v0.20.11
+   Compiling httparse v1.10.1
+   Compiling litrs v1.0.0
+   Compiling cfg_aliases v0.2.2
+   Compiling deranged v0.5.8
+   Compiling thiserror v1.0.69
+   Compiling objc2-encode v4.1.0
+   Compiling thiserror-impl v2.0.20
+   Compiling num-conv v0.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling utf8parse v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling vcpkg v0.2.15
+   Compiling core-foundation-sys v0.8.7
+   Compiling time-core v0.1.9
+   Compiling pkg-config v0.3.34
+   Compiling anstyle-parse v1.0.0
+   Compiling nix v0.28.0
+   Compiling time v0.3.55
+   Compiling compact_str v0.9.1
+   Compiling document-features v0.2.12
+   Compiling nix v0.31.3
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling libsqlite3-sys v0.38.2
+   Compiling thiserror-impl v1.0.69
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling getrandom v0.4.3
+   Compiling kasuari v0.4.12
+   Compiling darling_macro v0.20.11
+   Compiling colorchoice v1.0.5
+   Compiling memchr v2.8.3
+   Compiling anstyle v1.0.14
+   Compiling derive_more v2.1.1
+   Compiling zmij v1.0.23
+   Compiling anstyle-query v1.1.5
+   Compiling bytes v1.12.1
+   Compiling rustls v0.23.43
+   Compiling darling v0.20.11
+   Compiling anyhow v1.0.104
+   Compiling regex-syntax v0.8.11
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling block2 v0.6.2
+   Compiling anstream v1.0.0
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling strum v0.28.0
+   Compiling regex-automata v0.4.18
+   Compiling rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling serde_json v1.0.151
+   Compiling clap_lex v1.1.0
+   Compiling arrayvec v0.7.8
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.229
+   Compiling option-ext v0.2.0
+   Compiling winnow v1.0.4
+   Compiling base64 v0.23.1
+   Compiling pin-project-lite v0.2.17
+   Compiling lazy_static v1.5.0
+   Compiling ureq-proto v0.6.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling dirs-sys v0.5.0
+   Compiling vte v0.15.0
+   Compiling clap_builder v4.6.6
+   Compiling digest v0.10.7
+   Compiling security-framework v3.7.0
+   Compiling matchers v0.2.0
+   Compiling ratatui-core v0.1.2
+   Compiling filedescriptor v0.8.3
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling serde_derive v1.0.229
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling clap_derive v4.6.4
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-iterator v0.3.0
+   Compiling percent-encoding v2.3.2
+   Compiling downcast-rs v1.2.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-off-1-524-1/crates/glasshouse)
+   Compiling shell-words v1.1.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling utf8-zero v0.8.1
+   Compiling winnow v0.7.15
+   Compiling portable-pty v0.9.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling vt100 v0.16.2
+   Compiling clap v4.6.6
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling ratatui-macros v0.7.2
+   Compiling rusqlite v0.40.2
+   Compiling hex v0.4.3
+   Compiling ratatui v0.30.2
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ureq v3.4.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.06s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... FAILED
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+failures:
+
+---- every_association_this_build_writes_is_observed_and_never_referenced stdout ----
+
+thread 'every_association_this_build_writes_is_observed_and_never_referenced' (493294235) panicked at crates/glasshouse/tests/memory_file_observer.rs:368:5:
+assertion `left == right` failed: `referenced` is line 1139's word and this build must not be able to store it
+  left: Some(Referenced)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_association_this_build_writes_is_observed_and_never_referenced
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.65s
+
+error: test failed, to rerun pass `--test memory_file_observer`
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhdpw-11iq — resume it with:  pane --resume tlhdpw-11iq
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: 1 item(s) derived from the request
+session tlhdpw-11iq — resume it with:  pane --resume tlhdpw-11iq
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling foldhash v0.2.0
+   Compiling rustversion v1.0.23
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling unicode-width v0.2.2
+   Compiling serde_core v1.0.229
+   Compiling version_check v0.9.5
+   Compiling either v1.18.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling itertools v0.14.0
+   Compiling generic-array v0.14.7
+   Compiling signal-hook v0.3.18
+   Compiling static_assertions v1.1.0
+   Compiling instability v0.3.10
+   Compiling rustix v1.1.4
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling convert_case v0.10.0
+   Compiling castaway v0.2.4
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling unicode-truncate v2.0.1
+   Compiling zeroize v1.9.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling typenum v1.20.1
+   Compiling objc2 v0.6.4
+   Compiling scopeguard v1.2.0
+   Compiling indoc v2.0.7
+   Compiling critical-section v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling num-conv v0.2.2
+   Compiling utf8parse v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling untrusted v0.9.0
+   Compiling httparse v1.10.1
+   Compiling objc2-encode v4.1.0
+   Compiling litrs v1.0.0
+   Compiling deranged v0.5.8
+   Compiling compact_str v0.9.1
+   Compiling thiserror v1.0.69
+   Compiling vcpkg v0.2.15
+   Compiling cfg_aliases v0.2.2
+   Compiling pkg-config v0.3.34
+   Compiling core-foundation-sys v0.8.7
+   Compiling time-core v0.1.9
+   Compiling cfg_aliases v0.1.1
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling nix v0.31.3
+   Compiling libsqlite3-sys v0.38.2
+   Compiling time v0.3.55
+   Compiling anstyle-parse v1.0.0
+   Compiling darling_core v0.20.11
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling rustls v0.23.43
+   Compiling memchr v2.8.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling anyhow v1.0.104
+   Compiling regex-syntax v0.8.11
+   Compiling thiserror-impl v2.0.20
+   Compiling anstyle-query v1.1.5
+   Compiling bytes v1.12.1
+   Compiling colorchoice v1.0.5
+   Compiling getrandom v0.4.3
+   Compiling zmij v1.0.23
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling block-buffer v0.10.4
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling regex-automata v0.4.18
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling arrayvec v0.7.8
+   Compiling winnow v1.0.4
+   Compiling derive_more v2.1.1
+   Compiling darling_macro v0.20.11
+   Compiling base64 v0.23.1
+   Compiling kasuari v0.4.12
+   Compiling darling v0.20.11
+   Compiling serde v1.0.229
+   Compiling clap_lex v1.1.0
+   Compiling rustls-webpki v0.103.15
+   Compiling crossterm v0.29.0
+   Compiling lazy_static v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling subtle v2.6.1
+   Compiling pin-project-lite v0.2.17
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.5.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling strum v0.28.0
+   Compiling filedescriptor v0.8.3
+   Compiling matchers v0.2.0
+   Compiling clap_builder v4.6.6
+   Compiling ureq-proto v0.6.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling vte v0.15.0
+   Compiling digest v0.10.7
+   Compiling security-framework v3.7.0
+   Compiling dispatch2 v0.3.1
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling ratatui-core v0.1.2
+   Compiling tracing-log v0.2.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling percent-encoding v2.3.2
+   Compiling shell-words v1.1.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling downcast-rs v1.2.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-off-2-524-2/crates/glasshouse)
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-iterator v0.3.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling winnow v0.7.15
+   Compiling portable-pty v0.9.0
+   Compiling sha2 v0.10.9
+   Compiling rusqlite v0.40.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling keyring v3.6.3
+   Compiling ctrlc v3.5.2
+   Compiling vt100 v0.16.2
+   Compiling ureq v3.4.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling clap v4.6.6
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.41s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s
+
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhdty-aox — resume it with:  pane --resume tlhdty-aox
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: 1 item(s) derived from the request
+session tlhdty-aox — resume it with:  pane --resume tlhdty-aox
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling rustversion v1.0.23
+   Compiling equivalent v1.0.2
+   Compiling cc v1.4.4
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling foldhash v0.2.0
+   Compiling ident_case v1.0.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling once_cell v1.21.4
+   Compiling either v1.18.0
+   Compiling unicode-width v0.2.2
+   Compiling version_check v0.9.5
+   Compiling smallvec v1.15.2
+   Compiling serde_core v1.0.229
+   Compiling hashbrown v0.17.1
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling instability v0.3.10
+   Compiling parking_lot_core v0.9.12
+   Compiling static_assertions v1.1.0
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling rustix v1.1.4
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling unicode-truncate v2.0.1
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling convert_case v0.10.0
+   Compiling typenum v1.20.1
+   Compiling indoc v2.0.7
+   Compiling objc2 v0.6.4
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling critical-section v1.2.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling darling_core v0.20.11
+   Compiling lock_api v0.4.14
+   Compiling mio v1.2.2
+   Compiling thiserror-impl v2.0.20
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling powerfmt v0.2.0
+   Compiling httparse v1.10.1
+   Compiling time-core v0.1.9
+   Compiling untrusted v0.9.0
+   Compiling pkg-config v0.3.34
+   Compiling num-conv v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling cfg_aliases v0.2.2
+   Compiling core-foundation-sys v0.8.7
+   Compiling objc2-encode v4.1.0
+   Compiling litrs v1.0.0
+   Compiling cfg_aliases v0.1.1
+   Compiling utf8parse v0.2.2
+   Compiling deranged v0.5.8
+   Compiling thiserror v1.0.69
+   Compiling darling_macro v0.20.11
+   Compiling anstyle-parse v1.0.0
+   Compiling derive_more v2.1.1
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling darling v0.20.11
+   Compiling libsqlite3-sys v0.38.2
+   Compiling nix v0.31.3
+   Compiling time v0.3.55
+   Compiling compact_str v0.9.1
+   Compiling thiserror-impl v1.0.69
+   Compiling strum v0.28.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling kasuari v0.4.12
+   Compiling line-clipping v0.3.8
+   Compiling getrandom v0.4.3
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling rustls v0.23.43
+   Compiling anyhow v1.0.104
+   Compiling anstyle v1.0.14
+   Compiling bytes v1.12.1
+   Compiling colorchoice v1.0.5
+   Compiling regex-syntax v0.8.11
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling anstream v1.0.0
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling block2 v0.6.2
+   Compiling rustls-webpki v0.103.15
+   Compiling regex-automata v0.4.18
+   Compiling ratatui-core v0.1.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling tracing-attributes v0.1.31
+   Compiling serde_json v1.0.151
+   Compiling arrayvec v0.7.8
+   Compiling winnow v1.0.4
+   Compiling option-ext v0.2.0
+   Compiling serde v1.0.229
+   Compiling lazy_static v1.5.0
+   Compiling base64 v0.23.1
+   Compiling pin-project-lite v0.2.17
+   Compiling clap_lex v1.1.0
+   Compiling subtle v2.6.1
+   Compiling tracing v0.1.44
+   Compiling clap_builder v4.6.6
+   Compiling ureq-proto v0.6.1
+   Compiling filedescriptor v0.8.3
+   Compiling sharded-slab v0.1.7
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling dirs-sys v0.5.0
+   Compiling vte v0.15.0
+   Compiling matchers v0.2.0
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling utf8-zero v0.8.1
+   Compiling downcast-rs v1.2.1
+   Compiling shell-words v1.1.1
+   Compiling percent-encoding v2.3.2
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling winnow v0.7.15
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-off-3-524-3/crates/glasshouse)
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling ureq v3.4.0
+   Compiling clap v4.6.6
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling vt100 v0.16.2
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling ratatui-macros v0.7.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling fastrand v2.5.0
+   Compiling ratatui v0.30.2
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.40.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.88s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test the_dirty_tree_observer_writes_observed_and_never_referenced ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhe0u-kzq — resume it with:  pane --resume tlhe0u-kzq
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.68), complexity needs_exploration (0.83), 667 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhe0u-kzq — resume it with:  pane --resume tlhe0u-kzq
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling heck v0.5.0
+   Compiling foldhash v0.2.0
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling ident_case v1.0.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling version_check v0.9.5
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling either v1.18.0
+   Compiling serde_core v1.0.229
+   Compiling unicode-width v0.2.2
+   Compiling hashbrown v0.17.1
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling instability v0.3.10
+   Compiling ryu v1.0.23
+   Compiling static_assertions v1.1.0
+   Compiling signal-hook v0.3.18
+   Compiling rustix v1.1.4
+   Compiling parking_lot_core v0.9.12
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling convert_case v0.10.0
+   Compiling critical-section v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling typenum v1.20.1
+   Compiling zeroize v1.9.0
+   Compiling indoc v2.0.7
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.2
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.9
+   Compiling core-foundation-sys v0.8.7
+   Compiling untrusted v0.9.0
+   Compiling darling_core v0.20.11
+   Compiling objc2-encode v4.1.0
+   Compiling pkg-config v0.3.34
+   Compiling litrs v1.0.0
+   Compiling deranged v0.5.8
+   Compiling cfg_aliases v0.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling httparse v1.10.1
+   Compiling thiserror-impl v2.0.20
+   Compiling vcpkg v0.2.15
+   Compiling num-conv v0.2.2
+   Compiling thiserror v1.0.69
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling time v0.3.55
+   Compiling document-features v0.2.12
+   Compiling libsqlite3-sys v0.38.2
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling nix v0.28.0
+   Compiling compact_str v0.9.1
+   Compiling darling_macro v0.20.11
+   Compiling nix v0.31.3
+   Compiling darling v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling memchr v2.8.3
+   Compiling bytes v1.12.1
+   Compiling anyhow v1.0.104
+   Compiling rustls v0.23.43
+   Compiling strum v0.28.0
+   Compiling regex-syntax v0.8.11
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling http v1.5.0
+   Compiling anstream v1.0.0
+   Compiling kasuari v0.4.12
+   Compiling block2 v0.6.2
+   Compiling regex-automata v0.4.18
+   Compiling crossterm v0.29.0
+   Compiling ratatui-core v0.1.2
+   Compiling rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling option-ext v0.2.0
+   Compiling serde v1.0.229
+   Compiling base64 v0.23.1
+   Compiling winnow v1.0.4
+   Compiling subtle v2.6.1
+   Compiling arrayvec v0.7.8
+   Compiling pin-project-lite v0.2.17
+   Compiling serde_json v1.0.151
+   Compiling lazy_static v1.5.0
+   Compiling clap_lex v1.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling vte v0.15.0
+   Compiling clap_builder v4.6.6
+   Compiling ureq-proto v0.6.1
+   Compiling tracing v0.1.44
+   Compiling security-framework v3.7.0
+   Compiling dirs-sys v0.5.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling digest v0.10.7
+   Compiling filedescriptor v0.8.3
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling ratatui-crossterm v0.1.2
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-iterator v0.3.0
+   Compiling downcast-rs v1.2.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling percent-encoding v2.3.2
+   Compiling shell-words v1.1.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling winnow v0.7.15
+   Compiling utf8-zero v0.8.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-shadow-1-524-4/crates/glasshouse)
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling ureq v3.4.0
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ratatui-macros v0.7.2
+   Compiling fastrand v2.5.0
+   Compiling ratatui v0.30.2
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.40.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.56s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... FAILED
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+failures:
+
+---- every_association_this_build_writes_is_observed_and_never_referenced stdout ----
+
+thread 'every_association_this_build_writes_is_observed_and_never_referenced' (493920046) panicked at crates/glasshouse/tests/memory_file_observer.rs:368:5:
+assertion `left == right` failed: `referenced` is line 1139's word and this build must not be able to store it
+  left: Some(Referenced)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_association_this_build_writes_is_observed_and_never_referenced
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+error: test failed, to rerun pass `--test memory_file_observer`
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhecu-gfk — resume it with:  pane --resume tlhecu-gfk
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.66), complexity needs_exploration (0.88), 574 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhecu-gfk — resume it with:  pane --resume tlhecu-gfk
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling heck v0.5.0
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling fnv v1.0.7
+   Compiling either v1.18.0
+   Compiling serde_core v1.0.229
+   Compiling unicode-width v0.2.2
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling itertools v0.14.0
+   Compiling static_assertions v1.1.0
+   Compiling generic-array v0.14.7
+   Compiling rustix v1.1.4
+   Compiling instability v0.3.10
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling parking_lot_core v0.9.12
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling convert_case v0.10.0
+   Compiling errno v0.3.14
+   Compiling castaway v0.2.4
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling unicode-truncate v2.0.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling objc2 v0.6.4
+   Compiling indoc v2.0.7
+   Compiling typenum v1.20.1
+   Compiling critical-section v1.2.0
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling httparse v1.10.1
+   Compiling litrs v1.0.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling pkg-config v0.3.34
+   Compiling powerfmt v0.2.0
+   Compiling cfg_aliases v0.2.2
+   Compiling time-core v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling utf8parse v0.2.2
+   Compiling thiserror v1.0.69
+   Compiling objc2-encode v4.1.0
+   Compiling deranged v0.5.8
+   Compiling cfg_aliases v0.1.1
+   Compiling vcpkg v0.2.15
+   Compiling untrusted v0.9.0
+   Compiling nix v0.28.0
+   Compiling darling_core v0.20.11
+   Compiling anstyle-parse v1.0.0
+   Compiling document-features v0.2.12
+   Compiling libsqlite3-sys v0.38.2
+   Compiling nix v0.31.3
+   Compiling time v0.3.55
+   Compiling thiserror-impl v2.0.20
+   Compiling compact_str v0.9.1
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling getrandom v0.4.3
+   Compiling regex-syntax v0.8.11
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling zmij v1.0.23
+   Compiling bytes v1.12.1
+   Compiling anyhow v1.0.104
+   Compiling darling_macro v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling rustls v0.23.43
+   Compiling memchr v2.8.3
+   Compiling darling v0.20.11
+   Compiling anstyle-query v1.1.5
+   Compiling regex-automata v0.4.18
+   Compiling anstream v1.0.0
+   Compiling strum v0.28.0
+   Compiling http v1.5.0
+   Compiling block2 v0.6.2
+   Compiling rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling kasuari v0.4.12
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling crossterm v0.29.0
+   Compiling base64 v0.23.1
+   Compiling arrayvec v0.7.8
+   Compiling subtle v2.6.1
+   Compiling clap_lex v1.1.0
+   Compiling winnow v1.0.4
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling pin-project-lite v0.2.17
+   Compiling lazy_static v1.5.0
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.5.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling ratatui-core v0.1.2
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling filedescriptor v0.8.3
+   Compiling clap_builder v4.6.6
+   Compiling vte v0.15.0
+   Compiling ureq-proto v0.6.1
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling dispatch2 v0.3.1
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling downcast-rs v1.2.1
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-iterator v0.3.0
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-shadow-2-524-5/crates/glasshouse)
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling winnow v0.7.15
+   Compiling shell-words v1.1.1
+   Compiling percent-encoding v2.3.2
+   Compiling portable-pty v0.9.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling ureq v3.4.0
+   Compiling clap v4.6.6
+   Compiling sha2 v0.10.9
+   Compiling keyring v3.6.3
+   Compiling rusqlite v0.40.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ctrlc v3.5.2
+   Compiling vt100 v0.16.2
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.65s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... FAILED
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+failures:
+
+---- every_association_this_build_writes_is_observed_and_never_referenced stdout ----
+
+thread 'every_association_this_build_writes_is_observed_and_never_referenced' (494057750) panicked at crates/glasshouse/tests/memory_file_observer.rs:368:5:
+assertion `left == right` failed: `referenced` is line 1139's word and this build must not be able to store it
+  left: Some(Referenced)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_association_this_build_writes_is_observed_and_never_referenced
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+error: test failed, to rerun pass `--test memory_file_observer`
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhehg-23dz — resume it with:  pane --resume tlhehg-23dz
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.63), complexity needs_exploration (0.86), 573 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhehg-23dz — resume it with:  pane --resume tlhehg-23dz
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling allocator-api2 v0.2.21
+   Compiling rustversion v1.0.23
+   Compiling cc v1.4.4
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling heck v0.5.0
+   Compiling fnv v1.0.7
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.20
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling either v1.18.0
+   Compiling once_cell v1.21.4
+   Compiling unicode-width v0.2.2
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.16.1
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling signal-hook v0.3.18
+   Compiling instability v0.3.10
+   Compiling rustix v1.1.4
+   Compiling static_assertions v1.1.0
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling typenum v1.20.1
+   Compiling scopeguard v1.2.0
+   Compiling critical-section v1.2.0
+   Compiling indoc v2.0.7
+   Compiling zeroize v1.9.0
+   Compiling objc2 v0.6.4
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling deranged v0.5.8
+   Compiling pkg-config v0.3.34
+   Compiling darling_core v0.20.11
+   Compiling thiserror v1.0.69
+   Compiling litrs v1.0.0
+   Compiling utf8parse v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling untrusted v0.9.0
+   Compiling time-core v0.1.9
+   Compiling powerfmt v0.2.0
+   Compiling thiserror-impl v2.0.20
+   Compiling num-conv v0.2.2
+   Compiling httparse v1.10.1
+   Compiling objc2-encode v4.1.0
+   Compiling cfg_aliases v0.2.2
+   Compiling core-foundation-sys v0.8.7
+   Compiling libsqlite3-sys v0.38.2
+   Compiling nix v0.31.3
+   Compiling time v0.3.55
+   Compiling document-features v0.2.12
+   Compiling anstyle-parse v1.0.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling compact_str v0.9.1
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling nix v0.28.0
+   Compiling derive_more v2.1.1
+   Compiling tracing-core v0.1.36
+   Compiling darling_macro v0.20.11
+   Compiling line-clipping v0.3.8
+   Compiling anstyle-query v1.1.5
+   Compiling zmij v1.0.23
+   Compiling rustls v0.23.43
+   Compiling anyhow v1.0.104
+   Compiling getrandom v0.4.3
+   Compiling darling v0.20.11
+   Compiling colorchoice v1.0.5
+   Compiling memchr v2.8.3
+   Compiling bytes v1.12.1
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.11
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling block2 v0.6.2
+   Compiling strum v0.28.0
+   Compiling anstream v1.0.0
+   Compiling http v1.5.0
+   Compiling kasuari v0.4.12
+   Compiling crossterm v0.29.0
+   Compiling regex-automata v0.4.18
+   Compiling rustls-webpki v0.103.15
+   Compiling ratatui-core v0.1.2
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling winnow v1.0.4
+   Compiling serde v1.0.229
+   Compiling option-ext v0.2.0
+   Compiling subtle v2.6.1
+   Compiling pin-project-lite v0.2.17
+   Compiling base64 v0.23.1
+   Compiling arrayvec v0.7.8
+   Compiling lazy_static v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling clap_lex v1.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling vte v0.15.0
+   Compiling ureq-proto v0.6.1
+   Compiling clap_builder v4.6.6
+   Compiling tracing v0.1.44
+   Compiling dirs-sys v0.5.0
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling filedescriptor v0.8.3
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling percent-encoding v2.3.2
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-shadow-3-524-6/crates/glasshouse)
+   Compiling shell-words v1.1.1
+   Compiling downcast-rs v1.2.1
+   Compiling fallible-iterator v0.3.0
+   Compiling winnow v0.7.15
+   Compiling nu-ansi-term v0.50.3
+   Compiling utf8-zero v0.8.1
+   Compiling clap v4.6.6
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0
+   Compiling sha2 v0.10.9
+   Compiling ureq v3.4.0
+   Compiling ctrlc v3.5.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.79s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhevv-pm0 — resume it with:  pane --resume tlhevv-pm0
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.65), complexity needs_exploration (0.83), 589 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhevv-pm0 — resume it with:  pane --resume tlhevv-pm0
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling heck v0.5.0
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling cc v1.4.4
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling either v1.18.0
+   Compiling serde_core v1.0.229
+   Compiling unicode-width v0.2.2
+   Compiling smallvec v1.15.2
+   Compiling version_check v0.9.5
+   Compiling once_cell v1.21.4
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling ryu v1.0.23
+   Compiling generic-array v0.14.7
+   Compiling static_assertions v1.1.0
+   Compiling parking_lot_core v0.9.12
+   Compiling instability v0.3.10
+   Compiling rustix v1.1.4
+   Compiling signal-hook v0.3.18
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling lru v0.18.2
+   Compiling convert_case v0.10.0
+   Compiling critical-section v1.2.0
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling indoc v2.0.7
+   Compiling objc2 v0.6.4
+   Compiling typenum v1.20.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling castaway v0.2.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.2
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling powerfmt v0.2.0
+   Compiling thiserror v1.0.69
+   Compiling vcpkg v0.2.15
+   Compiling litrs v1.0.0
+   Compiling deranged v0.5.8
+   Compiling cfg_aliases v0.1.1
+   Compiling untrusted v0.9.0
+   Compiling num-conv v0.2.2
+   Compiling pkg-config v0.3.34
+   Compiling httparse v1.10.1
+   Compiling utf8parse v0.2.2
+   Compiling time-core v0.1.9
+   Compiling core-foundation-sys v0.8.7
+   Compiling compact_str v0.9.1
+   Compiling cfg_aliases v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling time v0.3.55
+   Compiling anstyle-parse v1.0.0
+   Compiling nix v0.31.3
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling anstyle-query v1.1.5
+   Compiling zmij v1.0.23
+   Compiling colorchoice v1.0.5
+   Compiling darling_core v0.20.11
+   Compiling anyhow v1.0.104
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling bytes v1.12.1
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.4.3
+   Compiling rustls v0.23.43
+   Compiling thiserror-impl v2.0.20
+   Compiling regex-syntax v0.8.11
+   Compiling http v1.5.0
+   Compiling block2 v0.6.2
+   Compiling anstream v1.0.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling serde v1.0.229
+   Compiling arrayvec v0.7.8
+   Compiling regex-automata v0.4.18
+   Compiling serde_json v1.0.151
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling tracing-attributes v0.1.31
+   Compiling clap_lex v1.1.0
+   Compiling lazy_static v1.5.0
+   Compiling winnow v1.0.4
+   Compiling subtle v2.6.1
+   Compiling option-ext v0.2.0
+   Compiling derive_more v2.1.1
+   Compiling base64 v0.23.1
+   Compiling darling_macro v0.20.11
+   Compiling kasuari v0.4.12
+   Compiling pin-project-lite v0.2.17
+   Compiling rustls-webpki v0.103.15
+   Compiling ureq-proto v0.6.1
+   Compiling darling v0.20.11
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling crossterm v0.29.0
+   Compiling tracing v0.1.44
+   Compiling dirs-sys v0.5.0
+   Compiling matchers v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling strum v0.28.0
+   Compiling clap_builder v4.6.6
+   Compiling security-framework v3.7.0
+   Compiling filedescriptor v0.8.3
+   Compiling vte v0.15.0
+   Compiling digest v0.10.7
+   Compiling dispatch2 v0.3.1
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling tracing-log v0.2.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling downcast-rs v1.2.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling ratatui-core v0.1.2
+   Compiling shell-words v1.1.1
+   Compiling percent-encoding v2.3.2
+   Compiling utf8-zero v0.8.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-on-1-524-7/crates/glasshouse)
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling winnow v0.7.15
+   Compiling fallible-iterator v0.3.0
+   Compiling portable-pty v0.9.0
+   Compiling ureq v3.4.0
+   Compiling sha2 v0.10.9
+   Compiling tracing-subscriber v0.3.23
+   Compiling ctrlc v3.5.2
+   Compiling rusqlite v0.40.2
+   Compiling vt100 v0.16.2
+   Compiling clap v4.6.6
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.60s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test every_association_the_observed_writer_stores_says_observed ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhf3w-1avp — resume it with:  pane --resume tlhf3w-1avp
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.64), complexity needs_exploration (0.82), 594 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: 1 item(s) derived from the request
+session tlhf3w-1avp — resume it with:  pane --resume tlhf3w-1avp
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling foldhash v0.2.0
+   Compiling cc v1.4.4
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling equivalent v1.0.2
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.20
+   Compiling fnv v1.0.7
+   Compiling serde_core v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling unicode-width v0.2.2
+   Compiling either v1.18.0
+   Compiling smallvec v1.15.2
+   Compiling hashbrown v0.17.1
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling signal-hook v0.3.18
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling static_assertions v1.1.0
+   Compiling instability v0.3.10
+   Compiling rustix v1.1.4
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling convert_case v0.10.0
+   Compiling castaway v0.2.4
+   Compiling zeroize v1.9.0
+   Compiling objc2 v0.6.4
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling indoc v2.0.7
+   Compiling critical-section v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling darling_core v0.20.11
+   Compiling litrs v1.0.0
+   Compiling powerfmt v0.2.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling num-conv v0.2.2
+   Compiling pkg-config v0.3.34
+   Compiling cfg_aliases v0.1.1
+   Compiling deranged v0.5.8
+   Compiling time-core v0.1.9
+   Compiling objc2-encode v4.1.0
+   Compiling utf8parse v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling thiserror-impl v2.0.20
+   Compiling untrusted v0.9.0
+   Compiling thiserror v1.0.69
+   Compiling httparse v1.10.1
+   Compiling cfg_aliases v0.2.2
+   Compiling nix v0.31.3
+   Compiling libsqlite3-sys v0.38.2
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling time v0.3.55
+   Compiling compact_str v0.9.1
+   Compiling darling_macro v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling anstyle-parse v1.0.0
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling darling v0.20.11
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling memchr v2.8.3
+   Compiling anyhow v1.0.104
+   Compiling zmij v1.0.23
+   Compiling colorchoice v1.0.5
+   Compiling getrandom v0.4.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling strum v0.28.0
+   Compiling bytes v1.12.1
+   Compiling regex-syntax v0.8.11
+   Compiling rustls v0.23.43
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling kasuari v0.4.12
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling regex-automata v0.4.18
+   Compiling ratatui-core v0.1.2
+   Compiling rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling arrayvec v0.7.8
+   Compiling winnow v1.0.4
+   Compiling base64 v0.23.1
+   Compiling clap_lex v1.1.0
+   Compiling subtle v2.6.1
+   Compiling lazy_static v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling pin-project-lite v0.2.17
+   Compiling option-ext v0.2.0
+   Compiling serde v1.0.229
+   Compiling tracing v0.1.44
+   Compiling sharded-slab v0.1.7
+   Compiling dirs-sys v0.5.0
+   Compiling ureq-proto v0.6.1
+   Compiling filedescriptor v0.8.3
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling clap_builder v4.6.6
+   Compiling vte v0.15.0
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling winnow v0.7.15
+   Compiling nu-ansi-term v0.50.3
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-on-2-524-8/crates/glasshouse)
+   Compiling downcast-rs v1.2.1
+   Compiling percent-encoding v2.3.2
+   Compiling shell-words v1.1.1
+   Compiling fallible-iterator v0.3.0
+   Compiling utf8-zero v0.8.1
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling ureq v3.4.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling sha2 v0.10.9
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling vt100 v0.16.2
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling ratatui-macros v0.7.2
+   Compiling fastrand v2.5.0
+   Compiling ratatui v0.30.2
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.40.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.41s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... FAILED
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+failures:
+
+---- every_association_this_build_writes_is_observed_and_never_referenced stdout ----
+
+thread 'every_association_this_build_writes_is_observed_and_never_referenced' (494842779) panicked at crates/glasshouse/tests/memory_file_observer.rs:368:5:
+assertion `left == right` failed: `referenced` is line 1139's word and this build must not be able to store it
+  left: Some(Referenced)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_association_this_build_writes_is_observed_and_never_referenced
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+
+error: test failed, to rerun pass `--test memory_file_observer`
+Preparing worktree (detached HEAD 5d46aeee)
+HEAD is now at 5d46aeee refactor(routing): split routing/evidence into ledger, readers, signals, joins and tests -- Phase 59 line 2051; blast-radius no longer takes a src-side tests/ file for an integration crate; the dogfooding lane's file; batch 95 checkpoint -- 1268/1355
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhf97-13ir — resume it with:  pane --resume tlhf97-13ir
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent run (0.63), complexity needs_exploration (0.87), 603 ms
+preflight: preflight: run (asks for verification with no checks configured; the decision model reads this request as needing exploration)
+acceptance: 1 item(s) derived from the request
+session tlhf97-13ir — resume it with:  pane --resume tlhf97-13ir
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling rustversion v1.0.23
+   Compiling heck v0.5.0
+   Compiling cc v1.4.4
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.20
+   Compiling fnv v1.0.7
+   Compiling either v1.18.0
+   Compiling unicode-width v0.2.2
+   Compiling version_check v0.9.5
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling serde_core v1.0.229
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling generic-array v0.14.7
+   Compiling instability v0.3.10
+   Compiling static_assertions v1.1.0
+   Compiling rustix v1.1.4
+   Compiling signal-hook v0.3.18
+   Compiling ryu v1.0.23
+   Compiling parking_lot_core v0.9.12
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling convert_case v0.10.0
+   Compiling typenum v1.20.1
+   Compiling objc2 v0.6.4
+   Compiling critical-section v1.2.0
+   Compiling indoc v2.0.7
+   Compiling zeroize v1.9.0
+   Compiling scopeguard v1.2.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling vcpkg v0.2.15
+   Compiling cfg_aliases v0.2.2
+   Compiling httparse v1.10.1
+   Compiling darling_core v0.20.11
+   Compiling core-foundation-sys v0.8.7
+   Compiling utf8parse v0.2.2
+   Compiling litrs v1.0.0
+   Compiling num-conv v0.2.2
+   Compiling time-core v0.1.9
+   Compiling thiserror v1.0.69
+   Compiling powerfmt v0.2.0
+   Compiling thiserror-impl v2.0.20
+   Compiling pkg-config v0.3.34
+   Compiling untrusted v0.9.0
+   Compiling cfg_aliases v0.1.1
+   Compiling objc2-encode v4.1.0
+   Compiling deranged v0.5.8
+   Compiling nix v0.28.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling parking_lot v0.12.5
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling document-features v0.2.12
+   Compiling compact_str v0.9.1
+   Compiling anstyle-parse v1.0.0
+   Compiling time v0.3.55
+   Compiling darling_macro v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling signal-hook-mio v0.2.5
+   Compiling nix v0.31.3
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling darling v0.20.11
+   Compiling colorchoice v1.0.5
+   Compiling getrandom v0.4.3
+   Compiling rustls v0.23.43
+   Compiling anyhow v1.0.104
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling memchr v2.8.3
+   Compiling regex-syntax v0.8.11
+   Compiling kasuari v0.4.12
+   Compiling bytes v1.12.1
+   Compiling anstyle-query v1.1.5
+   Compiling zmij v1.0.23
+   Compiling block2 v0.6.2
+   Compiling strum v0.28.0
+   Compiling anstream v1.0.0
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling ratatui-core v0.1.2
+   Compiling rustls-webpki v0.103.15
+   Compiling regex-automata v0.4.18
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling serde v1.0.229
+   Compiling base64 v0.23.1
+   Compiling pin-project-lite v0.2.17
+   Compiling arrayvec v0.7.8
+   Compiling serde_json v1.0.151
+   Compiling lazy_static v1.5.0
+   Compiling clap_lex v1.1.0
+   Compiling option-ext v0.2.0
+   Compiling subtle v2.6.1
+   Compiling winnow v1.0.4
+   Compiling dirs-sys v0.5.0
+   Compiling clap_builder v4.6.6
+   Compiling sharded-slab v0.1.7
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling vte v0.15.0
+   Compiling ureq-proto v0.6.1
+   Compiling tracing v0.1.44
+   Compiling filedescriptor v0.8.3
+   Compiling matchers v0.2.0
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling utf8-zero v0.8.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-iterator v0.3.0
+   Compiling shell-words v1.1.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L2-pane-decisions-on-3-524-9/crates/glasshouse)
+   Compiling percent-encoding v2.3.2
+   Compiling winnow v0.7.15
+   Compiling downcast-rs v1.2.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling portable-pty v0.9.0
+   Compiling rusqlite v0.40.2
+   Compiling sha2 v0.10.9
+   Compiling clap v4.6.6
+   Compiling keyring v3.6.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling ctrlc v3.5.2
+   Compiling vt100 v0.16.2
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling ureq v3.4.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.54s
+     Running tests/memory_file_observer.rs (target/debug/deps/memory_file_observer-787f6a5c858e7b28)
+
+running 9 tests
+test only_a_repo_relative_slash_separated_path_reaches_the_column ... ok
+test an_empty_side_of_the_association_writes_nothing ... ok
+test a_refused_path_leaves_no_row_and_an_accepted_one_is_stored_canonically ... ok
+test an_association_from_another_project_is_refused_by_the_schema ... ok
+test a_project_with_no_index_records_no_files_and_still_extracts ... ok
+test every_association_this_build_writes_is_observed_and_never_referenced ... FAILED
+test a_memory_extracted_against_a_clean_tree_records_no_files ... ok
+test two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations ... ok
+test two_projects_with_the_same_path_dirty_never_see_each_others_memories ... ok
+
+failures:
+
+---- every_association_this_build_writes_is_observed_and_never_referenced stdout ----
+
+thread 'every_association_this_build_writes_is_observed_and_never_referenced' (495211561) panicked at crates/glasshouse/tests/memory_file_observer.rs:368:5:
+assertion `left == right` failed: `referenced` is line 1139's word and this build must not be able to store it
+  left: Some(Referenced)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_association_this_build_writes_is_observed_and_never_referenced
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s
+
+error: test failed, to rerun pass `--test memory_file_observer`
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhfkf-vmy — resume it with:  pane --resume tlhfkf-vmy
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhfkf-vmy — resume it with:  pane --resume tlhfkf-vmy
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling cc v1.4.4
+   Compiling heck v0.5.0
+   Compiling foldhash v0.2.0
+   Compiling rustversion v1.0.23
+   Compiling thiserror v2.0.20
+   Compiling fnv v1.0.7
+   Compiling ident_case v1.0.1
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling unicode-width v0.2.2
+   Compiling smallvec v1.15.2
+   Compiling either v1.18.0
+   Compiling once_cell v1.21.4
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling itertools v0.14.0
+   Compiling instability v0.3.10
+   Compiling signal-hook v0.3.18
+   Compiling rustix v1.1.4
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling static_assertions v1.1.0
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling convert_case v0.10.0
+   Compiling unicode-truncate v2.0.1
+   Compiling typenum v1.20.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling indoc v2.0.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling scopeguard v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling critical-section v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling mio v1.2.2
+   Compiling untrusted v0.9.0
+   Compiling objc2-encode v4.1.0
+   Compiling pkg-config v0.3.34
+   Compiling litrs v1.0.0
+   Compiling cfg_aliases v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling deranged v0.5.8
+   Compiling thiserror v1.0.69
+   Compiling utf8parse v0.2.2
+   Compiling compact_str v0.9.1
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.9
+   Compiling httparse v1.10.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling cfg_aliases v0.1.1
+   Compiling num-conv v0.2.2
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling anstyle-parse v1.0.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling nix v0.31.3
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling regex-syntax v0.8.11
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling darling_core v0.20.11
+   Compiling zmij v1.0.23
+   Compiling rustls v0.23.43
+   Compiling anyhow v1.0.104
+   Compiling time v0.3.55
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.4.3
+   Compiling colorchoice v1.0.5
+   Compiling bytes v1.12.1
+   Compiling thiserror-impl v2.0.20
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling regex-automata v0.4.18
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling tracing-attributes v0.1.31
+   Compiling base64 v0.23.1
+   Compiling serde_json v1.0.151
+   Compiling subtle v2.6.1
+   Compiling clap_lex v1.1.0
+   Compiling kasuari v0.4.12
+   Compiling derive_more v2.1.1
+   Compiling darling_macro v0.20.11
+   Compiling option-ext v0.2.0
+   Compiling winnow v1.0.4
+   Compiling pin-project-lite v0.2.17
+   Compiling arrayvec v0.7.8
+   Compiling rustls-webpki v0.103.15
+   Compiling serde v1.0.229
+   Compiling darling v0.20.11
+   Compiling lazy_static v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling sharded-slab v0.1.7
+   Compiling vte v0.15.0
+   Compiling tracing v0.1.44
+   Compiling matchers v0.2.0
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling strum v0.28.0
+   Compiling dirs-sys v0.5.0
+   Compiling clap_builder v4.6.6
+   Compiling filedescriptor v0.8.3
+   Compiling ureq-proto v0.6.1
+   Compiling digest v0.10.7
+   Compiling security-framework v3.7.0
+   Compiling dispatch2 v0.3.1
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling tracing-log v0.2.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling percent-encoding v2.3.2
+   Compiling ratatui-core v0.1.2
+   Compiling utf8-zero v0.8.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-off-1-524-10/crates/glasshouse)
+   Compiling fallible-iterator v0.3.0
+   Compiling winnow v0.7.15
+   Compiling shell-words v1.1.1
+   Compiling downcast-rs v1.2.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling portable-pty v0.9.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling rusqlite v0.40.2
+   Compiling ureq v3.4.0
+   Compiling sha2 v0.10.9
+   Compiling keyring v3.6.3
+   Compiling clap v4.6.6
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling ctrlc v3.5.2
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+warning: unused import: `MIN_SAMPLE_FOR_SUMMARY`
+     --> crates/glasshouse/src/main.rs:14768:58
+      |
+14768 |         HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
+      |                                                          ^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `replay`
+     --> crates/glasshouse/src/main.rs:14764:5
+      |
+14764 |     replay: glasshouse::routing::evidence::HeadroomReplayCounts,
+      |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_replay`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `glasshouse` (bin "glasshouse") generated 2 warnings (run `cargo fix --bin "glasshouse" -p glasshouse` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.73s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhfsf-1it3 — resume it with:  pane --resume tlhfsf-1it3
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhfsf-1it3 — resume it with:  pane --resume tlhfsf-1it3
+request failed: http status: 429 — {"type":"error","error":{"type":"rate_limit_error","message":"All credentials for model claude-sonnet-4-6 are cooling down via provider claude (last error: rate_limit_error: Usage credits are required for long context requests.)"}}
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling cc v1.4.4
+   Compiling rustversion v1.0.23
+   Compiling heck v0.5.0
+   Compiling thiserror v2.0.20
+   Compiling fnv v1.0.7
+   Compiling ident_case v1.0.1
+   Compiling either v1.18.0
+   Compiling serde_core v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling version_check v0.9.5
+   Compiling unicode-width v0.2.2
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling instability v0.3.10
+   Compiling generic-array v0.14.7
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook v0.3.18
+   Compiling ryu v1.0.23
+   Compiling rustix v1.1.4
+   Compiling static_assertions v1.1.0
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling convert_case v0.10.0
+   Compiling indoc v2.0.7
+   Compiling zeroize v1.9.0
+   Compiling critical-section v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling num_threads v0.1.7
+   Compiling darling_core v0.20.11
+   Compiling mio v1.2.2
+   Compiling getrandom v0.2.17
+   Compiling deranged v0.5.8
+   Compiling thiserror-impl v2.0.20
+   Compiling thiserror v1.0.69
+   Compiling untrusted v0.9.0
+   Compiling time-core v0.1.9
+   Compiling utf8parse v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling cfg_aliases v0.1.1
+   Compiling num-conv v0.2.2
+   Compiling litrs v1.0.0
+   Compiling httparse v1.10.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling pkg-config v0.3.34
+   Compiling powerfmt v0.2.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling cfg_aliases v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling document-features v0.2.12
+   Compiling nix v0.31.3
+   Compiling libsqlite3-sys v0.38.2
+   Compiling darling_macro v0.20.11
+   Compiling compact_str v0.9.1
+   Compiling time v0.3.55
+   Compiling thiserror-impl v1.0.69
+   Compiling nix v0.28.0
+   Compiling anstyle-parse v1.0.0
+   Compiling derive_more v2.1.1
+   Compiling darling v0.20.11
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling kasuari v0.4.12
+   Compiling regex-syntax v0.8.11
+   Compiling rustls v0.23.43
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anyhow v1.0.104
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling bytes v1.12.1
+   Compiling strum v0.28.0
+   Compiling getrandom v0.4.3
+   Compiling zmij v1.0.23
+   Compiling colorchoice v1.0.5
+   Compiling memchr v2.8.3
+   Compiling anstream v1.0.0
+   Compiling regex-automata v0.4.18
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling block2 v0.6.2
+   Compiling rustls-webpki v0.103.15
+   Compiling ratatui-core v0.1.2
+   Compiling tracing-attributes v0.1.31
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling option-ext v0.2.0
+   Compiling lazy_static v1.5.0
+   Compiling subtle v2.6.1
+   Compiling arrayvec v0.7.8
+   Compiling clap_lex v1.1.0
+   Compiling pin-project-lite v0.2.17
+   Compiling winnow v1.0.4
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling base64 v0.23.1
+   Compiling tracing v0.1.44
+   Compiling filedescriptor v0.8.3
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling clap_builder v4.6.6
+   Compiling ureq-proto v0.6.1
+   Compiling vte v0.15.0
+   Compiling sharded-slab v0.1.7
+   Compiling dirs-sys v0.5.0
+   Compiling digest v0.10.7
+   Compiling security-framework v3.7.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling downcast-rs v1.2.1
+   Compiling shell-words v1.1.1
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-iterator v0.3.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-off-2-524-11/crates/glasshouse)
+   Compiling percent-encoding v2.3.2
+   Compiling winnow v0.7.15
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling ureq v3.4.0
+   Compiling portable-pty v0.9.0
+   Compiling sha2 v0.10.9
+   Compiling clap v4.6.6
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling hex v0.4.3
+   Compiling ratatui-macros v0.7.2
+   Compiling fastrand v2.5.0
+   Compiling ratatui v0.30.2
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.40.2
+warning: unused variable: `replay`
+     --> crates/glasshouse/src/main.rs:14764:5
+      |
+14764 |     replay: glasshouse::routing::evidence::HeadroomReplayCounts,
+      |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_replay`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `glasshouse` (bin "glasshouse") generated 1 warning (run `cargo fix --bin "glasshouse" -p glasshouse` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.97s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhfzr-1q2y — resume it with:  pane --resume tlhfzr-1q2y
+supervisor: off (no model)
+decisions: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhfzr-1q2y — resume it with:  pane --resume tlhfzr-1q2y
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling cc v1.4.4
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling version_check v0.9.5
+   Compiling either v1.18.0
+   Compiling smallvec v1.15.2
+   Compiling unicode-width v0.2.2
+   Compiling once_cell v1.21.4
+   Compiling serde_core v1.0.229
+   Compiling itertools v0.14.0
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling instability v0.3.10
+   Compiling ryu v1.0.23
+   Compiling rustix v1.1.4
+   Compiling parking_lot_core v0.9.12
+   Compiling static_assertions v1.1.0
+   Compiling signal-hook v0.3.18
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling errno v0.3.14
+   Compiling typenum v1.20.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling critical-section v1.2.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling objc2 v0.6.4
+   Compiling castaway v0.2.4
+   Compiling zeroize v1.9.0
+   Compiling scopeguard v1.2.0
+   Compiling indoc v2.0.7
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling mio v1.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling vcpkg v0.2.15
+   Compiling untrusted v0.9.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling thiserror v1.0.69
+   Compiling utf8parse v0.2.2
+   Compiling num-conv v0.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling litrs v1.0.0
+   Compiling time-core v0.1.9
+   Compiling cfg_aliases v0.2.2
+   Compiling httparse v1.10.1
+   Compiling powerfmt v0.2.0
+   Compiling darling_core v0.20.11
+   Compiling pkg-config v0.3.34
+   Compiling deranged v0.5.8
+   Compiling libsqlite3-sys v0.38.2
+   Compiling document-features v0.2.12
+   Compiling thiserror-impl v2.0.20
+   Compiling signal-hook-mio v0.2.5
+   Compiling nix v0.31.3
+   Compiling time v0.3.55
+   Compiling nix v0.28.0
+   Compiling anstyle-parse v1.0.0
+   Compiling parking_lot v0.12.5
+   Compiling compact_str v0.9.1
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling regex-syntax v0.8.11
+   Compiling memchr v2.8.3
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling zmij v1.0.23
+   Compiling bytes v1.12.1
+   Compiling darling_macro v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling getrandom v0.4.3
+   Compiling rustls v0.23.43
+   Compiling anstyle-query v1.1.5
+   Compiling darling v0.20.11
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anyhow v1.0.104
+   Compiling anstream v1.0.0
+   Compiling kasuari v0.4.12
+   Compiling http v1.5.0
+   Compiling block2 v0.6.2
+   Compiling regex-automata v0.4.18
+   Compiling strum v0.28.0
+   Compiling crossterm v0.29.0
+   Compiling tracing-attributes v0.1.31
+   Compiling rustls-webpki v0.103.15
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.229
+   Compiling arrayvec v0.7.8
+   Compiling serde_json v1.0.151
+   Compiling pin-project-lite v0.2.17
+   Compiling option-ext v0.2.0
+   Compiling lazy_static v1.5.0
+   Compiling winnow v1.0.4
+   Compiling clap_lex v1.1.0
+   Compiling base64 v0.23.1
+   Compiling sharded-slab v0.1.7
+   Compiling ratatui-core v0.1.2
+   Compiling clap_builder v4.6.6
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling ureq-proto v0.6.1
+   Compiling vte v0.15.0
+   Compiling dirs-sys v0.5.0
+   Compiling tracing v0.1.44
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling matchers v0.2.0
+   Compiling filedescriptor v0.8.3
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-off-3-524-12/crates/glasshouse)
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling winnow v0.7.15
+   Compiling shell-words v1.1.1
+   Compiling percent-encoding v2.3.2
+   Compiling fallible-iterator v0.3.0
+   Compiling utf8-zero v0.8.1
+   Compiling downcast-rs v1.2.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0
+   Compiling ureq v3.4.0
+   Compiling sha2 v0.10.9
+   Compiling clap v4.6.6
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.2
+warning: unused import: `MIN_SAMPLE_FOR_SUMMARY`
+     --> crates/glasshouse/src/main.rs:14768:58
+      |
+14768 |         HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
+      |                                                          ^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `replay`
+     --> crates/glasshouse/src/main.rs:14764:5
+      |
+14764 |     replay: glasshouse::routing::evidence::HeadroomReplayCounts,
+      |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_replay`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `glasshouse` (bin "glasshouse") generated 2 warnings (run `cargo fix --bin "glasshouse" -p glasshouse` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.21s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.77s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhg9o-1a2p — resume it with:  pane --resume tlhg9o-1a2p
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.66), complexity needs_exploration (0.92), 794 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhg9o-1a2p — resume it with:  pane --resume tlhg9o-1a2p
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling log v0.4.34
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling rustversion v1.0.23
+   Compiling equivalent v1.0.2
+   Compiling cc v1.4.4
+   Compiling foldhash v0.2.0
+   Compiling heck v0.5.0
+   Compiling allocator-api2 v0.2.21
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling version_check v0.9.5
+   Compiling either v1.18.0
+   Compiling once_cell v1.21.4
+   Compiling unicode-width v0.2.2
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling itertools v0.14.0
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling static_assertions v1.1.0
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling instability v0.3.10
+   Compiling parking_lot_core v0.9.12
+   Compiling rustix v1.1.4
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling convert_case v0.10.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling castaway v0.2.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling unicode-truncate v2.0.1
+   Compiling scopeguard v1.2.0
+   Compiling critical-section v1.2.0
+   Compiling indoc v2.0.7
+   Compiling typenum v1.20.1
+   Compiling zeroize v1.9.0
+   Compiling objc2 v0.6.4
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling mio v1.2.2
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling vcpkg v0.2.15
+   Compiling thiserror v1.0.69
+   Compiling pkg-config v0.3.34
+   Compiling time-core v0.1.9
+   Compiling cfg_aliases v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling litrs v1.0.0
+   Compiling httparse v1.10.1
+   Compiling utf8parse v0.2.2
+   Compiling compact_str v0.9.1
+   Compiling num-conv v0.2.2
+   Compiling deranged v0.5.8
+   Compiling cfg_aliases v0.1.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling untrusted v0.9.0
+   Compiling powerfmt v0.2.0
+   Compiling nix v0.28.0
+   Compiling document-features v0.2.12
+   Compiling libsqlite3-sys v0.38.2
+   Compiling anstyle-parse v1.0.0
+   Compiling nix v0.31.3
+   Compiling signal-hook-mio v0.2.5
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling memchr v2.8.3
+   Compiling anstyle-query v1.1.5
+   Compiling zmij v1.0.23
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling regex-syntax v0.8.11
+   Compiling darling_core v0.20.11
+   Compiling rustls v0.23.43
+   Compiling anyhow v1.0.104
+   Compiling time v0.3.55
+   Compiling bytes v1.12.1
+   Compiling anstyle v1.0.14
+   Compiling getrandom v0.4.3
+   Compiling thiserror-impl v2.0.20
+   Compiling colorchoice v1.0.5
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling anstream v1.0.0
+   Compiling regex-automata v0.4.18
+   Compiling core-foundation v0.10.1
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling tracing-attributes v0.1.31
+   Compiling security-framework-sys v2.17.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling rustls-webpki v0.103.15
+   Compiling clap_lex v1.1.0
+   Compiling derive_more v2.1.1
+   Compiling darling_macro v0.20.11
+   Compiling serde v1.0.229
+   Compiling kasuari v0.4.12
+   Compiling lazy_static v1.5.0
+   Compiling pin-project-lite v0.2.17
+   Compiling arrayvec v0.7.8
+   Compiling winnow v1.0.4
+   Compiling darling v0.20.11
+   Compiling crossterm v0.29.0
+   Compiling serde_json v1.0.151
+   Compiling subtle v2.6.1
+   Compiling option-ext v0.2.0
+   Compiling base64 v0.23.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling dirs-sys v0.5.0
+   Compiling tracing v0.1.44
+   Compiling strum v0.28.0
+   Compiling ureq-proto v0.6.1
+   Compiling vte v0.15.0
+   Compiling matchers v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling clap_builder v4.6.6
+   Compiling digest v0.10.7
+   Compiling filedescriptor v0.8.3
+   Compiling security-framework v3.7.0
+   Compiling dispatch2 v0.3.1
+   Compiling ratatui-core v0.1.2
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling tracing-log v0.2.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling downcast-rs v1.2.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-shadow-1-524-13/crates/glasshouse)
+   Compiling utf8-zero v0.8.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling winnow v0.7.15
+   Compiling shell-words v1.1.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling percent-encoding v2.3.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling clap v4.6.6
+   Compiling keyring v3.6.3
+   Compiling rusqlite v0.40.2
+   Compiling ureq v3.4.0
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling vt100 v0.16.2
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.60s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhged-14a7 — resume it with:  pane --resume tlhged-14a7
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.68), complexity needs_exploration (0.92), 582 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhged-14a7 — resume it with:  pane --resume tlhged-14a7
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling allocator-api2 v0.2.21
+   Compiling cc v1.4.4
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling heck v0.5.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling unicode-width v0.2.2
+   Compiling either v1.18.0
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling static_assertions v1.1.0
+   Compiling generic-array v0.14.7
+   Compiling rustix v1.1.4
+   Compiling instability v0.3.10
+   Compiling ryu v1.0.23
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook v0.3.18
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling zeroize v1.9.0
+   Compiling scopeguard v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling typenum v1.20.1
+   Compiling critical-section v1.2.0
+   Compiling indoc v2.0.7
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.2
+   Compiling num_threads v0.1.7
+   Compiling darling_core v0.20.11
+   Compiling objc2-encode v4.1.0
+   Compiling thiserror v1.0.69
+   Compiling untrusted v0.9.0
+   Compiling time-core v0.1.9
+   Compiling litrs v1.0.0
+   Compiling cfg_aliases v0.2.2
+   Compiling thiserror-impl v2.0.20
+   Compiling core-foundation-sys v0.8.7
+   Compiling utf8parse v0.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling num-conv v0.2.2
+   Compiling deranged v0.5.8
+   Compiling vcpkg v0.2.15
+   Compiling httparse v1.10.1
+   Compiling powerfmt v0.2.0
+   Compiling pkg-config v0.3.34
+   Compiling signal-hook-mio v0.2.5
+   Compiling document-features v0.2.12
+   Compiling nix v0.28.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling libsqlite3-sys v0.38.2
+   Compiling time v0.3.55
+   Compiling thiserror-impl v1.0.69
+   Compiling anstyle-parse v1.0.0
+   Compiling compact_str v0.9.1
+   Compiling nix v0.31.3
+   Compiling darling_macro v0.20.11
+   Compiling parking_lot v0.12.5
+   Compiling derive_more v2.1.1
+   Compiling tracing-core v0.1.36
+   Compiling darling v0.20.11
+   Compiling line-clipping v0.3.8
+   Compiling bytes v1.12.1
+   Compiling anstyle-query v1.1.5
+   Compiling getrandom v0.4.3
+   Compiling anstyle v1.0.14
+   Compiling memchr v2.8.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling regex-syntax v0.8.11
+   Compiling colorchoice v1.0.5
+   Compiling anyhow v1.0.104
+   Compiling kasuari v0.4.12
+   Compiling rustls v0.23.43
+   Compiling strum v0.28.0
+   Compiling zmij v1.0.23
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling crossterm v0.29.0
+   Compiling regex-automata v0.4.18
+   Compiling ratatui-core v0.1.2
+   Compiling rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling winnow v1.0.4
+   Compiling option-ext v0.2.0
+   Compiling subtle v2.6.1
+   Compiling pin-project-lite v0.2.17
+   Compiling base64 v0.23.1
+   Compiling clap_lex v1.1.0
+   Compiling arrayvec v0.7.8
+   Compiling lazy_static v1.5.0
+   Compiling tracing v0.1.44
+   Compiling sharded-slab v0.1.7
+   Compiling vte v0.15.0
+   Compiling ureq-proto v0.6.1
+   Compiling clap_builder v4.6.6
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling dirs-sys v0.5.0
+   Compiling filedescriptor v0.8.3
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling clap_derive v4.6.4
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling serde_derive v1.0.229
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-iterator v0.3.0
+   Compiling shell-words v1.1.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling winnow v0.7.15
+   Compiling utf8-zero v0.8.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-shadow-2-524-14/crates/glasshouse)
+   Compiling percent-encoding v2.3.2
+   Compiling downcast-rs v1.2.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling ureq v3.4.0
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling tracing-subscriber v0.3.23
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling ratatui-macros v0.7.2
+   Compiling tempfile v3.27.0
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.2
+warning: unused import: `MIN_SAMPLE_FOR_SUMMARY`
+     --> crates/glasshouse/src/main.rs:14771:58
+      |
+14771 |         HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
+      |                                                          ^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `replay`
+     --> crates/glasshouse/src/main.rs:14767:5
+      |
+14767 |     replay: glasshouse::routing::evidence::HeadroomReplayCounts,
+      |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_replay`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `glasshouse` (bin "glasshouse") generated 2 warnings (run `cargo fix --bin "glasshouse" -p glasshouse` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.31s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhgnn-kig — resume it with:  pane --resume tlhgnn-kig
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.73), complexity needs_exploration (0.90), 600 ms
+preflight: preflight: run (asks for verification with no checks configured)
+acceptance: the lister named nothing verifiable
+session tlhgnn-kig — resume it with:  pane --resume tlhgnn-kig
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling foldhash v0.2.0
+   Compiling heck v0.5.0
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling rustversion v1.0.23
+   Compiling fnv v1.0.7
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.20
+   Compiling version_check v0.9.5
+   Compiling once_cell v1.21.4
+   Compiling unicode-width v0.2.2
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling either v1.18.0
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.17.1
+   Compiling rustix v1.1.4
+   Compiling itertools v0.14.0
+   Compiling static_assertions v1.1.0
+   Compiling instability v0.3.10
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling parking_lot_core v0.9.12
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling castaway v0.2.4
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling critical-section v1.2.0
+   Compiling typenum v1.20.1
+   Compiling indoc v2.0.7
+   Compiling objc2 v0.6.4
+   Compiling darling_core v0.20.11
+   Compiling rustls-pki-types v1.15.1
+   Compiling thiserror-impl v2.0.20
+   Compiling lock_api v0.4.14
+   Compiling mio v1.2.2
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling num_threads v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling num-conv v0.2.2
+   Compiling darling_macro v0.20.11
+   Compiling litrs v1.0.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling vcpkg v0.2.15
+   Compiling darling v0.20.11
+   Compiling powerfmt v0.2.0
+   Compiling deranged v0.5.8
+   Compiling httparse v1.10.1
+   Compiling utf8parse v0.2.2
+   Compiling cfg_aliases v0.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling objc2-encode v4.1.0
+   Compiling thiserror v1.0.69
+   Compiling untrusted v0.9.0
+   Compiling time-core v0.1.9
+   Compiling pkg-config v0.3.34
+   Compiling nix v0.28.0
+   Compiling strum v0.28.0
+   Compiling time v0.3.55
+   Compiling nix v0.31.3
+   Compiling anstyle-parse v1.0.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling compact_str v0.9.1
+   Compiling document-features v0.2.12
+   Compiling derive_more v2.1.1
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling thiserror-impl v1.0.69
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling bytes v1.12.1
+   Compiling anstyle v1.0.14
+   Compiling anyhow v1.0.104
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling getrandom v0.4.3
+   Compiling regex-syntax v0.8.11
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling rustls v0.23.43
+   Compiling zmij v1.0.23
+   Compiling memchr v2.8.3
+   Compiling rustls-webpki v0.103.15
+   Compiling regex-automata v0.4.18
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling kasuari v0.4.12
+   Compiling http v1.5.0
+   Compiling block-buffer v0.10.4
+   Compiling ratatui-core v0.1.2
+   Compiling crypto-common v0.1.7
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling crossterm v0.29.0
+   Compiling tracing-attributes v0.1.31
+   Compiling option-ext v0.2.0
+   Compiling arrayvec v0.7.8
+   Compiling lazy_static v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling clap_lex v1.1.0
+   Compiling pin-project-lite v0.2.17
+   Compiling winnow v1.0.4
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.229
+   Compiling base64 v0.23.1
+   Compiling tracing v0.1.44
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling ureq-proto v0.6.1
+   Compiling clap_builder v4.6.6
+   Compiling sharded-slab v0.1.7
+   Compiling vte v0.15.0
+   Compiling dirs-sys v0.5.0
+   Compiling security-framework v3.7.0
+   Compiling ratatui-widgets v0.3.2
+   Compiling digest v0.10.7
+   Compiling dispatch2 v0.3.1
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling filedescriptor v0.8.3
+   Compiling thread_local v1.1.10
+   Compiling shell-words v1.1.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-shadow-3-524-15/crates/glasshouse)
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling winnow v0.7.15
+   Compiling percent-encoding v2.3.2
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-iterator v0.3.0
+   Compiling ratatui-crossterm v0.1.2
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling downcast-rs v1.2.1
+   Compiling clap v4.6.6
+   Compiling portable-pty v0.9.0
+   Compiling ureq v3.4.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling rusqlite v0.40.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.30s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.89s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhgxi-i07 — resume it with:  pane --resume tlhgxi-i07
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.75), complexity needs_exploration (0.90), 557 ms
+preflight: preflight: run (asks for verification with no checks configured; the decision model reads this request as needing exploration)
+acceptance: the lister named nothing verifiable
+session tlhgxi-i07 — resume it with:  pane --resume tlhgxi-i07
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling log v0.4.34
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling heck v0.5.0
+   Compiling foldhash v0.2.0
+   Compiling cc v1.4.4
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.20
+   Compiling fnv v1.0.7
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling either v1.18.0
+   Compiling unicode-width v0.2.2
+   Compiling smallvec v1.15.2
+   Compiling hashbrown v0.16.1
+   Compiling generic-array v0.14.7
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling ryu v1.0.23
+   Compiling instability v0.3.10
+   Compiling static_assertions v1.1.0
+   Compiling signal-hook v0.3.18
+   Compiling rustix v1.1.4
+   Compiling parking_lot_core v0.9.12
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling castaway v0.2.4
+   Compiling errno v0.3.14
+   Compiling convert_case v0.10.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling typenum v1.20.1
+   Compiling critical-section v1.2.0
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling indoc v2.0.7
+   Compiling objc2 v0.6.4
+   Compiling rustls-pki-types v1.15.1
+   Compiling lock_api v0.4.14
+   Compiling mio v1.2.2
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling time-core v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling core-foundation-sys v0.8.7
+   Compiling httparse v1.10.1
+   Compiling litrs v1.0.0
+   Compiling untrusted v0.9.0
+   Compiling thiserror v1.0.69
+   Compiling pkg-config v0.3.34
+   Compiling utf8parse v0.2.2
+   Compiling vcpkg v0.2.15
+   Compiling powerfmt v0.2.0
+   Compiling darling_core v0.20.11
+   Compiling cfg_aliases v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling deranged v0.5.8
+   Compiling cfg_aliases v0.1.1
+   Compiling nix v0.28.0
+   Compiling nix v0.31.3
+   Compiling compact_str v0.9.1
+   Compiling document-features v0.2.12
+   Compiling libsqlite3-sys v0.38.2
+   Compiling parking_lot v0.12.5
+   Compiling thiserror-impl v2.0.20
+   Compiling anstyle-parse v1.0.0
+   Compiling time v0.3.55
+   Compiling signal-hook-mio v0.2.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling anstyle-query v1.1.5
+   Compiling bytes v1.12.1
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling regex-syntax v0.8.11
+   Compiling colorchoice v1.0.5
+   Compiling rustls v0.23.43
+   Compiling anstyle v1.0.14
+   Compiling anyhow v1.0.104
+   Compiling derive_more v2.1.1
+   Compiling getrandom v0.4.3
+   Compiling anstream v1.0.0
+   Compiling darling_macro v0.20.11
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling darling v0.20.11
+   Compiling strum v0.28.0
+   Compiling kasuari v0.4.12
+   Compiling crossterm v0.29.0
+   Compiling regex-automata v0.4.18
+   Compiling tracing-attributes v0.1.31
+   Compiling rustls-webpki v0.103.15
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling arrayvec v0.7.8
+   Compiling option-ext v0.2.0
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling subtle v2.6.1
+   Compiling clap_lex v1.1.0
+   Compiling base64 v0.23.1
+   Compiling winnow v1.0.4
+   Compiling pin-project-lite v0.2.17
+   Compiling lazy_static v1.5.0
+   Compiling tracing v0.1.44
+   Compiling sharded-slab v0.1.7
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling ureq-proto v0.6.1
+   Compiling clap_builder v4.6.6
+   Compiling filedescriptor v0.8.3
+   Compiling ratatui-core v0.1.2
+   Compiling vte v0.15.0
+   Compiling dirs-sys v0.5.0
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling clap_derive v4.6.4
+   Compiling serde_derive v1.0.229
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-on-1-524-16/crates/glasshouse)
+   Compiling fallible-iterator v0.3.0
+   Compiling downcast-rs v1.2.1
+   Compiling shell-words v1.1.1
+   Compiling utf8-zero v0.8.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling percent-encoding v2.3.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling winnow v0.7.15
+   Compiling ureq v3.4.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.2
+error[E0425]: cannot find value `headroom_replay` in this scope
+     --> crates/glasshouse/src/main.rs:14330:43
+      |
+14330 |                   let _ = writeln!(out, "  {headroom_replay}");
+      |                                             ^^^^^^^^^^^^^^^
+...
+14744 | / fn headroom_replay_for(
+14745 | |     ledger: Option<&glasshouse::routing::evidence::EvidenceLedger>,
+14746 | |     now_unix: i64,
+14747 | |     entry: &glasshouse::config::ResolvedEntitlement,
+...     |
+14759 | | }
+      | |_- similarly named function `headroom_replay_for` defined here
+      |
+help: a function with a similar name exists
+      |
+14330 |                 let _ = writeln!(out, "  {headroom_replay_for}");
+      |                                                          ++++
+
+error[E0425]: cannot find value `headroom_replay` in this scope
+     --> crates/glasshouse/src/main.rs:14689:39
+      |
+14689 |               let _ = writeln!(out, "  {headroom_replay}");
+      |                                         ^^^^^^^^^^^^^^^
+...
+14744 | / fn headroom_replay_for(
+14745 | |     ledger: Option<&glasshouse::routing::evidence::EvidenceLedger>,
+14746 | |     now_unix: i64,
+14747 | |     entry: &glasshouse::config::ResolvedEntitlement,
+...     |
+14759 | | }
+      | |_- similarly named function `headroom_replay_for` defined here
+      |
+help: a function with a similar name exists
+      |
+14689 |             let _ = writeln!(out, "  {headroom_replay_for}");
+      |                                                      ++++
+
+warning: unused variable: `headroom_replay`
+     --> crates/glasshouse/src/main.rs:14898:9
+      |
+14898 |     let headroom_replay = if replay.throttles() < MIN_SAMPLE_FOR_SUMMARY {
+      |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_headroom_replay`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `glasshouse` (bin "glasshouse") generated 1 warning
+error: could not compile `glasshouse` (bin "glasshouse") due to 2 previous errors; 1 warning emitted
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhh4g-19pt — resume it with:  pane --resume tlhh4g-19pt
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.74), complexity needs_exploration (0.89), 573 ms
+preflight: preflight: run (asks for verification with no checks configured; the decision model reads this request as needing exploration)
+acceptance: the lister named nothing verifiable
+session tlhh4g-19pt — resume it with:  pane --resume tlhh4g-19pt
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling equivalent v1.0.2
+   Compiling rustversion v1.0.23
+   Compiling heck v0.5.0
+   Compiling allocator-api2 v0.2.21
+   Compiling cc v1.4.4
+   Compiling foldhash v0.2.0
+   Compiling ident_case v1.0.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling either v1.18.0
+   Compiling unicode-width v0.2.2
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.15.2
+   Compiling once_cell v1.21.4
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.17.1
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.16.1
+   Compiling ryu v1.0.23
+   Compiling signal-hook v0.3.18
+   Compiling parking_lot_core v0.9.12
+   Compiling static_assertions v1.1.0
+   Compiling instability v0.3.10
+   Compiling rustix v1.1.4
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling unicode-truncate v2.0.1
+   Compiling convert_case v0.10.0
+   Compiling errno v0.3.14
+   Compiling objc2 v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling zeroize v1.9.0
+   Compiling critical-section v1.2.0
+   Compiling typenum v1.20.1
+   Compiling indoc v2.0.7
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling castaway v0.2.4
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling getrandom v0.2.17
+   Compiling num_threads v0.1.7
+   Compiling mio v1.2.2
+   Compiling cfg_aliases v0.1.1
+   Compiling httparse v1.10.1
+   Compiling deranged v0.5.8
+   Compiling core-foundation-sys v0.8.7
+   Compiling num-conv v0.2.2
+   Compiling cfg_aliases v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling powerfmt v0.2.0
+   Compiling thiserror v1.0.69
+   Compiling pkg-config v0.3.34
+   Compiling litrs v1.0.0
+   Compiling utf8parse v0.2.2
+   Compiling time-core v0.1.9
+   Compiling darling_core v0.20.11
+   Compiling vcpkg v0.2.15
+   Compiling untrusted v0.9.0
+   Compiling time v0.3.55
+   Compiling document-features v0.2.12
+   Compiling anstyle-parse v1.0.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling signal-hook-mio v0.2.5
+   Compiling nix v0.31.3
+   Compiling thiserror-impl v2.0.20
+   Compiling nix v0.28.0
+   Compiling parking_lot v0.12.5
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling compact_str v0.9.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling zmij v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling colorchoice v1.0.5
+   Compiling regex-syntax v0.8.11
+   Compiling bytes v1.12.1
+   Compiling rustls v0.23.43
+   Compiling darling_macro v0.20.11
+   Compiling derive_more v2.1.1
+   Compiling anstyle v1.0.14
+   Compiling memchr v2.8.3
+   Compiling anstyle-query v1.1.5
+   Compiling darling v0.20.11
+   Compiling getrandom v0.4.3
+   Compiling anstream v1.0.0
+   Compiling regex-automata v0.4.18
+   Compiling kasuari v0.4.12
+   Compiling block2 v0.6.2
+   Compiling http v1.5.0
+   Compiling strum v0.28.0
+   Compiling crossterm v0.29.0
+   Compiling tracing-attributes v0.1.31
+   Compiling rustls-webpki v0.103.15
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.229
+   Compiling pin-project-lite v0.2.17
+   Compiling serde_json v1.0.151
+   Compiling arrayvec v0.7.8
+   Compiling lazy_static v1.5.0
+   Compiling winnow v1.0.4
+   Compiling base64 v0.23.1
+   Compiling clap_lex v1.1.0
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.5.0
+   Compiling ureq-proto v0.6.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling clap_builder v4.6.6
+   Compiling ratatui-core v0.1.2
+   Compiling vte v0.15.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling security-framework v3.7.0
+   Compiling digest v0.10.7
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling filedescriptor v0.8.3
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling thread_local v1.1.10
+   Compiling fallible-iterator v0.3.0
+   Compiling winnow v0.7.15
+   Compiling shell-words v1.1.1
+   Compiling percent-encoding v2.3.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-on-2-524-17/crates/glasshouse)
+   Compiling nu-ansi-term v0.50.3
+   Compiling utf8-zero v0.8.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling downcast-rs v1.2.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling ureq v3.4.0
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling sha2 v0.10.9
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling vt100 v0.16.2
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling directories v6.0.0
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.18s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s
+
+Preparing worktree (detached HEAD a4cc95ce)
+HEAD is now at a4cc95ce feat(routing,evaluation,memory,cli,config): wave 107 -- 1836/1854/1855 the router's estimates measured against what happened; 1760/1767/1769 debug views over rows that now exist (Phase 47 complete) -- 1254/1347
+settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed.
+session tlhhfe-tk9 — resume it with:  pane --resume tlhhfe-tk9
+supervisor: off (no model)
+sandbox: profile compiled once for this session -- 0 path rule(s), 12 command pattern(s), network: no
+sandbox: argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)
+decision: intent modify (0.77), complexity needs_exploration (0.91), 762 ms
+preflight: preflight: run (asks for verification with no checks configured; the decision model reads this request as needing exploration)
+acceptance: the lister named nothing verifiable
+session tlhhfe-tk9 — resume it with:  pane --resume tlhhfe-tk9
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling log v0.4.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling itoa v1.0.18
+   Compiling unicode-segmentation v1.13.3
+   Compiling strsim v0.11.1
+   Compiling equivalent v1.0.2
+   Compiling cc v1.4.4
+   Compiling heck v0.5.0
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.20
+   Compiling ident_case v1.0.1
+   Compiling either v1.18.0
+   Compiling smallvec v1.15.2
+   Compiling serde_core v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling unicode-width v0.2.2
+   Compiling itertools v0.14.0
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling generic-array v0.14.7
+   Compiling ryu v1.0.23
+   Compiling parking_lot_core v0.9.12
+   Compiling rustix v1.1.4
+   Compiling instability v0.3.10
+   Compiling signal-hook v0.3.18
+   Compiling static_assertions v1.1.0
+   Compiling lru v0.18.2
+   Compiling ring v0.17.14
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling unicode-truncate v2.0.1
+   Compiling errno v0.3.14
+   Compiling castaway v0.2.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling convert_case v0.10.0
+   Compiling critical-section v1.2.0
+   Compiling objc2 v0.6.4
+   Compiling zeroize v1.9.0
+   Compiling typenum v1.20.1
+   Compiling scopeguard v1.2.0
+   Compiling indoc v2.0.7
+   Compiling lock_api v0.4.14
+   Compiling rustls-pki-types v1.15.1
+   Compiling mio v1.2.2
+   Compiling getrandom v0.2.17
+   Compiling darling_core v0.20.11
+   Compiling num_threads v0.1.7
+   Compiling litrs v1.0.0
+   Compiling powerfmt v0.2.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling cfg_aliases v0.1.1
+   Compiling vcpkg v0.2.15
+   Compiling httparse v1.10.1
+   Compiling thiserror-impl v2.0.20
+   Compiling utf8parse v0.2.2
+   Compiling objc2-encode v4.1.0
+   Compiling num-conv v0.2.2
+   Compiling time-core v0.1.9
+   Compiling untrusted v0.9.0
+   Compiling pkg-config v0.3.34
+   Compiling cfg_aliases v0.2.2
+   Compiling deranged v0.5.8
+   Compiling thiserror v1.0.69
+   Compiling nix v0.31.3
+   Compiling strum_macros v0.28.0
+   Compiling compact_str v0.9.1
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling libsqlite3-sys v0.38.2
+   Compiling derive_more v2.1.1
+   Compiling anstyle-parse v1.0.0
+   Compiling nix v0.28.0
+   Compiling time v0.3.55
+   Compiling signal-hook-mio v0.2.5
+   Compiling darling_macro v0.20.11
+   Compiling document-features v0.2.12
+   Compiling parking_lot v0.12.5
+   Compiling kasuari v0.4.12
+   Compiling tracing-core v0.1.36
+   Compiling line-clipping v0.3.8
+   Compiling darling v0.20.11
+   Compiling zmij v1.0.23
+   Compiling anstyle v1.0.14
+   Compiling memchr v2.8.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling bytes v1.12.1
+   Compiling regex-syntax v0.8.11
+   Compiling getrandom v0.4.3
+   Compiling anyhow v1.0.104
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling rustls v0.23.43
+   Compiling strum v0.28.0
+   Compiling crossterm v0.29.0
+   Compiling http v1.5.0
+   Compiling anstream v1.0.0
+   Compiling block2 v0.6.2
+   Compiling regex-automata v0.4.18
+   Compiling rustls-webpki v0.103.15
+   Compiling ratatui-core v0.1.2
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling tracing-attributes v0.1.31
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling option-ext v0.2.0
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling pin-project-lite v0.2.17
+   Compiling clap_lex v1.1.0
+   Compiling subtle v2.6.1
+   Compiling winnow v1.0.4
+   Compiling base64 v0.23.1
+   Compiling lazy_static v1.5.0
+   Compiling arrayvec v0.7.8
+   Compiling filedescriptor v0.8.3
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling vte v0.15.0
+   Compiling ureq-proto v0.6.1
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling clap_builder v4.6.6
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling security-framework v3.7.0
+   Compiling dirs-sys v0.5.0
+   Compiling digest v0.10.7
+   Compiling matchers v0.2.0
+   Compiling dispatch2 v0.3.1
+   Compiling tracing-log v0.2.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling serde_derive v1.0.229
+   Compiling clap_derive v4.6.4
+   Compiling webpki-roots v1.0.9
+   Compiling serial2 v0.2.38
+   Compiling cpufeatures v0.2.17
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling downcast-rs v1.2.1
+   Compiling fallible-iterator v0.3.0
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling shell-words v1.1.1
+   Compiling glasshouse v0.1.0 (/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/pane-ruler/L4-pane-decisions-on-3-524-18/crates/glasshouse)
+   Compiling winnow v0.7.15
+   Compiling percent-encoding v2.3.2
+   Compiling ureq v3.4.0
+   Compiling portable-pty v0.9.0
+   Compiling clap v4.6.6
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling sha2 v0.10.9
+   Compiling rusqlite v0.40.2
+   Compiling ctrlc v3.5.2
+   Compiling keyring v3.6.3
+   Compiling directories v6.0.0
+   Compiling vt100 v0.16.2
+   Compiling which v8.0.5
+   Compiling hex v0.4.3
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling ratatui-macros v0.7.2
+   Compiling ratatui v0.30.2
+warning: unused import: `MIN_SAMPLE_FOR_SUMMARY`
+     --> crates/glasshouse/src/main.rs:14768:58
+      |
+14768 |         HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
+      |                                                          ^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `glasshouse` (bin "glasshouse") generated 1 warning (run `cargo fix --bin "glasshouse" -p glasshouse` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.46s
+     Running tests/entitlement_broker.rs (target/debug/deps/entitlement_broker-e638ffbf33427662)
+
+running 40 tests
+test a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind ... ok
+test a_fallback_never_lands_on_an_account_in_the_same_state ... ok
+test a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step ... ok
+test a_harness_rule_holds_under_fallback_pressure ... ok
+test a_tier_rule_holds_under_fallback_pressure ... ok
+test a_spend_ceiling_holds_under_fallback_pressure ... ok
+test a_throttled_winner_is_fallen_back_from_through_choose ... ok
+test a_model_the_entitlement_cannot_serve_is_refused_by_name ... ok
+test a_single_configured_entitlement_leaves_every_total_unchanged ... ok
+test a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing ... ok
+test an_entitlement_with_no_backing_stated_is_never_a_fallback_target ... ok
+test a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules ... ok
+test a_warm_session_moves_when_its_entitlements_band_reads_exhausted ... ok
+test an_unknown_capability_tier_never_widens_the_fallback ... ok
+test an_untriggered_selection_and_a_pool_of_one_never_fall_back ... ok
+test a_warm_session_stays_on_its_entitlement_against_a_better_scoring_sibling ... ok
+test an_exact_account_override_is_never_moved_by_the_fallback ... ok
+test capacity_returning_at_the_reset_boundary_brings_the_account_back ... ok
+test independent_fresh_choices_spread_across_the_pool ... ok
+test the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must ... ok
+test the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant ... ok
+test the_reset_boundary_burns_an_expiring_remainder_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::the_shared_fixture_reads_its_log_path_from_the_env_var_not_the_script ... ok
+test shared_fixture_proof::two_tempdirs_installing_the_fake_harness_get_one_shared_file ... ok
+test the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured ... ok
+test three_live_entitlements_are_chosen_by_score_order_and_never_rotation ... ok
+test the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured ... ok
+test unknown_facets_contribute_nothing_and_a_pool_of_one_is_inert ... ok
+test zero_fallbacks_leave_no_record_and_say_nothing ... ok
+test route_refuses_an_account_over_the_spend_ceiling_the_user_wrote ... ok
+test route_falls_back_from_a_throttled_winner_and_names_the_reason ... ok
+test two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one ... ok
+test route_ranks_the_same_profile_across_every_account_of_the_pool ... ok
+test route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one ... ok
+test shared_fixture_proof::a_real_launch_through_the_shared_fixture_dumps_its_env_to_the_requested_log ... ok
+test the_session_record_names_the_entitlement_that_served_it ... ok
+test a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost ... ok
+test a_launch_that_falls_back_records_the_fallback_with_its_reason ... ok
+test a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account ... ok
+test the_view_reports_what_each_entitlement_served ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+
+task  harness  outcome  tokens/completed  wall  turns  tokens(failed)
+L2  pane:decisions-off  2/3 pass  —  3m16s  —  —
+L2  pane:decisions-on  1/3 pass  —  4m48s  —  —
+L2  pane:decisions-shadow  1/3 pass  —  8m38s  —  —
+L4  pane:decisions-off  3/3 pass  —  5m02s  —  —
+L4  pane:decisions-on  2/3 pass  —  6m56s  —  —
+L4  pane:decisions-shadow  3/3 pass  —  4m45s  —  —
+-- tier leaf --
+leaf  pane:decisions-off  5/6 pass  —  4m20s  —  —
+leaf  pane:decisions-on  3/6 pass  —  6m14s  —  —
+leaf  pane:decisions-shadow  4/6 pass  —  5m44s  —  —
+-- aggregate --
+aggregate  pane:decisions-off  5/6 pass  —  4m20s  —  —
+aggregate  pane:decisions-on  3/6 pass  —  6m14s  —  —
+aggregate  pane:decisions-shadow  4/6 pass  —  5m44s  —  —
+-- decisions (per task, per arm; overrides is a false-hold proxy, not a measured one) --
+task  arm  verified  findings  checker spared  holds  overrides  would_hold  failed  tokens(parent)  wall  excluded
+L2  pane:decisions-off  1/3  2  0  0  0  0  0  1,003,658  3m35s  0
+L2  pane:decisions-on  2/3  1  0  0  0  0  0  1,533,780  4m30s  0
+L2  pane:decisions-shadow  2/3  1  0  0  0  0  0  1,739,764  5m46s  0
+L4  pane:decisions-off  1/2  1  0  0  0  0  0  1,507,262  4m39s  0
+L4  pane:decisions-on  0/3  3  0  0  0  0  0  1,600,193  5m37s  0
+L4  pane:decisions-shadow  2/3  1  0  0  0  0  0  1,122,426  4m17s  0
