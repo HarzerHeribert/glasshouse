@@ -257,6 +257,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     }
 }
 
@@ -538,6 +539,7 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -594,6 +596,7 @@ fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("claude-code");
 
@@ -641,6 +644,7 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("codex");
 
@@ -701,6 +705,7 @@ fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -756,6 +761,7 @@ fn the_accepted_flags_are_exactly_these() {
             "--credit-ratio",
             "--pane-decisions",
             "--decisions-model",
+            "--parent-model",
             "--out"
         ]
     );
@@ -819,6 +825,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
         },
         harnesses: attempt::default_harnesses(),
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -876,6 +883,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
         },
         harnesses: attempt::default_harnesses(),
         rollouts: None,
+        parent_model: None,
     };
     let harness2 = Harness::new("claude-code");
 
@@ -928,6 +936,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
         },
         harnesses: attempt::default_harnesses(),
         rollouts: None,
+        parent_model: None,
     };
     let pane_harness = Harness::new("pane");
     let pane_result = attempt::run_one(&pane_task, &pane_harness, 1, &pane_opts);
@@ -949,6 +958,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
         },
         harnesses: attempt::default_harnesses(),
         rollouts: None,
+        parent_model: None,
     };
     let claude_harness = Harness::new("claude-code");
     let claude_result = attempt::run_one(&claude_task, &claude_harness, 1, &claude_opts);
@@ -1201,6 +1211,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
         },
         harnesses: attempt::default_harnesses(),
         rollouts: None,
+        parent_model: None,
     };
     let harness2 = Harness::new("pane");
 
@@ -1537,6 +1548,7 @@ fn a_pane_arm_captures_its_stdout_and_carries_the_metrics() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
     let harness = Harness::new("pane:hybrid");
 
@@ -1601,6 +1613,7 @@ fn a_pane_arm_without_a_telemetry_document_is_unmeasured_not_zero() {
         meter: Meter::None,
         harnesses,
         rollouts: None,
+        parent_model: None,
     };
 
     let result = attempt::run_one(&task, &Harness::new("pane:cells"), 1, &opts);
@@ -1836,6 +1849,7 @@ fn a_decisions_off_arm_gets_no_config_file_while_shadow_and_on_get_the_exact_tom
             meter: Meter::None,
             harnesses,
             rollouts: None,
+            parent_model: None,
         };
 
         let result = attempt::run_one(&task, &Harness::new(arm_name.as_str()), 1, &opts);
@@ -1971,5 +1985,186 @@ fn no_decisions_arm_renders_no_decisions_table() {
     assert_eq!(
         report::render_decisions_table(&decisions::rows(&attempts)),
         ""
+    );
+}
+
+// --- The two ways an attempt can measure nothing and look like a result ----
+//
+// A `pane` row's worktree is cut detached and carries no `.pane/config.toml`,
+// so `pane session` refuses to start and exits non-zero. The run used to read
+// only whether the harness could be *spawned*, so it then ran the task's own
+// tests against a tree nothing had touched and scored what those tests said
+// at the base commit -- green, for most tasks. Two runs on 2026-09-17 were
+// discarded by hand for that shape, which is a thing a person noticed rather
+// than a thing the ruler reported.
+
+/// A `pane` row's attempt carries the parent model into the worktree the
+/// session will read it from — the one place a session looks, since no flag
+/// on the row's argv names a model.
+#[test]
+fn a_pane_attempt_writes_the_parent_model_into_its_own_project_config() {
+    let scratch = scratch_dir("pane-parent-model");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    // The harness prints the config it was given, so the assertion is about
+    // what the *session* would have read, not about what this test wrote.
+    let config_echo = scratch.join("config.txt");
+    let fake_pane = scratch.join("fake_pane.sh");
+    fs::write(
+        &fake_pane,
+        format!(
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"{}\"\nprintf '%s' \"$ANTHROPIC_BASE_URL\" > \"{}\"\ncat .pane/config.toml > \"{}\"\nexit 0\n",
+            argv_record.display(),
+            env_record.display(),
+            config_echo.display(),
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&fake_pane).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_pane, perms).unwrap();
+
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+    let pane_row = attempt::default_harnesses().remove("pane").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "pane".to_string(),
+        HarnessCommand {
+            program: fake_pane,
+            args: pane_row.args,
+            interface: None,
+            decisions: None,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+        rollouts: None,
+        parent_model: Some("gpt-5-6-sol".to_string()),
+    };
+
+    let result = attempt::run_one(&task, &Harness::new("pane"), 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+    let config = fs::read_to_string(&config_echo).unwrap();
+    assert!(
+        config.contains("[model]") && config.contains("parent = \"gpt-5-6-sol\""),
+        "the session's own config must name the parent model: {config}"
+    );
+}
+
+/// A row that is not a `pane` row configures its own model and gets no
+/// `.pane/config.toml` written under it.
+#[test]
+fn a_foreign_row_gets_no_pane_config_written_beneath_it() {
+    let scratch = scratch_dir("foreign-row-config");
+    let launched = scratch.join("launched.txt");
+    let harness_script = write_script(&scratch, "fake.sh", &launched, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let mut opts = base_opts(scratch.clone(), harness_script);
+    opts.parent_model = Some("gpt-5-6-sol".to_string());
+
+    let result = attempt::run_one(&task, &Harness::new("fake"), 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+    let where_it_ran = PathBuf::from(fs::read_to_string(&launched).unwrap().trim());
+    assert!(
+        !where_it_ran.join(".pane").exists(),
+        "a foreign row's worktree must stay untouched: {where_it_ran:?}"
+    );
+}
+
+/// The decisive one: a harness that starts, refuses and exits non-zero is an
+/// errored attempt, whatever the task's own tests would have said about the
+/// tree it never touched.
+#[test]
+fn a_harness_that_exits_non_zero_is_errored_and_its_tests_are_not_the_answer() {
+    let scratch = scratch_dir("refusing-harness");
+    let launched = scratch.join("launched.txt");
+    // Exit 1, exactly as `pane session` does when it has no model to run.
+    let refusing = write_script(&scratch, "refusing.sh", &launched, 1);
+    let passed = scratch.join("passed.txt");
+    // A test command that passes on an untouched tree — the shape that turns
+    // a refusal into a pass.
+    let test_script = write_script(&scratch, "always_passes.sh", &passed, 0);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = base_opts(scratch.clone(), refusing);
+
+    let result = attempt::run_one(&task, &Harness::new("fake"), 1, &opts);
+    assert_eq!(
+        result.outcome,
+        Outcome::Errored,
+        "a refusing harness never reached its test command"
+    );
+    assert!(
+        launched.exists(),
+        "the harness must really have been launched"
+    );
+    assert!(
+        !passed.exists(),
+        "the task's tests must not run once the harness has refused"
+    );
+}
+
+/// A selected `pane` row with no `--parent-model` is refused before any
+/// attempt runs, rather than producing attempts that measure nothing.
+#[test]
+fn a_pane_row_without_a_parent_model_is_refused_before_any_attempt() {
+    let out = scratch_dir("pane-row-no-model");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "pane".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    let message = result.expect_err("a pane row with no model must be refused");
+    assert!(
+        message.contains("--parent-model") && message.contains("pane"),
+        "refusal should name the flag and the row: {message}"
+    );
+    assert!(
+        !out.join("attempts.jsonl").exists(),
+        "no attempt may have run"
+    );
+}
+
+/// The same run with a model passes the flag check — the refusal is about
+/// the missing model and nothing else.
+#[test]
+fn a_foreign_row_alone_needs_no_parent_model() {
+    let out = scratch_dir("foreign-row-no-model");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "no-such-task".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    // Refused by task resolution, which runs *after* the parent-model check:
+    // reaching it at all is the proof that no row here needed a model.
+    let message = result.expect_err("an unknown task id is refused");
+    assert!(
+        message.contains("no-such-task"),
+        "the parent-model check must not fire for a foreign row: {message}"
     );
 }

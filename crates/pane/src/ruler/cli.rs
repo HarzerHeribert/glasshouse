@@ -38,6 +38,7 @@ pub const ACCEPTED_FLAGS: &[&str] = &[
     "--credit-ratio",
     "--pane-decisions",
     "--decisions-model",
+    "--parent-model",
     "--out",
 ];
 
@@ -108,6 +109,16 @@ pub struct RunArgs {
     /// `[decisions]` table at all.
     #[arg(long)]
     pub decisions_model: Option<String>,
+    /// The model every `pane` row's session runs with, written into each
+    /// attempt's own `.pane/config.toml` as `[model] parent`.
+    ///
+    /// **Required whenever a `pane` row is selected.** An attempt's worktree
+    /// is cut detached and carries no configuration, so without this `pane
+    /// session` refuses to start and the attempt measures nothing --
+    /// silently, because the task's own tests then run against an untouched
+    /// tree. The other rows configure their own model and ignore this.
+    #[arg(long)]
+    pub parent_model: Option<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -153,6 +164,16 @@ fn run(flags: &[String]) -> Result<(), String> {
     }
 
     let selected = resolve_harnesses(&args)?;
+    if args.parent_model.is_none()
+        && let Some(row) = selected.iter().find(|row| attempt::is_pane_row(row))
+    {
+        return Err(format!(
+            "--parent-model <id> is required to run the `{row}` row: an attempt's worktree carries no .pane/config.toml, so `pane session` would refuse to start and the attempt would measure nothing"
+        ));
+    }
+    if let Some(model) = &args.parent_model {
+        crate::config::validate_parent_model(model)?;
+    }
     let via_glasshouse = resolve_via_glasshouse(&args.via_glasshouse, &selected)?;
     let ratios = match &args.credit_ratio {
         Some(text) => CreditRatios::parse(text)?,
@@ -195,6 +216,7 @@ fn run(flags: &[String]) -> Result<(), String> {
             None => Meter::None,
         },
         harnesses: harness_table,
+        parent_model: args.parent_model.clone(),
         // Created before the first attempt rather than with the records at
         // the end: an attempt writes its rollout while it runs, and a
         // missing directory would leave every one of them unstated.

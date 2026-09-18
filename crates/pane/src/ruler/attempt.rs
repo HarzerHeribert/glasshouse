@@ -234,6 +234,21 @@ pub struct RunOpts {
     /// every attempt's `program` unstated, which is what a harness row that
     /// takes no such flag already does.
     pub rollouts: Option<PathBuf>,
+    /// The model a `pane` row's session is run with, written into the
+    /// attempt's own `<worktree>/.pane/config.toml` as `[model] parent`
+    /// before the harness launches.
+    ///
+    /// **Without it a `pane` row cannot run at all.** An attempt's worktree
+    /// is cut detached from the task's commit and carries no configuration
+    /// of the developer's, so `pane session` refuses to start with *no
+    /// parent model selected*, exits non-zero, and changes nothing --
+    /// whereupon the task's own tests run against an untouched tree and
+    /// report whatever they reported before the benchmark existed. Two runs
+    /// on 2026-09-17 were discarded by hand for that shape; `cli::run` now
+    /// refuses a selected `pane` row without this, and a non-zero harness
+    /// exit is `Errored` rather than scored. This stays an `Option` because
+    /// the other rows carry their own configuration.
+    pub parent_model: Option<String>,
 }
 
 /// Runs one attempt of `task` by `harness` and returns its record.
@@ -341,9 +356,13 @@ fn run_attempt_in(
         );
     };
 
-    if let Some(arm) = &command.decisions
-        && let Err(_message) = write_decisions_config(dir, arm)
-    {
+    if let Err(_message) = write_pane_config(
+        dir,
+        is_pane_row(harness.as_str())
+            .then_some(opts.parent_model.as_deref())
+            .flatten(),
+        command.decisions.as_ref(),
+    ) {
         return finish(
             Outcome::Errored,
             Tokens::default(),
@@ -429,16 +448,30 @@ fn run_attempt_in(
     let start_wall = Instant::now();
     let start_time = SystemTime::now();
 
-    if launch.status().is_err() {
-        return finish(
-            Outcome::Errored,
-            Tokens::default(),
-            start_wall.elapsed(),
-            None,
-            None,
-            None,
-            None,
-        );
+    // **A harness that exits non-zero never ran the task, and its tests are
+    // not the benchmark's answer.** This read `is_err()` alone, which catches
+    // only a harness that could not be spawned; a harness that started,
+    // refused, and exited 1 looked like a harness that had worked. The tests
+    // then ran against a worktree nothing had touched and reported the
+    // task's own pre-existing state -- `Pass` for every task whose tests are
+    // green at its base commit. `Errored` is exactly the right word for it:
+    // the attempt never reached its test command, and `score.rs` counts it
+    // in no denominator. Pane itself exits non-zero only when the session
+    // refuses to start, never because a task went unfinished, so nothing
+    // real is lost to this rule.
+    match launch.status() {
+        Ok(status) if status.success() => {}
+        _ => {
+            return finish(
+                Outcome::Errored,
+                Tokens::default(),
+                start_wall.elapsed(),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
     }
     let metrics = result_file.as_deref().and_then(read_metrics);
     let decision_figures = result_file.as_deref().and_then(read_decision_figures);
@@ -483,25 +516,48 @@ fn run_attempt_in(
     attempt
 }
 
-/// Writes `<dir>/.pane/config.toml`'s `[decisions]` table for a
-/// `pane:decisions-<mode>` arm, right after the worktree is cut and before
-/// the harness launches. The `off` mode touches nothing -- unset model
-/// already means off, so there is no table to write. If the task's own
-/// commit already carries a `.pane/config.toml`, the table is appended to
-/// it; a file that already has a `[decisions]` table refuses the arm rather
-/// than guess which table wins.
-fn write_decisions_config(dir: &Path, arm: &DecisionsArm) -> Result<(), String> {
-    let Some(model) = &arm.model else {
+/// Whether `row` is the `pane` row or one of its arms — the rows launched
+/// as the `pane` binary, and so the rows that need a parent model written.
+pub fn is_pane_row(row: &str) -> bool {
+    row.split_once(':').map_or(row, |(base, _)| base) == "pane"
+}
+
+/// Writes `<dir>/.pane/config.toml` — `[model] parent` for a `pane` row and
+/// `[decisions]` for a `pane:decisions-<mode>` arm — right after the
+/// worktree is cut and before the harness launches. Neither table ever
+/// travels as a session flag: both are what a person's own project
+/// configuration would carry, which is the thing being measured.
+///
+/// **One writer for one file.** These were two, and the second silently won:
+/// the decisions arm wrote `[decisions]` into a file with no `[model]` table
+/// in it, and every attempt of it refused to start.
+///
+/// The `off` decision mode contributes nothing -- unset model already means
+/// off, so there is no table to write. If the task's own commit already
+/// carries a `.pane/config.toml`, the tables are appended to it; a file that
+/// already has one of them refuses rather than guess which wins.
+fn write_pane_config(
+    dir: &Path,
+    parent_model: Option<&str>,
+    arm: Option<&DecisionsArm>,
+) -> Result<(), String> {
+    let decisions_model = arm.and_then(|arm| arm.model.as_deref());
+    if parent_model.is_none() && decisions_model.is_none() {
         return Ok(());
-    };
+    }
     let config_dir = dir.join(".pane");
     let config_path = config_dir.join("config.toml");
     let existing = fs::read_to_string(&config_path).unwrap_or_default();
-    if existing.contains("[decisions]") {
-        return Err(format!(
-            "{} already has a [decisions] table",
-            config_path.display()
-        ));
+    for (table, wanted) in [
+        ("[model]", parent_model.is_some()),
+        ("[decisions]", decisions_model.is_some()),
+    ] {
+        if wanted && existing.contains(table) {
+            return Err(format!(
+                "{} already has a {table} table",
+                config_path.display()
+            ));
+        }
     }
     fs::create_dir_all(&config_dir)
         .map_err(|e| format!("could not create {}: {e}", config_dir.display()))?;
@@ -509,10 +565,15 @@ fn write_decisions_config(dir: &Path, arm: &DecisionsArm) -> Result<(), String> 
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str(&format!(
-        "[decisions]\nmodel = \"{model}\"\nmode = \"{}\"\n",
-        arm.mode
-    ));
+    if let Some(model) = parent_model {
+        content.push_str(&format!("[model]\nparent = \"{model}\"\n"));
+    }
+    if let Some(model) = decisions_model {
+        content.push_str(&format!(
+            "[decisions]\nmodel = \"{model}\"\nmode = \"{}\"\n",
+            arm.map_or("", |arm| arm.mode.as_str())
+        ));
+    }
     fs::write(&config_path, content)
         .map_err(|e| format!("could not write {}: {e}", config_path.display()))
 }

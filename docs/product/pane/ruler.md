@@ -109,6 +109,7 @@ the only interesting thing the run found.
     pane ruler run \
       --task L1 --task S1 --task H1 \
       --harness claude-code --harness pane \
+      --parent-model gpt-5-6-sol \
       --repeat 3 \
       --gateway http://127.0.0.1:8731 \
       --out ruler/2026-09-05/
@@ -137,6 +138,15 @@ without re-reading a table.
 **`--repeat 3` is the default and the minimum.** A single attempt of an agent
 task measures the sample, not the harness.
 
+**`--parent-model <id>` is required whenever a `pane` row is selected**, and
+the run is refused without it before any worktree is cut. An attempt's
+worktree is cut detached from the task's parent commit and carries none of
+the developer's configuration, so a `pane` row has no model unless the ruler
+gives it one: it is written into that attempt's own
+`<root>/.pane/config.toml` as `[model]\nparent = "<id>"`, never as a flag on
+the row's argv, because a project file is what a person's own session reads.
+The other rows configure their own model and get no file written under them.
+
 ### Decisions arms
 
 `--pane-decisions off,shadow,on --decisions-model jev-latest` expands the
@@ -157,7 +167,7 @@ attempts whose telemetry document was never captured. **`overrides` is a
 proxy for a false hold, not a measured one, until the campaign says
 otherwise.**
 
-## 5. Two ways this measurement can lie, and what the ruler does about each
+## 5. Three ways this measurement can lie, and what the ruler does about each
 
 **A task whose statement leaks its answer.** The statements above are derived
 from commit subjects, and a subject like *"split `main.rs` into `commands/`"*
@@ -165,6 +175,23 @@ names the destination. That is the correct amount of leakage — it is what a
 person would say — but it must be *equal* across harnesses, so the statement
 is a fixed string in the task file and neither harness gets a word the other
 does not.
+
+**A harness that never ran, whose tests answer for it.** A harness that
+starts, refuses and exits non-zero has not attempted the task -- but the
+task's own tests will still run happily against the untouched worktree and
+report whatever they report at the base commit, which for most tasks is
+green. The run used to read only whether the harness could be *spawned*, so
+every such refusal was scored as though it had been an attempt. **An attempt
+whose harness exits non-zero is therefore `errored`**: its test command is
+not run, and `errored` is in no denominator of the score.
+
+This is the shape a `pane` row falls into first, because an attempt's
+worktree carries no configuration of its own: without `--parent-model` the
+session refuses to start, exits 1, and touches nothing. Two earlier runs on
+2026-09-17 were discarded by hand for exactly that reason (their run script
+deleted the configuration those attempts depended on); the rule and the flag
+together are what make a third such run report itself instead of being
+noticed.
 
 **A test that the harness can satisfy without doing the work.** `H3`'s test is
 `scripts/blast-radius.sh`, which a harness could pass by deleting code. Every
