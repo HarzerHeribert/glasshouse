@@ -1559,6 +1559,39 @@ fn a_failed_recap_prints_nothing() {
     );
 }
 
+/// A recurring notice answers one question rather than stacking: the second
+/// "Copied" line replaces the first, an unrelated note between them ends the
+/// run so the next copy starts a fresh line, and a note at another turn
+/// boundary is never reached backwards.
+#[test]
+fn a_recurring_notice_replaces_its_predecessor_instead_of_piling_up() {
+    let mut state = ScreenState::default();
+    state.note_replacing("Copied ", "Copied 9 lines to the clipboard.");
+    state.note_replacing("Copied ", "Copied 17 lines to the clipboard.");
+    state.note_replacing("Copied ", "Copied 4 lines to the clipboard.");
+    assert_eq!(
+        state
+            .history
+            .iter()
+            .map(|note| note.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Copied 4 lines to the clipboard."],
+        "three drags leave one standing answer"
+    );
+
+    state.note("Opened crates/pane/src/tui.rs.");
+    state.note_replacing("Copied ", "Copied 2 lines to the clipboard.");
+    assert_eq!(state.history.len(), 3, "an unrelated note ends the run");
+
+    state.messages_seen = 2;
+    state.note_replacing("Copied ", "Copied 6 lines to the clipboard.");
+    assert_eq!(
+        state.history.len(),
+        4,
+        "a copy after a later message does not swallow the one before it"
+    );
+}
+
 /// Notices are history: a note stays in the conversation after a later one,
 /// is drawn at its turn boundary (before the message sent after it, after
 /// the turn it followed), and an `ERROR:` note is red.

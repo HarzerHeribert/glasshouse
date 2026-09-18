@@ -25,6 +25,22 @@ impl ScreenState {
             });
         }
     }
+
+    /// Keeps `text` the way [`note`](Self::note) does, but as the current
+    /// answer to one recurring question rather than another line under the
+    /// last one: a note already standing at this position whose text begins
+    /// with `prefix` is replaced. Ten drag-selections leave one "Copied"
+    /// line, not ten.
+    pub fn note_replacing(&mut self, prefix: &str, text: impl Into<String>) {
+        if self
+            .history
+            .last()
+            .is_some_and(|note| note.after == self.messages_seen && note.text.starts_with(prefix))
+        {
+            self.history.pop();
+        }
+        self.note(text);
+    }
 }
 
 /// Draws the notes from `next` on that belong at or before message `upto`.

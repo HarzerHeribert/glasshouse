@@ -100,6 +100,16 @@ const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 /// The matching resets, in the same order.
 const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1006l";
 
+/// The opening of the drag-selection notice, which replaces its own
+/// predecessor rather than stacking under it.
+const COPIED: &str = "Copied ";
+
+/// The longest the screen goes without a frame while input keeps arriving.
+/// A drag or a wheel delivers events faster than a full transcript re-render
+/// takes, so the loop draws once per *batch* of input; this is the bound
+/// that keeps a continuous stream from starving the screen entirely.
+const FRAME: Duration = Duration::from_millis(50);
+
 /// Request mouse reporting in both of the spellings a host can need.
 fn enable_mouse_reporting() -> io::Result<()> {
     io::stdout().write_all(ENABLE_MOUSE_REPORTING)?;
@@ -691,6 +701,7 @@ fn run(
     let started = Instant::now();
     state.activity = Activity::Starting;
     let mut dirty = true;
+    let mut last_drawn = Instant::now();
     let mut last_tick = Instant::now();
     let mut task_started: Option<Instant> = None;
     let mut helper_clocks: HashMap<(usize, usize), Instant> = HashMap::new();
@@ -850,7 +861,14 @@ fn run(
             last_scroll = None;
             dirty = true;
         }
-        if dirty {
+        // **One frame per batch of input, not one per event.** Rendering
+        // the transcript costs more than the gap between two events of a
+        // drag or a wheel flick, so drawing on each one puts the screen
+        // behind the hand and leaves a flicked wheel scrolling after it
+        // stopped -- the motion a person sees is the queue draining. While
+        // more input is already waiting, consume it and draw once.
+        let waiting = input.queued() || event::poll(Duration::ZERO)?;
+        if dirty && (!waiting || last_drawn.elapsed() >= FRAME) {
             tick_helper_clocks(&mut notebook, &mut helper_clocks);
             state.input = editor.text.clone();
             state.cursor = Some(editor.cursor);
@@ -905,6 +923,7 @@ fn run(
             })?;
             io::stdout().flush()?;
             dirty = false;
+            last_drawn = Instant::now();
         }
         if !input.queued() && !event::poll(Duration::from_millis(if moving { 40 } else { 100 }))? {
             continue;
@@ -960,10 +979,15 @@ fn run(
                             Some(text) => {
                                 links::copy(text);
                                 let lines = text.lines().count();
-                                state.note(format!(
-                                    "Copied {lines} line{} to the clipboard.",
-                                    if lines == 1 { "" } else { "s" }
-                                ));
+                                // One standing answer to "what did I just
+                                // copy", not a new line per drag.
+                                state.note_replacing(
+                                    COPIED,
+                                    format!(
+                                        "{COPIED}{lines} line{} to the clipboard.",
+                                        if lines == 1 { "" } else { "s" }
+                                    ),
+                                );
                             }
                             None => state.selection = None,
                         }

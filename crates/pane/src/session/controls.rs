@@ -1355,7 +1355,12 @@ mod tests {
         let file = root.join(".pane/config.toml");
         let text = "[model]\nparent='base-parent'\n[limits]\ncells=42\n[helpers]\nmodel='base-helper'\nenabled=true\n[agents]\nmodel='base-agent'\n[profiles.review.limits]\ncells=17\n[profiles.review.web]\nenabled=true\n[profiles.review.helpers]\nmodel='review-helper'\n";
         fs::write(&file, text).unwrap();
-        let base = PaneConfig::parse(text).unwrap();
+        // Loaded, not parsed: the claim below is that the tier changes left
+        // the base settings alone, and `load` is what the assertion re-reads.
+        // Parsing only the project text made the pair differ by whatever the
+        // developer's own global configuration contributes, so the test read
+        // the machine it ran on.
+        let base = PaneConfig::load(&root).unwrap();
         with_selected_session(&root, Some("review"), |session| {
             assign_model(session, Tier::Helpers, "changed-helper").unwrap();
             assert_eq!(session.config().limits.cells, Some(17));
