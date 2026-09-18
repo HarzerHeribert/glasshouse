@@ -7,8 +7,10 @@ mod bands;
 mod composer;
 mod paths;
 mod regions;
+mod selection;
 pub(crate) use composer::composer_offset;
 use composer::{composer_cursor, wrapped_input};
+pub use selection::Selection;
 mod hit;
 pub(crate) use hit::{Hit, ScreenGeometry, StatusField};
 
@@ -187,6 +189,9 @@ pub struct ScreenState {
     /// why the status line says so (the user, 2026-09-17: click-and-drag
     /// selection must stay available).
     pub mouse_off: bool,
+    /// A drag in progress or just finished, in screen cells. Drawn over
+    /// everything else, because a person selects what they can see.
+    pub selection: Option<selection::Selection>,
     pub theme: Theme,
     pub settings_root: Option<std::path::PathBuf>,
     pub settings_profile: Option<String>,
@@ -1370,6 +1375,12 @@ pub(crate) fn render_screen_with_geometry(
         if cell.bg == ACCENT {
             cell.set_bg(state.theme.accent());
         }
+    }
+    // Last, over everything already drawn: the selection is a rectangle of
+    // cells, so what is copied is exactly what is on the screen.
+    if let Some(span) = state.selection.filter(|span| !span.is_empty()) {
+        let area = frame.area();
+        geometry.selected = Some(selection::draw(frame.buffer_mut(), area, span));
     }
     geometry
 }

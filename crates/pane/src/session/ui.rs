@@ -77,14 +77,16 @@ impl Drop for StartupNotes {
 }
 
 /// **Ask for exactly the mouse reports the UI consumes.** `?1000` is
-/// press/release reporting and `?1006` is the SGR encoding those reports are
-/// parsed from — together they are what the scroll handler reads and all a
-/// click handler would need. `EnableMouseCapture` would add `?1002`
-/// (button-drag motion) and `?1003` (any motion), which no arm of this file's
-/// `Event::Mouse` match looks at: they make the terminal report every pointer
-/// movement over the window, and each discarded report is another chance for a
-/// read boundary to split one into text (`terminal_input`). Crossterm has no
-/// command for the narrow pair, so the bytes are written directly.
+/// press/release, `?1002` is motion **while a button is held**, and `?1006`
+/// is the SGR encoding all three are parsed from. `?1002` was deliberately
+/// absent until 2026-09-18, when the user ruled that a plain click-and-drag
+/// must select: a terminal offers its own selection only behind a modifier
+/// while reporting is on, so Pane draws the selection itself and needs to see
+/// the drag. Still **not** `?1003` (any motion), which reports every pointer
+/// movement over the window whether or not anything is pressed, and each
+/// report no arm consumes is another chance for a read boundary to split one
+/// into text (`terminal_input`). Crossterm has no command for this set, so
+/// the bytes are written directly.
 ///
 /// **On Windows these bytes are necessary and not sufficient**, which is why
 /// [`enable_mouse_reporting`] exists. They reach the ConPTY emulator and tell
@@ -94,9 +96,9 @@ impl Drop for StartupNotes {
 /// is all `EnableMouseCapture` does there (`is_ansi_code_supported` is `false`
 /// on Windows, so it writes no `?1002`/`?1003` either). Without that call
 /// pane's wheel did nothing on Windows at all.
-const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 /// The matching resets, in the same order.
-const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000l\x1b[?1006l";
+const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1006l";
 
 /// Request mouse reporting in both of the spellings a host can need.
 fn enable_mouse_reporting() -> io::Result<()> {
@@ -628,9 +630,9 @@ fn set_mouse_capture(state: &mut tui::ScreenState, on: bool) {
     }
     state.mouse_off = !on;
     state.note(if on {
-        "Mouse on: clicks reach Pane. /mouse or Ctrl-G releases it for selection."
+        "Mouse on: click to open, drag to select. /mouse or Ctrl-G hands it back."
     } else {
-        "Mouse released: drag to select and copy. /mouse or Ctrl-G takes it back."
+        "Mouse released: the terminal owns the pointer. /mouse or Ctrl-G takes it back."
     });
 }
 
@@ -694,6 +696,9 @@ fn run(
     let mut helper_clocks: HashMap<(usize, usize), Instant> = HashMap::new();
     let mut previous_rows = 0usize;
     let mut viewport_height = 10usize;
+    // Where the left button went down, so a release knows whether the
+    // gesture was a click or a drag.
+    let mut pressed_at: Option<(u16, u16)> = None;
     let mut geometry = tui::ScreenGeometry::default();
     // When the position indicator came up, so it can go down again after
     // `tui::SCROLL_INDICATOR_LINGER` without a timer of its own.
@@ -924,6 +929,70 @@ fn run(
                     dirty = true;
                     continue;
                 }
+                // **Every press anchors a possible drag, whatever else it
+                // reaches.** A person who starts selecting on a cell header
+                // still means to select; the widget that fires below has
+                // already done its one thing and the drag is a second, later
+                // gesture that cannot be confused with it.
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    pressed_at = Some((mouse.column, mouse.row));
+                    if state.selection.take().is_some() {
+                        dirty = true;
+                    }
+                }
+                if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                    if let Some(anchor) = pressed_at {
+                        state.selection = Some(tui::Selection {
+                            anchor,
+                            head: (mouse.column, mouse.row),
+                        });
+                        dirty = true;
+                    }
+                    continue;
+                }
+                if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    let anchor = pressed_at.take();
+                    // A drag that covered something is a selection, and it
+                    // goes to the clipboard through the terminal -- the same
+                    // OSC 52 route `/copy` uses, so it works over SSH too.
+                    if state.selection.is_some_and(|span| !span.is_empty()) {
+                        match geometry.selected() {
+                            Some(text) => {
+                                links::copy(text);
+                                let lines = text.lines().count();
+                                state.note(format!(
+                                    "Copied {lines} line{} to the clipboard.",
+                                    if lines == 1 { "" } else { "s" }
+                                ));
+                            }
+                            None => state.selection = None,
+                        }
+                        dirty = true;
+                        continue;
+                    }
+                    // A press and a release in the same place is a click.
+                    // The path is answered here rather than on the press so
+                    // that a drag which begins on one selects instead.
+                    if let Some(tui::Hit::Path(index)) =
+                        anchor.and_then(|(column, row)| geometry.hit(column, row))
+                        && let Some(path) = geometry.path(index)
+                    {
+                        let shown = path.to_string();
+                        let resolved = std::path::Path::new(&shown).to_path_buf();
+                        let resolved = if resolved.is_absolute() {
+                            resolved
+                        } else {
+                            std::env::current_dir().unwrap_or_default().join(resolved)
+                        };
+                        state.note(if links::show(&resolved) {
+                            format!("Opened {shown}.")
+                        } else {
+                            format!("Nothing here can open {shown}.")
+                        });
+                        dirty = true;
+                    }
+                    continue;
+                }
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     match geometry.hit(mouse.column, mouse.row) {
                         // The picker's own rows, exactly as they behaved
@@ -941,25 +1010,10 @@ fn run(
                         // A file path drawn in the transcript. The one
                         // surface with no keyboard twin, by the user's
                         // ruling of 2026-09-18: naming the path to a slash
-                        // command is slower than the click is worth.
-                        Some(tui::Hit::Path(index)) => {
-                            if let Some(path) = geometry.path(index) {
-                                let shown = path.to_string();
-                                let resolved = std::path::Path::new(&shown).to_path_buf();
-                                let resolved = if resolved.is_absolute() {
-                                    resolved
-                                } else {
-                                    std::env::current_dir().unwrap_or_default().join(resolved)
-                                };
-                                state.note(if links::show(&resolved) {
-                                    format!("Opened {shown}.")
-                                } else {
-                                    format!("Nothing here can open {shown}.")
-                                });
-                            }
-                            dirty = true;
-                            continue;
-                        }
+                        // command is slower than the click is worth. It is
+                        // opened on the release above, not here, so that a
+                        // drag beginning on a path selects instead.
+                        Some(tui::Hit::Path(_)) => continue,
                         // The same thing `/cell <n>` does, on the cell whose
                         // header was clicked.
                         Some(tui::Hit::Cell(cell)) => {

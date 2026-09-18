@@ -77,6 +77,10 @@ pub(crate) struct ScreenGeometry {
     /// its top -- both from the draw, because a click on the first visible
     /// row of a scrolled composer is not the first row of the text.
     composer: Option<(Rect, usize)>,
+    /// What the pointer selected in this frame, read off the drawn cells by
+    /// `selection::draw`. The draw is the only thing that knows, because the
+    /// selection is of the screen rather than of the model behind it.
+    pub(crate) selected: Option<String>,
 }
 
 impl ScreenGeometry {
@@ -88,6 +92,11 @@ impl ScreenGeometry {
     /// One drawn path, at the exact columns it occupies.
     pub(crate) fn record_path(&mut self, area: Rect, path: String) {
         self.paths.push((area, path));
+    }
+
+    /// The text the pointer selected in the frame this geometry came from.
+    pub(crate) fn selected(&self) -> Option<&str> {
+        self.selected.as_deref().filter(|text| !text.is_empty())
     }
 
     /// The path [`Hit::Path`] names.

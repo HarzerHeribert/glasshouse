@@ -1111,6 +1111,10 @@ fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
             "press/release reporting must be requested"
         );
         assert!(
+            emitted(&app.bytes, b"\x1b[?1002h"),
+            "motion while a button is held must be requested: it is what a drag-selection reads"
+        );
+        assert!(
             emitted(&app.bytes, b"\x1b[?1006h"),
             "SGR encoding must be requested"
         );
@@ -1121,10 +1125,12 @@ fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
     {
         let shutdown = &app.bytes[startup..];
         assert!(
-            emitted(shutdown, b"\x1b[?1000l") && emitted(shutdown, b"\x1b[?1006l"),
-            "both requested modes must be reset on exit"
+            emitted(shutdown, b"\x1b[?1000l")
+                && emitted(shutdown, b"\x1b[?1002l")
+                && emitted(shutdown, b"\x1b[?1006l"),
+            "every requested mode must be reset on exit"
         );
-        for unused in [b"?1002".as_slice(), b"?1003".as_slice()] {
+        for unused in [b"?1003".as_slice()] {
             assert!(
                 !emitted(&app.bytes, unused),
                 "a motion mode nothing handles was negotiated: {}",
