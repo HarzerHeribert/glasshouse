@@ -21,43 +21,85 @@ pub const PREAMBLE: &str = concat!(
     "tools and branch on their actual returned values. Batch deterministic work\n",
     "when useful; stop at the next decision that needs unseen evidence. After\n",
     "submitting a cell, wait for its correlated result. Never invent output or\n",
-    "infer success: only that result is runtime evidence.\n\n",
+    "infer success: only that result is runtime evidence.\n",
+    "\n",
+    "A cell is a program, and that is what earns it a turn. One cell can read\n",
+    "several files, search the tree, edit, run the tests and branch on what comes\n",
+    "back: every call is awaited, and every result is a live value the next line\n",
+    "uses. So spend the turn on a whole step — gather what the step needs, act on\n",
+    "it, and check the result in the same program — then yield when the next\n",
+    "decision needs evidence that does not exist yet.\n",
+    "\n",
+    "  // one inspection cell: everything the next step is about to change\n",
+    "  const [limits, callback, hits] = await Promise.all([\n",
+    "    context({path: \"src/config.rs\", symbol: \"Limits\"}),\n",
+    "    context({path: \"src/runtime/bindings.rs\", symbol: \"tool_callback\"}),\n",
+    "    rg({pattern: \"cell_wall_clock|response_bytes\", path: \"src\"}),\n",
+    "  ]);\n",
+    "  return {omissions: limits.omissions, matched: hits.length};\n",
+    "\n",
+    "  // the next cell: the edits those results earned, and the check for them\n",
+    "  await edit({path: \"src/config.rs\", old: OLD, replacement: REPLACEMENT});\n",
+    "  const run = await bash({command: \"cargo test -p pane --lib config\"});\n",
+    "  const failures = await helper.reduce(run.stdout);\n",
+    "  return {passed: run.exit_code === 0, failures};\n",
+    "\n",
+    "  // judge what the cell already holds, and branch on it, in the same turn\n",
+    "  const diff = await bash({command: \"git diff --stat\"});\n",
+    "  const call = await decide.choice(\n",
+    "    \"Does this diff do more than rename a symbol?\",\n",
+    "    {rename_only: \"every hunk renames one symbol\", wider: \"anything else\"},\n",
+    "    diff.stdout);\n",
+    "  if (call.choice === \"wider\" && call.confidence > 0.85) { /* inspect */ }\n",
+    "\n",
+    "`helper.<name>` and `decide.choice` answer from inside the cell and cost no\n",
+    "turn, so a summary or a judgement belongs in the step that needs it rather\n",
+    "than in a turn of its own; the Runtime block below declares the ones this\n",
+    "session has.\n",
+    "\n",
+    "Changing existing source has a rhythm worth knowing before you start: `edit`\n",
+    "writes against the version `context` delivered in a previous completed cell.\n",
+    "So fetch every symbol the step will change in one cell, and make all of those\n",
+    "edits in the next — two turns for a batch of edits, rather than two turns for\n",
+    "each one.\n",
+    "\n",
     "Every cell carries a description: one short line, in the person's language,\n",
     "saying what it is for and why — not which functions it calls. It is the only\n",
     "account of your work the person sees while you run, and you read it back after\n",
     "compaction. Pass it as the `description` argument; in the fenced form it is the\n",
-    "line immediately before the fence.\n\n",
+    "line immediately before the fence.\n",
+    "\n",
     "A cell is validated before it runs. A parse error runs nothing and may offer\n",
     "`pane-edit`; a return, yield, or throw stops later code. Tool results are live\n",
-    "objects, but unseen fields are not model-visible. Use declared fields and\n",
-    "standard JavaScript; do not bind a declared tool or host-global name. Reuse\n",
-    "live handles rather than repeating reads. For an existing source change,\n",
-    "`context({path, symbol})` is the first source-reading tool; do not `read` or\n",
-    "print the whole source first. Its complete target is delivered automatically.\n",
-    "Batch independent context calls in one inspection cell. After inspection,\n",
-    "related edits, new tests and verification can run in one cell; yield when\n",
-    "the next decision needs interpretation of new evidence.\n",
-    "In the next cell use `edit({path, old, replacement})`; do not name a variable\n",
-    "`new`. Pane binds the edit to the latest observed source version. For file or\n",
-    "script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:\n",
-    "one double-quoted JavaScript string per logical line, never a template literal.\n",
-    "Pane supplies line separators. Use\n",
-    "compact structured summaries or bounded excerpts instead of broad prints.\n",
-    "`glob` may return directories, so select a file before `read`. A `bash`\n",
-    "result succeeded only when its\n",
-    "`exit_code` says so.\n\n",
+    "objects, but unseen fields are not model-visible: use declared fields and\n",
+    "standard JavaScript, and bind your own values to names no declared tool or\n",
+    "host global already has. Reuse live handles rather than repeating a read.\n",
+    "For an existing source change,\n",
+    "`context({path, symbol})` is the first source-reading tool and delivers its\n",
+    "complete target automatically; `read` and whole-file prints are for files the\n",
+    "step is not about to edit. Then `edit({path, old, replacement})` — the second\n",
+    "argument is `replacement`, since `new` is a JavaScript keyword — and Pane binds\n",
+    "it to the latest observed source version. For file or script text containing\n",
+    "`$`, quotes or heredocs, `write` and `edit` take line arrays:\n",
+    "one double-quoted JavaScript string per logical line, and Pane supplies the\n",
+    "separators. Prefer compact structured summaries or bounded excerpts to broad\n",
+    "prints. `glob` may return directories, so select a file before `read`. A\n",
+    "`bash` result succeeded only when its `exit_code` says so.\n",
+    "\n",
     "Bindings persist between cells of this user request; redeclaring replaces\n",
     "them. Each new user request starts a fresh runtime. Earlier requests are\n",
     "history, not unfinished work. Work on the current request, including its\n",
     "requested tests. Running off the end or `yieldNow(reason)` gives results\n",
     "and another turn. Returning an object, array or tool object displays\n",
     "notebook output and also gives another turn. A top-level returned string\n",
-    "ends the task; use one for the final answer grounded in observed results.\n\n",
+    "ends the task; use one for the final answer grounded in observed results.\n",
+    "\n",
     "A prose response with no `execute_cell` call ends the task as the answer.\n",
     "Use prose-only output only when the request is finished; do not use it to\n",
     "announce work you still intend to perform.\n",
     "To interpret a file, inspect and yield first, then answer from the feedback.\n",
-    "Use structured returns for inspection when useful; they do not finish the task.\n\n",
+    "Use structured returns for inspection when useful; they do not finish the task.\n",
+    "\n",
     "A thrown error carries its position and completed bindings. Continue from\n",
     "that state; failed or skipped calls did not succeed. PermissionDenied is\n",
     "final: code cannot widen the session's sandbox grant.",
@@ -122,23 +164,20 @@ const VARIANTS: &[Variant] = &[
     Variant {
         cells: "A cell is validated before it runs. A parse error runs nothing and may offer\n\
                 `pane-edit`; a return, yield, or throw stops later code. Tool results are live\n\
-                objects, but unseen fields are not model-visible. Use declared fields and\n\
-                standard JavaScript; do not bind a declared tool or host-global name. Reuse\n\
-                live handles rather than repeating reads. For an existing source change,\n\
-                `context({path, symbol})` is the first source-reading tool; do not `read` or\n\
-                print the whole source first. Its complete target is delivered automatically.\n\
-                Batch independent context calls in one inspection cell. After inspection,\n\
-                related edits, new tests and verification can run in one cell; yield when\n\
-                the next decision needs interpretation of new evidence.\n\
-                In the next cell use `edit({path, old, replacement})`; do not name a variable\n\
-                `new`. Pane binds the edit to the latest observed source version. For file or\n\
-                script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:\n\
-                one double-quoted JavaScript string per logical line, never a template literal.\n\
-                Pane supplies line separators. Use\n\
-                compact structured summaries or bounded excerpts instead of broad prints.\n\
-                `glob` may return directories, so select a file before `read`. A `bash`\n\
-                result succeeded only when its\n\
-                `exit_code` says so.",
+                objects, but unseen fields are not model-visible: use declared fields and\n\
+                standard JavaScript, and bind your own values to names no declared tool or\n\
+                host global already has. Reuse live handles rather than repeating a read.\n\
+                For an existing source change,\n\
+                `context({path, symbol})` is the first source-reading tool and delivers its\n\
+                complete target automatically; `read` and whole-file prints are for files the\n\
+                step is not about to edit. Then `edit({path, old, replacement})` — the second\n\
+                argument is `replacement`, since `new` is a JavaScript keyword — and Pane binds\n\
+                it to the latest observed source version. For file or script text containing\n\
+                `$`, quotes or heredocs, `write` and `edit` take line arrays:\n\
+                one double-quoted JavaScript string per logical line, and Pane supplies the\n\
+                separators. Prefer compact structured summaries or bounded excerpts to broad\n\
+                prints. `glob` may return directories, so select a file before `read`. A\n\
+                `bash` result succeeded only when its `exit_code` says so.",
         hybrid: None,
         tools: Some(
             "Pane binds an edit to the latest observed source version. A command result\n\
@@ -149,6 +188,80 @@ const VARIANTS: &[Variant] = &[
         cells: "A prose response with no `execute_cell` call ends the task as the answer.\n",
         hybrid: Some("A prose response with no tool call ends the task as the answer.\n"),
         tools: Some("A prose response with no tool call ends the task as the answer.\n"),
+    },
+    // The chaining paragraph and its worked cells: what a turn buys. The
+    // examples carry their own indentation, so these segments are `concat!`
+    // forms rather than line-continuations, which would strip it. A request
+    // that declares no `execute_cell` has no cell to fill, so `Tools` drops
+    // each of them with its separator; `Hybrid` keeps them, because a cell is
+    // exactly where hybrid's dependent work belongs.
+    Variant {
+        cells: concat!(
+            "A cell is a program, and that is what earns it a turn. One cell can read\n",
+            "several files, search the tree, edit, run the tests and branch on what comes\n",
+            "back: every call is awaited, and every result is a live value the next line\n",
+            "uses. So spend the turn on a whole step — gather what the step needs, act on\n",
+            "it, and check the result in the same program — then yield when the next\n",
+            "decision needs evidence that does not exist yet.\n",
+            "\n",
+            "  // one inspection cell: everything the next step is about to change\n",
+            "  const [limits, callback, hits] = await Promise.all([\n",
+            "    context({path: \"src/config.rs\", symbol: \"Limits\"}),\n",
+            "    context({path: \"src/runtime/bindings.rs\", symbol: \"tool_callback\"}),\n",
+            "    rg({pattern: \"cell_wall_clock|response_bytes\", path: \"src\"}),\n",
+            "  ]);\n",
+            "  return {omissions: limits.omissions, matched: hits.length};\n",
+            "\n",
+            "  // the next cell: the edits those results earned, and the check for them\n",
+            "  await edit({path: \"src/config.rs\", old: OLD, replacement: REPLACEMENT});\n",
+            "  const run = await bash({command: \"cargo test -p pane --lib config\"});\n",
+            "  const failures = await helper.reduce(run.stdout);\n",
+            "  return {passed: run.exit_code === 0, failures};\n",
+            "\n",
+            "  // judge what the cell already holds, and branch on it, in the same turn\n",
+            "  const diff = await bash({command: \"git diff --stat\"});\n",
+            "  const call = await decide.choice(\n",
+            "    \"Does this diff do more than rename a symbol?\",\n",
+            "    {rename_only: \"every hunk renames one symbol\", wider: \"anything else\"},\n",
+            "    diff.stdout);\n",
+            "  if (call.choice === \"wider\" && call.confidence > 0.85) { /* inspect */ }\n",
+            "\n",
+        ),
+        hybrid: None,
+        tools: Some(""),
+    },
+    Variant {
+        cells: concat!(
+            "`helper.<name>` and `decide.choice` answer from inside the cell and cost no\n",
+            "turn, so a summary or a judgement belongs in the step that needs it rather\n",
+            "than in a turn of its own; the Runtime block below declares the ones this\n",
+            "session has.\n",
+            "\n",
+        ),
+        hybrid: Some(concat!(
+            "`helper.<name>` and `decide.choice` answer from inside the cell and cost no\n",
+            "turn, so a summary or a judgement belongs in the step that needs it rather\n",
+            "than in a turn of its own; the Runtime block below declares the ones this\n",
+            "session has. A direct call spends a whole turn on one operation, which suits\n",
+            "an independent step whose result needs nothing further this turn; dependent,\n",
+            "branching or repeated work is what a cell is for.\n",
+            "\n",
+        )),
+        tools: Some(""),
+    },
+    // The two-turn rhythm `edit` imposes. `Tools` states the version rule in
+    // its own mechanics replacement and has no cell to batch into.
+    Variant {
+        cells: concat!(
+            "Changing existing source has a rhythm worth knowing before you start: `edit`\n",
+            "writes against the version `context` delivered in a previous completed cell.\n",
+            "So fetch every symbol the step will change in one cell, and make all of those\n",
+            "edits in the next — two turns for a batch of edits, rather than two turns for\n",
+            "each one.\n",
+            "\n",
+        ),
+        hybrid: None,
+        tools: Some(""),
     },
 ];
 

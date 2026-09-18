@@ -94,6 +94,22 @@ fn the_tools_preamble_never_mentions_a_cell_it_cannot_send() {
     assert!(!tools.contains("provider-native tool"), "{tools}");
     assert!(!tools.contains("A cell is validated"), "{tools}");
     assert!(!tools.contains("template literal"), "{tools}");
+    // The chaining paragraph, its worked cells and the edit rhythm are a
+    // cell's economics; a request that declares no cell must not be taught
+    // them, and the two host globals those examples call are bound only
+    // inside one.
+    for absent in [
+        "A cell is a program",
+        "await Promise.all",
+        "helper.reduce(",
+        "decide.choice(",
+        "two turns for a batch of edits",
+    ] {
+        assert!(
+            !tools.contains(absent),
+            "tools preamble teaches {absent:?}:\n{tools}"
+        );
+    }
     assert!(
         tools.contains(
             "To act, call the familiar tools directly; each call's result is runtime\nevidence."
@@ -108,6 +124,31 @@ fn the_tools_preamble_never_mentions_a_cell_it_cannot_send() {
         assert!(
             tools.contains(sentence),
             "tools lost {sentence:?}:\n{tools}"
+        );
+    }
+}
+
+/// A dropped segment takes its own blank line with it.
+///
+/// Three segments are dropped in `Tools` (the descriptor paragraph, the
+/// chaining paragraph with its worked cells, and the edit-rhythm paragraph)
+/// and one in `Hybrid`'s replacements. Each carries its trailing separator,
+/// so a drop leaves one blank line between paragraphs rather than two.
+#[test]
+fn a_dropped_segment_leaves_no_hole_in_the_block() {
+    for interface in [Interface::Cells, Interface::Hybrid, Interface::Tools] {
+        let text = prompt::preamble_for(interface);
+        assert!(
+            !text.contains("\n\n\n"),
+            "{interface:?} preamble has a blank-line hole:\n{text}"
+        );
+        assert!(
+            !text.starts_with('\n'),
+            "{interface:?} preamble opens blank"
+        );
+        assert!(
+            text.ends_with("sandbox grant."),
+            "{interface:?} preamble does not end on its last sentence:\n{text}"
         );
     }
 }

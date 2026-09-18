@@ -41,6 +41,46 @@ the byte-for-byte text below remains the compatibility contract.
     submitting a cell, wait for its correlated result. Never invent output or
     infer success: only that result is runtime evidence.
 
+    A cell is a program, and that is what earns it a turn. One cell can read
+    several files, search the tree, edit, run the tests and branch on what comes
+    back: every call is awaited, and every result is a live value the next line
+    uses. So spend the turn on a whole step — gather what the step needs, act on
+    it, and check the result in the same program — then yield when the next
+    decision needs evidence that does not exist yet.
+
+      // one inspection cell: everything the next step is about to change
+      const [limits, callback, hits] = await Promise.all([
+        context({path: "src/config.rs", symbol: "Limits"}),
+        context({path: "src/runtime/bindings.rs", symbol: "tool_callback"}),
+        rg({pattern: "cell_wall_clock|response_bytes", path: "src"}),
+      ]);
+      return {omissions: limits.omissions, matched: hits.length};
+
+      // the next cell: the edits those results earned, and the check for them
+      await edit({path: "src/config.rs", old: OLD, replacement: REPLACEMENT});
+      const run = await bash({command: "cargo test -p pane --lib config"});
+      const failures = await helper.reduce(run.stdout);
+      return {passed: run.exit_code === 0, failures};
+
+      // judge what the cell already holds, and branch on it, in the same turn
+      const diff = await bash({command: "git diff --stat"});
+      const call = await decide.choice(
+        "Does this diff do more than rename a symbol?",
+        {rename_only: "every hunk renames one symbol", wider: "anything else"},
+        diff.stdout);
+      if (call.choice === "wider" && call.confidence > 0.85) { /* inspect */ }
+
+    `helper.<name>` and `decide.choice` answer from inside the cell and cost no
+    turn, so a summary or a judgement belongs in the step that needs it rather
+    than in a turn of its own; the Runtime block below declares the ones this
+    session has.
+
+    Changing existing source has a rhythm worth knowing before you start: `edit`
+    writes against the version `context` delivered in a previous completed cell.
+    So fetch every symbol the step will change in one cell, and make all of those
+    edits in the next — two turns for a batch of edits, rather than two turns for
+    each one.
+
     Every cell carries a description: one short line, in the person's language,
     saying what it is for and why — not which functions it calls. It is the only
     account of your work the person sees while you run, and you read it back after
@@ -49,23 +89,20 @@ the byte-for-byte text below remains the compatibility contract.
 
     A cell is validated before it runs. A parse error runs nothing and may offer
     `pane-edit`; a return, yield, or throw stops later code. Tool results are live
-    objects, but unseen fields are not model-visible. Use declared fields and
-    standard JavaScript; do not bind a declared tool or host-global name. Reuse
-    live handles rather than repeating reads. For an existing source change,
-    `context({path, symbol})` is the first source-reading tool; do not `read` or
-    print the whole source first. Its complete target is delivered automatically.
-    Batch independent context calls in one inspection cell. After inspection,
-    related edits, new tests and verification can run in one cell; yield when
-    the next decision needs interpretation of new evidence.
-    In the next cell use `edit({path, old, replacement})`; do not name a variable
-    `new`. Pane binds the edit to the latest observed source version. For file or
-    script text containing `$`, quotes or heredocs, use `write`/`edit` line arrays:
-    one double-quoted JavaScript string per logical line, never a template literal.
-    Pane supplies line separators. Use
-    compact structured summaries or bounded excerpts instead of broad prints.
-    `glob` may return directories, so select a file before `read`. A `bash`
-    result succeeded only when its
-    `exit_code` says so.
+    objects, but unseen fields are not model-visible: use declared fields and
+    standard JavaScript, and bind your own values to names no declared tool or
+    host global already has. Reuse live handles rather than repeating a read.
+    For an existing source change,
+    `context({path, symbol})` is the first source-reading tool and delivers its
+    complete target automatically; `read` and whole-file prints are for files the
+    step is not about to edit. Then `edit({path, old, replacement})` — the second
+    argument is `replacement`, since `new` is a JavaScript keyword — and Pane binds
+    it to the latest observed source version. For file or script text containing
+    `$`, quotes or heredocs, `write` and `edit` take line arrays:
+    one double-quoted JavaScript string per logical line, and Pane supplies the
+    separators. Prefer compact structured summaries or bounded excerpts to broad
+    prints. `glob` may return directories, so select a file before `read`. A
+    `bash` result succeeded only when its `exit_code` says so.
 
     Bindings persist between cells of this user request; redeclaring replaces
     them. Each new user request starts a fresh runtime. Earlier requests are
@@ -99,7 +136,19 @@ preamble.
 `prompt::preamble_for(interface)` renders the block above for the interface the
 request declares (`tool-abi.md` §3). `Cells` is the block verbatim and the
 default since 2026-09-13 (a session without `--interface` shows exactly the
-block in §2). `Hybrid` and
+block in §2).
+
+**What the 2026-09-13 ablation measured, and what it did not.** It scored
+cells 12/12, hybrid 11/12 and tools 10/12 — under the preamble as it then
+stood, whose only instruction to chain was one subordinate clause inside a
+paragraph of prohibitions. Two sessions on 2026-09-17 then measured 1.6 and
+1.98 tool calls per cell, with 20 of 120 cells making no call at all: a cell
+was being used as a single tool call, in every mode. That ablation therefore
+compared three interfaces through a prompt that taught none of them to chain,
+and its margins say little about the interfaces themselves. Re-running it
+against the preamble above is what would.
+
+`Hybrid` and
 `Tools` are the same constant with exactly the segments below replaced and
 nothing else changed, so every shared sentence has one copy;
 `prompt_bytes.rs::the_interface_variants_are_the_contracts_verbatim` pins each
@@ -120,6 +169,22 @@ becomes:
 
     A prose response with no tool call ends the task as the answer.
 
+and the sentence about `helper.<name>` and `decide.choice` (*… the Runtime
+block below declares the ones this session has.*) gains what a direct call
+costs, becoming:
+
+    `helper.<name>` and `decide.choice` answer from inside the cell and cost no
+    turn, so a summary or a judgement belongs in the step that needs it rather
+    than in a turn of its own; the Runtime block below declares the ones this
+    session has. A direct call spends a whole turn on one operation, which suits
+    an independent step whose result needs nothing further this turn; dependent,
+    branching or repeated work is what a cell is for.
+
+The chaining paragraph with its three worked cells, and the edit-rhythm
+paragraph, are kept **verbatim** in `Hybrid`: a cell is where dependent,
+branching or repeated work belongs in either mode, and the hybrid sentence
+above is what tells the model when a direct call is the cheaper route.
+
 **Tools.** The opening tool sentences become:
 
     To act, call the familiar tools directly; each call's result is runtime
@@ -131,6 +196,11 @@ evidence.*) becomes:
     Stop at the next decision that needs unseen evidence. After each call, wait
     for its correlated result. Never invent output or infer success: only that
     result is runtime evidence.
+
+The chaining paragraph, the `helper`/`decide` sentence and the edit-rhythm
+paragraph are **dropped entirely**, each with its trailing blank line: a
+request that declares no `execute_cell` has no cell for a worked program to
+fill, and the two host globals those examples call are bound only inside one.
 
 The descriptor paragraph (*Every cell carries a description … before the
 fence.*) is **dropped entirely**: a request that declares no `execute_cell`
