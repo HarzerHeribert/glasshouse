@@ -212,10 +212,7 @@ fn the_whole_set_sentence_is_interface_aware() {
     );
     // The facts after the sentence are the same in every variant.
     for text in [&cells, &hybrid, &tools] {
-        assert!(
-            text.contains("Sandbox: write allow rules: Write(src/**)"),
-            "{text}"
-        );
+        assert!(text.contains("Sandbox: writable: Write(src/**)"), "{text}");
     }
 }
 

@@ -510,7 +510,7 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
         "nothing is writable".to_string()
     } else {
         format!(
-            "write allow rules: {} (deny rules still apply)",
+            "writable: {} (deny rules still apply)",
             facts.writable.join(", ")
         )
     };

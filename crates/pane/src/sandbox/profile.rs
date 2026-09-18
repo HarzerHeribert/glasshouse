@@ -627,6 +627,25 @@ impl Profile {
         &self.additional_roots
     }
 
+    /// The roots a cell may write under, as [`Profile::check`] would answer.
+    ///
+    /// **The one place that question is answered, because two derivations of
+    /// it disagreed.** A root's writability is not expressed as a rule, so a
+    /// reader that listed the write-`allow` rules reported "nothing is
+    /// writable" for the ordinary session where `check` admits a write to the
+    /// project root — the system block said that on the line above the
+    /// manifest saying the opposite (measured 2026-09-18, a dogfooding
+    /// session). An invalid root refuses everything, and so is no root at
+    /// all here.
+    pub fn writable_roots(&self) -> Vec<&Path> {
+        if self.invalid_root.is_some() {
+            return Vec::new();
+        }
+        std::iter::once(self.root.as_path())
+            .chain(self.additional_roots.iter().map(PathBuf::as_path))
+            .collect()
+    }
+
     /// The read-only toolchain subtrees this profile granted, for a platform
     /// applier to render. Read and execute; never write, and never a path a
     /// refusing rule covers — [`Profile::check`] is the authority and these

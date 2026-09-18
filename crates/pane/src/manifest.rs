@@ -89,7 +89,7 @@ impl Manifest {
         if profile.container_mode() {
             readable_roots.push(CONTAINER_READ_ROOT.to_string());
         }
-        let writable_roots: Vec<String> = roots.iter().map(|root| shown(root)).collect();
+        let writable_roots: Vec<String> = profile.writable_roots().into_iter().map(shown).collect();
         let reserved_paths: Vec<String> = roots
             .iter()
             .flat_map(|root| [".pane", ".claude"].map(|name| shown(&root.join(name))))

@@ -677,16 +677,21 @@ pub(super) fn preflight_serving(
 /// the binary did rather than spelling them a second time — the same reason
 /// that test calls [`prompt::render_system`] instead of quoting its output.
 pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
+    // The roots come from `Profile::writable_roots`, which is the same
+    // answer `Profile::check` gives and the same one the manifest renders.
+    // Listing only the write-`allow` rules said "nothing is writable" for an
+    // ordinary session, on the line above the manifest naming the project
+    // root as writable.
     let mut writable: Vec<String> = profile
-        .rules()
-        .filter(|rule| rule.write() && rule.effect() == crate::sandbox::profile::Effect::Allow)
-        .map(|rule| rule.written().to_string())
+        .writable_roots()
+        .into_iter()
+        .map(|root| root.display().to_string())
         .collect();
     writable.extend(
         profile
-            .additional_roots()
-            .iter()
-            .map(|root| root.display().to_string()),
+            .rules()
+            .filter(|rule| rule.write() && rule.effect() == crate::sandbox::profile::Effect::Allow)
+            .map(|rule| rule.written().to_string()),
     );
     writable.sort();
     writable.dedup();

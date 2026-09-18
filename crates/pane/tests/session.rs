@@ -4684,10 +4684,56 @@ fn prompt_write_grants_do_not_include_denied_path_components() {
         Some(r#"{"permissions":{"allow":["Write(src/**)"],"deny":["Write(secrets/**)"]}}"#),
     );
     let facts = pane::session::session_facts(&profile);
-    assert_eq!(facts.writable, vec!["Write(src/**)"]);
+    assert_eq!(
+        facts.writable,
+        vec![
+            profile.root().display().to_string(),
+            "Write(src/**)".to_string()
+        ],
+        "the root is writable whether or not a rule says so"
+    );
     let text = pane::prompt::render_session_facts(&facts);
     assert!(text.contains("deny rules still apply"));
     assert!(!text.contains("secrets"));
+}
+
+/// One system block, two renderings of the same grant, and until 2026-09-18
+/// they disagreed: the `Sandbox:` line listed the write-`allow` rules and so
+/// said **nothing is writable** for an ordinary session, directly above the
+/// `## Environment` block naming the project root as a writable root. A
+/// dogfooding session read the restrictive half as authoritative and declined
+/// to do any work in a directory it was allowed to write.
+///
+/// `Profile::check` is the authority both now read through.
+#[test]
+fn the_sandbox_line_and_the_environment_block_agree_about_what_is_writable() {
+    let root = scratch_dir("writable-agreement-root");
+    // No write rules at all: the case where the two derivations diverged.
+    let profile = pane::sandbox::profile::Profile::compile(&root, None);
+    assert!(
+        profile
+            .check(
+                "write",
+                pane::sandbox::profile::Access::Write,
+                &root.join("new.txt"),
+            )
+            .is_ok(),
+        "the authority admits a write under the project root"
+    );
+
+    let facts = pane::session::session_facts(&profile);
+    let sandbox_line = pane::prompt::render_session_facts(&facts);
+    let environment = pane::manifest::Manifest::collect(&profile, &[]).render();
+
+    assert!(
+        !sandbox_line.contains("nothing is writable"),
+        "a root `check` admits is not nothing: {sandbox_line}"
+    );
+    let shown = profile.root().display().to_string();
+    assert!(
+        sandbox_line.contains(&shown) && environment.contains(&shown),
+        "both name the same writable root\n--- sandbox\n{sandbox_line}\n--- environment\n{environment}"
+    );
 }
 
 #[test]
