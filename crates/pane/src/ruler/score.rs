@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::interface::{self, CreditRatios, RegretRow};
-use super::model::{Attempt, Harness, Outcome, Tier, Tokens};
+use super::model::{Attempt, Harness, Outcome, Program, Tier, Tokens};
 
 /// One aggregated row: the three numbers `ruler.md` §3 names, grouped over
 /// whatever set of attempts the caller built it from.
@@ -40,6 +40,14 @@ pub struct Row {
     /// Sum of turns across every attempt in the group, regardless of
     /// outcome. Printed and never divided into -- map line 2432.
     pub turns: Option<u32>,
+    /// Cells and calls summed across every attempt in the group that kept a
+    /// rollout. `None` when none did -- an attempt whose rollout was not kept
+    /// is skipped, never averaged in as nought.
+    ///
+    /// Held as the two counts rather than their ratio so this row stays
+    /// exact: the division belongs to the renderer, and its denominator is
+    /// cells. Turns remain a divisor of nothing.
+    pub program: Option<Program>,
 }
 
 /// One `(task, harness)` row, tier carried alongside for grouping into tier
@@ -192,6 +200,9 @@ fn build_row(group: &[&Attempt]) -> Row {
         .filter_map(|a| a.turns)
         .fold(None, |acc: Option<u32>, n| Some(acc.unwrap_or(0) + n));
 
+    let programs: Vec<Program> = group.iter().filter_map(|a| a.program).collect();
+    let program = Program::sum(programs.iter());
+
     Row {
         attempts_completed,
         attempts_made,
@@ -200,5 +211,6 @@ fn build_row(group: &[&Attempt]) -> Row {
         tokens_failed,
         wall_per_completed,
         turns,
+        program,
     }
 }

@@ -256,6 +256,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     }
 }
 
@@ -536,6 +537,7 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
     let harness = Harness::new("pane");
 
@@ -591,6 +593,7 @@ fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
     let harness = Harness::new("claude-code");
 
@@ -637,6 +640,7 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
     let harness = Harness::new("codex");
 
@@ -696,6 +700,7 @@ fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
     let harness = Harness::new("pane");
 
@@ -813,6 +818,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
             glasshouse: fake_glasshouse,
         },
         harnesses: attempt::default_harnesses(),
+        rollouts: None,
     };
     let harness = Harness::new("pane");
 
@@ -869,6 +875,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
             glasshouse: fake_glasshouse2,
         },
         harnesses: attempt::default_harnesses(),
+        rollouts: None,
     };
     let harness2 = Harness::new("claude-code");
 
@@ -920,6 +927,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
             glasshouse: fake_glasshouse.clone(),
         },
         harnesses: attempt::default_harnesses(),
+        rollouts: None,
     };
     let pane_harness = Harness::new("pane");
     let pane_result = attempt::run_one(&pane_task, &pane_harness, 1, &pane_opts);
@@ -940,6 +948,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
             glasshouse: fake_glasshouse,
         },
         harnesses: attempt::default_harnesses(),
+        rollouts: None,
     };
     let claude_harness = Harness::new("claude-code");
     let claude_result = attempt::run_one(&claude_task, &claude_harness, 1, &claude_opts);
@@ -1191,6 +1200,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
             glasshouse: fake_glasshouse2,
         },
         harnesses: attempt::default_harnesses(),
+        rollouts: None,
     };
     let harness2 = Harness::new("pane");
 
@@ -1436,6 +1446,8 @@ fn pane_interface_expands_the_pane_row_into_one_arm_per_mode() {
                 "session",
                 "--root",
                 "{root}",
+                "--rollout",
+                "{rollout}",
                 "--task",
                 "{statement}",
                 "--interface",
@@ -1524,6 +1536,7 @@ fn a_pane_arm_captures_its_stdout_and_carries_the_metrics() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
     let harness = Harness::new("pane:hybrid");
 
@@ -1587,6 +1600,7 @@ fn a_pane_arm_without_a_telemetry_document_is_unmeasured_not_zero() {
         via_glasshouse: None,
         meter: Meter::None,
         harnesses,
+        rollouts: None,
     };
 
     let result = attempt::run_one(&task, &Harness::new("pane:cells"), 1, &opts);
@@ -1644,6 +1658,8 @@ fn pane_decisions_expands_the_pane_row_into_one_arm_per_mode() {
                 "session",
                 "--root",
                 "{root}",
+                "--rollout",
+                "{rollout}",
                 "--task",
                 "{statement}",
                 "--output-format",
@@ -1819,6 +1835,7 @@ fn a_decisions_off_arm_gets_no_config_file_while_shadow_and_on_get_the_exact_tom
             via_glasshouse: None,
             meter: Meter::None,
             harnesses,
+            rollouts: None,
         };
 
         let result = attempt::run_one(&task, &Harness::new(arm_name.as_str()), 1, &opts);
@@ -1899,6 +1916,7 @@ fn decision_attempt(
         wall_clock: std::time::Duration::from_secs(1),
         turns: None,
         changed_lines: None,
+        program: None,
         interface: None,
         metrics: None,
         decisions_mode: Some(arm.rsplit('-').next().unwrap().to_string()),

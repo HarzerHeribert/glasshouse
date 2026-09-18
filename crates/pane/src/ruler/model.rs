@@ -132,6 +132,46 @@ impl Tokens {
     }
 }
 
+/// What one attempt's own rollout says about the programs it wrote: how many
+/// cells ran, and how many tool calls those cells made between them.
+///
+/// **The denominator is cells, never turns.** Map line 2432 forbids a
+/// per-turn division and [`Attempt::turns`] is never a divisor anywhere; this
+/// figure answers a different question -- whether a cell is being used as the
+/// program it is, or as a single tool call wearing a program's costs. Measured
+/// on 2026-09-17: two real sessions of 120 cells each ran at 1.6 and 1.98
+/// calls per cell, with 20 of 120 cells making no call at all.
+///
+/// Absent is not zero, as everywhere else here: an attempt whose rollout was
+/// never kept, or could not be read, carries `None` and is skipped by
+/// [`Program::sum`] rather than averaged in as nought.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Program {
+    pub cells: u32,
+    pub calls: u32,
+}
+
+impl Program {
+    /// Calls per cell, or `None` when no cell ran -- a division by nought is
+    /// unstated, never `0.0`.
+    pub fn calls_per_cell(&self) -> Option<f64> {
+        (self.cells > 0).then(|| f64::from(self.calls) / f64::from(self.cells))
+    }
+
+    /// Sum across attempts, absent unless at least one carried a figure.
+    pub fn sum<'a>(programs: impl IntoIterator<Item = &'a Program>) -> Option<Program> {
+        programs
+            .into_iter()
+            .fold(None, |acc: Option<Program>, next| {
+                let acc = acc.unwrap_or_default();
+                Some(Program {
+                    cells: acc.cells + next.cells,
+                    calls: acc.calls + next.calls,
+                })
+            })
+    }
+}
+
 /// The result of running the task's own test command on the harness's tree
 /// after the harness stops. **There is no partial credit and no rubric.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +229,10 @@ pub struct Attempt {
     pub turns: Option<u32>,
     /// The attempt's own `--shortstat` insertions plus deletions.
     pub changed_lines: Option<u32>,
+    /// What this attempt's own kept rollout says about its cells and the
+    /// calls they made; `None` when no rollout was kept or it could not be
+    /// read -- unmeasured, never a zero.
+    pub program: Option<Program>,
     /// The `--interface` mode a `pane:<mode>` ablation arm was launched
     /// with; `None` for every other row.
     pub interface: Option<String>,

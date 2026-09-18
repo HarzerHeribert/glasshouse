@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::decisions::DecisionFigures;
 use super::interface::{self, Metrics};
 use super::meter::Meter;
-use super::model::{Attempt, Harness, Outcome, Task, Tokens};
+use super::model::{Attempt, Harness, Outcome, Program, Task, Tokens};
 
 /// Serializes every attempt's harness-launch-through-meter-read span,
 /// process-wide.
@@ -181,6 +181,8 @@ pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
                 "session".to_string(),
                 "--root".to_string(),
                 "{root}".to_string(),
+                "--rollout".to_string(),
+                "{rollout}".to_string(),
                 "--task".to_string(),
                 "{statement}".to_string(),
             ],
@@ -221,6 +223,17 @@ pub struct RunOpts {
     pub via_glasshouse: Option<HashMap<String, String>>,
     pub meter: Meter,
     pub harnesses: HashMap<String, HarnessCommand>,
+    /// Where an attempt's own rollout is kept, so it outlives the worktree
+    /// that produced it -- `cli::run` passes `--out`, and the directory
+    /// exists before the first attempt runs.
+    ///
+    /// **Without it the headline figure cannot be computed at all.** The
+    /// attempt's `.pane/sessions/*.jsonl` dies with `remove_worktree`, and a
+    /// row's cells and calls are what say whether a cell was used as a
+    /// program. `None` drops the `--rollout` pair from the argv and leaves
+    /// every attempt's `program` unstated, which is what a harness row that
+    /// takes no such flag already does.
+    pub rollouts: Option<PathBuf>,
 }
 
 /// Runs one attempt of `task` by `harness` and returns its record.
@@ -242,6 +255,7 @@ pub fn run_one(task: &Task, harness: &Harness, attempt_no: u32, opts: &RunOpts) 
         wall_clock: Duration::default(),
         turns: None,
         changed_lines: None,
+        program: None,
         interface: None,
         metrics: None,
         decisions_mode: None,
@@ -308,6 +322,7 @@ fn run_attempt_in(
             wall_clock,
             turns,
             changed_lines,
+            program: None,
             interface: interface.clone(),
             metrics,
             decisions_mode: decisions_mode.clone(),
@@ -375,12 +390,16 @@ fn run_attempt_in(
         }
         None => Command::new(&command.program),
     };
-    for arg in &command.args {
-        match arg.as_str() {
-            "{root}" => launch.arg(dir),
-            "{statement}" => launch.arg(task.statement),
-            _ => launch.arg(arg),
-        };
+    let rollout = opts.rollouts.as_ref().map(|out| {
+        out.join(format!(
+            "{}-{}-{}.jsonl",
+            task.id,
+            harness.as_str().replace(':', "-"),
+            attempt_no
+        ))
+    });
+    for arg in substituted_args(&command.args, dir, task.statement, rollout.as_deref()) {
+        launch.arg(arg);
     }
     launch.current_dir(dir);
     if let Some(gateway) = &opts.gateway {
@@ -448,7 +467,7 @@ fn run_attempt_in(
         TestResult::Errored => Outcome::Errored,
     };
 
-    finish(
+    let mut attempt = finish(
         outcome,
         tokens,
         wall_clock,
@@ -456,7 +475,12 @@ fn run_attempt_in(
         changed_lines,
         metrics,
         decision_figures,
-    )
+    );
+    // Only this path can carry one: every early return above left before the
+    // harness wrote a cell, so an absent figure there is the truth rather
+    // than a gap.
+    attempt.program = rollout.as_deref().and_then(read_program);
+    attempt
 }
 
 /// Writes `<dir>/.pane/config.toml`'s `[decisions]` table for a
@@ -491,6 +515,124 @@ fn write_decisions_config(dir: &Path, arm: &DecisionsArm) -> Result<(), String> 
     ));
     fs::write(&config_path, content)
         .map_err(|e| format!("could not write {}: {e}", config_path.display()))
+}
+
+/// The argv for one attempt: the row's template with `{root}`, `{statement}`
+/// and `{rollout}` filled in.
+///
+/// **A `--rollout {rollout}` pair with no path to fill it is dropped whole**,
+/// flag and placeholder together, rather than handed to the harness as a
+/// literal `{rollout}` it would try to open. That is why this is a loop over
+/// indices and not a `map`: dropping a placeholder means dropping the flag
+/// that introduced it, which the element in hand cannot know on its own.
+fn substituted_args(
+    args: &[String],
+    dir: &Path,
+    statement: &str,
+    rollout: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "{root}" => out.push(dir.as_os_str().to_os_string()),
+            "{statement}" => out.push(std::ffi::OsString::from(statement)),
+            "{rollout}" => {
+                if let Some(path) = rollout {
+                    out.push(path.as_os_str().to_os_string());
+                } else {
+                    // The flag that introduced it goes with it.
+                    out.pop();
+                }
+            }
+            other => out.push(std::ffi::OsString::from(other)),
+        }
+        index += 1;
+    }
+    out
+}
+
+/// The bare runtime tools a cell calls by name. `helper.<name>` and
+/// `decide.choice` are counted separately in [`count_calls`], since both are
+/// reached through a receiver and a bare `find(` is not one of them.
+const CELL_TOOLS: [&str; 10] = [
+    "read", "rg", "grep", "glob", "context", "edit", "write", "bash", "fd", "jq",
+];
+
+/// How many tool calls one cell's source makes.
+///
+/// An identifier counts when it is one of [`CELL_TOOLS`], stands on its own
+/// rather than after a `.`, and is followed by `(`; or when it is reached
+/// through `helper.` or as `decide.choice`. A method of the same name on
+/// something else -- `results.read(...)` -- is not a tool call and is not
+/// counted.
+fn count_calls(source: &str) -> u32 {
+    let bytes = source.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut calls = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_ident(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_ident(bytes[index]) {
+            index += 1;
+        }
+        if start > 0 && is_ident(bytes[start - 1]) {
+            continue;
+        }
+        let name = &source[start..index];
+        // The next non-space character decides whether this is a call at all.
+        let mut after = index;
+        while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+            after += 1;
+        }
+        if after >= bytes.len() || bytes[after] != b'(' {
+            continue;
+        }
+        let dotted = start > 0 && bytes[start - 1] == b'.';
+        if dotted {
+            let mut receiver_end = start - 1;
+            while receiver_end > 0 && bytes[receiver_end - 1].is_ascii_whitespace() {
+                receiver_end -= 1;
+            }
+            let mut receiver_start = receiver_end;
+            while receiver_start > 0 && is_ident(bytes[receiver_start - 1]) {
+                receiver_start -= 1;
+            }
+            match &source[receiver_start..receiver_end] {
+                "helper" => calls += 1,
+                "decide" if name == "choice" => calls += 1,
+                _ => {}
+            }
+        } else if CELL_TOOLS.contains(&name) {
+            calls += 1;
+        }
+    }
+    calls
+}
+
+/// What one kept rollout says about the cells the attempt ran, or `None`
+/// when it was never kept or cannot be read -- unmeasured, never a zero, and
+/// never an inference from the record's absence.
+fn read_program(path: &Path) -> Option<Program> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut program = Program::default();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("kind").and_then(serde_json::Value::as_str) != Some("cell") {
+            continue;
+        }
+        program.cells += 1;
+        if let Some(source) = value.get("source").and_then(serde_json::Value::as_str) {
+            program.calls += count_calls(source);
+        }
+    }
+    (program.cells > 0).then_some(program)
 }
 
 /// The captured telemetry document, or `None` when the file is unreadable
@@ -631,7 +773,15 @@ mod tests {
         let pane = &table["pane"];
         assert_eq!(
             pane.args,
-            vec!["session", "--root", "{root}", "--task", "{statement}"]
+            vec![
+                "session",
+                "--root",
+                "{root}",
+                "--rollout",
+                "{rollout}",
+                "--task",
+                "{statement}"
+            ]
         );
 
         let codex = &table["codex"];
@@ -643,5 +793,102 @@ mod tests {
                 "{statement}"
             ]
         );
+    }
+
+    #[test]
+    fn a_rollout_with_nowhere_to_go_drops_its_flag_with_it() {
+        let args: Vec<String> = default_harnesses()["pane"].args.clone();
+        let root = Path::new("/tmp/attempt-root");
+
+        let kept = substituted_args(
+            &args,
+            root,
+            "do the thing",
+            Some(Path::new("/out/S1.jsonl")),
+        );
+        assert_eq!(
+            kept,
+            vec![
+                "session",
+                "--root",
+                "/tmp/attempt-root",
+                "--rollout",
+                "/out/S1.jsonl",
+                "--task",
+                "do the thing"
+            ]
+        );
+
+        // Not a literal `{rollout}` and not a bare `--rollout` with the
+        // statement swallowed as its value: the pair goes together.
+        let dropped = substituted_args(&args, root, "do the thing", None);
+        assert_eq!(
+            dropped,
+            vec![
+                "session",
+                "--root",
+                "/tmp/attempt-root",
+                "--task",
+                "do the thing"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cells_calls_are_counted_by_name_and_by_receiver() {
+        // Every shape that counts, and three that must not: a method of the
+        // same name on a value, an identifier that merely starts with a tool
+        // name, and a mention that is not a call.
+        let source = "const a = await read({path: \"x\"});\n\
+             const b = await rg({pattern: \"y\"});\n\
+             const c = context({path: \"z\", symbol: \"S\"});\n\
+             const d = await helper.find(\"where\");\n\
+             const e = await decide.choice(\"q\", {a: \"1\", b: \"2\"});\n\
+             const f = results.read(0);\n\
+             const g = readme(1);\n\
+             const h = \"bash is a word here\";\n";
+        assert_eq!(count_calls(source), 5);
+    }
+
+    #[test]
+    fn a_cell_that_calls_nothing_is_a_cell_all_the_same() {
+        // Twenty of the 120 cells in the session of 2026-09-17 made no call
+        // at all; they are exactly what drags calls-per-cell down, so they
+        // must count in the denominator.
+        assert_eq!(count_calls("return {done: true};"), 0);
+    }
+
+    #[test]
+    fn an_unreadable_rollout_is_unstated_rather_than_a_cellless_attempt() {
+        assert_eq!(read_program(Path::new("/nonexistent/attempt.jsonl")), None);
+    }
+
+    #[test]
+    fn a_kept_rollout_reports_its_cells_and_their_calls() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruler-program-{}-{}",
+            std::process::id(),
+            next_attempt_dir_ordinal()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("S1-pane-1.jsonl");
+        fs::write(
+            &path,
+            "{\"kind\":\"system\",\"text\":\"read( in the preamble is not a cell\"}\n\
+             {\"kind\":\"cell\",\"cell\":1,\"source\":\"const a = await read({path: 'a'}); const b = await rg({pattern: 'b'});\"}\n\
+             {\"kind\":\"turn\",\"role\":\"assistant\",\"text\":\"prose\"}\n\
+             {\"kind\":\"cell\",\"cell\":2,\"source\":\"return 1;\"}\n\
+             not json at all\n",
+        )
+        .expect("write rollout");
+
+        let program = read_program(&path).expect("a kept rollout carries a figure");
+        assert_eq!(program.cells, 2);
+        assert_eq!(program.calls, 2);
+        // One call in one cell and none in the other: the empty cell is in
+        // the denominator, so this is 1.00 and not 2.00.
+        assert_eq!(program.calls_per_cell(), Some(1.0));
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

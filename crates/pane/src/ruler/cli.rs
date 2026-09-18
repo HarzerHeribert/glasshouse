@@ -195,7 +195,13 @@ fn run(flags: &[String]) -> Result<(), String> {
             None => Meter::None,
         },
         harnesses: harness_table,
+        // Created before the first attempt rather than with the records at
+        // the end: an attempt writes its rollout while it runs, and a
+        // missing directory would leave every one of them unstated.
+        rollouts: Some(args.out.clone()),
     };
+    fs::create_dir_all(&args.out)
+        .map_err(|e| format!("could not create --out {}: {e}", args.out.display()))?;
 
     // This loop must stay a plain sequential loop: `attempt::run_one` reads
     // the meter by time window alone (`meter.rs`'s module doc comment), and

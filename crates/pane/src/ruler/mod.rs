@@ -16,4 +16,4 @@ pub mod report;
 pub mod score;
 pub mod tasks;
 
-pub use model::{Attempt, Harness, Outcome, Task, Tier, Tokens};
+pub use model::{Attempt, Harness, Outcome, Program, Task, Tier, Tokens};

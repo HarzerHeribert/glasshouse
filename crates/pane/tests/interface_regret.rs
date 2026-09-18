@@ -23,6 +23,7 @@ fn arm(task: &'static str, mode: &str, attempt_no: u32, metrics: Option<Metrics>
         wall_clock: Duration::from_secs(10),
         turns: None,
         changed_lines: None,
+        program: None,
         interface: Some(mode.to_string()),
         metrics,
         decisions_mode: None,
@@ -280,18 +281,21 @@ fn render_table_without_interfaces_is_unchanged() {
         wall_clock: Duration::from_secs(10),
         turns: Some(3),
         changed_lines: None,
+        program: None,
         interface: None,
         metrics: None,
         decisions_mode: None,
         decision_figures: None,
     };
     let table = report::render_table(&Score::of(std::slice::from_ref(&plain)));
-    let expected = "task  harness  outcome  tokens/completed  wall  turns  tokens(failed)\n\
-L1  claude-code  1/1 pass  150  10s  3  —\n\
+    // An attempt that kept no rollout reads unmeasured in both program
+    // columns -- never `0` cells and never `0.00` calls per cell.
+    let expected = "task  harness  outcome  tokens/completed  wall  turns  cells  calls/cell  tokens(failed)\n\
+L1  claude-code  1/1 pass  150  10s  3  —  —  —\n\
 -- tier leaf --\n\
-leaf  claude-code  1/1 pass  150  10s  3  —\n\
+leaf  claude-code  1/1 pass  150  10s  3  —  —  —\n\
 -- aggregate --\n\
-aggregate  claude-code  1/1 pass  150  10s  3  —\n";
+aggregate  claude-code  1/1 pass  150  10s  3  —  —  —\n";
     assert_eq!(table, expected);
 
     let jsonl = report::render_jsonl(std::slice::from_ref(&plain));

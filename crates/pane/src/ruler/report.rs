@@ -12,18 +12,20 @@ use std::fmt::Write as _;
 
 use super::decisions::{DecisionFigures, DecisionRow};
 use super::interface::{CreditRatios, Metrics, RegretRow};
-use super::model::{Attempt, Outcome, Tier};
+use super::model::{Attempt, Outcome, Program, Tier};
 use super::score::{AggregateRow, Row, Score, TaskRow, TierRow};
 
 /// The rendered table's columns, in order. `render_table` emits exactly
 /// these and no others.
-pub const HEADERS: [&str; 7] = [
+pub const HEADERS: [&str; 9] = [
     "task",
     "harness",
     "outcome",
     "tokens/completed",
     "wall",
     "turns",
+    "cells",
+    "calls/cell",
     "tokens(failed)",
 ];
 
@@ -35,7 +37,7 @@ pub const HEADERS: [&str; 7] = [
 /// attempt never reached its test) -- `Attempt` carries no separate exit code.
 /// `interface` and `metrics` are a `pane:<mode>` ablation arm's mode and its
 /// own telemetry figures, `null` on every other row.
-pub const JSONL_KEYS: [&str; 15] = [
+pub const JSONL_KEYS: [&str; 17] = [
     "task",
     "harness",
     "commit",
@@ -46,6 +48,8 @@ pub const JSONL_KEYS: [&str; 15] = [
     "tokens_cached_input",
     "wall_ms",
     "turns",
+    "cells",
+    "calls",
     "exit_status",
     "interface",
     "metrics",
@@ -232,13 +236,15 @@ fn fmt_measure(value: f64) -> String {
 
 fn render_row(label: &str, harness: &str, row: &Row) -> String {
     format!(
-        "{label}  {harness}  {outcome}  {tokens}  {wall}  {turns}  {failed}",
+        "{label}  {harness}  {outcome}  {tokens}  {wall}  {turns}  {cells}  {calls_per_cell}  {failed}",
         label = label,
         harness = harness,
         outcome = fmt_outcome(row.attempts_completed, row.attempts_made),
         tokens = fmt_tokens(row.tokens_per_completed),
         wall = fmt_wall(row.wall_per_completed),
         turns = fmt_turns(row.turns),
+        cells = fmt_cells(row.program),
+        calls_per_cell = fmt_calls_per_cell(row.program),
         failed = fmt_tokens(row.tokens_failed),
     )
 }
@@ -257,6 +263,26 @@ fn fmt_tokens(tokens: Option<u64>) -> String {
 fn fmt_turns(turns: Option<u32>) -> String {
     match turns {
         Some(n) => n.to_string(),
+        None => UNMEASURED.to_string(),
+    }
+}
+
+/// The group's cells, or the unmeasured marker when no attempt in it kept a
+/// rollout.
+fn fmt_cells(program: Option<Program>) -> String {
+    match program {
+        Some(program) => program.cells.to_string(),
+        None => UNMEASURED.to_string(),
+    }
+}
+
+/// Calls per cell to two places. **The denominator is cells** -- turns are
+/// printed here and divided into nowhere (map line 2432) -- and a group whose
+/// rollouts were never kept, or that ran no cell, reads as unmeasured rather
+/// than as `0.00`.
+fn fmt_calls_per_cell(program: Option<Program>) -> String {
+    match program.and_then(|program| program.calls_per_cell()) {
+        Some(ratio) => format!("{ratio:.2}"),
         None => UNMEASURED.to_string(),
     }
 }
@@ -304,7 +330,7 @@ pub fn render_jsonl(attempts: &[Attempt]) -> String {
 
 fn render_jsonl_line(attempt: &Attempt) -> String {
     format!(
-        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics},\"decisions_mode\":{decisions_mode},\"decisions_figures\":{decisions_figures}}}",
+        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"cells\":{cells},\"calls\":{calls},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics},\"decisions_mode\":{decisions_mode},\"decisions_figures\":{decisions_figures}}}",
         task = json_str(attempt.task),
         harness = json_str(attempt.harness.as_str()),
         commit = json_str(&attempt.base_commit),
@@ -315,6 +341,8 @@ fn render_jsonl_line(attempt: &Attempt) -> String {
         tokens_cached = json_opt(attempt.tokens.cached_input),
         wall_ms = attempt.wall_clock.as_millis(),
         turns = json_opt(attempt.turns),
+        cells = json_opt(attempt.program.map(|program| program.cells)),
+        calls = json_opt(attempt.program.map(|program| program.calls)),
         exit_status = json_opt(exit_status(attempt.outcome)),
         interface = attempt
             .interface

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use pane::ruler::score::Score;
-use pane::ruler::{Attempt, Harness, Outcome, Tier, Tokens, report, tasks};
+use pane::ruler::{Attempt, Harness, Outcome, Program, Tier, Tokens, report, tasks};
 
 #[allow(clippy::too_many_arguments)]
 fn attempt(
@@ -30,6 +30,7 @@ fn attempt(
         wall_clock: Duration::from_secs(wall_secs),
         turns,
         changed_lines: None,
+        program: None,
         interface: None,
         metrics: None,
         decisions_mode: None,
@@ -238,6 +239,94 @@ fn an_uncounted_token_figure_never_renders_as_zero() {
 }
 
 #[test]
+fn an_attempt_without_a_rollout_is_skipped_rather_than_counted_as_no_cells() {
+    // The figure this whole column exists for: two real sessions of
+    // 2026-09-17 ran at 1.6 and 1.98 calls per cell. An attempt whose
+    // rollout was never kept knows nothing about either number, and folding
+    // it in as zero cells and zero calls would drag a group's ratio toward
+    // whatever the kept attempts happened to be.
+    let mut kept = attempt(
+        "S1",
+        Tier::Standard,
+        "pane",
+        1,
+        Outcome::Pass,
+        Tokens {
+            input: Some(100),
+            output: Some(50),
+            cached_input: None,
+        },
+        10,
+        Some(4),
+    );
+    kept.program = Some(Program {
+        cells: 4,
+        calls: 12,
+    });
+
+    let unkept = attempt(
+        "S1",
+        Tier::Standard,
+        "pane",
+        2,
+        Outcome::Pass,
+        Tokens {
+            input: Some(100),
+            output: Some(50),
+            cached_input: None,
+        },
+        10,
+        Some(4),
+    );
+    assert_eq!(unkept.program, None);
+
+    let score = Score::of(&[kept, unkept]);
+    let row = &score.task_rows[0].row;
+    assert_eq!(
+        row.program,
+        Some(Program {
+            cells: 4,
+            calls: 12
+        }),
+        "the kept attempt's figures stand alone; the unkept one adds nothing"
+    );
+    assert_eq!(
+        row.program.and_then(|program| program.calls_per_cell()),
+        Some(3.0),
+        "12 calls over 4 cells -- not 12 over 8"
+    );
+
+    let table = report::render_table(&score);
+    assert!(table.contains("  4  3.00  "), "{table}");
+}
+
+#[test]
+fn a_group_that_kept_no_rollout_reads_unmeasured_in_both_program_columns() {
+    let score = Score::of(&[attempt(
+        "S1",
+        Tier::Standard,
+        "claude-code",
+        1,
+        Outcome::Pass,
+        Tokens {
+            input: Some(100),
+            output: Some(50),
+            cached_input: None,
+        },
+        10,
+        Some(4),
+    )]);
+    assert_eq!(score.task_rows[0].row.program, None);
+
+    let table = report::render_table(&score);
+    let first = table.lines().nth(1).expect("a task row");
+    assert!(
+        first.ends_with("—  —  —"),
+        "cells, calls/cell and tokens(failed) all unmeasured: {first}"
+    );
+}
+
+#[test]
 fn the_table_and_the_jsonl_have_exactly_these_columns() {
     assert_eq!(
         report::HEADERS,
@@ -248,6 +337,8 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
             "tokens/completed",
             "wall",
             "turns",
+            "cells",
+            "calls/cell",
             "tokens(failed)",
         ]
     );
@@ -264,6 +355,8 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
             "tokens_cached_input",
             "wall_ms",
             "turns",
+            "cells",
+            "calls",
             "exit_status",
             "interface",
             "metrics",
