@@ -4073,12 +4073,13 @@ fn os_sandbox_bypass_requires_an_explicit_yolo_grant() {
     assert!(stderr.contains("requires --yolo"), "stderr: {stderr}");
 }
 
-/// The platform gate on the bypass: Linux and Windows accept it with
-/// `--yolo` (an externally isolated container, VM or runner is the boundary
-/// there) and the session goes on to its ordinary startup; macOS refuses it
-/// by platform, with `--yolo` present, before anything else runs.
+/// The platform gate on the bypass: every platform Pane has an unconfined
+/// applier for accepts it with `--yolo` and goes on to its ordinary startup.
+/// macOS is one of them since 2026-09-18 — a development machine is the
+/// boundary its owner has already chosen, and refusing them the mode only
+/// moved the work somewhere with no admission checks at all.
 #[test]
-fn os_sandbox_bypass_is_accepted_on_linux_and_windows_and_refused_on_macos() {
+fn os_sandbox_bypass_is_accepted_on_every_platform_with_an_unconfined_applier() {
     let root = scratch_dir("sandbox-bypass-platform");
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))
         .arg("session")
@@ -4104,18 +4105,90 @@ fn os_sandbox_bypass_is_accepted_on_linux_and_windows_and_refused_on_macos() {
         !stderr.contains("requires --yolo"),
         "--yolo was given: {stderr}"
     );
-    if cfg!(any(target_os = "linux", target_os = "windows")) {
+    if cfg!(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos"
+    )) {
         assert!(
-            !stderr.contains("supported only on"),
+            !stderr.contains("is supported on"),
             "the bypass is accepted on this platform: {stderr}"
         );
     } else {
         assert!(!output.status.success());
         assert!(
-            stderr.contains("supported only on Linux and Windows"),
+            stderr.contains("is supported on macOS, Linux and Windows"),
             "the bypass is refused by platform here: {stderr}"
         );
     }
+}
+
+/// `--full-access` is the one name for all three halves — the widest
+/// admission profile, the rung that asks nothing, and no OS confinement of
+/// Pane's own — and it says so in one line a person can act on, naming what
+/// still refuses rather than only shouting.
+#[test]
+fn full_access_is_one_flag_for_all_three_halves_and_says_what_still_holds() {
+    let root = scratch_dir("full-access-one-flag");
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .arg("--model")
+        .arg("fixture-model")
+        .arg("--gateway")
+        .arg(root.join("no-gateway"))
+        .arg("--full-access")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"))
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let said = format!("{stdout}{stderr}");
+    assert!(
+        !said.contains("requires --yolo"),
+        "--full-access carries its own yolo half: {said}"
+    );
+    assert!(
+        said.contains("permissions: full"),
+        "--full-access starts on the full rung: {said}"
+    );
+    assert!(
+        said.contains("sandbox: full access"),
+        "the unconfined half must be announced: {said}"
+    );
+    // The half that does not move, in the same line, by name.
+    assert!(
+        said.contains("never-grantable") && said.contains(".ssh"),
+        "the line must say what still refuses: {said}"
+    );
+}
+
+/// `--full-access` names the `full` rung, so naming a different one beside
+/// it is refused rather than silently resolved — the same rule
+/// `--ask-approval` already has.
+#[test]
+fn full_access_refuses_a_different_permissions_rung_beside_it() {
+    let root = scratch_dir("full-access-ambiguous");
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .arg("--full-access")
+        .arg("--permissions")
+        .arg("manual")
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous"), "stderr: {stderr}");
 }
 
 /// Without `--yolo` and without a settings document the sandbox grants

@@ -11,11 +11,29 @@ files. `cargo_test` is what needs a sandbox, not `hits.filter(...)`.
 
 ## Current implementation addendum (2026-09-12)
 
-`--dangerously-bypass-os-sandbox --yolo` is an explicit escape hatch for
-disposable benchmark and CI containers, VMs and runners whose outer runtime is
-the intended security boundary; it is accepted on Linux and Windows and
-refused by platform on macOS (2026-09-17: the GitHub runners lack the
-AppContainer isolation service). On Windows it spawns through the applier's
+`--full-access` is the one name for the widest session Pane has: the
+admission profile of `--yolo`, the rung that asks nothing
+(`--permissions full`), and no OS confinement of Pane's own
+(`--dangerously-bypass-os-sandbox`, which still works and still means only
+that third half). It is accepted on **macOS, Linux and Windows** — every
+platform with an unconfined applier — and refused elsewhere, because a bypass
+that spawned anyway would be the one unconfined path this code exists not to
+have.
+
+**macOS was refused until 2026-09-18**, on the reasoning that an externally
+isolated container or CI runner is the boundary on Linux and Windows and
+nothing outside the seatbelt is one on macOS. That reasoning described a
+benchmark runner and not a person: on a development machine the machine is the
+boundary its owner has already chosen, and refusing them the mode only moved
+the work to a tool with no admission checks at all (user ruling: *voller
+Zugriff ist das einzige was Sinn macht in modernen Zeiten*). **What does not
+move is §4.** `Profile::check` runs in this process on every path, before the
+container-mode reading grant and before any child is spawned, so the
+never-grantable set refuses identically in full access and in a session
+started with no flags: no network, no `~/.ssh`, `~/.aws`, `~/.claude`,
+`~/.codex`, `~/.config`, no registry credential inside the toolchain, no
+sandbox launcher. Every rung and every flag here removes a *question*; none
+of them adds a *grant*. On Windows it spawns through the applier's
 own `CreateProcessW` with no AppContainer — the same pipes, job and
 `LineShape` command line as the confined path — reachable only from
 `Profile::os_sandbox_bypassed()`; a failure before the call is reported as the
@@ -612,7 +630,7 @@ one `cargo fetch` needs the registry". What exists today, and what each costs:
 | today | what it gives | what it costs |
 |---|---|---|
 | `[web]` broker (`web.fetch`, `web.search`) | HTTP the host performs, to domains the person allowed | not a shell; a package manager cannot use it |
-| `--dangerously-bypass-os-sandbox` (Linux, Windows) | the whole session unconfined | every command for the rest of the session, not the one that needed it |
+| `--full-access` / `--dangerously-bypass-os-sandbox` (macOS, Linux, Windows) | the whole session unconfined | every command for the rest of the session, not the one that needed it |
 | an outer container | a real boundary Pane need not enforce | the person builds and runs it |
 
 **The middle rung, stated as a design and not built.** Codex's escalation with

@@ -27,6 +27,55 @@ struct Listing {
     accounts: Vec<ServedAccount>,
 }
 
+/// How far this session's children reach: how wide the admission profile is
+/// compiled, and whether Pane confines what it spawns.
+///
+/// Two independent facts rather than one flag, because they answer different
+/// questions and two of the three spellings that set them
+/// (`--yolo`, `--dangerously-bypass-os-sandbox`) name exactly one each.
+pub(super) struct Reach {
+    /// The project root and every command line are admitted.
+    pub yolo: bool,
+    /// Pane installs no OS confinement of its own on the children it spawns.
+    pub unconfined: bool,
+}
+
+/// The reach `args` asks for, refused rather than approximated.
+///
+/// `--full-access` is the one name for all three halves — this pair and the
+/// `full` rung [`ladder`] resolves — and the older spellings keep meaning
+/// exactly the half they always meant.
+///
+/// **Every platform Pane has an unconfined applier for is accepted.** This
+/// was Linux and Windows only, on the reasoning that an externally isolated
+/// container or CI runner is the boundary there and nothing outside the
+/// seatbelt is one on macOS. That reasoning described a benchmark runner and
+/// not a person: on a development machine the machine itself is the boundary
+/// its owner has already chosen, and refusing them the mode only moved the
+/// work to a tool with no admission checks at all (user ruling 2026-09-18).
+/// What does not move is what `Profile::check` refuses: §4's never-grantable
+/// set is enforced in this process, before any child is spawned, and is
+/// identical on every rung and every platform.
+pub(super) fn reach(args: &SessionArgs) -> Result<Reach, String> {
+    let reach = Reach {
+        yolo: args.yolo || args.full_access,
+        unconfined: args.dangerously_bypass_os_sandbox || args.full_access,
+    };
+    if reach.unconfined && !reach.yolo {
+        return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit (or pass --full-access, which is both)".into());
+    }
+    if reach.unconfined
+        && !cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        ))
+    {
+        return Err("--full-access is supported on macOS, Linux and Windows; this platform has no unconfined applier, and a bypass that spawned anyway would be the one unconfined path Pane exists not to have".into());
+    }
+    Ok(reach)
+}
+
 /// Which rung a session starts on, and whether it has anybody to ask.
 ///
 /// The flag, then the saved rung, then the default — one place decides it.
@@ -50,8 +99,18 @@ pub(super) fn ladder(
                 .into(),
         );
     }
+    // `--full-access` names this rung as one of its three halves, so naming
+    // a different one beside it is the same ambiguity and gets the same
+    // refusal rather than a silent winner.
+    if args.full_access && args.permissions.is_some_and(|rung| rung != Rung::Full) {
+        return Err(
+            "--full-access starts on the `full` rung; naming --permissions with a different rung beside it is ambiguous"
+                .into(),
+        );
+    }
     let rung = args
         .permissions
+        .or_else(|| args.full_access.then_some(Rung::Full))
         .or_else(|| args.ask_approval.then_some(Rung::Manual))
         .or_else(|| {
             crate::settings_session::value(values, "permissions.mode")

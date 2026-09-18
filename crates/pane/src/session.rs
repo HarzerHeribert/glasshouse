@@ -65,6 +65,7 @@ macro_rules! session_println {
     ($($arg:tt)*) => { ui::output(format!($($arg)*)) };
 }
 
+mod args;
 mod context;
 mod controls;
 mod ending;
@@ -405,137 +406,8 @@ fn write_cell(
     Ok(())
 }
 
-/// `pane session`'s whole flag set. A project root and a way to identify the
-/// rollout file are the only things every run needs; `--task` is the
-/// non-interactive, scriptable entry point this package's own acceptance
-/// tests drive (`env!("CARGO_BIN_EXE_pane")` subprocesses can pipe a task in
-/// as an argument far more simply than as timed stdin), and the same flag is
-/// what the ruler's future `pane` harness row will pass a statement through.
-/// Absent `--task`, terminals use the live composer; piped input is read
-/// one input per line until EOF.
-#[derive(Parser, Debug)]
-#[command(name = "pane session")]
-pub struct SessionArgs {
-    /// The project root map line 2448 loads from.
-    #[arg(long)]
-    pub root: PathBuf,
+pub use args::SessionArgs;
 
-    /// One scripted user input (a slash command or a task) run once, non-
-    /// interactively. Omitted opens the live composer on a terminal, or reads
-    /// piped inputs one per line until EOF.
-    #[arg(long)]
-    pub task: Option<String>,
-
-    /// Machine formats require one-shot --task; progress records are versioned JSON.
-    #[arg(long, value_enum, default_value = "text")]
-    pub output_format: output::Format,
-
-    /// Initial request model; can also be changed with /model.
-    #[arg(long)]
-    pub model: Option<String>,
-
-    /// Which entry points the model is shown: `cells` (default, `execute_cell`
-    /// only), `hybrid` (both) or `tools`. Visibility only, one executor.
-    #[arg(long, value_parser = crate::abi::Interface::parse)]
-    pub interface: Option<crate::abi::Interface>,
-
-    /// Input context capacity for the initial model. Pane does not guess
-    /// provider-specific limits; switching models makes the capacity unknown
-    /// until a future catalogue supplies per-model metadata.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    pub context_window_tokens: Option<u64>,
-
-    /// Resume a session by the id `/exit` prints, or the newest in this
-    /// folder when given no value. A bare `pane` always starts a new one.
-    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
-    pub resume: Option<String>,
-
-    /// List this folder's resumable sessions, newest first, and exit.
-    #[arg(long)]
-    pub sessions: bool,
-
-    /// Where turns are appended, overriding the resolved session's own file.
-    #[arg(long)]
-    pub rollout: Option<PathBuf>,
-
-    /// This session's id: the value every `glasshouse hook --session`
-    /// invocation carries, and the name `--resume` takes. Defaults to a
-    /// generated one -- `--resume` is why it is no longer the process id.
-    #[arg(long)]
-    pub session: Option<String>,
-
-    /// The `glasshouse` executable pane's three seams shell out to. Bare
-    /// `"glasshouse"`, absent this flag, resolves through `PATH` exactly as
-    /// `glasshouse.rs`'s own doc comment describes; a test overrides it with
-    /// its own fake script so no test performs a real `PATH` lookup.
-    #[arg(long)]
-    pub glasshouse: Option<PathBuf>,
-
-    /// The `inference-gateway` executable this session's provider traffic and
-    /// its entitlement, subscription and routing-cost controls go through.
-    ///
-    /// Bare `"inference-gateway"`, absent this flag, resolves through `PATH`.
-    /// **It is only spawned when `ANTHROPIC_BASE_URL` is unset**: a set URL
-    /// means a gateway is already serving and pane attaches to it
-    /// (`gateway::start_or_attach`).
-    #[arg(long)]
-    pub gateway: Option<PathBuf>,
-
-    /// Grant the whole project root and every command line, retaining native
-    /// permission denials and the never-grantable set.
-    ///
-    /// **This is the person widening their own grant at session start, which
-    /// is the only widening `sandbox-grants.md` §1.1 permits** — it is a flag
-    /// on the command that starts the session, never something a cell can
-    /// reach, ask for or set. It compiles a synthesised settings document
-    /// rather than adding a second way to build a profile, so §4's
-    /// never-grantable set still applies: a debugger is refused under
-    /// `--yolo` exactly as it is without it.
-    #[arg(long)]
-    pub yolo: bool,
-
-    /// Skip Pane's native OS child-process confinement after an explicit
-    /// acknowledgement. Intended for disposable benchmark/CI containers
-    /// whose outer runtime is the security boundary; requires --yolo.
-    #[arg(long)]
-    pub dangerously_bypass_os_sandbox: bool,
-
-    /// Ask before admitted foreground file/shell tools. O allows once, S
-    /// remembers this exact call, D denies. Web, MCP, background and agents
-    /// are excluded; this never grants additional permissions.
-    ///
-    /// The alias for `--permissions manual`, kept because it shipped first.
-    #[arg(long)]
-    pub ask_approval: bool,
-
-    /// How often you are asked: `manual`, `accept-edits`, `auto` (default)
-    /// or `full`. Shift-Tab cycles it in a live session and `/permissions`
-    /// sets one. A rung never widens a grant.
-    #[arg(long, value_parser = |w: &str| crate::permissions::Rung::parse(w)
-        .ok_or("manual, accept-edits, auto or full"))]
-    pub permissions: Option<crate::permissions::Rung>,
-
-    /// Start in planning mode: reads run, no change executes. Same as `--mode plan`.
-    #[arg(long)]
-    pub plan: bool,
-
-    /// Start in `execute`, `explore` (read-only shell, writes only to scratch
-    /// and documentation globs) or `plan`.
-    #[arg(long, value_parser = |w: &str| tui::Mode::parse(w).ok_or("execute, explore or plan"))]
-    pub mode: Option<tui::Mode>,
-
-    /// Select [profiles.NAME] in pane.toml over the base configuration.
-    #[arg(long)]
-    pub profile: Option<String>,
-
-    /// Attach a local PNG, JPEG, GIF, or WebP to the first task (up to four).
-    #[arg(long = "image", value_name = "PATH")]
-    pub images: Vec<PathBuf>,
-
-    /// Grant an additional existing directory for this session only.
-    #[arg(long = "add-dir", value_name = "PATH")]
-    pub additional_dirs: Vec<PathBuf>,
-}
 
 /// Parses `args` (everything after `pane session`) and runs it.
 pub fn dispatch(args: &[String]) -> Result<(), String> {
@@ -653,18 +525,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         .iter()
         .map(|path| crate::images::load(&args.root, path))
         .collect::<Result<Vec<_>, _>>()?;
-    if args.dangerously_bypass_os_sandbox && !args.yolo {
-        return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit".into());
-    }
-    // Linux and Windows: the platforms where an externally isolated
-    // container, VM or CI runner is the boundary (the GitHub runners lack
-    // the AppContainer isolation service; the user's ruling of 2026-09-17).
-    // macOS stays refused: nothing outside the seatbelt is the boundary
-    // there.
-    if args.dangerously_bypass_os_sandbox && !cfg!(any(target_os = "linux", target_os = "windows"))
-    {
-        return Err("--dangerously-bypass-os-sandbox is supported only on Linux and Windows, where an externally isolated container, VM or CI runner is the boundary".into());
-    }
+    let startup::Reach { yolo, unconfined } = startup::reach(&args)?;
     // `little-helpers.md`: a malformed roster is a refusal with one sentence,
     // and it is made here because this is the last moment before anything a
     // helper can be called from exists. A guardrail checked after the first
@@ -738,14 +599,16 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
     // for the session's life. Reloading a persisted configuration must never
     // let a program widen its own sandbox during the running session.
-    let mut profile = compile_profile_once(&project, args.yolo);
+    let mut profile = compile_profile_once(&project, yolo);
     for directory in &args.additional_dirs {
         profile = profile.with_additional_root(directory)?;
     }
-    if args.dangerously_bypass_os_sandbox {
+    if unconfined {
         profile = profile.with_os_sandbox_bypass();
+        // Said plainly, and said with what still holds: a line that only
+        // shouts teaches a person to stop reading it.
         session_println!(
-            "sandbox: DANGER — Pane OS child-process confinement is bypassed by explicit CLI flag; the outer container or VM is the security boundary"
+            "sandbox: full access — Pane applies no OS confinement to the children it spawns; this machine is the boundary. Path admission, the deny patterns and the never-grantable set (network, ~/.ssh, ~/.aws, ~/.claude, ~/.codex, ~/.config, registry credentials, sandbox launchers) are unchanged."
         );
     }
 
@@ -865,7 +728,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                             "{}p/{}c{}",
                             profile.rule_count(),
                             profile.command_pattern_count(),
-                            if args.yolo { " YOLO" } else { "" }
+                            if yolo { " YOLO" } else { "" }
                         )),
                         // The shell never has a network; the field names the
                         // host tools that do (map 2657, design §8).

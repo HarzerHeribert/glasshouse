@@ -5323,8 +5323,8 @@ state; each is the user's ruling of 2026-09-13 (*Pane wins by spending less
 expensive attention*) applied to a specific boundary.
 
 **Container mode is a named policy, not a wider sandbox.** Under the explicit
-`--yolo --dangerously-bypass-os-sandbox` (Linux, CLI only, never
-configuration) the compiled profile answers two questions differently, and
+`--full-access` (or `--yolo --dangerously-bypass-os-sandbox`; macOS, Linux and
+Windows since 2026-09-18, CLI only, never configuration) the compiled profile answers two questions differently, and
 only those two: a read outside the project root is granted unless a
 never-grantable rule or a `deny` pattern refuses it, and a debugger
 (`gdb`, `lldb`, `strace` and the rest of §4.6's attach set) is admitted. The
@@ -5617,3 +5617,37 @@ response, and it already has `provider/quota`'s `Capacity` with its four distinc
 **And the display rule that follows: show a percentage only when the figure is trusted** — observed
 or configured. On a published prior the meter says so rather than implying a measurement. Being
 wrong about how much room is left is worse than admitting the number came from a table.
+
+## Full access is one word, and it removes questions rather than adding grants
+
+**User ruling, 2026-09-18.** *"Voller Zugriff ist das einzige was Sinn macht in
+modernen Zeiten. Wenn ich Pane losschicke um ein Problem in einem produktiven
+Stack zu finden … will ich mir keine Sorgen über Sicherheit machen — technisch.
+Und ich will nicht wie ein Affe dasitzen und 'y' tippen."* And, on what the
+whole repair is for: *"Pane ist die ganze Zeit seine eigenen Constraints am
+fighten und das möchte ich beheben."*
+
+Three separate choices had three separate flags — how wide the admission
+profile is (`--yolo`), how often the person is asked (`--permissions`), and
+whether Pane confines the children it spawns
+(`--dangerously-bypass-os-sandbox`) — and a person who wanted all three had to
+know all three and pair them correctly. **`--full-access` is the one word for
+it**, and the older spellings keep meaning exactly the half they always meant.
+
+**macOS is included.** The mode was Linux and Windows only, on the reasoning
+that an externally isolated container or CI runner is the boundary there and
+nothing outside the seatbelt is one on macOS. That reasoning described a
+benchmark runner and not a person: on a development machine the machine itself
+is the boundary its owner has already chosen, and refusing them the mode did
+not make anything safer — it moved the work to a tool with no admission checks
+at all.
+
+**The invariant that makes this safe to say plainly:** every rung and every
+flag here can only ever remove a *question*. None of them adds a *grant*.
+`Profile::check` runs in this process on every path, before the container-mode
+reading grant and before any child is spawned, so §4's never-grantable set is
+exactly as refusing under `--full-access` as under no flags at all — no
+network, no `~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex`, `~/.config`, no
+registry credential inside the toolchain, no sandbox launcher. The startup
+line says both halves in one sentence, because a line that only shouts teaches
+a person to stop reading it.
