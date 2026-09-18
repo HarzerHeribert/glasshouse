@@ -58,24 +58,62 @@ fn text(buffer: &Buffer) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+/// The first row of the answer block, found by its header.
+fn answer_row(buffer: &Buffer, regions: &pane::tui::ScreenRegions) -> u16 {
+    let rendered = text(buffer);
+    let at = rendered
+        .lines()
+        .position(|line| line.contains(" PANE") && !line.contains("PANE /"))
+        .expect("the fixture has an answer");
+    let _ = regions;
+    u16::try_from(at).unwrap()
+}
 fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
 
+/// The request is framed and the answer is tinted — the two things a reader
+/// scrolling a long transcript navigates by. Before 2026-09-18 both were a
+/// bare word on a transparent row and a turn boundary was an empty line, so
+/// the screen was one column of text with nothing marking where anything
+/// began (user, from a screenshot: "there is nothing at all").
 #[test]
 fn a_turn_block_has_a_visible_boundary_and_a_header() {
     let buffer = draw(80, 30, &state(), &conversation(), &Notebook::default());
     let rendered = text(&buffer);
-    for (header, body) in [("USER", "Inspect"), (" PANE", "I found")] {
-        let lines: Vec<_> = rendered.lines().collect();
-        let at = lines
+    let lines: Vec<_> = rendered.lines().collect();
+    let at = |header: &str| {
+        lines
             .iter()
             .position(|line| line.contains(header) && !line.contains("PANE /"))
-            .unwrap();
-        assert_eq!(buffer[(0, at as u16)].bg, ratatui::style::Color::Reset);
-        assert!(lines[at + 1].contains(body));
-        assert!(lines[at + 1].starts_with(' '));
-    }
+            .unwrap()
+    };
+
+    // The request: a rule that reaches the edge of the transcript, in the
+    // theme's accent, and no fill -- a frame, so a transparent terminal
+    // stays transparent behind the person's own words.
+    let user = at("USER");
+    assert!(
+        lines[user].trim_end().ends_with('━'),
+        "the request's rule reaches the edge: {:?}",
+        lines[user]
+    );
+    assert_eq!(buffer[(0, user as u16)].bg, ratatui::style::Color::Reset);
+    assert_eq!(buffer[(0, user as u16)].fg, state().theme.accent());
+    assert!(lines[user + 1].contains("Inspect"));
+    assert!(lines[user + 1].starts_with(' '));
+
+    // The answer: a muted ground the block sits on, header and body alike.
+    let pane = at(" PANE");
+    let hush = buffer[(0, pane as u16)].bg;
+    assert_ne!(hush, ratatui::style::Color::Reset, "the answer is tinted");
+    assert!(lines[pane + 1].contains("I found"));
+    assert!(lines[pane + 1].starts_with(' '));
+    assert_eq!(
+        buffer[(0, pane as u16 + 1)].bg,
+        hush,
+        "the whole block is tinted, not only its header"
+    );
 }
 
 #[test]
@@ -846,10 +884,18 @@ fn transparent_themes_keep_blocks_separate_and_preserve_text() {
     state.theme = Theme::Amber;
     let amber = draw(120, 40, &state, &conversation(), &Notebook::default());
     assert!(amber.content.iter().any(|cell| cell.bg == Color::Reset));
+    // Transparent everywhere the transcript is not deliberately tinted: the
+    // answer block carries the theme's hush and nothing else fills a row.
     let regions = screen_regions(amber.area, &state);
+    let hush = amber[(regions.transcript.x, answer_row(&amber, &regions))].bg;
+    assert_ne!(hush, Color::Reset);
     for y in regions.transcript.y..regions.transcript.bottom() {
         for x in regions.transcript.x..regions.transcript.right() {
-            assert_eq!(amber[(x, y)].bg, Color::Reset);
+            let bg = amber[(x, y)].bg;
+            assert!(
+                bg == Color::Reset || bg == hush,
+                "({x},{y}) is neither transparent nor the answer's hush: {bg:?}"
+            );
         }
     }
     assert_ne!(

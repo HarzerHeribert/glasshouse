@@ -3,6 +3,7 @@
 mod controls;
 mod history;
 pub use history::HistoryNote;
+mod bands;
 mod composer;
 mod regions;
 pub(crate) use composer::composer_offset;
@@ -337,7 +338,18 @@ impl Theme {
             Self::Rose => Color::Rgb(38, 22, 34),
         }
     }
-    pub(crate) fn accent(self) -> Color {
+    /// The answer's own ground: the theme's dock, darkened, so the model's
+    /// reply reads as one block without competing with a cell header for
+    /// attention. Deliberately near the terminal's own background — a
+    /// highlight the eye finds and does not have to look past.
+    fn hush(self) -> Color {
+        match self.dock() {
+            Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
+            other => other,
+        }
+    }
+
+    pub fn accent(self) -> Color {
         match self {
             Self::Neon => Color::Rgb(223, 255, 0),
             Self::Amber => Color::LightYellow,
@@ -1578,44 +1590,7 @@ fn conversation_lines(
         }
     }
     push_recap(&mut content, state.recap.as_ref());
-    let mut active = false;
-    for line in &mut content {
-        let mut cell_header = false;
-        if let Some(first) = line.spans.first_mut() {
-            if first.content.starts_with("╭─ ") {
-                cell_header = first.content.contains("Cell ")
-                    || first.content.contains("CELL ")
-                    || first.content.contains("Action failed")
-                    || first.content.contains("PANE / CODE");
-                if state.activity == Activity::Executing
-                    && first.content.contains("◇ Cell preparing · nothing has run")
-                {
-                    first.content = first
-                        .content
-                        .replace(
-                            "◇ Cell preparing · nothing has run",
-                            &format!(
-                                "{} Cell running",
-                                Activity::Executing.indicator(state.animation_frame)
-                            ),
-                        )
-                        .into();
-                }
-                first.content = first.content.trim_start_matches("╭─ ").to_string().into();
-                active = true;
-            } else if first.content == "╰─" {
-                *line = Line::default();
-                active = false;
-            }
-        }
-        if active {
-            line.style = line.style.bg(if cell_header {
-                state.theme.dock()
-            } else {
-                state.theme.backlight()
-            });
-        }
-    }
+    bands::decorate(&mut content, state, width.saturating_sub(2));
     wrap_lines(content, width.saturating_sub(2))
 }
 

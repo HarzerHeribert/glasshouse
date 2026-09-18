@@ -314,7 +314,28 @@ pub(super) fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             spans.extend(inline(quote));
             out.push(Line::from(spans));
         } else {
-            out.extend(flow(Line::from(inline(line)), width.min(110)));
+            // **The leading whitespace is kept.** `flow` reads the line as
+            // prose: it splits on whitespace and rejoins with single spaces,
+            // which is right for a paragraph and wrong for everything that
+            // carries structure in its indentation. Pretty-printed JSON is
+            // the case that showed it -- every key of an `OUTPUT` block came
+            // out on column zero, so the nesting the pretty-printer had just
+            // computed was invisible (measured 2026-09-18, from a screen).
+            let indent = line.len() - line.trim_start().len();
+            if indent == 0 {
+                out.extend(flow(Line::from(inline(line)), width.min(110)));
+            } else {
+                let pad = " ".repeat(indent);
+                let body = flow(
+                    Line::from(inline(trimmed)),
+                    width.min(110).saturating_sub(indent).max(1),
+                );
+                out.extend(body.into_iter().map(|row| {
+                    let mut spans = vec![Span::raw(pad.clone())];
+                    spans.extend(row.spans);
+                    Line::from(spans).style(row.style)
+                }));
+            }
         }
         i += 1;
     }
