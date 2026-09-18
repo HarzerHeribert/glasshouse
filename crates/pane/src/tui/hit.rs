@@ -46,6 +46,11 @@ pub(crate) enum Hit {
     Cell(usize),
     /// A status-line field. Twin: each field's own, per [`StatusField`].
     Status(StatusField),
+    /// An existing file path drawn in the transcript, as an index into the
+    /// geometry's own list. **The one surface here with no keyboard twin**
+    /// (user, 2026-09-18): naming a path to a slash command is slower than
+    /// the click is worth, so the module rule is lifted for this one.
+    Path(usize),
     /// Inside the composer, at this row and column **of the wrapped text**,
     /// with the composer's own scroll already added, so a caller turns it
     /// into a cursor offset without knowing how the box was drawn. Twin: the
@@ -64,6 +69,9 @@ pub(crate) struct ScreenGeometry {
     /// already tested where it lives.
     pub(crate) panel: PanelGeometry,
     cells: Vec<(Rect, usize)>,
+    /// Where each clickable path was drawn, and the path itself. Recorded by
+    /// the draw, like everything else here.
+    paths: Vec<(Rect, String)>,
     status: Vec<(Rect, StatusField)>,
     /// The composer's text area, and how many wrapped rows are scrolled off
     /// its top -- both from the draw, because a click on the first visible
@@ -75,6 +83,16 @@ impl ScreenGeometry {
     /// One row of a cell block that reaches that cell when clicked.
     pub(crate) fn record_cell(&mut self, area: Rect, cell: usize) {
         self.cells.push((area, cell));
+    }
+
+    /// One drawn path, at the exact columns it occupies.
+    pub(crate) fn record_path(&mut self, area: Rect, path: String) {
+        self.paths.push((area, path));
+    }
+
+    /// The path [`Hit::Path`] names.
+    pub(crate) fn path(&self, index: usize) -> Option<&str> {
+        self.paths.get(index).map(|(_, path)| path.as_str())
     }
 
     /// A status field's own span, not the whole row: the row also carries
@@ -114,6 +132,15 @@ impl ScreenGeometry {
                 row: usize::from(row - area.y) + skip,
                 column: column - area.x,
             });
+        }
+        // Before the cell: a path is drawn inside a cell's block, and the
+        // narrower thing under the pointer is the thing that was meant.
+        if let Some(index) = self
+            .paths
+            .iter()
+            .position(|(area, _)| contains(*area, column, row))
+        {
+            return Some(Hit::Path(index));
         }
         self.cells
             .iter()

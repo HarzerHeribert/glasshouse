@@ -37,6 +37,44 @@ pub(super) fn open(url: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Shows a file to the person, with the system's own opener.
+///
+/// **It opens, it never reads.** The path came off the drawn screen, so it is
+/// already something this session printed; handing it to the launcher shows it
+/// in whatever window the person's machine uses for that kind of file, which
+/// is the whole point of the click. Nothing is executed: `open`/`xdg-open`
+/// resolve a file to its editor or viewer, and a path that does not exist is
+/// refused here rather than by a dialog.
+///
+/// Over SSH the window would open on the wrong machine, so nothing does.
+pub(super) fn show(path: &std::path::Path) -> bool {
+    let over_ssh = ["SSH_CONNECTION", "SSH_TTY"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    if over_ssh || !path.exists() {
+        return false;
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg(path);
+        command
+    } else if cfg!(windows) {
+        let mut command = Command::new("explorer.exe");
+        command.arg(path);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// The OSC 52 sequence asking the terminal to put `text` on the clipboard;
 /// it works over SSH too, because the terminal, not this machine, holds it.
 pub(super) fn copy_sequence(text: &str) -> String {

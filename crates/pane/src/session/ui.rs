@@ -938,6 +938,28 @@ fn run(
                                 continue;
                             }
                         }
+                        // A file path drawn in the transcript. The one
+                        // surface with no keyboard twin, by the user's
+                        // ruling of 2026-09-18: naming the path to a slash
+                        // command is slower than the click is worth.
+                        Some(tui::Hit::Path(index)) => {
+                            if let Some(path) = geometry.path(index) {
+                                let shown = path.to_string();
+                                let resolved = std::path::Path::new(&shown).to_path_buf();
+                                let resolved = if resolved.is_absolute() {
+                                    resolved
+                                } else {
+                                    std::env::current_dir().unwrap_or_default().join(resolved)
+                                };
+                                state.note(if links::show(&resolved) {
+                                    format!("Opened {shown}.")
+                                } else {
+                                    format!("Nothing here can open {shown}.")
+                                });
+                            }
+                            dirty = true;
+                            continue;
+                        }
                         // The same thing `/cell <n>` does, on the cell whose
                         // header was clicked.
                         Some(tui::Hit::Cell(cell)) => {

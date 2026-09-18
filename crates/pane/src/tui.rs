@@ -5,6 +5,7 @@ mod history;
 pub use history::HistoryNote;
 mod bands;
 mod composer;
+mod paths;
 mod regions;
 pub(crate) use composer::composer_offset;
 use composer::{composer_cursor, wrapped_input};
@@ -1629,16 +1630,25 @@ fn render_conversation(
             );
         }
     }
+    // The project's own directory, for a relative path a model wrote. Read
+    // once per draw, not once per token.
+    let root = std::env::current_dir().unwrap_or_default();
     let lines: Vec<Line> = lines
         .into_iter()
         .skip(start)
         .take(usize::from(area.height))
-        .map(|mut line| {
+        .enumerate()
+        .map(|(offset, mut line)| {
             if line.style.bg.is_some() {
                 line.spans.insert(0, Span::raw(" "));
                 let padding = usize::from(area.width).saturating_sub(line.width());
                 line.spans.push(Span::raw(" ".repeat(padding)));
             }
+            // **After the padding, because the padding moves the columns.**
+            // `wrap_lines` left one span per grapheme, so a column range is a
+            // span range and the rectangle recorded here is exactly the cells
+            // the path was drawn into.
+            paths::mark(&mut line, &root, area, offset, geometry);
             line
         })
         .collect();
