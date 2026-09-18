@@ -37,8 +37,9 @@ fn system(interface: Interface, manifest: Option<String>) -> String {
 const SHARED: &[&str] = &[
     "You are Pane, a coding assistant. Answer conversational questions naturally.",
     "Bindings persist between cells of this user request",
-    "A top-level returned string\nends the task",
-    "Use prose-only output only when the request is finished",
+    "returning a value displays it\nas notebook output and finishes nothing",
+    "The task ends only where you say it ends.",
+    "only when the request is finished and the answer is grounded in",
     "PermissionDenied is\nfinal: code cannot widen the session's sandbox grant.",
 ];
 

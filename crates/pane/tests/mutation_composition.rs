@@ -149,7 +149,7 @@ fn an_external_change_between_panes_edits_is_still_stale() {
 
     std::fs::write(&path, "value = 99\n").unwrap();
     let refused = runtime.run_cell(
-        "try { await edit({path:'src/value.py', old:'value = 2', replacement:'value = 3'}); return \"applied\"; }\n\
+        "try { await edit({path:'src/value.py', old:'value = 2', replacement:'value = 3'}); answer(\"applied\"); }\n\
          catch (e) { return e.message; }",
     );
     let message = returned_text(&refused);
@@ -202,7 +202,7 @@ fn a_hunk_that_does_not_match_leaves_the_file_byte_identical() {
     let mut runtime = runtime(&root, "missing-hunk");
     runtime.run_cell("await context({path:'src/list.txt'});");
     let refused = runtime.run_cell(
-        "try { await edit({path:'src/list.txt', olds:['one', 'absent', 'five'], replacements:['1', '?', '5']}); return \"applied\"; }\n\
+        "try { await edit({path:'src/list.txt', olds:['one', 'absent', 'five'], replacements:['1', '?', '5']}); answer(\"applied\"); }\n\
          catch (e) { return e.message; }",
     );
     let message = returned_text(&refused);
@@ -219,7 +219,7 @@ fn overlapping_hunks_are_refused_without_writing() {
     let mut runtime = runtime(&root, "overlap");
     runtime.run_cell("await context({path:'src/list.txt'});");
     let refused = runtime.run_cell(
-        "try { await edit({path:'src/list.txt', olds:['two\\nthree', 'three\\nfour'], replacements:['a', 'b']}); return \"applied\"; }\n\
+        "try { await edit({path:'src/list.txt', olds:['two\\nthree', 'three\\nfour'], replacements:['a', 'b']}); answer(\"applied\"); }\n\
          catch (e) { return e.message; }",
     );
     let message = returned_text(&refused);
@@ -237,12 +237,12 @@ fn the_single_and_multi_forms_cannot_be_mixed_and_counts_must_pair() {
     let mut runtime = runtime(&root, "mixed");
     runtime.run_cell("await context({path:'src/list.txt'});");
     let mixed = runtime.run_cell(
-        "try { await edit({path:'src/list.txt', old:'one', replacement:'1', olds:['two'], replacements:['2']}); return \"applied\"; }\n\
+        "try { await edit({path:'src/list.txt', old:'one', replacement:'1', olds:['two'], replacements:['2']}); answer(\"applied\"); }\n\
          catch (e) { return e.rule; }",
     );
     assert!(returned_text(&mixed).contains("not both"), "{mixed:?}");
     let mismatch = runtime.run_cell(
-        "try { await edit({path:'src/list.txt', olds:['one', 'two'], replacements:['1']}); return \"applied\"; }\n\
+        "try { await edit({path:'src/list.txt', olds:['one', 'two'], replacements:['1']}); answer(\"applied\"); }\n\
          catch (e) { return e.message; }",
     );
     assert!(

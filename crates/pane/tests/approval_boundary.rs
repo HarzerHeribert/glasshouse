@@ -646,7 +646,7 @@ fn hint_provider(hints: Vec<HintReply>) -> (String, Arc<Mutex<Vec<String>>>) {
                 let request: serde_json::Value =
                     serde_json::from_str(&body_text).unwrap_or_default();
                 let text =
-                    "```pane\nwrite({path: \"a.txt\", content: \"1\"});\nreturn \"done\";\n```";
+                    "```pane\nwrite({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");\n```";
                 let (mime, out) = if request["stream"] == true {
                     let events = [
                         serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":10}}}),

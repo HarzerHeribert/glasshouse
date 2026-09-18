@@ -147,7 +147,7 @@ fn subagent_uses_native_cell_handoff_across_turns() {
     };
     let base = start_native_provider_sequence(vec![
         reply("first", "const answer = 42; console.log(answer);"),
-        reply("second", "return `native ${answer}`;"),
+        reply("second", "answer(`native ${answer}`);"),
     ]);
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &base);
@@ -191,7 +191,7 @@ fn subagent_continues_after_structured_notebook_output() {
         reply("inspect", "return {matchesCount: 0, sampleMatches: []};"),
         reply(
             "answer",
-            "return \"recommendations follow from the inspection\";",
+            "answer(\"recommendations follow from the inspection\");",
         ),
     ]);
     unsafe {
@@ -258,7 +258,7 @@ fn wait_for_event(session: &SessionId, within: Duration) -> Vec<pane::events::Ev
 fn a_subagent_answers_in_a_later_event_and_never_blocks_the_caller() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("answers");
-    let base_url = start_provider("```pane\nreturn \"the answer is 42\";\n```", 2);
+    let base_url = start_provider("```pane\nanswer(\"the answer is 42\");\n```", 2);
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
@@ -372,7 +372,7 @@ fn a_subagent_with_no_turn_hint_works_until_it_answers() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("uncapped");
     let mut replies = vec!["```pane\nconst n = 1;\n```"; 25];
-    replies.push("```pane\nreturn 'the twenty-sixth turn answered';\n```");
+    replies.push("```pane\nanswer('the twenty-sixth turn answered');\n```");
     let base_url = start_provider_sequence(replies);
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
@@ -657,7 +657,7 @@ fn a_running_subagents_rollout_is_readable_while_it_works() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("record");
     let mut replies = vec!["Reading the parser.\n```pane\nconst n = 1;\n```"; 5];
-    replies.push("```pane\nreturn 'done reading';\n```");
+    replies.push("```pane\nanswer('done reading');\n```");
     let (base_url, _seen) = start_recording_provider(replies, Duration::from_millis(150));
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
@@ -745,7 +745,7 @@ fn a_person_can_tell_a_running_subagent_something() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("tell");
     let mut replies = vec!["Still reading.\n```pane\nconst n = 1;\n```"; 6];
-    replies.push("```pane\nreturn 'stopped reading';\n```");
+    replies.push("```pane\nanswer('stopped reading');\n```");
     let (base_url, seen) = start_recording_provider(replies, Duration::from_millis(150));
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
@@ -801,7 +801,7 @@ fn a_person_can_tell_a_running_subagent_something() {
 fn a_message_to_a_finished_subagent_is_undelivered_rather_than_an_error() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("late");
-    let base_url = start_provider("```pane\nreturn 'answered at once';\n```", 1);
+    let base_url = start_provider("```pane\nanswer('answered at once');\n```", 1);
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
@@ -845,7 +845,7 @@ fn a_look_names_the_record_and_whether_it_still_listens() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("wayin");
     let (base_url, _seen) = start_recording_provider(
-        vec!["```pane\nreturn 'answered';\n```"],
+        vec!["```pane\nanswer('answered');\n```"],
         Duration::from_millis(250),
     );
     // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.

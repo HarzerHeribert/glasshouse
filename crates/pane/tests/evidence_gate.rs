@@ -110,9 +110,9 @@ fn a_stray_binary_beside_the_deliverable_holds_the_return_once_and_is_recorded_u
             "c1",
             "await write({path: \"polyglot/main.py.c\", content: \"int main(){return 0;}\\n\"});\n\
              await write({path: \"polyglot/cmain\", content: \"\\u007fELF compiled test binary\"});\n\
-             return \"done\";",
+             answer(\"done\");",
         ),
-        cell("c2", "return \"done\";"),
+        cell("c2", "answer(\"done\");"),
     ]);
     let result = exec_json(&root, &endpoint);
     let completion = &result["telemetry"]["completion"];
@@ -152,9 +152,9 @@ fn coverage_data_outside_the_source_tree_is_a_finding_before_completion() {
             "c1",
             "await write({path: \"sqlite-gcov-build/btree.gcno\", content: \"gcno\"});\n\
              await write({path: \"sqlite/src/btree.c\", content: \"int btree(void){return 2;}\\n\"});\n\
-             return \"built with coverage\";",
+             answer(\"built with coverage\");",
         ),
-        cell("c2", "return \"built with coverage\";"),
+        cell("c2", "answer(\"built with coverage\");"),
     ]);
     let result = exec_json(&root, &endpoint);
     let completion = &result["telemetry"]["completion"];
@@ -185,9 +185,9 @@ fn a_declared_check_that_never_ran_holds_the_return_and_an_undeclared_one_does_n
     let (endpoint, bodies) = providers(vec![
         cell(
             "c1",
-            "await write({path: \"src/lib.rs\", content: \"pub fn x() {}\\n\"});\nreturn \"done\";",
+            "await write({path: \"src/lib.rs\", content: \"pub fn x() {}\\n\"});\nanswer(\"done\");",
         ),
-        cell("c2", "return \"done\";"),
+        cell("c2", "answer(\"done\");"),
     ]);
     let result = exec_json(&held, &endpoint);
     assert_eq!(result["telemetry"]["completion"]["verified"], false);
@@ -201,7 +201,7 @@ fn a_declared_check_that_never_ran_holds_the_return_and_an_undeclared_one_does_n
     let plain = root("undeclared-check");
     let (endpoint, bodies) = providers(vec![cell(
         "c1",
-        "await write({path: \"src/lib.rs\", content: \"pub fn x() {}\\n\"});\nreturn \"done\";",
+        "await write({path: \"src/lib.rs\", content: \"pub fn x() {}\\n\"});\nanswer(\"done\");",
     )]);
     let result = exec_json(&plain, &endpoint);
     assert_eq!(result["telemetry"]["completion"]["verified"], true);
@@ -219,7 +219,7 @@ fn an_identical_failing_cell_repeated_is_noticed_once_and_counted() {
     let (endpoint, bodies) = providers(vec![
         cell("c1", repeat),
         cell("c2", repeat),
-        cell("c3", "return \"gave up\";"),
+        cell("c3", "answer(\"gave up\");"),
     ]);
     let result = exec_json(&root, &endpoint);
     assert_eq!(result["telemetry"]["progress"]["no_progress_notices"], 1);
@@ -249,7 +249,7 @@ fn the_task_capsule_reaches_the_feedback_and_the_result() {
             "c1",
             "await write({path: \"notes.txt\", content: \"hello\\n\"});",
         ),
-        cell("c2", "return \"done\";"),
+        cell("c2", "answer(\"done\");"),
     ]);
     let result = exec_json(&root, &endpoint);
     let capsule = &result["telemetry"]["capsule"];

@@ -132,6 +132,10 @@ pub(crate) struct CellTrace {
     calls: RefCell<Vec<CallRecord>>,
     yield_requested: Cell<bool>,
     yield_reason: RefCell<Option<String>>,
+    /// What `answer(text)` said, when the cell said it. **The only way a
+    /// cell ends the task**, so that ending is something a program states
+    /// and never something the shape of a value implies.
+    answer: RefCell<Option<String>>,
     pub(crate) response_byte_cap: Cell<usize>,
     /// Whether this frame's capability results are being captured for a
     /// provider `tool_result`. Off for an authored cell, which pays nothing.
@@ -145,6 +149,7 @@ impl CellTrace {
             calls: RefCell::new(Vec::new()),
             yield_requested: Cell::new(false),
             yield_reason: RefCell::new(None),
+            answer: RefCell::new(None),
             response_byte_cap: Cell::new(DEFAULT_RESPONSE_BYTE_CAP),
             capture_results: Cell::new(false),
             results: RefCell::new(Vec::new()),
@@ -155,6 +160,7 @@ impl CellTrace {
         self.calls.borrow_mut().clear();
         self.yield_requested.set(false);
         self.yield_reason.borrow_mut().take();
+        self.answer.borrow_mut().take();
         self.results.borrow_mut().clear();
     }
 
@@ -190,6 +196,16 @@ impl CellTrace {
             return None;
         }
         Some(self.yield_reason.borrow_mut().take())
+    }
+
+    /// What this cell answered, taken once. `None` when it did not answer,
+    /// which is every cell that was still working.
+    pub(crate) fn take_answer(&self) -> Option<String> {
+        self.answer.borrow_mut().take()
+    }
+
+    fn record_answer(&self, text: String) {
+        *self.answer.borrow_mut() = Some(text);
     }
 
     pub(crate) fn record(&self, call: CallRecord) {
@@ -418,6 +434,9 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
     }
     if let Some(function) = v8::Function::builder(yield_now_callback).build(scope) {
         set_fixed_key(scope, global, "yieldNow", function.into());
+    }
+    if let Some(function) = v8::Function::builder(answer_callback).build(scope) {
+        set_fixed_key(scope, global, "answer", function.into());
     }
 
     // `events-contract.md` §5's three background-job entry points, on one
@@ -1996,6 +2015,32 @@ fn yield_now_callback(
     {
         script.run(scope);
     }
+}
+
+/// `answer(text)` — the one way a cell ends the person's task
+/// (`runtime-contract.md` §9.2). It records the text and returns; the
+/// program keeps running to its own end, so a cell may answer and still
+/// tidy up after itself.
+///
+/// **It is a statement, not an inference.** Before this existed the task
+/// ended when a cell returned a value that was not an array or an object,
+/// which made `return someBashResult.stdout` -- a thing written to *look*
+/// at output -- publish that output as the final answer and stop the
+/// session. Nothing about a value's type says the work is done; only the
+/// program can.
+///
+/// Called more than once, the last text stands: a program that changes its
+/// mind before it ends should be able to say so.
+fn answer_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    let given = args.get(0);
+    if given.is_undefined() || given.is_null() {
+        return;
+    }
+    trace(scope).record_answer(given.to_rust_string_lossy(scope));
 }
 
 /// One line, at most [`REASON_CHARS`] characters, cut on a character

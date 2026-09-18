@@ -73,7 +73,7 @@ fn run(format: &str, status: u16, reply: Value) -> std::process::Output {
 }
 
 fn native_return() -> Value {
-    json!({"role": "assistant", "content": [{"type": "tool_use", "id": "call-answer", "name": "execute_cell", "input": {"code": "return 'answer 42';"}}],
+    json!({"role": "assistant", "content": [{"type": "tool_use", "id": "call-answer", "name": "execute_cell", "input": {"code": "answer('answer 42');"}}],
         "usage": {"input_tokens": 20, "output_tokens": 7, "cache_read_input_tokens": 4,
             "cache_creation_input_tokens": 1}})
 }
@@ -191,7 +191,7 @@ fn machine_telemetry_splits_preflight_helper_and_parent_usage_by_model() {
     .unwrap();
     let helper = json!({
         "role": "assistant",
-        "content": [{"type": "text", "text": "```pane\nreturn 'fixture.rs:1 relevant';\n```"}],
+        "content": [{"type": "text", "text": "```pane\nanswer('fixture.rs:1 relevant');\n```"}],
         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3,
             "cache_creation_input_tokens": 2}
     });

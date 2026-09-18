@@ -89,7 +89,7 @@ fn provider(target: PathBuf) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
             } else {
                 (
                     "write-after-policy",
-                    "await write({path: 'nested/result.txt', content: 'verified'}); return 'done';",
+                    "await write({path: 'nested/result.txt', content: 'verified'}); answer('done');",
                 )
             };
             let payload = serde_json::json!({

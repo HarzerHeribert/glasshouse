@@ -240,8 +240,13 @@ fn structured_returns_continue_and_scalar_or_text_returns_end_the_task() {
     assert!(!bare.ends_the_task());
     assert_eq!(returned(&bare), &Value::Undefined);
 
-    let answer = runtime.run_cell("return \"done\";\n");
-    assert!(answer.ends_the_task());
+    // A returned string is notebook output too. Nothing a cell returns ends
+    // the task; `answer(text)` is the only thing that does.
+    let text = runtime.run_cell("return \"done\";\n");
+    assert!(!text.ends_the_task());
+    let said = runtime.run_cell("answer(\"done\");\nreturn { still: \"output\" };\n");
+    assert!(said.ends_the_task());
+    assert_eq!(said.answer(), Some("done"));
 }
 
 #[test]
@@ -1248,7 +1253,7 @@ fn no_door_shadows_deletes_or_redefines_a_host_function() {
 /// with, not by a flag the program can set.
 ///
 /// `__pane_cell.e()` used to set that flag, so one line of the model's own
-/// program turned its `return` into a yield and the task never ended.
+/// program turned its `return` into a yield.
 #[test]
 fn a_forged_epilogue_does_not_turn_a_return_into_a_yield() {
     let fixture = Fixture::new("epilogue");
@@ -1257,18 +1262,24 @@ fn a_forged_epilogue_does_not_turn_a_return_into_a_yield() {
     let mut runtime = runtime(&fixture, &glasshouse, &session);
 
     let named = runtime.run_cell("__pane_cell.e();\nreturn \"THIS SHOULD END THE TASK\";\n");
-    assert!(named.ends_the_task(), "{named:?}");
+    assert!(
+        matches!(named, CellOutcome::Returned { .. }),
+        "the forged epilogue turned a return into a yield: {named:?}"
+    );
     assert_eq!(returned_string(&named), "THIS SHOULD END THE TASK");
 
     // The same object reached without naming it: `arguments[0]` is the host
     // object, and it buys the same nothing.
     let through_arguments = runtime.run_cell("arguments[0].e();\nreturn \"ALSO THE END\";\n");
-    assert!(through_arguments.ends_the_task(), "{through_arguments:?}");
+    assert!(
+        matches!(through_arguments, CellOutcome::Returned { .. }),
+        "{through_arguments:?}"
+    );
     assert_eq!(returned_string(&through_arguments), "ALSO THE END");
 
     // A marker minted in an earlier cell does not answer for a later one.
     let stashed = runtime.run_cell("const marker = __pane_cell.e();\n");
-    assert!(!stashed.ends_the_task(), "{stashed:?}");
+    assert!(matches!(stashed, CellOutcome::Yielded { .. }), "{stashed:?}");
     let replayed = runtime.run_cell("return marker;\n");
     assert!(
         matches!(replayed, CellOutcome::Returned { .. }),
@@ -2922,8 +2933,8 @@ fn the_model_calls_where_ack_and_rest_on_the_batch_it_was_given() {
     // what it did not ack. An id no batch holds comes back as unknown rather
     // than being silently dropped.
     let acked = runtime.run_cell(
-        "const answer = batch.ack([batch.where({})[0].id, 9999]);\n\
-         return `${answer.acked.length}/${answer.unknown[0]}/${batch.rest().length}`;\n",
+        "const acked = batch.ack([batch.where({})[0].id, 9999]);\n\
+         return `${acked.acked.length}/${acked.unknown[0]}/${batch.rest().length}`;\n",
     );
     assert_eq!(returned_string(&acked), "1/9999/2");
 }

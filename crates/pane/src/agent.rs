@@ -625,12 +625,12 @@ pub(crate) fn run_narrowed_metered(
             conversation.system.push_str("\n\n");
             conversation.system.push_str(&pending.text);
         }
-        if let CellOutcome::Returned {
-            value, terminal, ..
-        } = &outcome
-            && outcome.ends_the_task()
+        // A subagent ends the same way the person's task does: by saying so
+        // with `answer(text)`. Reading the ending off a returned value's type
+        // is the mistake `outcome.rs::ends_the_task` records.
+        if outcome.ends_the_task()
+            && let Some(answer) = outcome.answer().map(str::to_string)
         {
-            let answer = terminal.render(value);
             let helpers = runtime.helper_records();
             if let Some(handoff) = checker_handoff(&helpers, &answer) {
                 // A return written before the checker answered cannot have
@@ -986,7 +986,7 @@ fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>)
         output: match outcome {
             CellOutcome::Returned {
                 value, terminal, ..
-            } if !outcome.ends_the_task() => Some(terminal.render(value)),
+            } => Some(terminal.render(value)),
             _ => None,
         },
         handle_table: turn.table.clone(),

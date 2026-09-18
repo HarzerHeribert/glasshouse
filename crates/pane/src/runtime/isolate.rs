@@ -1909,6 +1909,7 @@ impl Runtime {
             _ => None,
         };
         let calls = self.trace().take_calls();
+        let answer = self.trace().take_answer();
         let record = CellRecord {
             cell,
             source: source.to_string(),
@@ -1938,6 +1939,7 @@ impl Runtime {
             stdout_tail,
             stdout_dropped_tokens,
             yield_reason,
+            answer,
             record,
             plan: self.state.plan(),
             capability_results: self.trace().take_results(),

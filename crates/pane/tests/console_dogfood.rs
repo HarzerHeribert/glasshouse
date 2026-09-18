@@ -15,7 +15,7 @@ fn run(source: &str) -> pane::runtime::outcome::CellOutcome {
 fn console_inspects_nested_data_without_invoking_getters_or_chasing_cycles() {
     let outcome = run("let getterRuns = 0;\n\
          const item = {name: 'roman', nested: {done: false}};\n\
-         Object.defineProperty(item, 'danger', {enumerable: true, get() { getterRuns++; return 'ran'; }});\n\
+         Object.defineProperty(item, 'danger', {enumerable: true, get() { getterRuns++; answer('ran'); }});\n\
          item.self = item;\n\
          console.log([item]);\n\
          console.log('getter runs after inspection:', getterRuns);\n");

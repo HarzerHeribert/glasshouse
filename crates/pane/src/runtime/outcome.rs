@@ -35,6 +35,10 @@ pub struct CellTurn {
     /// rather than [`CellOutcome::Yielded`] because callers outside this
     /// package match `Yielded { turn }` exhaustively.
     pub yield_reason: Option<String>,
+    /// What the cell said with `answer(text)`, and the **only** thing that
+    /// ends the person's task. `None` for every cell that was still working
+    /// -- which is every cell that did not say otherwise.
+    pub answer: Option<String>,
     /// The one rollout line this cell owes — appended by the wiring package,
     /// never by this one.
     pub record: CellRecord,
@@ -174,22 +178,34 @@ impl CellOutcome {
         }
     }
 
-    /// Whether the task is over. Structured values are notebook output for
-    /// another inference turn; text and scalar results are terminal.
+    /// Whether the task is over, and it is over **only because the cell
+    /// said so** with `answer(text)`.
+    ///
+    /// It used to be read off the returned value's type -- an array or an
+    /// object was notebook output, anything else was the final answer. That
+    /// made `return result.stdout`, written to look at a command's output,
+    /// publish that output as the answer and end the session; a returned
+    /// value's shape says nothing about whether the work is finished. A
+    /// throw never ends a task however it answered: something failed after
+    /// the claim, and the claim has not survived it.
+    #[must_use]
     pub fn ends_the_task(&self) -> bool {
         match self {
-            CellOutcome::Returned { value, .. } => !matches!(
-                value,
-                Value::Array(_)
-                    | Value::File(_)
-                    | Value::TestReport(_)
-                    | Value::Null
-                    | Value::Undefined
-                    | Value::Object(_)
-                    | Value::Collection(_)
-                    | Value::Error(_)
-            ),
-            CellOutcome::Yielded { .. } | CellOutcome::Threw { .. } => false,
+            CellOutcome::Returned { turn, .. } | CellOutcome::Yielded { turn } => {
+                turn.answer.is_some()
+            }
+            CellOutcome::Threw { .. } => false,
+        }
+    }
+
+    /// What the cell answered, when it did.
+    #[must_use]
+    pub fn answer(&self) -> Option<&str> {
+        match self {
+            CellOutcome::Returned { turn, .. } | CellOutcome::Yielded { turn } => {
+                turn.answer.as_deref()
+            }
+            CellOutcome::Threw { .. } => None,
         }
     }
 }
@@ -431,6 +447,7 @@ mod tests {
             stdout_tail: String::new(),
             stdout_dropped_tokens: 0,
             yield_reason: None,
+            answer: None,
             record: CellRecord {
                 cell: 1,
                 source: String::new(),
@@ -445,45 +462,56 @@ mod tests {
         }
     }
 
+    /// **No returned value ends the task, whatever its type.** A cell ends
+    /// it only by saying so with `answer(text)`, and a throw ends nothing
+    /// even when the cell answered before it failed.
     #[test]
-    fn structured_returns_continue_and_scalar_or_text_returns_end_the_task() {
+    fn only_an_answer_ends_the_task_and_no_returned_value_does() {
+        let answered = || CellTurn {
+            answer: Some("done".into()),
+            ..turn()
+        };
+        for value in [
+            Value::Null,
+            Value::Number(3.0),
+            Value::string("done"),
+            Value::object(vec![("a".to_string(), Value::Number(1.0))]),
+        ] {
+            let terminal = Terminal::Json {
+                text: "…".into(),
+                cut: false,
+            };
+            assert!(
+                !CellOutcome::Returned {
+                    value: value.clone(),
+                    terminal: terminal.clone(),
+                    turn: turn(),
+                }
+                .ends_the_task(),
+                "a returned {value:?} must not end the task"
+            );
+            assert!(
+                CellOutcome::Returned {
+                    value,
+                    terminal,
+                    turn: answered(),
+                }
+                .ends_the_task()
+            );
+        }
         assert!(!CellOutcome::Yielded { turn: turn() }.ends_the_task());
-        assert!(
-            !CellOutcome::Returned {
-                value: Value::Null,
-                terminal: Terminal::Json {
-                    text: "null".into(),
-                    cut: false
-                },
-                turn: turn()
-            }
-            .ends_the_task()
-        );
-        assert!(
-            CellOutcome::Returned {
-                value: Value::Number(3.0),
-                terminal: Terminal::Json {
-                    text: "3".into(),
-                    cut: false
-                },
-                turn: turn()
-            }
-            .ends_the_task()
-        );
-        assert!(
-            CellOutcome::Returned {
-                value: Value::string("done"),
-                terminal: Terminal::Text("done".into()),
-                turn: turn()
-            }
-            .ends_the_task()
+        assert!(CellOutcome::Yielded { turn: answered() }.ends_the_task());
+        assert_eq!(
+            CellOutcome::Yielded { turn: answered() }.answer(),
+            Some("done")
         );
         assert!(
             !CellOutcome::Threw {
                 error: ErrorValue::default(),
-                turn: turn()
+                turn: answered(),
             }
-            .ends_the_task()
+            .ends_the_task(),
+            "a throw after an answer has not survived its own cell"
         );
     }
 

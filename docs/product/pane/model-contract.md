@@ -107,16 +107,18 @@ the byte-for-byte text below remains the compatibility contract.
     Bindings persist between cells of this user request; redeclaring replaces
     them. Each new user request starts a fresh runtime. Earlier requests are
     history, not unfinished work. Work on the current request, including its
-    requested tests. Running off the end or `yieldNow(reason)` gives results
-    and another turn. Returning an object, array or tool object displays
-    notebook output and also gives another turn. A top-level returned string
-    ends the task; use one for the final answer grounded in observed results.
+    requested tests. Running off the end, `yieldNow(reason)` or a top-level
+    `return` all give results and another turn: returning a value displays it
+    as notebook output and finishes nothing. Return whatever you want to look
+    at, as often as you like.
 
+    The task ends only where you say it ends.
+    `answer(text)` inside a cell ends the task with that text.
     A prose response with no `execute_cell` call ends the task as the answer.
-    Use prose-only output only when the request is finished; do not use it to
-    announce work you still intend to perform.
+    Use either only when the request is finished and the answer is grounded in
+    observed results; do not use prose to announce work you still intend to
+    perform.
     To interpret a file, inspect and yield first, then answer from the feedback.
-    Use structured returns for inspection when useful; they do not finish the task.
 
     A thrown error carries its position and completed bindings. Continue from
     that state; failed or skipped calls did not succeed. PermissionDenied is

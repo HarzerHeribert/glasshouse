@@ -417,13 +417,13 @@ fn a_terminal_response_is_one_assistant_turn_line_resume_rebuilds() {
     let mut rollout = Rollout::create(&path, SessionId::new("s1"), "system prompt").unwrap();
     rollout.record_turn(Role::User, "count them").unwrap();
     rollout
-        .record_turn(Role::Assistant, "```pane\nreturn \"three files\";\n```")
+        .record_turn(Role::Assistant, "```pane\nanswer(\"three files\");\n```")
         .unwrap();
     rollout
         .record_cell(&CellRecord {
             cell: 1,
             description: None,
-            source: "return \"three files\";\n".to_string(),
+            source: "answer(\"three files\");\n".to_string(),
             outcome: CellOutcomeKind::Returned,
             handles: Vec::new(),
             calls: Vec::new(),
@@ -457,7 +457,7 @@ fn a_terminal_response_is_one_assistant_turn_line_resume_rebuilds() {
         conversation.messages,
         vec![
             Message::text(Role::User, "count them"),
-            Message::text(Role::Assistant, "```pane\nreturn \"three files\";\n```"),
+            Message::text(Role::Assistant, "```pane\nanswer(\"three files\");\n```"),
             Message::text(Role::Assistant, "three files"),
         ]
     );

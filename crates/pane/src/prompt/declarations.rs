@@ -514,6 +514,13 @@ pub const RUNTIME: &[Binding] = &[
                       // error: you get the handle table and another turn.",
     },
     Binding {
+        global: "answer",
+        declaration: "declare function answer(text: string): void;\n\
+                      // End the task with this text as the final answer. The one way a cell\n\
+                      // finishes the request; returning a value never does. The program keeps\n\
+                      // running after it, so you can answer and still tidy up.",
+    },
+    Binding {
         global: "checks",
         declaration: "declare const checks: { list(): Record<string, {command: string; inputs: string[]; reuse: boolean}>; run(name: string, force?: boolean): {name: string; command: string; stdout: string; stderr: string; exit_code: number | null; observed_at_ms: number; executed: boolean; reused: boolean; reuse_scope: string}; };\n// Named commands from .glasshouse/checks.toml run under the existing sandbox. Configure before use. Reuse is explicit for declared inputs; force=true always executes. A reused observation is not a fresh test run.",
     },

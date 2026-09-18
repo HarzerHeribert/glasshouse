@@ -142,7 +142,7 @@ fn provider(first: String) -> (String, Arc<Mutex<Vec<String>>>) {
             let response = if index == 0 {
                 first.clone()
             } else {
-                code("return 'recovered';")
+                code("answer('recovered');")
             };
             let _ = write!(
                 stream,

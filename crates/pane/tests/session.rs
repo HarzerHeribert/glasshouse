@@ -274,7 +274,7 @@ fn native_cell_result_is_correlated_before_the_next_request() {
     let rollout = root.join("rollout.jsonl");
     let (base, bodies) = start_fake_provider(vec![
         native_cell_reply("call-read", "const x = 6 * 7; console.log(x);"),
-        native_cell_reply("call-return", "return `done ${x}`;"),
+        native_cell_reply("call-return", "answer(`done ${x}`);"),
     ]);
     let output = run_session(&root, &rollout, "native-handoff", "compute", &base, None);
     assert!(
@@ -337,7 +337,7 @@ fn multiple_native_calls_are_all_rejected_without_execution() {
     ]})
     .to_string();
     let (base, bodies) =
-        start_fake_provider(vec![first, native_cell_reply("finish", "return 'safe';")]);
+        start_fake_provider(vec![first, native_cell_reply("finish", "answer('safe');")]);
     let output = run_session(&root, &rollout, "native-multiple", "do it", &base, None);
     assert!(output.status.success());
     assert_eq!(
@@ -369,7 +369,7 @@ fn one_long_native_call_can_run_multiple_runtime_tools() {
     );
     let (base, bodies) = start_fake_provider(vec![
         native_cell_reply("long-tools", &code),
-        native_cell_reply("finish", "return 'done';"),
+        native_cell_reply("finish", "answer('done');"),
     ]);
     let output = run_session(&root, &rollout, "native-long-tools", "do it", &base, None);
     assert!(
@@ -396,7 +396,7 @@ fn malformed_native_input_and_runtime_throw_are_correlated_errors() {
     let (base, bodies) = start_fake_provider(vec![
         malformed,
         native_cell_reply("throws", "throw new Error('boom')"),
-        native_cell_reply("finish", "return 'done';"),
+        native_cell_reply("finish", "answer('done');"),
     ]);
     let output = run_session(&root, &rollout, "native-errors", "do it", &base, None);
     assert!(output.status.success());
@@ -1233,7 +1233,7 @@ fn rollback_previews_the_exact_checkpoint_and_headless_confirmation_refuses() {
             "make-file",
             "await write({path: 'created-by-cell.txt', content: 'cell'});",
         ),
-        native_cell_reply("finish", "return 'done';"),
+        native_cell_reply("finish", "answer('done');"),
     ]);
 
     let output = run_session_stdin(
@@ -1832,7 +1832,7 @@ fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
             "```pane\nreturn {};\n```",
             serde_json::to_string(answer).unwrap()
         )),
-        assistant_reply("```pane\nreturn \"NEVER REQUESTED\";\n```"),
+        assistant_reply("```pane\nanswer(\"NEVER REQUESTED\");\n```"),
     ]);
 
     let output = run_session(
@@ -1890,7 +1890,7 @@ fn a_throw_never_becomes_a_terminal_response() {
 
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply(
-            "```pane\nconst before = 1;\nthrow new ReferenceError(\"fixture\");\nreturn \"CONFIDENT SENTENCE\";\n```",
+            "```pane\nconst before = 1;\nthrow new ReferenceError(\"fixture\");\nanswer(\"CONFIDENT SENTENCE\");\n```",
         ),
         ending_reply(),
     ]);
@@ -3333,7 +3333,7 @@ mod interrupts {
         let marker = marker_of(&root, "call");
         let (base_url, bodies) = start_fake_provider(vec![
             spinning_cell("call"),
-            assistant_reply("```pane\nreturn \"done\";\n```"),
+            assistant_reply("```pane\nanswer(\"done\");\n```"),
         ]);
 
         let started = Instant::now();
@@ -3547,7 +3547,7 @@ mod interrupts {
         let (base_url, bodies) = start_fake_provider(vec![
             computing_cell(),
             spinning_cell("compute"),
-            assistant_reply("```pane\nreturn \"done\";\n```"),
+            assistant_reply("```pane\nanswer(\"done\");\n```"),
         ]);
 
         let mut child = spawn_session(&root, &rollout, "compute then spin", &base_url);
@@ -3600,7 +3600,7 @@ mod interrupts {
         let (base_url, _bodies) = start_fake_provider(vec![
             spinning_cell("apart"),
             spinning_cell("apart"),
-            assistant_reply("```pane\nreturn \"done\";\n```"),
+            assistant_reply("```pane\nanswer(\"done\");\n```"),
         ]);
 
         let mut child = spawn_session(&root, &rollout, "spin, wait, spin", &base_url);
@@ -4392,7 +4392,7 @@ fn untaken_tool_branches_are_not_reported_as_executed_calls() {
     let root = scratch_dir("untaken-branch");
     let rollout = root.join("rollout.jsonl");
     let (base, _) = start_fake_provider(vec![assistant_reply(
-        "```pane\nif (false) await bash({command: 'never-run'});\nreturn 'done';\n```",
+        "```pane\nif (false) await bash({command: 'never-run'});\nanswer('done');\n```",
     )]);
     let output = run_session(&root, &rollout, "untaken", "do it", &base, None);
     assert!(
@@ -4742,7 +4742,7 @@ fn an_identity_answer_after_a_completed_task_does_not_trigger_more_execution() {
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-glasshouse");
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nconst result = 42; return 'Task complete.';\n```"),
+        assistant_reply("```pane\nconst result = 42; answer('Task complete.');\n```"),
         assistant_reply(
             "I am Pane, a coding assistant. The requested model is deepseek-v4-flash.\n<!-- pane:done -->",
         ),
@@ -4962,7 +4962,7 @@ fn prose_without_a_native_call_is_final_and_never_executes_its_example() {
             "Let me create the regression tests now.\n```bash\ntouch MUST_NOT_EXECUTE\n```",
         ),
         assistant_reply(
-            "```pane\nawait write({path:'regression.txt', content:'retained regression fixture'});\nreturn 'Implementation and regression fixture written.';\n```",
+            "```pane\nawait write({path:'regression.txt', content:'retained regression fixture'});\nanswer('Implementation and regression fixture written.');\n```",
         ),
     ]);
     let output = run_session(
@@ -5241,7 +5241,7 @@ fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
                 assert!(!system.contains("NESTED_GUIDANCE:"));
                 native_cell_reply(
                     "blocked",
-                    "await write({path: 'nested/result.txt', content: 'too early'}); return 'wrong';",
+                    "await write({path: 'nested/result.txt', content: 'too early'}); answer('wrong');",
                 )
             }
             _ => {
@@ -5256,7 +5256,7 @@ fn nested_instructions_reach_the_provider_before_a_write_can_execute() {
                 assert!(result["content"].as_str().unwrap().contains("did not run"));
                 native_cell_reply(
                     "allowed",
-                    "await write({path: 'nested/result.txt', content: 'verified'}); return 'done';",
+                    "await write({path: 'nested/result.txt', content: 'verified'}); answer('done');",
                 )
             }
         }
@@ -5308,7 +5308,7 @@ fn standing_handler_drains_a_future_batch_without_an_extra_model_request() {
             _ => {
                 // Let the real background process finish while the model request is in flight.
                 thread::sleep(std::time::Duration::from_millis(800));
-                assistant_reply("```pane\nreturn `seen=${seen}; remaining=${batch.n}`;\n```")
+                assistant_reply("```pane\nanswer(`seen=${seen}; remaining=${batch.n}`);\n```")
             }
         }
     });
@@ -5371,7 +5371,7 @@ fn disabled_handler_notice_reaches_the_first_preview_once_before_next_inference(
                 thread::sleep(std::time::Duration::from_millis(800));
                 assistant_reply("```pane\nconst continued = 1;\n```")
             }
-            _ => assistant_reply("```pane\nreturn 'done';\n```"),
+            _ => assistant_reply("```pane\nanswer('done');\n```"),
         }
     });
     let output = run_session(
@@ -5539,7 +5539,7 @@ fn preflight_serves_the_scouts_files_under_the_verbatim_request() {
     let absent = root.join("no-such-glasshouse");
     let task = "find the needle, and do not change the colour";
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nreturn \"haystack.rs:1 where the needle is\";\n```"),
+        assistant_reply("```pane\nanswer(\"haystack.rs:1 where the needle is\");\n```"),
         ending_reply(),
     ]);
 

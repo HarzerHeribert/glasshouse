@@ -450,7 +450,7 @@ fn a_written_plan_reaches_the_next_request_once() {
         if body.contains("plan the change") && !body.contains("carry it out") {
             cell_reply(&write_all(&[".pane/scratch/plan.md"]))
         } else {
-            cell_reply("return \"done\";")
+            cell_reply("answer(\"done\");")
         }
     });
     let output = run(
@@ -484,7 +484,7 @@ fn a_written_plan_reaches_the_next_request_once() {
 #[test]
 fn a_plan_request_that_writes_nothing_carries_nothing() {
     let root = project("plan-nothing");
-    let (base_url, bodies) = start_provider(2, |_| cell_reply("return \"no plan\";"));
+    let (base_url, bodies) = start_provider(2, |_| cell_reply("answer(\"no plan\");"));
     let output = run(
         &root,
         &["--plan"],
@@ -593,7 +593,7 @@ fn mode_auto_unpins_and_a_confident_intent_proposes_again() {
 fn shadow_mode_runs_as_today_and_counts_would_apply() {
     let root = project_with_config("mode-proposal-shadow", DECISIONS_SHADOW);
     let (base_url, _) =
-        start_provider_with_intent(vec![cell_reply("return \"done\";")], "read_only", 0.97);
+        start_provider_with_intent(vec![cell_reply("answer(\"done\");")], "read_only", 0.97);
     let out_path = root.join("stdout.json");
     let stdout_file = std::fs::File::create(&out_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_pane"))

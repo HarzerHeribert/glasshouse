@@ -235,7 +235,7 @@ fn an_unconfigured_helper_refuses_and_makes_no_wire_call() {
         &SessionId::new("helpers-unconfigured"),
     );
     let outcome = runtime.run_cell(
-        "try { await helper.reduce(\"a log line\"); return \"no refusal\"; }\n\
+        "try { await helper.reduce(\"a log line\"); answer(\"no refusal\"); }\n\
          catch (e) { return e.name + \": \" + e.message; }\n",
     );
 
@@ -286,7 +286,7 @@ fn the_cell_call_ceiling_refuses_the_call_after_it() {
          \x20 try { await helper.reduce(\"a log line\"); done++; }\n\
          \x20 catch (e) { return e.name + \" after \" + done + \": \" + e.message; }\n\
          }\n\
-         return \"never refused\";\n",
+         answer(\"never refused\");\n",
     );
 
     unsafe {
@@ -473,7 +473,7 @@ fn a_multiturn_helper_sums_each_response_once_with_cache_coverage() {
             "role": "assistant",
             "content": [{
                 "type": "tool_use", "id": "cell-2", "name": "execute_cell",
-                "input": {"code": "return \"found\";"}
+                "input": {"code": "answer(\"found\");"}
             }],
             "usage": {"input_tokens": 11, "output_tokens": 6,
                 "cache_read_input_tokens": 71, "cache_creation_input_tokens": 21}
@@ -688,7 +688,7 @@ fn a_helper_runs_past_every_former_ceiling_and_answers() {
         "role": "assistant",
         "content": [{
             "type": "tool_use", "id": "cell-last", "name": "execute_cell",
-            "input": {"code": "return \"the twelfth turn answered\";"}
+            "input": {"code": "answer(\"the twelfth turn answered\");"}
         }]
     }));
     let provider = scripted_provider(payloads);
@@ -888,7 +888,7 @@ fn helpers_disabled_with_a_model_configured_still_refuse_and_never_reach_the_wir
         ..HelpersConfig::default()
     });
     let outcome = runtime.run_cell(
-        "try { await helper.reduce(\"a log line\"); return \"no refusal\"; }\n\
+        "try { await helper.reduce(\"a log line\"); answer(\"no refusal\"); }\n\
          catch (e) { return e.name + \": \" + e.message; }\n",
     );
 

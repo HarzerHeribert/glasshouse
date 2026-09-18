@@ -572,7 +572,7 @@ fn exec_bounded(root: &Path, endpoint: &str, task: &str, interface: Option<&str>
 fn a_read_only_request_holds_the_first_effectful_cell_once_then_lets_it_run() {
     let root = root("hold-once");
     write_config(&root, DECISIONS_ON);
-    let held = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
+    let held = "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell("c1", held), cell("c2", held)],
         vec![Decision::Answer(decision_answer("read_only", 0.94))],
@@ -608,7 +608,7 @@ fn a_confidence_below_hold_above_never_holds() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("read_only", 0.80))],
         vec![],
@@ -630,7 +630,7 @@ fn shadow_records_the_would_be_hold_and_writes_the_file() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("read_only", 0.94))],
         vec![],
@@ -654,7 +654,7 @@ fn shadow_records_the_would_be_hold_and_writes_the_file() {
 // -- the drift question (2643) -------------------------------------------
 
 const DRIFT_PLAN_CELL: &str = "todo.write([{text: \"write a.txt\", status: \"active\"}]);";
-const DRIFT_EFFECT_CELL: &str = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
+const DRIFT_EFFECT_CELL: &str = "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
 
 #[test]
 fn a_confident_drift_no_holds_the_cell_once_then_lets_it_run() {
@@ -811,7 +811,7 @@ fn a_modify_intent_or_a_pure_cell_is_never_held() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
         vec![],
@@ -917,7 +917,7 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Status(500)],
         vec![],
@@ -940,7 +940,7 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Sleep(Duration::from_secs(3))],
         vec![],
@@ -959,7 +959,7 @@ fn no_model_means_no_request_and_no_thread() {
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![],
         vec![],
@@ -983,7 +983,7 @@ fn the_decision_request_carries_purpose_model_and_the_intent_question() {
     let (endpoint, _messages, decisions, headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("read_only", 0.94))],
         vec![],
@@ -1047,7 +1047,7 @@ fn a_needs_exploration_answer_above_threshold_starts_the_scout_with_the_signal_n
     let root = root("scout-signal-above");
     write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![scout_prose(), cell("c1", "answer(\"done\");")],
         vec![Decision::Answer(decision_answer_with_complexity(
             "read_only",
             0.94,
@@ -1078,7 +1078,7 @@ fn a_needs_exploration_answer_below_threshold_does_not_start_the_scout() {
     let root = root("scout-signal-below");
     write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![Decision::Answer(decision_answer_with_complexity(
             "read_only",
             0.94,
@@ -1105,7 +1105,7 @@ fn a_trivial_answer_never_suppresses_a_deterministic_signal() {
     let root = root("scout-signal-trivial");
     write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![scout_prose(), cell("c1", "answer(\"done\");")],
         vec![Decision::Answer(decision_answer_with_complexity(
             "read_only",
             0.94,
@@ -1140,7 +1140,7 @@ fn shadow_records_would_scout_and_never_starts_the_scout() {
     let root = root("scout-signal-shadow");
     write_config(&root, DECISIONS_SHADOW_WITH_PREFLIGHT);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![Decision::Answer(decision_answer_with_complexity(
             "read_only",
             0.94,
@@ -1167,7 +1167,7 @@ fn a_failed_decision_leaves_preflight_exactly_as_it_is_today() {
     let root = root("scout-signal-failed");
     write_config(&root, DECISIONS_ON_WITH_PREFLIGHT);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![Decision::Status(500)],
         vec![],
     );
@@ -1194,8 +1194,8 @@ fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
     write_config(&root, DECISIONS_ON);
     let (endpoint, messages, decisions, _headers) = providers(
         vec![
-            cell("c1", "return \"done\";"),
-            cell("c2", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
+            cell("c2", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.06))],
@@ -1233,11 +1233,11 @@ fn a_changed_diff_is_asked_again_and_a_fixed_task_verifies() {
         vec![
             cell(
                 "c1",
-                "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+                "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
             ),
             cell(
                 "c2",
-                "await write({path: \"b.txt\", content: \"1\"});\nreturn \"done\";",
+                "await write({path: \"b.txt\", content: \"1\"});\nanswer(\"done\");",
             ),
         ],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
@@ -1290,7 +1290,7 @@ fn a_confident_yes_spares_the_fresh_checker_when_nothing_else_is_found() {
     let root = root("completion-yes");
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
     let (endpoint, messages, decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Answer(completion_answer(0.94))],
     );
@@ -1319,7 +1319,7 @@ fn an_undecided_answer_runs_the_checker_as_today() {
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
             prose("The change holds; nothing more is needed."),
         ],
         vec![],
@@ -1346,9 +1346,9 @@ fn a_yes_never_removes_a_mechanical_finding() {
     write_checks_toml(&root, "[contract]\nrequired = [\"missing.txt\"]\n");
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
             prose("The change holds; nothing more is needed."),
-            cell("c2", "return \"done\";"),
+            cell("c2", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.94))],
@@ -1388,9 +1388,9 @@ fn a_confident_no_checker_judge_carries_the_line_and_leaves_the_finding_intact()
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
     let (endpoint, messages, decisions, _headers) = providers_with_rank_and_judge(
         vec![
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
             prose("does not hold: the diff misses the retry path"),
-            cell("c2", "return \"done\";"),
+            cell("c2", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.55))],
@@ -1435,9 +1435,9 @@ fn a_confident_yes_checker_judge_carries_nothing() {
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
     let (endpoint, messages, _decisions, _headers) = providers_with_rank_and_judge(
         vec![
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
             prose("does not hold: the diff misses the retry path"),
-            cell("c2", "return \"done\";"),
+            cell("c2", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.55))],
@@ -1479,7 +1479,7 @@ fn decisions_helpers_telemetry_counts_the_scouts_ranking_and_its_own_judge() {
     )
     .unwrap();
     let (endpoint, _messages, _decisions, _headers) = providers_with_rank_and_judge(
-        vec![scout_prose(), cell("c1", "return \"done\";")],
+        vec![scout_prose(), cell("c1", "answer(\"done\");")],
         vec![Decision::Answer(decision_answer_with_complexity(
             "read_only",
             0.94,
@@ -1508,7 +1508,7 @@ fn shadow_records_the_completion_answer_and_changes_nothing() {
     let root = root("completion-shadow");
     write_config(&root, DECISIONS_SHADOW);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Answer(completion_answer(0.06))],
     );
@@ -1532,7 +1532,7 @@ fn a_failed_or_slow_completion_decision_leaves_the_gate_as_it_is() {
     let failed = root("completion-500");
     write_config(&failed, DECISIONS_ON);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Status(500)],
     );
@@ -1548,7 +1548,7 @@ fn a_failed_or_slow_completion_decision_leaves_the_gate_as_it_is() {
     let slow = root("completion-slow");
     write_config(&slow, DECISIONS_ON);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Sleep(Duration::from_secs(3))],
     );
@@ -1571,7 +1571,7 @@ fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
             "x".repeat(2_000)
         ));
     }
-    code.push_str("return \"done\";");
+    code.push_str("answer(\"done\");");
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell("c1", &code)],
         // A non-read-only intent, so the non-empty diff this cell produces
@@ -1610,7 +1610,7 @@ fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
 fn a_confident_out_of_scope_yes_is_one_finding_held_once_with_the_reason() {
     let root = root("hygiene-out-of-scope");
     write_config(&root, DECISIONS_ON);
-    let held = "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";";
+    let held = "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
     let (endpoint, messages, decisions, _headers) = providers(
         vec![cell("c1", held), cell("c2", held)],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
@@ -1647,7 +1647,7 @@ fn an_undecided_has_tests_answer_adds_no_finding() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
         vec![Decision::Answer(completion_answer_with_hygiene(
@@ -1675,7 +1675,7 @@ fn shadow_records_the_five_hygiene_nouls_and_adds_no_finding() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "await write({path: \"a.txt\", content: \"1\"});\nreturn \"done\";",
+            "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");",
         )],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
         vec![Decision::Answer(completion_answer_with_hygiene(
@@ -1704,7 +1704,7 @@ fn an_answer_only_task_with_an_empty_diff_is_asked_over_the_answer_state() {
     let root = root("answer-state-verified");
     write_config(&root, DECISIONS_ON);
     let (endpoint, messages, decisions, _headers) = providers(
-        vec![cell("c1", "return \"done\";")],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Answer(completion_answer(0.94))],
     );
@@ -1735,8 +1735,8 @@ fn a_confident_no_over_the_answer_state_is_one_finding_held_once() {
     write_config(&root, DECISIONS_ON);
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
-            cell("c1", "return \"done\";"),
-            cell("c2", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
+            cell("c2", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.05))],
@@ -1776,7 +1776,7 @@ fn a_judge_item_answered_yes_is_satisfied_without_the_checker() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             prose("judge: the tone is friendly"),
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer_with_judge(
@@ -1812,8 +1812,8 @@ fn a_judge_item_answered_no_is_a_finding_held_once_then_verifies_unverified_with
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             prose("judge: the tone is friendly"),
-            cell("c1", "return \"done\";"),
-            cell("c1b", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
+            cell("c1b", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer_with_judge(
@@ -1847,7 +1847,7 @@ fn a_judge_item_answered_undecided_runs_the_checker_as_today() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             prose("judge: the tone is friendly"),
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
             prose("The change holds; nothing more is needed."),
         ],
         vec![],
@@ -1874,7 +1874,7 @@ fn shadow_records_judged_and_changes_nothing() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             prose("judge: the tone is friendly"),
-            cell("c1", "return \"done\";"),
+            cell("c1", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer_with_judge(
@@ -1914,7 +1914,7 @@ const SUPERVISED_BY_THE_DECISION_MODEL: &str =
 /// One cell that yields (so a look has a next turn to head) and one that
 /// ends the task.
 fn looping_then_done() -> Vec<Value> {
-    vec![cell("c1", "const x = 1;"), cell("c2", "return \"done\";")]
+    vec![cell("c1", "const x = 1;"), cell("c2", "answer(\"done\");")]
 }
 
 fn prose_looks(messages: &[String]) -> usize {

@@ -20,7 +20,7 @@ fn max_token_prose_and_native_calls_fail_without_execution_or_retry() {
         if with_call {
             content.push(serde_json::json!({
                 "type": "tool_use", "id": "partial-call", "name": "execute_cell",
-                "input": {"code": "await bash({command: 'printf unsafe > marker'}); return 'done';"},
+                "input": {"code": "await bash({command: 'printf unsafe > marker'}); answer('done');"},
             }));
         }
         let response = serde_json::json!({

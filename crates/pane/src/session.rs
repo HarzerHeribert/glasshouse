@@ -2170,15 +2170,16 @@ fn act_on(
     };
 
     let mut response = None;
-    match &outcome {
-        // Nothing that threw, was refused or was cancelled reaches this arm
-        // -- each of those is a `Threw`, and a throw is answered. §9.2: what
-        // is rendered is the terminal response -- a string verbatim, any
-        // other value as its JSON -- never `marshal`'s sample.
-        CellOutcome::Returned {
-            value, terminal, ..
-        } if outcome.ends_the_task() => {
-            let text = terminal.render(value);
+    // **The task ends where the cell said it ends, and nowhere else.** The
+    // text is `answer(text)`'s, never a returned value: a return is written
+    // to look at something, and reading one as a final answer is what once
+    // published a `sed` dump as the session's conclusion. A throw answers
+    // nothing -- `ends_the_task` says so -- so a claim that did not survive
+    // its own cell cannot end the task either.
+    if outcome.ends_the_task()
+        && let Some(text) = outcome.answer().map(str::to_string)
+    {
+        {
             if let Some(handoff) = crate::agent::checker_handoff(&view.helpers, &text) {
                 // A completion guard answered during this cell, after the
                 // candidate was authored. Keep the candidate as notebook
@@ -2205,13 +2206,19 @@ fn act_on(
                 }
             }
         }
+    }
+    match &outcome {
+        // §9.2: what is rendered is a string verbatim and any other value as
+        // its JSON -- never `marshal`'s sample. Every one of them is notebook
+        // output for the next turn; none of them is an ending.
         CellOutcome::Returned {
             value, terminal, ..
-        } => {
+        } if response.is_none() => {
             let text = terminal.render(value);
             view.output = Some(text.clone());
             result.output = Some(text);
         }
+        CellOutcome::Returned { .. } => {}
         CellOutcome::Threw { error, .. } => {
             view.error = Some(CellError {
                 class: error.class.clone(),
