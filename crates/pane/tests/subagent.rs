@@ -222,15 +222,31 @@ fn subagent_continues_after_structured_notebook_output() {
     assert_eq!(result.stdout, "recommendations follow from the inspection");
 }
 
+/// Every event this session has published by the time the subagent is done,
+/// or everything seen before `within` runs out.
+///
+/// **It waits for the `AgentDone`, not for the first event of any kind.**
+/// `bg::drain` takes what is there *now*, and a subagent publishes more than
+/// one event: the first drain to come back non-empty may hold only what the
+/// agent said on the way, with the answer still in flight. Returning that was
+/// a race every caller here lost the same way — each of them goes on to
+/// `.find(AgentDone)` — and it was invisible on macOS, where the events
+/// happened to land in one drain, while `pane (ubuntu-latest)` went red on
+/// the deadline test (the sweep of 2026-09-18). Draining is destructive, so
+/// what is taken has to be accumulated rather than re-read.
 fn wait_for_event(session: &SessionId, within: Duration) -> Vec<pane::events::Event> {
     let deadline = Instant::now() + within;
+    let mut seen: Vec<pane::events::Event> = Vec::new();
     loop {
-        let drained = bg::drain(session);
-        if !drained.is_empty() {
-            return drained;
+        seen.extend(bg::drain(session));
+        if seen
+            .iter()
+            .any(|event| matches!(event.kind, Kind::AgentDone { .. }))
+        {
+            return seen;
         }
         if Instant::now() >= deadline {
-            return Vec::new();
+            return seen;
         }
         std::thread::sleep(Duration::from_millis(20));
     }

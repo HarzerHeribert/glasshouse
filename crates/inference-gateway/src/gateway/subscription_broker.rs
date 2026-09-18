@@ -157,8 +157,6 @@ impl RunningSubscriptionBroker {
         let internal_key = BrokerApiKey::generate()?;
         let config = render_config(port, &auth_dir, internal_key.expose())?;
         write_private_file(&config_path, config.as_bytes())?;
-        drop(reserved);
-
         let mut command = Command::new(executable);
         command
             .arg("-config")
@@ -173,6 +171,15 @@ impl RunningSubscriptionBroker {
             command.env(name, value);
         }
 
+        // **Held until the last instant before the child binds it.** A
+        // reserved port is only reserved while the listener is open; between
+        // the drop and the child's own bind, anything on this machine may
+        // take it — and then the readiness probe below would be answered by
+        // a stranger. The window cannot be closed from here (the child must
+        // do the binding), so it is made as small as the syscall order
+        // allows, and the probe's bearer key is what tells our own sidecar
+        // from a stranger that happens to be listening.
+        drop(reserved);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {

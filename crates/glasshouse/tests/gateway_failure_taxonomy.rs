@@ -957,7 +957,6 @@ fn a_relayed_body_is_never_read_and_never_leaks_into_the_ledger_or_logs() {
     );
     for (name, code) in &relay {
         for needle in [
-            "from_utf8",
             "serde_json",
             "::from_slice",
             "from_str(",
@@ -974,6 +973,37 @@ fn a_relayed_body_is_never_read_and_never_leaks_into_the_ledger_or_logs() {
             );
         }
     }
+
+    // **One reading is allowed, and only where it is allowed.** A provider's
+    // *refusal* is the one place the window a route actually enforces is
+    // stated, and no catalogue can know it (`design-decisions.md`, *A context
+    // window is a property of the route, not of the model*). So a body
+    // carrying a client error is copied, bounded, read for one integer, and
+    // dropped -- `gateway/context_limit.rs`. A successful response is still
+    // never decoded at any size, which is what the blanket rule above was
+    // protecting and what this keeps protecting: the exception is pinned to
+    // the refusal buffer by name rather than trusted to stay there.
+    //
+    // Counted, not pattern-matched: a second decoding site anywhere in these
+    // two files fails this even if it sits next to the first one.
+    const REFUSAL_READING: &str = ".and_then(|bytes| std::str::from_utf8(bytes).ok())";
+    for (name, code) in &relay {
+        let sites = code.matches("from_utf8").count();
+        let expected = usize::from(*name == "gateway/ingress.rs");
+        assert_eq!(
+            sites, expected,
+            "{name} decodes bytes at {sites} site(s) and may decode at {expected}: the relay \
+             may decode a client error's own bytes to learn the window the route enforces, \
+             and nothing else"
+        );
+    }
+    assert!(
+        relay[0].1.contains(REFUSAL_READING)
+            && relay[0].1.contains("context_limit::stated_limit")
+            && relay[0].1.contains("counted\n            .refusal"),
+        "the one allowed decoding must still be the refusal reading itself: the refusal \
+         buffer, decoded, handed to `context_limit::stated_limit`"
+    );
     // `::from_slice` rather than `from_slice`, and the difference is checked
     // rather than trusted: the needle has to fire on the realistic violation
     // and not on `Vec::extend_from_slice`, which is how a bounded observer

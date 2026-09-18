@@ -83,6 +83,19 @@ for line in lines:
 with open(os.environ["FAKE_CAPTURE"], "w", encoding="utf-8") as handle:
     handle.write("\n".join(safe))
 
+# The key this instance was configured with, as the real sidecar reads it.
+# **It answers to this key and to no other.** Without that, a fake standing
+# on a port another instance had reserved would answer that instance's
+# readiness probe, and a broker that must never become ready would become
+# ready -- which is exactly how `pane (ubuntu-latest)` and every `msrv` cell
+# went red on 2026-09-18 while macOS stayed green: the reservation is a bind
+# that is dropped before the child binds it, so on a fast runner a parallel
+# test can take the port in between.
+configured_key = next(
+    (line.split(":", 1)[1].strip().strip("[]").strip('"') for line in lines if line.startswith("api-keys:")),
+    "",
+)
+
 mode = os.environ.get("FAKE_MODE", "ready")
 if mode == "exit":
     sys.exit(23)
@@ -125,7 +138,8 @@ while True:
             break
         body += chunk
     request = head + b"\r\n\r\n" + body
-    if b"GET /v1/models" in request and b"authorization: bearer " in request.lower():
+    expected = ("authorization: bearer " + configured_key).encode().lower()
+    if b"GET /v1/models" in request and expected in request.lower():
         payload = b'{"data":[]}' if mode == "empty" else b'{"data":[{"id":"ready"}]}'
         connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
     elif b"POST /v1/messages" in request:
