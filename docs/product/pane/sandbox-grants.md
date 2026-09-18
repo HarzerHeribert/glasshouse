@@ -529,6 +529,113 @@ every spawning tool fell back to the *unresolved* branch of the 61D exec-roots
 ruling — the wider grant — on the one platform whose applier cannot narrow an
 exec grant at all.
 
+## 3.6 The toolchain a build reads, and the repository a worktree belongs to
+
+Two grants are **derived**, not configured: no `permissions` pattern can ask
+for them, no document can widen them, and they exist because without them an
+ordinary developer build cannot run at all.
+
+**The toolchain, read and execute, never write.** `$CARGO_HOME` and
+`$RUSTUP_HOME` where the environment names them, else `~/.cargo` and
+`~/.rustup`, plus `~/.npm`, `~/.nvm`, `~/.pyenv` and `$UV_CACHE_DIR`. Each is
+a toolchain's own store: a compiler, a registry cache, a version manifest.
+Declined, and the reason is one sentence each: `~/.npmrc` and `~/.pypirc` are
+single files holding registry tokens rather than caches; `~/.docker`'s
+`config.json` carries registry credentials; `~/.gradle` and `~/.m2` hold
+`gradle.properties` and `settings.xml`, both conventional homes for signing
+keys and repository passwords. **A store whose ordinary contents include a
+secret is not a toolchain read.** Inside the grant, `$CARGO_HOME/credentials`
+and `credentials.toml` — what `cargo login` writes — keep their own refusal,
+because a registry token is not part of a toolchain either.
+
+Exec follows read, and **only where the exec scope is already a root list**
+(§4.6's fallback, and the every-command scope). A compiler driver is a chain:
+`~/.cargo/bin/cargo` is a rustup shim that execs
+`~/.rustup/toolchains/<t>/bin/cargo`, which execs `rustc`. A profile that
+*names* its commands keeps the 61D ruling's single literal and gains nothing
+here.
+
+**A worktree's repository, read and write.** A linked worktree's `.git` is a
+file whose one line reads `gitdir: <path>`, pointing into the main
+repository's `.git/worktrees/<name>` — outside the project root, and so
+outside every grant a root-based profile makes. That directory and the
+`commondir` it names are granted, both halves, because git writes its index,
+its refs and its objects there. The repository's **working tree** is a
+different path and no grant here names it. `~/.gitconfig` is granted as a
+single file, read-only, because `git` exits before doing anything without it;
+`~/.git-credentials` is not, and stays refused.
+
+Measured 2026-09-17 (session `tlj14m-24r`): without these, `cargo` failed on
+`~/.rustup/settings.toml`, the gate refused with *"is not a git worktree"*,
+and the model spent a large part of twenty million tokens working around a
+sandbox instead of verifying its work.
+
+On Windows the in-process check grants the same paths; the AppContainer
+applier does not render them, because an ACL grant there rewrites the DACL of
+the user's own directories persistently rather than building a per-process
+view. The OS layer is therefore **narrower** than the profile on that
+platform, which is the safe direction and the one §3 already documents.
+
+## 3.7 What a task that needs the network can do, and what it costs
+
+§4.1 refuses shell network authority absolutely, and that refusal is not
+softening. But a developer's ordinary day includes `brew install`,
+`npm install`, `cargo fetch` and `docker pull`, and Pane today answers all of
+them with *"Operation not permitted"* and no route forward. This section says
+what the two harnesses this project is measured against do instead, what a
+person can do here now, and what a middle rung would have to look like. It
+describes documented behaviour of those harnesses rather than anything
+measured in this repository.
+
+**Claude Code: ask, do not confine.** On a developer's machine it runs tools
+as the user, network up, with no OS confinement. What is gated is the
+*decision*: allow and deny rules, and for anything unlisted a classifier that
+auto-approves what it reads as read-only and otherwise puts the call in front
+of the person as a prompt. Modes — plan, accept-edits, bypass — move where
+that line sits. The consequence is that `brew install` simply works, and that
+a wrong judgement by the classifier is contained only by the person noticing.
+This project has met the other side of that trade: workers sitting invisibly
+on *"Do you want to proceed?"* because a `cd && grep` tripped the classifier.
+
+**Codex: confine, then escalate on failure.** Sandbox modes (read-only,
+workspace-write, danger-full-access) with an approval policy (untrusted,
+on-failure, on-request, never). The one that matters here is **on-failure**:
+the command runs sandboxed, and when it fails *because* of the sandbox, the
+harness offers the person to re-run that command outside it. Network is off in
+workspace-write and can be enabled deliberately.
+
+**Pane today is Codex's first half without its second.** We confine, and when
+the sandbox refuses there is no rung at all — only the session-wide
+`--dangerously-bypass-os-sandbox`, which is far too coarse a hammer for "this
+one `cargo fetch` needs the registry". What exists today, and what each costs:
+
+| today | what it gives | what it costs |
+|---|---|---|
+| `[web]` broker (`web.fetch`, `web.search`) | HTTP the host performs, to domains the person allowed | not a shell; a package manager cannot use it |
+| `--dangerously-bypass-os-sandbox` (Linux, Windows) | the whole session unconfined | every command for the rest of the session, not the one that needed it |
+| an outer container | a real boundary Pane need not enforce | the person builds and runs it |
+
+**The middle rung, stated as a design and not built.** Codex's escalation with
+Pane's rule about who may ask: the refusal the model already receives stays
+exactly as it is and remains final *for the model*; the **person** may
+authorise that one command, once, unconfined. Per call, never per session.
+Never inferable or requestable by the model. Recorded in the rollout as the
+person's act, with the command line it covered. Pane already has the parts —
+the approval gate (`--ask-approval`, `approval.rs`), a refusal that names what
+was denied, and the bypass machinery that today exists only session-wide.
+
+**The risks, unsoftened.** An escalated command runs with the user's full
+authority: no confinement, network up, the person's own credentials reachable.
+The real attack surface is not a clever model but a person approving quickly
+under time pressure, which is the failure mode every approval dialog in
+computing shares. And the moment the *model's* text can influence which
+command is offered for escalation — by proposing it, by phrasing the refusal,
+by choosing what to retry — the boundary is gone, because the thing being
+approved is then authored by the thing being contained. For this rung to be
+safe, three things must be true: the command shown for approval is the exact
+argv that will run, the approval covers that argv and nothing else, and it
+expires with the call.
+
 ## 4. What is never grantable, by any pattern, on any platform
 
 1. **Shell network authority through permissions patterns.** No `permissions` pattern names a host, a port or a protocol,

@@ -50,15 +50,19 @@ fn host_selected_home_subtree_is_accessible_without_granting_home_or_credentials
             .profile()
             .executable_is_refused(&fixture.0.join("extra/script"))
     );
-    for denied in [
-        home.join(".ssh/id_rsa"),
-        home.join(".config/credentials"),
-        home.join(".gitconfig"),
-    ] {
+    for denied in [home.join(".ssh/id_rsa"), home.join(".config/credentials")] {
         assert!(profile.check("read", Access::Read, &denied).is_err());
         assert!(profile.check("write", Access::Write, &denied).is_err());
         assert!(profile.executable_is_refused(&denied));
     }
+    // `~/.gitconfig` keeps every half this test is about — an additional
+    // root grants nothing around it, it is never writable and never
+    // executable. Its *read* is a derived host grant since 2026-09-17,
+    // because `git` will not start without it; that grant is pinned in
+    // `sandbox_profile.rs`, and it is not something `--add-dir` can widen.
+    let gitconfig = home.join(".gitconfig");
+    assert!(profile.check("write", Access::Write, &gitconfig).is_err());
+    assert!(profile.executable_is_refused(&gitconfig));
     assert!(fixture.profile().with_additional_root(&home).is_err());
     assert!(
         fixture

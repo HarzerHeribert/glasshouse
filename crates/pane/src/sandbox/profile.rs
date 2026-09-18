@@ -157,6 +157,18 @@ pub struct Profile {
     allow: Vec<PathRule>,
     deny: Vec<PathRule>,
     never: Vec<NeverRule>,
+    /// Read-only subtrees a build's own toolchain lives in, with each
+    /// path's [`spelling`] beside it so [`Profile::check`] compares without
+    /// recomputing one per question. Never writable, and derived from the
+    /// environment rather than listed: see [`toolchain_roots`].
+    toolchain: Vec<(PathBuf, Vec<String>)>,
+    /// Single files in `$HOME` a build's tools read, resolved
+    /// ([`TOOLCHAIN_READ_FILES`]). Read-only, and compared exactly rather
+    /// than as a prefix: this grants one file, never its directory.
+    toolchain_files: Vec<(PathBuf, Vec<String>)>,
+    /// The real git directory of a worktree root, and the repository's common
+    /// directory, read **and** write — see [`repository_dirs`].
+    repository: Vec<(PathBuf, Vec<String>)>,
     command_allow: Vec<String>,
     command_deny: Vec<String>,
     mcp_allow: BTreeSet<String>,
@@ -273,6 +285,9 @@ impl Profile {
             home,
             allow: Vec::new(),
             deny: Vec::new(),
+            toolchain: Vec::new(),
+            toolchain_files: Vec::new(),
+            repository: Vec::new(),
             command_allow: Vec::new(),
             command_deny: Vec::new(),
             mcp_allow: BTreeSet::new(),
@@ -288,6 +303,46 @@ impl Profile {
             profile.diagnostics.push(reason);
             return profile;
         }
+        // Derived, not configured, and before the document is read: a build
+        // reads its own toolchain whatever `.claude/settings.json` says, and
+        // a worktree's git directory is the repository the root already
+        // belongs to. Neither is something a pattern could ask for, and
+        // neither survives the never-grantable set, which ran above.
+        profile.toolchain = toolchain_roots(profile.home.as_deref())
+            .into_iter()
+            .map(|path| {
+                let spelling = spelling(&path);
+                (path, spelling)
+            })
+            .collect();
+        for home in toolchain_credential_files(&profile.toolchain) {
+            let prefix = spelling(&home);
+            profile.never.push(NeverRule {
+                glob: subtree_glob(&prefix),
+                prefix,
+                except: None,
+                except_spelling: None,
+                write_only: false,
+                rule: format!(
+                    "`{}` holds a registry token and is never readable, even though the toolchain around it is (sandbox-grants.md §4.2)",
+                    display(&home)
+                ),
+            });
+        }
+        profile.toolchain_files = toolchain_files(profile.home.as_deref())
+            .into_iter()
+            .map(|path| {
+                let spelling = spelling(&path);
+                (path, spelling)
+            })
+            .collect();
+        profile.repository = repository_dirs(&profile.root)
+            .into_iter()
+            .map(|path| {
+                let spelling = spelling(&path);
+                (path, spelling)
+            })
+            .collect();
         let Some(text) = settings else {
             return profile;
         };
@@ -570,6 +625,32 @@ impl Profile {
 
     pub fn additional_roots(&self) -> &[PathBuf] {
         &self.additional_roots
+    }
+
+    /// The read-only toolchain subtrees this profile granted, for a platform
+    /// applier to render. Read and execute; never write, and never a path a
+    /// refusing rule covers — [`Profile::check`] is the authority and these
+    /// are the same subtrees it answers from.
+    pub fn toolchain_roots(&self) -> impl Iterator<Item = &Path> {
+        self.toolchain.iter().map(|(path, _)| path.as_path())
+    }
+
+    /// Single files in `$HOME` a build's tools read before they will run,
+    /// granted read-only as files ([`TOOLCHAIN_READ_FILES`]).
+    pub fn toolchain_read_files(&self) -> impl Iterator<Item = &Path> {
+        self.toolchain_files.iter().map(|(path, _)| path.as_path())
+    }
+
+    /// The files inside those subtrees that stay unreadable, so an applier
+    /// can deny them after granting the subtree around them.
+    pub fn toolchain_credentials(&self) -> Vec<PathBuf> {
+        toolchain_credential_files(&self.toolchain)
+    }
+
+    /// The git directories of a worktree root, read and write
+    /// ([`repository_dirs`]). Empty for an ordinary checkout.
+    pub fn repository_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.repository.iter().map(|(path, _)| path.as_path())
     }
 
     /// Host-only construction step. Consuming the profile keeps the active
@@ -1011,14 +1092,33 @@ impl Profile {
             {
                 continue;
             }
+            // The broad `$HOME` boundary, and only it, is carved out by the
+            // host's own derived grants: an explicit additional root, the
+            // toolchain a build reads, and the repository a worktree belongs
+            // to. Credential stores and state keep their own rules, which is
+            // why this tests the broad rule by identity rather than skipping
+            // every rule whose subtree contains the candidate.
             if self
                 .home
                 .as_ref()
                 .is_some_and(|home| spelling(home) == never.prefix)
-                && self
+                && (self
                     .additional_roots
                     .iter()
                     .any(|root| contains(&spelling(root), &candidate))
+                    || self
+                        .repository
+                        .iter()
+                        .any(|(_, prefix)| contains(prefix, &candidate))
+                    || (access == Access::Read
+                        && (self
+                            .toolchain
+                            .iter()
+                            .any(|(_, prefix)| contains(prefix, &candidate))
+                            || self
+                                .toolchain_files
+                                .iter()
+                                .any(|(_, file)| file == &candidate))))
             {
                 continue;
             }
@@ -1042,6 +1142,31 @@ impl Profile {
                 .additional_roots
                 .iter()
                 .any(|root| contains(&spelling(root), &candidate))
+        {
+            return grant(resolved);
+        }
+        // The repository this root belongs to, read and write, because git
+        // writes its index and refs there and a worktree keeps them outside
+        // the root by construction ([`repository_dirs`]).
+        if self
+            .repository
+            .iter()
+            .any(|(_, prefix)| contains(prefix, &candidate))
+        {
+            return grant(resolved);
+        }
+        // The toolchain, read only, and after every refusing rule — so the
+        // credential carve-out above has already had its turn on a path
+        // inside one of these ([`toolchain_roots`]).
+        if access == Access::Read
+            && (self
+                .toolchain
+                .iter()
+                .any(|(_, prefix)| contains(prefix, &candidate))
+                || self
+                    .toolchain_files
+                    .iter()
+                    .any(|(_, file)| file == &candidate))
         {
             return grant(resolved);
         }
@@ -1324,6 +1449,191 @@ fn escaping_command(command_line: &str, container_mode: bool) -> Option<&'static
 
 /// `$HOME`, read from the environment rather than from a platform helper so
 /// this stays one code path on every host.
+/// The toolchain homes a build reads, as (environment variable, `$HOME`
+/// fallback) pairs.
+///
+/// **The toolchain a build reads is part of the build.** A compiler, a
+/// registry cache and a version manifest are not capabilities worth
+/// withholding: they are read-only, they are the developer's own, and
+/// without them `cargo test` cannot resolve a toolchain at all — measured
+/// 2026-09-17 in session `tlj14m-24r`, where a model spent a large part of
+/// twenty million tokens failing to verify its own work because
+/// `~/.rustup/settings.toml` was unreadable.
+///
+/// Derived from the environment first, because a developer who moved
+/// `CARGO_HOME` moved it for every tool and this one must follow. The
+/// `$HOME` fallback is the default layout each of these ships with.
+///
+/// **Only toolchains whose read is unambiguous are here.** `~/.npm` is
+/// npm's content-addressed package cache, `~/.nvm` holds whole Node
+/// installations a build execs, and `~/.pyenv` the same for Python — each is
+/// a toolchain's own store and nothing else. Declined: `~/.npmrc` and
+/// `~/.pypirc`, which are single files holding registry auth tokens rather
+/// than caches; `~/.docker`, whose `config.json` carries registry
+/// credentials; `~/.gradle` and `~/.m2`, which hold `gradle.properties` and
+/// `settings.xml`, both conventional homes for signing keys and repository
+/// passwords. A store whose ordinary contents include a secret is not a
+/// toolchain read, and admitting it here would make this list the thing §4.2
+/// exists to prevent.
+const TOOLCHAIN_HOMES: [(&str, &str); 6] = [
+    ("CARGO_HOME", ".cargo"),
+    ("RUSTUP_HOME", ".rustup"),
+    ("npm_config_cache", ".npm"),
+    ("NVM_DIR", ".nvm"),
+    ("PYENV_ROOT", ".pyenv"),
+    ("UV_CACHE_DIR", ".cache/uv"),
+];
+
+/// Single files in `$HOME` a build's tools read before they will run at all.
+///
+/// `~/.gitconfig` is the one measured case: under confinement `git` exits
+/// with *"unable to access '/Users/…/.gitconfig': Operation not permitted"*
+/// before it does anything, so a worktree grant without it buys nothing.
+/// Granted as a **file**, never as a subtree, and read-only.
+///
+/// `~/.git-credentials` is deliberately absent and stays refused by the
+/// `$HOME` rule: it is the store `credential.helper=store` writes, and it is
+/// the same class as a registry token.
+const TOOLCHAIN_READ_FILES: [&str; 1] = [".gitconfig"];
+
+/// File names inside a toolchain home that hold a registry token rather than
+/// a cache. `cargo login` writes the first; the second is its pre-1.78
+/// spelling, and both are still read.
+const TOOLCHAIN_CREDENTIAL_FILES: [&str; 2] = ["credentials.toml", "credentials"];
+
+/// The toolchain homes that exist on this machine, resolved.
+///
+/// A path the environment does not name and that does not exist is not an
+/// error and produces no rule: a machine without rustup simply has no
+/// rustup grant. Canonicalised, because every comparison in this module is
+/// made on the resolved spelling, and skipped when the resolve fails, since
+/// a grant on a path that cannot be resolved cannot be compared to one.
+fn toolchain_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for (variable, fallback) in TOOLCHAIN_HOMES {
+        let named = std::env::var_os(variable)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let candidate = match (named, home) {
+            (Some(path), _) => path,
+            (None, Some(home)) => home.join(fallback),
+            (None, None) => continue,
+        };
+        let Ok(resolved) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if !resolved.is_dir() || roots.contains(&resolved) {
+            continue;
+        }
+        roots.push(resolved);
+    }
+    roots
+}
+
+/// The credential files the toolchain grant must not reach.
+///
+/// Cargo's home and cargo's two spellings only: this is a carve-out for a
+/// known file, not a search for anything that looks like a secret, and the
+/// other toolchain homes here keep their tokens outside the directory this
+/// profile grants (`~/.npmrc`, not `~/.npm`). A file that does not exist
+/// still earns its rule, because it is the name that is refused and `cargo
+/// login` may write it tomorrow.
+fn toolchain_credential_files(toolchain: &[(PathBuf, Vec<String>)]) -> Vec<PathBuf> {
+    let Some(cargo) = cargo_home() else {
+        return Vec::new();
+    };
+    if !toolchain.iter().any(|(root, _)| root == &cargo) {
+        return Vec::new();
+    }
+    TOOLCHAIN_CREDENTIAL_FILES
+        .iter()
+        .map(|name| cargo.join(name))
+        .collect()
+}
+
+/// The single files [`TOOLCHAIN_READ_FILES`] names, resolved, for the ones
+/// that exist on this machine.
+fn toolchain_files(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    TOOLCHAIN_READ_FILES
+        .iter()
+        .filter_map(|name| std::fs::canonicalize(home.join(name)).ok())
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+/// Cargo's home as [`toolchain_roots`] resolved it, or `None`.
+fn cargo_home() -> Option<PathBuf> {
+    let named = std::env::var_os("CARGO_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let candidate = match named {
+        Some(path) => path,
+        None => home_dir()?.join(".cargo"),
+    };
+    std::fs::canonicalize(candidate).ok()
+}
+
+/// The git directories a session rooted in a **worktree** must reach, read
+/// and write.
+///
+/// A worktree's `.git` is a file whose one line reads `gitdir: <path>`,
+/// pointing into the main repository's `.git/worktrees/<name>` — outside the
+/// project root, and therefore outside every grant a root-based profile
+/// makes. Without this, `git status` fails and so does anything built on it:
+/// measured 2026-09-17, `blast-radius.sh` refused with *"is not a git
+/// worktree"* because it could not read the metadata that proves what it is.
+///
+/// **Write, not read**, and that is the widening this function makes: git
+/// writes its index, its refs and new objects there, and the common
+/// directory it names is the main repository's own `.git`. A session in a
+/// worktree can therefore write the repository's git directory — never its
+/// working tree, which is a separate path no grant here names.
+///
+/// An ordinary checkout, where `.git` is a directory inside the root, needs
+/// nothing: the read of that file fails and this returns empty.
+fn repository_dirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(root.join(".git")) else {
+        return Vec::new();
+    };
+    let Some(named) = text
+        .lines()
+        .next()
+        .and_then(|line| line.trim().strip_prefix("gitdir:"))
+    else {
+        return Vec::new();
+    };
+    let named = PathBuf::from(named.trim());
+    let gitdir = if named.is_absolute() {
+        named
+    } else {
+        root.join(named)
+    };
+    let Ok(gitdir) = std::fs::canonicalize(&gitdir) else {
+        return Vec::new();
+    };
+    let mut dirs = vec![gitdir.clone()];
+    // `commondir` is how a linked worktree names the repository it belongs
+    // to; its own objects and refs live there, so a grant on the worktree's
+    // directory alone leaves every object write refused.
+    if let Ok(text) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let named = PathBuf::from(text.trim());
+        let common = if named.is_absolute() {
+            named
+        } else {
+            gitdir.join(named)
+        };
+        if let Ok(common) = std::fs::canonicalize(&common)
+            && !dirs.contains(&common)
+        {
+            dirs.push(common);
+        }
+    }
+    dirs
+}
+
 fn home_dir() -> Option<PathBuf> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(value) = std::env::var_os(key)

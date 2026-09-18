@@ -1311,7 +1311,6 @@ fn home_outside_the_project_is_never_grantable_by_any_pattern() {
         for relative in [
             ".netrc",
             ".kube/config",
-            ".gitconfig",
             ".npmrc",
             ".docker/config.json",
             ".zsh_history",
@@ -1327,6 +1326,35 @@ fn home_outside_the_project_is_never_grantable_by_any_pattern() {
                 );
             }
         }
+
+        // `~/.gitconfig` is the one file in this list a derived host grant
+        // now reads, because `git` will not start without it. The invariant
+        // this test exists for is unchanged and is asserted twice over: the
+        // *write* is still refused by the rule no pattern can reach, and the
+        // read is granted with **no settings document at all** — so it is
+        // the derivation that grants it and never the pattern.
+        let denied = refusal(profile.check("Write", Access::Write, &home.join(".gitconfig")));
+        assert!(
+            denied.rule.contains("never grantable by any pattern"),
+            "{pattern} granted a write to ~/.gitconfig: {:?}",
+            denied.rule
+        );
+    }
+
+    let derived = Profile::compile(&fixture.root, None);
+    let gitconfig = home.join(".gitconfig");
+    if gitconfig.is_file() {
+        assert!(
+            derived.check("read", Access::Read, &gitconfig).is_ok(),
+            "a derived grant, not a pattern, is what reads ~/.gitconfig"
+        );
+        // And it is the file, never the directory around it.
+        assert!(
+            derived
+                .check("read", Access::Read, &home.join(".gitconfig.bak"))
+                .is_err(),
+            "the derived grant reached a neighbour of ~/.gitconfig"
+        );
     }
 
     // And the machine's own credential store, which is what `Write(/**)`
@@ -2610,4 +2638,127 @@ fn a_hard_link_between_two_ordinary_project_files_is_refused_and_a_single_name_i
     profile
         .check_request("write", Access::Write, &fixture.root.join("src"))
         .expect("a directory is not affected");
+}
+
+// --- The toolchain a build reads, and the repository a worktree belongs to.
+//
+// Measured 2026-09-17 in session `tlj14m-24r`: a model could not verify its
+// own work because `cargo` could not read `~/.rustup/settings.toml`, and
+// `blast-radius.sh` refused with "is not a git worktree" because a linked
+// worktree's `.git` is a file pointing outside the granted root.
+
+/// A project root whose `.git` is a worktree pointer, with the repository it
+/// names beside it. Returns (root, gitdir, commondir).
+fn worktree_fixture(fixture: &Fixture) -> (PathBuf, PathBuf, PathBuf) {
+    let repository = fixture.root.join("repo");
+    let common = repository.join(".git");
+    let gitdir = common.join("worktrees").join("feature");
+    std::fs::create_dir_all(&gitdir).unwrap();
+    let root = fixture.root.join("feature");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(".git"),
+        format!("gitdir: {}\n", gitdir.to_string_lossy()),
+    )
+    .unwrap();
+    std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+    (
+        std::fs::canonicalize(&root).unwrap(),
+        std::fs::canonicalize(&gitdir).unwrap(),
+        std::fs::canonicalize(&common).unwrap(),
+    )
+}
+
+#[test]
+fn a_worktree_root_reaches_the_repository_its_git_file_names() {
+    let fixture = Fixture::new("worktree");
+    let (root, gitdir, common) = worktree_fixture(&fixture);
+    let profile = Profile::compile(&root, None);
+
+    // Both halves: git writes its index and refs in the worktree's own
+    // directory and its objects in the common one, so a read-only grant
+    // would refuse every commit.
+    for directory in [&gitdir, &common] {
+        for access in [Access::Read, Access::Write] {
+            profile
+                .check("bash", access, &directory.join("index"))
+                .unwrap_or_else(|denied| {
+                    panic!("a worktree must reach {}: {denied}", directory.display())
+                });
+        }
+    }
+    let granted: Vec<PathBuf> = profile.repository_dirs().map(Path::to_path_buf).collect();
+    assert!(granted.contains(&gitdir), "{granted:?}");
+    assert!(granted.contains(&common), "{granted:?}");
+
+    // The repository's *working tree* is a different path and no grant here
+    // names it: this widens git's own directory, never the checkout beside it.
+    let sibling = common.parent().unwrap().join("src/main.rs");
+    assert!(
+        profile.check("read", Access::Read, &sibling).is_err(),
+        "the repository's working tree must stay outside the grant"
+    );
+}
+
+#[test]
+fn an_ordinary_checkout_grants_no_repository_directory() {
+    let fixture = Fixture::new("checkout");
+    std::fs::create_dir_all(fixture.root.join(".git")).unwrap();
+    let profile = Profile::compile(&fixture.root, None);
+    assert_eq!(profile.repository_dirs().count(), 0);
+}
+
+#[test]
+fn a_git_file_that_names_nothing_reachable_grants_nothing() {
+    let fixture = Fixture::new("dangling");
+    std::fs::write(
+        fixture.root.join(".git"),
+        "gitdir: /nonexistent/elsewhere/.git/worktrees/x\n",
+    )
+    .unwrap();
+    let profile = Profile::compile(&fixture.root, None);
+    assert_eq!(profile.repository_dirs().count(), 0);
+}
+
+#[test]
+fn the_toolchain_is_readable_and_never_writable() {
+    let fixture = Fixture::new("toolchain");
+    let profile = Profile::compile(&fixture.root, None);
+    let mut roots = profile.toolchain_roots().peekable();
+    if roots.peek().is_none() {
+        println!("skipped: this machine has none of the toolchain homes installed");
+        return;
+    }
+    for root in profile.toolchain_roots() {
+        let inside = root.join("settings.toml");
+        profile
+            .check("read", Access::Read, &inside)
+            .unwrap_or_else(|denied| panic!("a build must read its toolchain: {denied}"));
+        // Refused by §4.3 itself: the read is carved out of the broad `$HOME`
+        // boundary and the write is not, so the rule that refuses a write
+        // here is the same one that refuses every other pattern in `$HOME`.
+        let denied = profile
+            .check("write", Access::Write, &inside)
+            .expect_err("the toolchain is read-only");
+        assert!(denied.rule.contains("never grantable"), "{}", denied.rule);
+    }
+}
+
+#[test]
+fn a_registry_token_inside_the_toolchain_stays_unreadable() {
+    let fixture = Fixture::new("credentials");
+    let profile = Profile::compile(&fixture.root, None);
+    let Some(cargo) = profile
+        .toolchain_roots()
+        .find(|path| path.ends_with(".cargo"))
+    else {
+        println!("skipped: this machine has no CARGO_HOME");
+        return;
+    };
+    for name in ["credentials.toml", "credentials"] {
+        let denied = profile
+            .check("read", Access::Read, &cargo.join(name))
+            .expect_err("a registry token is not part of the toolchain read");
+        assert!(denied.rule.contains("registry token"), "{}", denied.rule);
+    }
 }

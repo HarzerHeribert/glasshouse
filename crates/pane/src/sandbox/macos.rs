@@ -372,6 +372,20 @@ pub fn profile_text_with_descendants(
             }
         }
     }
+    // The toolchain's own binaries, and only where the scope is already a
+    // root list. A compiler driver is a chain — `~/.cargo/bin/cargo` is a
+    // rustup shim that execs `~/.rustup/toolchains/<t>/bin/cargo`, which
+    // execs `rustc` — so a root-based grant that omits it stops at the first
+    // link, which is what a `cargo test` inside a cell hit on 2026-09-17.
+    // **Never in the resolved arm**: a profile that names its commands buys
+    // exec on the one binary pane resolved, and the 61D ruling exists to keep
+    // it that way. A chain under a named-command profile is the descendants
+    // mechanism's job, not this term's.
+    if !matches!(exec, ExecScope::ResolvedBinary) {
+        for path in profile.toolchain_roots() {
+            out.push_str(&format!(" (subpath {})", quote(&display(path))));
+        }
+    }
     for descendant in descendants {
         if descendant != binary {
             out.push_str(&format!(" (literal {})", quote(&display(descendant))));
@@ -447,6 +461,38 @@ pub fn profile_text_with_descendants(
         .is_ok()
     {
         out.push_str(&format!("(allow file-write* (subpath {}))\n", quote(&root)));
+    }
+
+    // The toolchain a build reads, and the repository a worktree belongs to.
+    // Both are the profile's own decision — `Profile::check` answers from the
+    // same subtrees — so the two layers cannot disagree about them.
+    for path in profile.toolchain_roots() {
+        out.push_str(&format!(
+            "(allow file-read* (subpath {}))\n",
+            quote(&display(path))
+        ));
+    }
+    // Single files, as `(literal …)`: `git` will not start without its
+    // global configuration, and granting the file grants nothing around it.
+    for path in profile.toolchain_read_files() {
+        out.push_str(&format!(
+            "(allow file-read* (literal {}))\n",
+            quote(&display(path))
+        ));
+    }
+    // After the subtree that contains them, because seatbelt takes the last
+    // matching term: a registry token is not part of the toolchain read.
+    for path in profile.toolchain_credentials() {
+        out.push_str(&format!(
+            "(deny file-read* (literal {}))\n",
+            quote(&display(&path))
+        ));
+    }
+    for path in profile.repository_dirs() {
+        out.push_str(&format!(
+            "(allow file-read* file-write* (subpath {}))\n",
+            quote(&display(path))
+        ));
     }
 
     // Explicit host roots are canonical subtrees, admitted only when no

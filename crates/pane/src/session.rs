@@ -2795,6 +2795,29 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
             "no"
         },
     ));
+    // Derived grants, said out loud: a person should be able to see that a
+    // build can read its toolchain without reading the source for it.
+    let toolchain: Vec<String> = profile
+        .toolchain_roots()
+        .map(|path| path.display().to_string())
+        .collect();
+    if !toolchain.is_empty() {
+        ui::detail(format!(
+            "sandbox: the toolchain is readable and runnable -- {} (read only; a registry \
+             credential file inside one is not)",
+            toolchain.join(", ")
+        ));
+    }
+    let repository: Vec<String> = profile
+        .repository_dirs()
+        .map(|path| path.display().to_string())
+        .collect();
+    if !repository.is_empty() {
+        ui::detail(format!(
+            "sandbox: this root is a git worktree, so its repository is readable and writable -- {}",
+            repository.join(", ")
+        ));
+    }
     for diagnostic in profile.diagnostics() {
         session_println!("sandbox: {diagnostic}");
     }

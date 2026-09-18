@@ -295,6 +295,18 @@ fn exec_filters(text: &str) -> Vec<Filter> {
         .collect()
 }
 
+/// The toolchain subtrees this machine's profile derived, as strings.
+///
+/// Computed from the profile rather than listed, because they come from the
+/// environment: a machine with no rustup installed derives none, and an
+/// expectation that spelled them would pass here and fail in CI.
+fn toolchain(profile: &Profile) -> Vec<String> {
+    profile
+        .toolchain_roots()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn sorted(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
@@ -339,6 +351,21 @@ fn the_allow_set_is_exactly_the_declared_terms() {
     expected.push(root.join(".claude").to_string_lossy().into_owned());
     expected.push(root.join(".pane").to_string_lossy().into_owned());
     expected.push(root.join(".pane/scratch").to_string_lossy().into_owned());
+    // The derived grants: the toolchain a build reads, and the cargo
+    // credential file carved back out of it. Computed from the profile
+    // because they come from this machine's environment.
+    expected.extend(toolchain(&profile));
+    expected.extend(
+        profile
+            .toolchain_read_files()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    expected.extend(
+        profile
+            .toolchain_credentials()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
     assert_eq!(
         sorted(filters.iter().map(|f| f.value.clone()).collect()),
         sorted(expected),
@@ -361,8 +388,16 @@ fn the_allow_set_is_exactly_the_declared_terms() {
     }
 
     // §2: a `Bash` pattern grants no file access. `Bash(cargo test*)` is in
-    // the document above and must leave no trace here.
-    assert!(!text.contains("cargo"), "{text}");
+    // the document above and must leave no trace here. The *pattern* is what
+    // may not appear: `$CARGO_HOME` is granted by the derived toolchain rule
+    // above, which no document can ask for and which grants no command.
+    assert!(!text.contains("cargo test"), "{text}");
+    for filter in &filters {
+        assert!(
+            !filter.value.contains("cargo test"),
+            "a command pattern reached the profile: {filter:?}"
+        );
+    }
 }
 
 #[test]
@@ -1150,14 +1185,15 @@ fn the_landlock_ruleset_is_exactly_the_declared_paths() {
 
     // Positively, path by path and in order: a new system root is a failure
     // by construction rather than by whether it happens to spell `$HOME`.
-    assert_eq!(
-        rules.read_only,
-        EXPECTED_LANDLOCK_READ_ONLY
-            .iter()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>(),
-        "{rules:?}"
-    );
+    // The declared system roots, then the toolchain this machine derived —
+    // read-only, and after them because that is the order the ruleset builds.
+    let mut expected_read_only: Vec<PathBuf> = EXPECTED_LANDLOCK_READ_ONLY
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    expected_read_only.extend(profile.toolchain_roots().map(Path::to_path_buf));
+    expected_read_only.extend(profile.toolchain_read_files().map(Path::to_path_buf));
+    assert_eq!(rules.read_only, expected_read_only, "{rules:?}");
     assert_eq!(
         rules.read_write,
         vec![PathBuf::from("/dev/null"), root.clone()],
@@ -1676,6 +1712,9 @@ fn an_unresolvable_program_falls_back_to_the_roots_and_says_so() {
         macos::ExecScope::DeclaredRoots
     );
     let text = macos::profile_text(&profile, unresolved);
+    let mut expected_exec: Vec<String> =
+        EXPECTED_EXEC_ROOTS.iter().map(|r| r.to_string()).collect();
+    expected_exec.extend(toolchain(&profile));
     assert_eq!(
         sorted(
             exec_filters(&text)
@@ -1683,7 +1722,7 @@ fn an_unresolvable_program_falls_back_to_the_roots_and_says_so() {
                 .map(|f| f.value.clone())
                 .collect()
         ),
-        sorted(EXPECTED_EXEC_ROOTS.iter().map(|r| r.to_string()).collect()),
+        sorted(expected_exec),
         "{text}"
     );
     assert!(
@@ -1708,11 +1747,14 @@ fn an_unresolvable_program_falls_back_to_the_roots_and_says_so() {
     );
     let rules = linux::landlock_rules(&profile, unresolved);
     assert_eq!(rules.exec, linux::ExecScope::DeclaredRoots, "{rules:?}");
-    let expected: Vec<PathBuf> = EXPECTED_LANDLOCK_SYSTEM_ROOTS
+    let mut expected: Vec<PathBuf> = EXPECTED_LANDLOCK_SYSTEM_ROOTS
         .iter()
         .chain(EXPECTED_LOADER_EXEC_ROOTS.iter())
         .map(PathBuf::from)
         .collect();
+    // The fallback is a root list, so the toolchain's own chain joins it —
+    // the resolved arm, tested above, keeps its single path.
+    expected.extend(profile.toolchain_roots().map(Path::to_path_buf));
     assert_eq!(rules.executable, expected, "{rules:?}");
 
     // Windows records the name and enforces nothing on it; the field is
@@ -2286,4 +2328,139 @@ fn a_profile_that_names_its_commands_is_not_widened_by_this() {
         exec_filters(&text).iter().all(|f| f.form == "literal"),
         "a named-command profile gained an exec subtree: {text}"
     );
+}
+
+/// The measurement this package exists for, against the kernel: a confined
+/// child resolves a toolchain and runs `git` in a worktree.
+///
+/// Session `tlj14m-24r` (2026-09-17) could do neither. `cargo` failed on
+/// `~/.rustup/settings.toml`, and the gate refused with "is not a git
+/// worktree" because a linked worktree's `.git` names a directory outside
+/// the project root.
+#[test]
+fn a_confined_child_resolves_its_toolchain_and_runs_git_in_a_worktree() {
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("skipped: seatbelt is macOS-only; Linux is the ubuntu cell");
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+
+        let fixture = Fixture::new("toolchain-exec");
+        // A worktree, as git lays one out: `.git` is a file naming a
+        // directory inside another repository.
+        let repository = fixture.root.join("repo");
+        let common = repository.join(".git");
+        let gitdir = common.join("worktrees").join("feature");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        let root = fixture.root.join("feature");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let git = Command::new("git")
+            .args(["init", "--quiet", repository.to_string_lossy().as_ref()])
+            .output();
+        if !git.is_ok_and(|out| out.status.success()) {
+            println!("skipped: git is not runnable on this machine");
+            return;
+        }
+        // A worktree needs a commit to detach from, and the fixture must not
+        // depend on this machine's git identity.
+        let commit = Command::new("git")
+            .current_dir(&repository)
+            .args([
+                "-c",
+                "user.email=pane@example.invalid",
+                "-c",
+                "user.name=pane",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "root",
+            ])
+            .output()
+            .unwrap();
+        if !commit.status.success() {
+            println!(
+                "skipped: git could not commit: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            );
+            return;
+        }
+        let worktree = Command::new("git")
+            .current_dir(&repository)
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                root.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        if !worktree.status.success() {
+            println!(
+                "skipped: git could not create a worktree: {}",
+                String::from_utf8_lossy(&worktree.stderr)
+            );
+            return;
+        }
+
+        // The case a developer is actually in: every command line admitted,
+        // which is what `--yolo` synthesises and what both dogfooding
+        // sessions ran under.
+        let resolved = std::fs::canonicalize(&root).unwrap();
+        let pattern = resolved.to_string_lossy().replace('\\', "/");
+        let profile = Profile::compile(
+            &resolved,
+            Some(&format!(
+                r#"{{"permissions":{{"allow":["Read({pattern}/**)","Write({pattern}/**)","Bash"]}}}}"#
+            )),
+        );
+        assert!(profile.admits_every_command());
+        let sh = |script: &str| {
+            let mut command = Command::new("/bin/bash");
+            command
+                .arg("-c")
+                .arg(script)
+                .current_dir(&resolved)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            macos::confine(&profile, Path::new("/bin/bash"), &mut command).unwrap();
+            command.output().unwrap()
+        };
+
+        // The gate's own question, which is what refused on 2026-09-17.
+        let status = sh("git rev-parse --is-inside-work-tree");
+        assert!(
+            status.status.success(),
+            "git in a worktree: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+
+        // And a write through git, because the worktree grant is read *and*
+        // write: an index refresh lands in the directory `.git` names.
+        let add = sh("touch a.txt && git add a.txt && git status --porcelain");
+        assert!(
+            add.status.success() && String::from_utf8_lossy(&add.stdout).contains("a.txt"),
+            "git add in a worktree: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+
+        // The toolchain, if this machine has one: reading the manifest that
+        // rustup resolves a toolchain from is the exact failure measured.
+        let mut roots = profile.toolchain_roots();
+        if let Some(rustup) = roots.find(|path| path.ends_with(".rustup")) {
+            let settings = rustup.join("settings.toml");
+            if settings.exists() {
+                let read = sh(&format!("cat {}", settings.to_string_lossy()));
+                assert!(
+                    read.status.success(),
+                    "a build must read its toolchain manifest: {}",
+                    String::from_utf8_lossy(&read.stderr)
+                );
+            }
+        } else {
+            println!("skipped the toolchain half: no rustup home on this machine");
+        }
+    }
 }

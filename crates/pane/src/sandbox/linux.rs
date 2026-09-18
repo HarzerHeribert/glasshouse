@@ -354,6 +354,15 @@ pub fn landlock_rules_with_descendants(
     } else if grants(profile, Access::Read, &root) {
         read_only.push(root);
     }
+    // The toolchain a build reads, and the repository a worktree belongs to
+    // — the same subtrees `Profile::check` answers from, so the ruleset and
+    // the pre-call check cannot disagree. Landlock has no deny term, so the
+    // credential carve-out inside a toolchain home is enforced by the
+    // in-process check alone; `Regime` says the OS layer is directory-
+    // granular for exactly this class of gap.
+    read_only.extend(profile.toolchain_roots().map(Path::to_path_buf));
+    read_only.extend(profile.toolchain_read_files().map(Path::to_path_buf));
+    read_write.extend(profile.repository_dirs().map(Path::to_path_buf));
     let exec = exec_scope(profile, binary);
     let mut executable: Vec<PathBuf> = match exec {
         ExecScope::ResolvedBinary => vec![binary.to_path_buf()],
@@ -370,6 +379,12 @@ pub fn landlock_rules_with_descendants(
         }
     };
     executable.extend(LOADER_EXEC_ROOTS.iter().map(PathBuf::from));
+    // A compiler driver execs the next link in its own chain, and only where
+    // the scope is already a root list; see the macOS applier's term for the
+    // reasoning and for why the resolved arm keeps its single path.
+    if !matches!(exec, ExecScope::ResolvedBinary) {
+        executable.extend(profile.toolchain_roots().map(Path::to_path_buf));
+    }
     executable.extend(
         descendants
             .iter()
