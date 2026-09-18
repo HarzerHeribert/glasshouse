@@ -33,6 +33,7 @@ use crate::tools::invoke::{self, Args, ToolContext, ToolError, ToolResult};
 use crate::tools::registry::{self, Tool};
 
 mod agent;
+mod ask;
 mod console;
 mod decide;
 mod helper;
@@ -136,6 +137,9 @@ pub(crate) struct CellTrace {
     /// cell ends the task**, so that ending is something a program states
     /// and never something the shape of a value implies.
     answer: RefCell<Option<String>>,
+    /// The question `ask` put to the person, when the cell asked one. At most
+    /// one per cell: `ask` ends the cell, so a second call cannot be reached.
+    ask: RefCell<Option<crate::ask::Question>>,
     pub(crate) response_byte_cap: Cell<usize>,
     /// Whether this frame's capability results are being captured for a
     /// provider `tool_result`. Off for an authored cell, which pays nothing.
@@ -150,6 +154,7 @@ impl CellTrace {
             yield_requested: Cell::new(false),
             yield_reason: RefCell::new(None),
             answer: RefCell::new(None),
+            ask: RefCell::new(None),
             response_byte_cap: Cell::new(DEFAULT_RESPONSE_BYTE_CAP),
             capture_results: Cell::new(false),
             results: RefCell::new(Vec::new()),
@@ -161,6 +166,7 @@ impl CellTrace {
         self.yield_requested.set(false);
         self.yield_reason.borrow_mut().take();
         self.answer.borrow_mut().take();
+        self.ask.borrow_mut().take();
         self.results.borrow_mut().clear();
     }
 
@@ -206,6 +212,15 @@ impl CellTrace {
 
     fn record_answer(&self, text: String) {
         *self.answer.borrow_mut() = Some(text);
+    }
+
+    /// The question this cell asked, taken once.
+    pub(crate) fn take_ask(&self) -> Option<crate::ask::Question> {
+        self.ask.borrow_mut().take()
+    }
+
+    fn record_ask(&self, question: crate::ask::Question) {
+        *self.ask.borrow_mut() = Some(question);
     }
 
     pub(crate) fn record(&self, call: CallRecord) {
@@ -438,6 +453,7 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
     if let Some(function) = v8::Function::builder(answer_callback).build(scope) {
         set_fixed_key(scope, global, "answer", function.into());
     }
+    ask::install_ask(scope);
 
     // `events-contract.md` §5's three background-job entry points, on one
     // fixed object for the same reason every host function above is fixed: a
@@ -2029,8 +2045,13 @@ fn yield_now_callback(
 /// session. Nothing about a value's type says the work is done; only the
 /// program can.
 ///
-/// Called more than once, the last text stands: a program that changes its
-/// mind before it ends should be able to say so.
+/// **It ends the cell where it is called**, the way [`yield_now_callback`]
+/// does and for the same reason: a program that answers inside a branch --
+/// `if (confident) { answer("look closer"); }` followed by
+/// `answer("rename only");` -- means the first one. Recording the text and
+/// running on let the second
+/// overwrite it -- an intention overruled by the shape of the program, which
+/// is the defect this whole contract exists to remove.
 fn answer_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -2040,7 +2061,22 @@ fn answer_callback(
     if given.is_undefined() || given.is_null() {
         return;
     }
-    trace(scope).record_answer(given.to_rust_string_lossy(scope));
+    let trace = trace(scope);
+    trace.record_answer(given.to_rust_string_lossy(scope));
+    // Deliberate, so the isolate answers with a yield rather than the
+    // `RuntimeTerminated` a termination nobody asked for would be. The task
+    // is over either way -- `ends_the_task` reads the answer, not this -- but
+    // a cell that stopped on purpose must not read as one that was killed.
+    trace.request_yield(None);
+    scope.terminate_execution();
+    // The same stack check `yield_now_callback` documents: V8 services a
+    // termination at a loop back-edge, never on the return from an API
+    // callback, so entering this loop is what stops the lines after the call.
+    if let Some(source) = v8::String::new(scope, "for (;;) {}")
+        && let Some(script) = v8::Script::compile(scope, source, None)
+    {
+        script.run(scope);
+    }
 }
 
 /// One line, at most [`REASON_CHARS`] characters, cut on a character

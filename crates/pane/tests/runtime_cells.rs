@@ -1249,8 +1249,41 @@ fn no_door_shadows_deletes_or_redefines_a_host_function() {
     assert_eq!(runtime.handle_names(), vec!["gone"], "{survived:?}");
 }
 
-/// §1's string return is decided by the value the cell's promise fulfils
-/// with, not by a flag the program can set.
+/// **An answer inside a branch is the answer.** `answer` ends the cell where
+/// it is called, so the lines after it never run and cannot overwrite what it
+/// said -- the shape a model actually writes when it chooses between two
+/// answers, and the shape that silently took the wrong one while `answer`
+/// merely recorded the text and returned.
+#[test]
+fn an_answer_ends_the_cell_so_a_later_one_cannot_overwrite_it() {
+    let fixture = Fixture::new("answer-branch");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("answer-branch-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let branched = runtime.run_cell(
+        "const wider = true;\nif (wider) { answer(\"look closer\"); }\nanswer(\"rename only\");\n",
+    );
+    assert!(branched.ends_the_task());
+    assert_eq!(branched.answer(), Some("look closer"));
+
+    // And nothing after the call runs at all, not merely nothing that
+    // answers: a write placed below it never reaches the disk.
+    let planted = fixture.root.join("after-the-answer.txt");
+    let stopped = runtime.run_cell(&format!(
+        "answer(\"done\");\nawait write({{path: {:?}, content: \"reached\"}});\n",
+        planted.to_string_lossy()
+    ));
+    assert_eq!(stopped.answer(), Some("done"));
+    assert!(
+        !planted.exists(),
+        "a write below the answer ran: {}",
+        planted.display()
+    );
+}
+
+/// Whether a cell returned or yielded is decided by the value its promise
+/// fulfils with, not by a flag the program can set.
 ///
 /// `__pane_cell.e()` used to set that flag, so one line of the model's own
 /// program turned its `return` into a yield.
@@ -1279,7 +1312,10 @@ fn a_forged_epilogue_does_not_turn_a_return_into_a_yield() {
 
     // A marker minted in an earlier cell does not answer for a later one.
     let stashed = runtime.run_cell("const marker = __pane_cell.e();\n");
-    assert!(matches!(stashed, CellOutcome::Yielded { .. }), "{stashed:?}");
+    assert!(
+        matches!(stashed, CellOutcome::Yielded { .. }),
+        "{stashed:?}"
+    );
     let replayed = runtime.run_cell("return marker;\n");
     assert!(
         matches!(replayed, CellOutcome::Returned { .. }),
@@ -3427,6 +3463,7 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
     use pane::runtime::outcome::{PlanItem, PlanStatus};
 
     let base = |plan: Vec<PlanItem>| CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 1,
         description: None,

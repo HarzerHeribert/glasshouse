@@ -278,26 +278,31 @@ rule the conversation column already applies to a message.
 
 ### 9.2 The terminal response
 
-A top-level `return` of a **string** is the terminal response, verbatim. The
-runtime renders it in the conversation column and appends it to the rollout as
-one `turn` line with the assistant's role — the same line an assistant message
-has always written, so `resume` rebuilds it from the file alone with no new
-reader and no new kind.
+**`answer(text)` is the terminal response, and the only one a cell has.** The
+runtime renders that text in the conversation column and appends it to the
+rollout as one `turn` line with the assistant's role — the same line an
+assistant message has always written, so `resume` rebuilds it from the file
+alone with no new reader and no new kind. Like `yieldNow` (§9.3) it ends the
+cell where it is called, so a program that answers inside a branch means that
+branch and nothing after it can overwrite the text. A cell that threw ends
+nothing, however it answered before failing.
 
-A `return` of a structured value — an object, array, collection or host tool
-object — is notebook output. It is rendered as bounded JSON with values,
-recorded on the cell, supplied as `## Output` in feedback and followed by
-another provider request. Nothing paraphrases it. This makes the runtime
-enforce the notebook distinction even when a model uses `return {diagnostic:
-value}` to inspect state. Numbers and booleans remain scalar terminal results;
-the model contract asks for a string when answering a person.
+**A `return` never ends the task, whatever its type.** Every returned value —
+string, number, object, array, collection or host tool object — is notebook
+output: rendered with values, recorded on the cell, supplied as `## Output` in
+feedback and followed by another provider request. Nothing paraphrases it.
 
-**Corrected 2026-09-07 after live subscription dogfood:** the earlier ruling
-made non-string returns terminal. Gemini used `return {matchesCount,
-sampleMatches}` as ordinary notebook inspection and Pane stopped before giving
-the requested recommendations. The runtime now reserves completion for strings
-and treats every structured return as non-terminal output; this is a mechanical
-type boundary rather than a prompt-compliance assumption.
+**Corrected 2026-09-19, after the type rule cost a second session.** The
+ending used to be read off the returned value's type, and it was narrowed
+once already: until 2026-09-07 any non-structured return was terminal, until
+Gemini used `return {matchesCount, sampleMatches}` as ordinary inspection and
+Pane stopped before giving the requested recommendations. Reserving the ending
+for strings only moved the edge. On 2026-09-18 a cell ran `const renderer =
+await bash({command: "sed -n …"}); return renderer.stdout;` to look at a file,
+and Pane published those 9,698 bytes of source as the session's final answer
+and stopped — the program was correct, and `sed` output is a string. No value's
+shape says whether the work is finished, so the ending is now something the
+program states and nothing the runtime infers.
 
 **A response is never silently truncated.** Over the turn's response cap the
 cell **yields** with the cap as its reason (§9.3) rather than rendering part of

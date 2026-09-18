@@ -180,6 +180,13 @@ pub(crate) struct RuntimeState {
     pub(crate) profile: Profile,
     /// Host-only suspension seam; absent in ordinary sessions and subagents.
     pub(crate) approval_gate: RefCell<Option<crate::approval::Gate>>,
+    /// Why `ask` cannot be used in this runtime, or `None` when it can.
+    ///
+    /// Held as the refusal sentence rather than a flag so the callback throws
+    /// the reason a person would want -- nobody at the keyboard, the setting
+    /// off, or the request narrowed to `explore` -- instead of one word that
+    /// covers three different situations.
+    pub(crate) ask_refusal: RefCell<Option<String>>,
     /// How long this cell has spent inside host callbacks rather than
     /// executing JavaScript, which its watchdog subtracts from the
     /// wall-clock limit ([`crate::approval::WaitClock`]). Always present,
@@ -355,6 +362,7 @@ impl RuntimeState {
             handlers: crate::runtime::handlers::Handlers::new(),
             profile: profile.clone(),
             approval_gate: RefCell::new(None),
+            ask_refusal: RefCell::new(Some(crate::ask::NOT_AVAILABLE.to_string())),
             watchdog_fired: RefCell::new(None),
             host_clock: Arc::new(crate::approval::WaitClock::default()),
             mcp: RefCell::new(crate::tools::mcp::Mcp::default()),

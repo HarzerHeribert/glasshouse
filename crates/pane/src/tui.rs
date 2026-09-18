@@ -3,6 +3,8 @@
 mod controls;
 mod history;
 pub use history::HistoryNote;
+mod ask;
+pub use ask::{Key as AskKey, key as ask_key, render as render_ask};
 mod bands;
 mod composer;
 mod paths;

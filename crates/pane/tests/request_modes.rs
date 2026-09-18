@@ -259,7 +259,7 @@ fn run(root: &Path, args: &[&str], inputs: &[&str], base_url: &str) -> std::proc
 /// One cell that attempts a write, and returns what happened as a string.
 fn attempt_write(file: &str) -> String {
     format!(
-        "let out;\ntry {{ await write({{ path: \"{file}\", content: \"changed\" }}); out = \"wrote\"; }} catch (e) {{ out = \"refused: \" + e.message; }}\nreturn out;"
+        "let out;\ntry {{ await write({{ path: \"{file}\", content: \"changed\" }}); out = \"wrote\"; }} catch (e) {{ out = \"refused: \" + e.message; }}\nanswer(out);"
     )
 }
 
@@ -302,7 +302,7 @@ fn execute_runs_the_same_write() {
 #[test]
 fn plan_reads_and_refuses_a_write() {
     let root = project("plan");
-    let code = "const file = await read({ path: \"src/lib.rs\" });\nlet out = \"read:\" + file.preview;\ntry { await write({ path: \"PLAN.md\", content: \"changed\" }); out += \"|wrote\"; } catch (e) { out += \"|refused: \" + e.message; }\nreturn out;";
+    let code = "const file = await read({ path: \"src/lib.rs\" });\nlet out = \"read:\" + file.preview;\ntry { await write({ path: \"PLAN.md\", content: \"changed\" }); out += \"|wrote\"; } catch (e) { out += \"|refused: \" + e.message; }\nanswer(out);";
     let (base_url, _) = start_provider(1, move |_| cell_reply(code));
     let output = run(&root, &["--plan"], &["plan the change"], &base_url);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -346,7 +346,7 @@ fn slash_mode_execute_restores_writes_from_the_next_request() {
 fn explore_bash_runs_read_only_commands_and_refuses_writers() {
     let root = project("explore-bash");
     fs::write(root.join("victim.txt"), "keep").unwrap();
-    let code = "const listed = await bash({ command: \"ls src\" });\nlet out = \"ls:\" + listed.stdout;\nfor (const command of [\"echo x > made.txt\", \"rm victim.txt\"]) {\n  try { await bash({ command }); out += \"|ran \" + command; } catch (e) { out += \"|refused: \" + e.message; }\n}\nreturn out;";
+    let code = "const listed = await bash({ command: \"ls src\" });\nlet out = \"ls:\" + listed.stdout;\nfor (const command of [\"echo x > made.txt\", \"rm victim.txt\"]) {\n  try { await bash({ command }); out += \"|ran \" + command; } catch (e) { out += \"|refused: \" + e.message; }\n}\nanswer(out);";
     let (base_url, _) = start_provider(1, move |_| cell_reply(code));
     let output = run(&root, &["--mode", "explore"], &["look around"], &base_url);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -389,8 +389,8 @@ fn explore_writes_the_scratchpad_and_is_refused_outside_it() {
     let root = project("explore-scratch");
     let code = format!(
         "{}\n{}",
-        attempt_write(".pane/scratch/notes.md").replace("return out;", "let first = out;"),
-        attempt_write("src/x.rs").replace("return out;", "return first + \"|\" + out;")
+        attempt_write(".pane/scratch/notes.md").replace("answer(out);", "let first = out;"),
+        attempt_write("src/x.rs").replace("answer(out);", "answer(first + \"|\" + out);")
     );
     let (base_url, _) = start_provider(1, move |_| cell_reply(&code));
     let output = run(&root, &["--mode", "explore"], &["take notes"], &base_url);
@@ -416,7 +416,7 @@ fn write_all(files: &[&str]) -> String {
             "try {{ await write({{ path: \"{file}\", content: \"step one\\nstep two\\n\" }}); out += \"|wrote {file}\"; }} catch (e) {{ out += \"|refused {file}: \" + e.message; }}\n"
         ));
     }
-    code.push_str("return out;");
+    code.push_str("answer(out);");
     code
 }
 
@@ -629,9 +629,9 @@ fn configured_explore_writable_and_commands_reach_the_overlay() {
     );
     fs::create_dir_all(root.join("docs")).unwrap();
     let code = format!(
-        "{}\n{}\nlet third;\ntry {{ await bash({{ command: \"cargo metadata\" }}); third = \"ran\"; }} catch (e) {{ third = \"refused: \" + e.message; }}\nreturn first + \"|\" + second + \"|\" + third;",
-        attempt_write("docs/notes.md").replace("return out;", "let first = out;"),
-        attempt_write("src/x.rs").replace("return out;", "let second = out;"),
+        "{}\n{}\nlet third;\ntry {{ await bash({{ command: \"cargo metadata\" }}); third = \"ran\"; }} catch (e) {{ third = \"refused: \" + e.message; }}\nanswer(first + \"|\" + second + \"|\" + third);",
+        attempt_write("docs/notes.md").replace("answer(out);", "let first = out;"),
+        attempt_write("src/x.rs").replace("answer(out);", "let second = out;"),
     );
     let (base_url, _) = start_provider(1, move |_| cell_reply(&code));
     let output = run(&root, &["--mode", "explore"], &["take notes"], &base_url);

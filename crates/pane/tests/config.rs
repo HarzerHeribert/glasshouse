@@ -26,15 +26,57 @@ fn scratch_dir(label: &str) -> PathBuf {
     dir
 }
 
+/// Points the global scope at an empty directory for as long as it is held,
+/// and puts the environment back afterwards. `XDG_CONFIG_HOME` is process
+/// state, so every test that needs it takes the same lock.
+struct NoGlobalConfig {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl NoGlobalConfig {
+    fn new(root: &Path) -> Self {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = ENV.lock().unwrap_or_else(|error| error.into_inner());
+        let empty = root.join("no-global-config");
+        fs::create_dir_all(&empty).unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: the lock above makes this the only thread touching the
+        // environment, which is what `set_var`'s contract asks for.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &empty) };
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for NoGlobalConfig {
+    fn drop(&mut self) {
+        // SAFETY: as above -- the lock is still held until this struct is gone.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+}
+
 fn write_pane_toml(root: &Path, text: &str) {
     let dir = root.join(".glasshouse");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("pane.toml"), text).unwrap();
 }
 
+/// What `load` answers when *nothing* is configured -- no project file and no
+/// global one. The global scope is `$XDG_CONFIG_HOME/pane/config.toml`, so a
+/// test that only makes an empty project root reads the configuration of the
+/// machine it runs on and fails the day a developer has any.
 #[test]
 fn absent_pane_toml_means_the_defaults() {
     let root = scratch_dir("absent");
+    let _guard = NoGlobalConfig::new(&root);
     let config = PaneConfig::load(&root).unwrap();
 
     assert_eq!(config, PaneConfig::default());

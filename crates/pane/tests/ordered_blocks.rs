@@ -44,15 +44,15 @@ fn the_whole_composition_is_preflighted_and_keeps_cross_block_references() {
 #[test]
 fn duplicate_top_level_bindings_are_preserved_for_the_cell_transform() {
     let Extracted::Program(source) = extract_program(
-        "```pane\nconst answer = 1;\n```\n```pane\nconst answer = 2;\nreturn answer;\n```",
+        "```pane\nconst tally = 1;\n```\n```pane\nconst tally = 2;\nreturn tally;\n```",
     ) else {
         panic!("expected one combined program");
     };
     let compiled = cell::compile(&source, 1).expect("REPL-style declarations compile");
     // The capture list is one handle per name; the source still contains both
     // declarations and its existing const-to-var rewrite makes the latter win.
-    assert_eq!(compiled.declared, vec!["answer"]);
-    assert_eq!(source.matches("const answer").count(), 2);
+    assert_eq!(compiled.declared, vec!["tally"]);
+    assert_eq!(source.matches("const tally").count(), 2);
 
     let root = std::env::temp_dir().join(format!("pane-ordered-duplicate-{}", std::process::id()));
     std::fs::create_dir_all(root.join(".claude")).unwrap();

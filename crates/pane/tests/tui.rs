@@ -624,7 +624,8 @@ fn the_masked_prompt_renders_bullets_and_never_the_key() {
 /// **The scan follows the file's successors.** The 2026-09-17 clickable-TUI
 /// move cut `scroll.rs`, `status.rs`, `composer.rs`, `hit.rs` and — with the
 /// cell descriptor, 2026-09-17 — `regions.rs` and — with the transcript's
-/// bands, 2026-09-18 — `bands.rs` out of `tui.rs` for the size ratchet; a rule that stopped at the original file would be a rule anything
+/// bands, 2026-09-18 — `bands.rs` and — with the question a cell puts to the
+/// person, 2026-09-19 — `ask.rs` out of `tui.rs` for the size ratchet; a rule that stopped at the original file would be a rule anything
 /// could step around by moving one function. `regions.rs` is where every
 /// bounded region of the transcript is drawn, `push_output_region` included,
 /// so it is exactly the file this scan must follow.
@@ -645,6 +646,7 @@ fn the_tui_renders_no_handle_itself() {
         ("tui/hit.rs", include_str!("../src/tui/hit.rs")),
         ("tui/regions.rs", include_str!("../src/tui/regions.rs")),
         ("tui/bands.rs", include_str!("../src/tui/bands.rs")),
+        ("tui/ask.rs", include_str!("../src/tui/ask.rs")),
     ] {
         let cleaned = source
             .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")

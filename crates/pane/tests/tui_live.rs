@@ -356,7 +356,7 @@ fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
         let streaming = request["stream"] == true;
         sender.send(request).unwrap();
         thread::sleep(Duration::from_millis(700));
-        let body=serde_json::json!({"role":"assistant","content":[{"type":"text","text":"```pane\nreturn \"LIVE RESULT INTACT\";\n```"}],"usage":{"input_tokens":123,"output_tokens":12}}).to_string();
+        let body=serde_json::json!({"role":"assistant","content":[{"type":"text","text":"```pane\nanswer(\"LIVE RESULT INTACT\");\n```"}],"usage":{"input_tokens":123,"output_tokens":12}}).to_string();
         // The client is allowed to be gone by now: every test kills pane in
         // `App::drop`, and this thread is still inside its 700 ms sleep when
         // that happens. Windows spells the resulting write `ConnectionReset`
@@ -570,7 +570,7 @@ fn held_provider() -> (String, mpsc::Receiver<serde_json::Value>, mpsc::Sender<(
         }
         let body = serde_json::json!({
             "role":"assistant",
-            "content":[{"type":"text","text":"```pane\nreturn \"released\";\n```"}],
+            "content":[{"type":"text","text":"```pane\nanswer(\"released\");\n```"}],
         })
         .to_string();
         let _ = write!(
@@ -1130,13 +1130,13 @@ fn mouse_reporting_asks_only_for_the_modes_the_ui_consumes() {
                 && emitted(shutdown, b"\x1b[?1006l"),
             "every requested mode must be reset on exit"
         );
-        for unused in [b"?1003".as_slice()] {
-            assert!(
-                !emitted(&app.bytes, unused),
-                "a motion mode nothing handles was negotiated: {}",
-                String::from_utf8_lossy(unused)
-            );
-        }
+        // `?1003` reports every pointer move, held or not. Nothing consumes
+        // it, and an unread report is another chance for a read boundary to
+        // split it into typed text.
+        assert!(
+            !emitted(&app.bytes, b"?1003"),
+            "a motion mode nothing handles was negotiated"
+        );
     }
 }
 
@@ -1329,7 +1329,7 @@ fn handlers_can_be_inspected_and_cancelled_during_an_active_task() {
             let text = if turn == 0 {
                 "```pane\nconst noise = on({}, 'batch.ack(batch.rest().map(e => e.id));');\n```"
             } else {
-                "```pane\nreturn 'HANDLER CONTROL DONE';\n```"
+                "```pane\nanswer('HANDLER CONTROL DONE');\n```"
             };
             let events = [
                 serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":20}}}),

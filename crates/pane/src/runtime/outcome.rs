@@ -39,6 +39,10 @@ pub struct CellTurn {
     /// ends the person's task. `None` for every cell that was still working
     /// -- which is every cell that did not say otherwise.
     pub answer: Option<String>,
+    /// The question the cell put to the person with `ask`, which ended it.
+    /// The session answers it and feeds the answer back on the next turn;
+    /// `None` is every cell that asked nothing.
+    pub ask: Option<crate::ask::Question>,
     /// The one rollout line this cell owes — appended by the wiring package,
     /// never by this one.
     pub record: CellRecord,
@@ -448,6 +452,7 @@ mod tests {
             stdout_dropped_tokens: 0,
             yield_reason: None,
             answer: None,
+            ask: None,
             record: CellRecord {
                 cell: 1,
                 source: String::new(),

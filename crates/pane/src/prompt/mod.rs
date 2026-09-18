@@ -796,6 +796,10 @@ pub struct CellResult {
     /// task longer than one cell is re-shown its checklist every turn, which
     /// is the whole reason a model keeps one.
     pub plan: Vec<PlanItem>,
+    /// The person's answer to the question this cell asked, rendered by
+    /// [`crate::ask::Answer::rendered`]. `None` for every cell that asked
+    /// nothing, which is almost all of them.
+    pub ask_answer: Option<String>,
 }
 
 /// §6's `## Error` section: the class, the message, where in the model's own
@@ -891,6 +895,13 @@ fn render_result_with_state(result: &CellResult, include_state: bool) -> String 
         for frame in error.frames.iter().take(3) {
             out.push_str(&format!("\n  at {frame}"));
         }
+    }
+
+    // Before the plan and the output: the answer is why this turn exists, and
+    // a model reading top to bottom should meet it before the bookkeeping.
+    if let Some(answer) = &result.ask_answer {
+        out.push_str("\n\n## Answer\n");
+        out.push_str(answer);
     }
 
     if include_state && !result.plan.is_empty() {

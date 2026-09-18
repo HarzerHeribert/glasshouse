@@ -515,10 +515,18 @@ pub const RUNTIME: &[Binding] = &[
     },
     Binding {
         global: "answer",
-        declaration: "declare function answer(text: string): void;\n\
+        declaration: "declare function answer(text: string): never;\n\
                       // End the task with this text as the final answer. The one way a cell\n\
-                      // finishes the request; returning a value never does. The program keeps\n\
-                      // running after it, so you can answer and still tidy up.",
+                      // finishes the request; returning a value never does. Like `yieldNow`\n\
+                      // it ends the cell where it is called, so nothing after it runs.",
+    },
+    Binding {
+        global: "ask",
+        declaration: "declare function ask(question: string, choices: string[]): never;\n\
+                      // Put one question to the person and end the cell; their choice arrives\n\
+                      // as `## Answer` on your next turn. Two to nine short choices. Throws\n\
+                      // when nobody is at the session, so catch it and decide for yourself.\n\
+                      // Ask when the answer changes what you would build, never to confirm.",
     },
     Binding {
         global: "checks",

@@ -204,6 +204,68 @@ impl Default for DecisionsConfig {
     }
 }
 
+/// `[ask] jev` -- how far the decision model gets to go on a question the
+/// program put to the person.
+///
+/// `weight` is the default wherever a decision model exists: the person still
+/// chooses, and Jev's reading of the request, the diff and the findings sits
+/// beside each option as a number. `decide` lets a confident enough answer
+/// stand in for the person; `off` never asks it at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskJev {
+    Off,
+    #[default]
+    Weight,
+    Decide,
+}
+
+impl AskJev {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" => Ok(Self::Off),
+            "weight" => Ok(Self::Weight),
+            "decide" => Ok(Self::Decide),
+            other => Err(format!(
+                "pane.toml: `[ask] jev` must be \"off\", \"weight\" or \"decide\", not `{other}`"
+            )),
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Weight => "weight",
+            Self::Decide => "decide",
+        }
+    }
+}
+
+/// `[ask]` -- whether a running program may put a question to the person, and
+/// how much of the answer the decision model is allowed to supply.
+///
+/// Off by default: a question suspends the work until somebody looks at the
+/// screen, so a session that never asked for the capability must not gain one
+/// that can stall it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AskConfig {
+    pub enabled: bool,
+    pub jev: AskJev,
+    /// Confidence at or above which `jev = "decide"` answers instead of the
+    /// person. `0.5..=1.0`, the same span every other confidence takes.
+    pub decide_above: f64,
+}
+
+impl Default for AskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            jev: AskJev::default(),
+            decide_above: 0.85,
+        }
+    }
+}
+
 /// `[modes]` -- the configurable half of a request narrowing
 /// (`sandbox/modes.rs::ModeOverlay`). Empty by default, so an unconfigured
 /// project's `explore` is exactly `sandbox::modes::DEFAULT_WRITABLE` and
@@ -393,6 +455,7 @@ pub struct PaneConfig {
     pub web: crate::web::WebConfig,
     pub decisions: DecisionsConfig,
     pub modes: ModesConfig,
+    pub ask: AskConfig,
 }
 
 /// `[model]` -- the parent tier, the one the person talks to.
@@ -597,12 +660,13 @@ impl PaneConfig {
                 "web",
                 "decisions",
                 "modes",
+                "ask",
             ]
             .contains(&key.as_str())
             {
                 return Err(format!(
                     "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
-                     [agents], [model], [web], [decisions] and [modes] are recognised"
+                     [agents], [model], [web], [decisions], [modes] and [ask] are recognised"
                 ));
             }
         }
@@ -650,6 +714,11 @@ impl PaneConfig {
             None => ModesConfig::default(),
         };
 
+        let ask = match table.get("ask") {
+            Some(value) => parse_ask(value)?,
+            None => AskConfig::default(),
+        };
+
         // The fallback above, applied once so every reader -- the session's
         // own switch, `/supervisor`, the sidebar -- sees one effective model.
         let supervisor = SupervisorConfig {
@@ -666,6 +735,7 @@ impl PaneConfig {
             web,
             decisions,
             modes,
+            ask,
         })
     }
 }
@@ -927,6 +997,58 @@ const SUPERVISION_ABOVE_MIN: f64 = 0.5;
 const SUPERVISION_ABOVE_MAX: f64 = 1.0;
 const COMMAND_RUNS_ABOVE_MIN: f64 = 0.5;
 const COMMAND_RUNS_ABOVE_MAX: f64 = 1.0;
+
+const DECIDE_ABOVE_MIN: f64 = 0.5;
+const DECIDE_ABOVE_MAX: f64 = 1.0;
+
+/// `[ask]`, refused key by key like every other table: an unknown key is a
+/// typo the person meant to have an effect, not a setting to ignore.
+fn parse_ask(value: &toml::Value) -> Result<AskConfig, String> {
+    let table = table_of(value, "ask")?;
+    let defaults = AskConfig::default();
+
+    for key in table.keys() {
+        if !["enabled", "jev", "decide_above"].contains(&key.as_str()) {
+            return Err(format!("pane.toml: unknown key `{key}` in [ask]"));
+        }
+    }
+
+    let enabled = match table.get("enabled") {
+        None => defaults.enabled,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `[ask] enabled` must be a boolean".to_string())?,
+    };
+    let jev = match table.get("jev") {
+        None => defaults.jev,
+        Some(value) => AskJev::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "pane.toml: `[ask] jev` must be a string".to_string())?,
+        )?,
+    };
+    let decide_above = match table.get("decide_above") {
+        None => defaults.decide_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `decide_above` must be a number".to_string())?;
+            if !(DECIDE_ABOVE_MIN..=DECIDE_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `decide_above` must be between {DECIDE_ABOVE_MIN} and {DECIDE_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
+    Ok(AskConfig {
+        enabled,
+        jev,
+        decide_above,
+    })
+}
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;

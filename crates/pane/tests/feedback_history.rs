@@ -3,6 +3,7 @@ use pane::prompt::{self, Budget, CellResult, ErrorSection};
 
 fn result(cell: u64, table: &str) -> CellResult {
     CellResult {
+        ask_answer: None,
         cell,
         elapsed_ms: 1,
         description: None,

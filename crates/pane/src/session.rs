@@ -66,6 +66,7 @@ macro_rules! session_println {
 }
 
 mod args;
+mod ask;
 mod context;
 mod controls;
 mod ending;
@@ -749,10 +750,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // one. Every other rung installs the gate and decides per call whether
     // it reaches a person (`permissions::judge`).
     let approval_gate = startup::approval_gate(&ladder, &config.borrow(), interactive.as_ref());
+    let ask_gate = interactive.as_ref().map(ui::LiveUi::ask_gate);
     let session = Session {
         selected_profile: args.profile.clone(),
         pending_images: RefCell::new(images),
         approval_gate,
+        ask_gate,
         ladder: Some(ladder.clone()),
         inbox: RefCell::new(crate::events::inbox::Inbox::discover(
             &glasshouse,
@@ -819,6 +822,9 @@ struct Session<'a> {
     selected_profile: Option<String>,
     pending_images: RefCell<Vec<Block>>,
     approval_gate: Option<crate::approval::Gate>,
+    /// Where a question a cell asked goes. `None` whenever nobody is at the
+    /// keyboard, which is what makes `ask` throw rather than wait.
+    ask_gate: Option<crate::ask::Gate>,
     /// The live permission rung, when this session has one. `None` only for
     /// the constructed sessions in tests that never ask anybody anything.
     ladder: Option<crate::permissions::Ladder>,
@@ -1225,6 +1231,9 @@ fn run_task_inner(
     if let Some(gate) = &session.approval_gate {
         runtime = runtime.with_approval_gate(gate.clone().with_task(task.to_string()));
     }
+    // Decided once per request, because all three of its inputs can change
+    // between requests: the terminal, `[ask] enabled`, and the narrowing.
+    runtime = runtime.with_ask(ask::refusal(session, proposal.narrow_mode));
     // `events-contract.md` §2: one window is always open, from session start
     // or from the moment the previous batch was delivered. It is per task
     // because the isolate the batch is bound in is, and §5's jobs are
@@ -2156,6 +2165,14 @@ fn act_on(
         stdout: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         ..CellView::default()
     };
+    // **The question is answered before the turn is assembled.** The cell
+    // that asked is already over, so nothing is suspended while a person
+    // reads; what waits is this one function, and it waits at most
+    // `ask::MAX_ASK_WAIT` before answering itself that nobody chose.
+    let ask_answer = turn
+        .ask
+        .clone()
+        .map(|question| ask::resolve(question, &after, session, task_state).rendered());
     let mut result = CellResult {
         cell: turn.record.cell,
         elapsed_ms: turn.elapsed_ms,
@@ -2163,6 +2180,7 @@ fn act_on(
         error: None,
         yield_reason: None,
         output: None,
+        ask_answer,
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         budget: budget.line(&session.model.borrow()),
@@ -3002,6 +3020,7 @@ mod tests {
             selected_profile: None,
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,
+            ask_gate: None,
             ladder: None,
             inbox: RefCell::new(crate::events::inbox::Inbox::discover(&glasshouse, root)),
             window: RefCell::new(crate::events::window::Window::new(Default::default())),

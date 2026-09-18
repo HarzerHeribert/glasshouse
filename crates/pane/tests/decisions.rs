@@ -654,7 +654,8 @@ fn shadow_records_the_would_be_hold_and_writes_the_file() {
 // -- the drift question (2643) -------------------------------------------
 
 const DRIFT_PLAN_CELL: &str = "todo.write([{text: \"write a.txt\", status: \"active\"}]);";
-const DRIFT_EFFECT_CELL: &str = "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
+const DRIFT_EFFECT_CELL: &str =
+    "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
 
 #[test]
 fn a_confident_drift_no_holds_the_cell_once_then_lets_it_run() {
@@ -827,7 +828,7 @@ fn a_modify_intent_or_a_pure_cell_is_never_held() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![cell(
             "c1",
-            "const seen = await read({path: \"notes.txt\"});\nreturn seen.text;",
+            "const seen = await read({path: \"notes.txt\"});\nanswer(seen.text);",
         )],
         vec![Decision::Answer(decision_answer("read_only", 0.94))],
         vec![],

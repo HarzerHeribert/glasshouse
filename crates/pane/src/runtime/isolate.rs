@@ -41,6 +41,7 @@ use crate::runtime::state::{HeapGuard, RuntimeState};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
 
+mod ask;
 mod decide;
 mod response;
 mod watchdog;
@@ -1910,6 +1911,7 @@ impl Runtime {
         };
         let calls = self.trace().take_calls();
         let answer = self.trace().take_answer();
+        let asked = self.trace().take_ask();
         let record = CellRecord {
             cell,
             source: source.to_string(),
@@ -1940,6 +1942,7 @@ impl Runtime {
             stdout_dropped_tokens,
             yield_reason,
             answer,
+            ask: asked,
             record,
             plan: self.state.plan(),
             capability_results: self.trace().take_results(),
@@ -2616,19 +2619,23 @@ mod tests {
             .join("\n")
     }
 
-    /// A scan that scanned nothing would pass every assertion below, so each
-    /// file's production half is checked to still contain the item that
-    /// makes it that file.
-    /// The epilogue that could not be stopped is not the cell that could
-    /// not be stopped, and the model is not told it was.
-    ///
-    /// `a0186fa` had one message for both, so a task ended by pane's own
-    /// handle-table read — thirty ordinary lazy accessors, a program with no
-    /// loop in it, reported to the model one turn earlier as `cell 1 yielded
-    /// in 7895 ms` — was explained to the model as `cell 1 did not stop when
-    /// pane terminated it`. That is a false statement about the model's own
-    /// program, and it is the half of Blocker 1 that a bounded budget does
-    /// not by itself repair.
+    // A scan that scanned nothing would pass every assertion below, so each
+    // file's production half is checked to still contain the item that
+    // makes it that file.
+    //
+    // The epilogue that could not be stopped is not the cell that could
+    // not be stopped, and the model is not told it was. `a0186fa` had one
+    // message for both, so a task ended by pane's own handle-table read —
+    // thirty ordinary lazy accessors, a program with no loop in it, reported
+    // to the model one turn earlier as `cell 1 yielded in 7895 ms` — was
+    // explained to the model as `cell 1 did not stop when pane terminated
+    // it`. That is a false statement about the model's own program, and it
+    // is the half of Blocker 1 that a bounded budget does not by itself
+    // repair.
+    //
+    // Documents no item: the test these two paragraphs were written for is
+    // gone, and they are kept as a note rather than as a doc comment that
+    // documents whatever happens to follow them.
 
     /// **The pre-judgement happens before the program runs, or it buys
     /// nothing.** Asked after `execute`, every command line would already

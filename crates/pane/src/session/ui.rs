@@ -165,6 +165,8 @@ pub(super) fn read_line() -> io::Result<Option<String>> {
 
 pub(super) enum Update {
     Approval(crate::approval::Request),
+    /// A question a cell put to the person, waiting on the session thread.
+    Ask(crate::ask::Request),
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
     /// Open a modal masked prompt with this title. The terminal thread
     /// answers it on the secret channel and on nothing else.
@@ -218,6 +220,22 @@ impl LiveUi {
         });
         gate
     }
+    /// Forwards questions a cell asked to the terminal owner. Closing the
+    /// terminal drops the pending question, which the session reads as
+    /// nobody having answered -- never as a reason to wait.
+    pub(super) fn ask_gate(&self) -> crate::ask::Gate {
+        let (gate, receiver) = crate::ask::Gate::channel();
+        let updates = self.updates.clone();
+        thread::spawn(move || {
+            for request in receiver {
+                if updates.send(Update::Ask(request)).is_err() {
+                    break;
+                }
+            }
+        });
+        gate
+    }
+
     pub(super) fn start(
         mut state: ScreenState,
         conversation: Conversation,
@@ -717,6 +735,10 @@ fn run(
     let mut approvals: std::collections::VecDeque<crate::approval::Request> =
         std::collections::VecDeque::new();
     let mut approval_scroll = 0u16;
+    // At most one question is ever outstanding: `ask` ends the cell that
+    // asked, and the session waits for the answer before the next turn.
+    let mut asking: Option<crate::ask::Request> = None;
+    let mut ask_selected = 0usize;
     let mut settings_editor: Option<crate::settings_session::Editor> = None;
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
@@ -736,6 +758,24 @@ fn run(
                     state.panel = None;
                     state.inspection = None;
                     approval_scroll = 0;
+                }
+                Update::Ask(request) => {
+                    // The decision model's own pick starts selected, so the
+                    // common answer is Enter and the person reads rather
+                    // than navigates.
+                    ask_selected = request
+                        .weights()
+                        .and_then(|weights| {
+                            request
+                                .question()
+                                .choices
+                                .iter()
+                                .position(|choice| choice == &weights.choice)
+                        })
+                        .unwrap_or(0);
+                    asking = Some(request);
+                    state.panel = None;
+                    state.inspection = None;
                 }
                 Update::Snapshot(snapshot) => {
                     let (c, n, s, activity) = *snapshot;
@@ -917,6 +957,8 @@ fn run(
                         approval_scroll,
                         request.hint_line(),
                     );
+                } else if let Some(request) = asking.as_ref() {
+                    tui::render_ask(frame, request, ask_selected, state.theme);
                 } else if let Some(settings) = settings_editor.as_ref() {
                     settings.panel.render(frame, state.theme);
                 }
@@ -1167,6 +1209,31 @@ fn run(
                             request.respond(decision);
                         }
                         approval_scroll = 0;
+                    }
+                    continue;
+                }
+                // **Modal, and answered either way.** Escape is a choice
+                // ("decide yourself"), not a cancellation: a model waiting on
+                // a question nobody answered would only ask it again.
+                if let Some(request) = asking.as_ref() {
+                    let choices = request.question().choices.len();
+                    let answer = match tui::ask_key(key.code, ask_selected, choices) {
+                        tui::AskKey::Move(index) => {
+                            ask_selected = index;
+                            None
+                        }
+                        tui::AskKey::Confirm => Some(crate::ask::Answer {
+                            choice: request.question().choices.get(ask_selected).cloned(),
+                            by: crate::ask::AnsweredBy::Person,
+                        }),
+                        tui::AskKey::Dismiss => Some(crate::ask::Answer::dismissed()),
+                        tui::AskKey::Ignored => None,
+                    };
+                    if let Some(answer) = answer
+                        && let Some(request) = asking.take()
+                    {
+                        request.respond(answer);
+                        ask_selected = 0;
                     }
                     continue;
                 }

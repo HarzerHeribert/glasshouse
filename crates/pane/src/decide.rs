@@ -1245,6 +1245,87 @@ pub fn judgement(
     }
 }
 
+/// The key the question a program put to the person is answered under.
+const ASKED_KEY: &str = "asked";
+
+/// Reads the person's question against what the session already knows: the
+/// request they made, the diff so far, and the findings.
+///
+/// **It is the same `Choice` shape `decide.choice` uses, with the session's
+/// own evidence as the state.** The point is that the model answering has
+/// seen what the person would have to scroll back through -- the original
+/// request, what has actually changed, and what the checkers found -- so its
+/// reading of a question is grounded in the work and not in the question's
+/// wording alone. The choices are the criteria, named by their own text, so
+/// the probabilities come back keyed by the choice the program offered.
+///
+/// The diff is bounded exactly as the completion gate bounds it
+/// ([`DIFF_STATE_BYTES`], cut at a hunk boundary), so one question cannot
+/// cost more than the gate that already runs every task.
+pub fn asked(
+    model: &str,
+    request: &str,
+    diff: &str,
+    findings: &[String],
+    question: &str,
+    choices: &[String],
+) -> Result<Judgement, DecideError> {
+    if choices.len() < JUDGEMENT_CRITERIA_MIN {
+        return Err(DecideError::Parse(
+            "a question needs at least two choices to weigh".to_string(),
+        ));
+    }
+    let (bounded, truncated) = bound_diff(diff);
+    let mut state = serde_json::json!({
+        "request": request,
+        "diff": bounded,
+        "findings": findings,
+        "question": head(question, JUDGEMENT_TEXT_BYTES),
+    });
+    if truncated {
+        state["diff_truncated"] = Value::Bool(true);
+    }
+    let criteria: BTreeMap<String, String> = choices
+        .iter()
+        .map(|choice| {
+            let choice = head(choice, JUDGEMENT_TEXT_BYTES);
+            (choice.clone(), format!("the answer is: {choice}"))
+        })
+        .collect();
+    let questions = [(
+        ASKED_KEY.to_string(),
+        Question::Choice {
+            instructions: format!(
+                "Given the request, the diff so far and the findings, which answer to this \
+                 question best serves what was asked for? Question: {}",
+                head(question, JUDGEMENT_TEXT_BYTES)
+            ),
+            criteria,
+        },
+    )];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{ASKED_KEY}`")))?;
+    match decision.answer {
+        Answer::Choice {
+            choice,
+            confidence,
+            probabilities,
+        } => Ok(Judgement {
+            choice,
+            confidence,
+            probabilities,
+            latency_ms: decision.latency_ms,
+        }),
+        Answer::Noul(_) => Err(DecideError::Parse(format!(
+            "the `{ASKED_KEY}` question was answered as a noul, not a choice"
+        ))),
+    }
+}
+
 /// `text`'s first `limit` bytes, cut on a character boundary.
 fn head(text: &str, limit: usize) -> String {
     if text.len() <= limit {

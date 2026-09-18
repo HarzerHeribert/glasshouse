@@ -293,6 +293,7 @@ fn a_full_context_batch_preserves_whole_evidence_and_does_not_certify_overflow()
     assert!(!inspected.turn().stdout_tail.contains("c-BEGIN"));
     assert!(inspected.turn().record.calls[2].evidence.is_none());
     let feedback = pane::prompt::CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: inspected.turn().elapsed_ms,
         description: None,

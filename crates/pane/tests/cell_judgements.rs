@@ -166,8 +166,8 @@ fn a_cell_asks_for_a_judgement_and_branches_on_the_answer() {
          \x20 \"Does this diff do more than rename a symbol?\",\n\
          \x20 {rename_only: \"every hunk renames one symbol\", wider: \"anything else changed\"},\n\
          \x20 \"-  let old = 1;\\n+  let renamed = 1;\\n+  fs.remove(path);\");\n\
-         if (call.choice === \"wider\" && call.confidence > 0.8) { answer(\"look closer\"); }\n\
-         answer(\"rename only\");\n",
+         if (call.choice === \"wider\" && call.confidence > 0.8) { return \"look closer\"; }\n\
+         return \"rename only\";\n",
     );
 
     assert_eq!(returned_string(&outcome), "look closer");
@@ -279,8 +279,8 @@ fn a_question_that_fails_throws_rather_than_answering() {
     let outcome = runtime.run_cell(
         "try {\n\
          \x20 await decide.choice(\"Is this a rename?\", {a: \"one\", b: \"two\"}, \"x\");\n\
-         \x20 answer(\"answered\");\n\
-         } catch (error) { answer(`caught:${error.name}`); }\n",
+         \x20 return \"answered\";\n\
+         } catch (error) { return `caught:${error.name}`; }\n",
     );
     assert_eq!(
         returned_string(&outcome),
@@ -320,8 +320,8 @@ fn a_judgement_spends_the_same_per_cell_allowance_a_helper_does() {
          \x20   await decide.choice(\"q\", {a: \"one\", b: \"two\"}, \"x\");\n\
          \x20   made++;\n\
          \x20 }\n\
-         \x20 answer(`all:${made}`);\n\
-         } catch (error) { answer(`stopped:${made}`); }\n",
+         \x20 return `all:${made}`;\n\
+         } catch (error) { return `stopped:${made}`; }\n",
     );
     assert_eq!(
         returned_string(&outcome),

@@ -146,8 +146,8 @@ fn subagent_uses_native_cell_handoff_across_turns() {
         })
     };
     let base = start_native_provider_sequence(vec![
-        reply("first", "const answer = 42; console.log(answer);"),
-        reply("second", "answer(`native ${answer}`);"),
+        reply("first", "const computed = 42; console.log(computed);"),
+        reply("second", "answer(`native ${computed}`);"),
     ]);
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &base);
@@ -177,8 +177,12 @@ fn subagent_uses_native_cell_handoff_across_turns() {
     assert_eq!(result.stdout, "native 42");
 }
 
+/// **No returned value finishes a subagent, not even a plain string.** The
+/// string return is the shape that used to end one -- `return result.stdout`,
+/// written to look at a command's output, was read as the final answer -- so
+/// it is the value this guards with. The subagent goes on until it answers.
 #[test]
-fn subagent_continues_after_structured_notebook_output() {
+fn a_returned_value_is_notebook_output_and_the_subagent_works_on() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("structured-output");
     let reply = |id: &str, code: &str| {
@@ -189,6 +193,10 @@ fn subagent_continues_after_structured_notebook_output() {
     };
     let base = start_native_provider_sequence(vec![
         reply("inspect", "return {matchesCount: 0, sampleMatches: []};"),
+        reply(
+            "plain",
+            "return \"a bare string, which used to end a subagent\";",
+        ),
         reply(
             "answer",
             "answer(\"recommendations follow from the inspection\");",
@@ -216,10 +224,13 @@ fn subagent_continues_after_structured_notebook_output() {
     let done = events
         .iter()
         .find(|event| matches!(event.kind, Kind::AgentDone { .. }))
-        .expect("structured output must not finish the subagent");
+        .expect("a returned value must not finish the subagent");
     let result = bg::payload(&fixture.session, done.payload.as_str()).unwrap();
     assert_eq!(result.status, "returned");
-    assert_eq!(result.stdout, "recommendations follow from the inspection");
+    assert_eq!(
+        result.stdout, "recommendations follow from the inspection",
+        "the answer stands, not either returned value"
+    );
 }
 
 /// Every event this session has published by the time the subagent is done,
@@ -310,10 +321,10 @@ fn a_subagent_answers_in_a_later_event_and_never_blocks_the_caller() {
     assert_eq!(result.status, "returned");
 }
 
-/// A subagent that never returns is stopped by its own turn cap, and says so
+/// A subagent that never answers is stopped by its own turn cap, and says so
 /// rather than reporting an answer it does not have.
 #[test]
-fn a_subagent_that_never_returns_stops_at_its_turn_hint_and_keeps_its_work() {
+fn a_subagent_that_never_answers_stops_at_its_turn_hint_and_keeps_its_work() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("cap");
     // A program that always yields: it binds a name and runs off the end.
@@ -506,8 +517,8 @@ fn a_subagent_can_amend_its_parse_failed_cell() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new("repair");
     let base = start_provider_sequence(vec![
-        "```pane\nreturn 'repaired;\n```",
-        "```pane-edit\n{\"cell\":1,\"replace\":\"'repaired;\",\"with\":\"'repaired';\"}\n```",
+        "```pane\nanswer('repaired;\n```",
+        "```pane-edit\n{\"cell\":1,\"replace\":\"'repaired;\",\"with\":\"'repaired');\"}\n```",
     ]);
     // SAFETY: the environment lock is held until the child has finished.
     unsafe {

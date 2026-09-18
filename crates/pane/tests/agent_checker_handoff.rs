@@ -1,5 +1,10 @@
-//! A checker invoked inside a terminal parent cell must be observed by a
+//! A checker invoked inside the same cell that answers must be observed by a
 //! later parent turn before that cell's candidate completion is accepted.
+//!
+//! A cell ends the task by calling `answer(text)`, so a cell that answers
+//! *and* runs a checker has claimed completion before it could read what the
+//! checker said. Every fixture here answers where it means to finish --
+//! parent, checker and the later corrected turn alike.
 
 use pane::agent::AgentOptions;
 use pane::contract::SessionId;
@@ -120,15 +125,18 @@ fn checker_and_candidate_are_handed_to_a_later_parent_turn() {
             &format!(
                 "await write({{path: \"result.txt\", content: \"draft retained\"}}); \
                  await helper.check(\"Check required verification.\"); \
-                 await helper.check(\"Check implementation sufficiency.\"); return {candidate:?};"
+                 await helper.check(\"Check implementation sufficiency.\"); answer({candidate:?});"
             ),
         ),
-        reply("checker-first", &format!("return {first_observation:?};")),
-        reply("checker-second", &format!("return {second_observation:?};")),
+        reply("checker-first", &format!("answer({first_observation:?});")),
+        reply(
+            "checker-second",
+            &format!("answer({second_observation:?});"),
+        ),
         reply(
             "parent-second",
             "const saved = await read({path: \"result.txt\"}); \
-             return \"Checker could not verify the draft; \" + saved.text;",
+             answer(\"Checker could not verify the draft; \" + saved.text);",
         ),
     ]);
     // SAFETY: every test in this file holds the same lock for the whole wire
@@ -217,11 +225,11 @@ fn scripted_session_defers_a_same_cell_candidate_until_after_checker_observation
             "session-first",
             &format!(
                 "await write({{path: \"session-result.txt\", content: \"retained\"}}); \
-                 await helper.check(\"Check the final claim.\"); return {candidate:?};"
+                 await helper.check(\"Check the final claim.\"); answer({candidate:?});"
             ),
         ),
-        reply("session-checker", &format!("return {observation:?};")),
-        reply("session-second", &format!("return {corrected:?};")),
+        reply("session-checker", &format!("answer({observation:?});")),
+        reply("session-second", &format!("answer({corrected:?});")),
     ]);
     let rollout = fixture.root.join("rollout.jsonl");
     let output = Command::new(env!("CARGO_BIN_EXE_pane"))

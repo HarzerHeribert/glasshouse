@@ -975,6 +975,9 @@ fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>)
         _ => None,
     };
     CellResult {
+        // A subagent has nobody at the keyboard, so `ask` is refused at the
+        // call and no answer can ever reach this result.
+        ask_answer: None,
         cell,
         elapsed_ms: turn.elapsed_ms,
         // A subagent's own result carries the descriptor its turn supplied,

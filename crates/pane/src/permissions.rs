@@ -477,7 +477,7 @@ mod tests {
     fn a_line_the_model_will_not_vouch_for_is_asked_and_never_refused() {
         let judge = Fixed {
             vouches: &[],
-            reason: Some("it deletes a directory outside the project".into()),
+            reason: Some("it deletes a directory outside the project"),
         };
         let verdict = judge_command("rm -rf /etc/somewhere", &[], Some(&judge));
         assert!(

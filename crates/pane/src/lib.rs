@@ -7,6 +7,7 @@ pub mod abi;
 pub mod acceptance;
 pub mod agent;
 pub mod approval;
+pub mod ask;
 pub mod bg;
 pub mod changes;
 pub mod commands;

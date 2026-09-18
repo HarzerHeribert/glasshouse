@@ -79,10 +79,11 @@ const PERMISSION_RUNGS: &[&str] = &crate::permissions::Rung::NAMES;
 const COMPLETION: &[&str] = &["silent", "recap"];
 const PREFLIGHT_SCOPE: &[&str] = &["auto", "always"];
 const DECISION_MODES: &[&str] = &["off", "shadow", "on"];
+const ASK_JEV: &[&str] = &["off", "weight", "decide"];
 
 /// The top-level tables `PaneConfig` parses. A key under one of these is
 /// validated by the runtime parser; everything else is owned here.
-pub(crate) const RUNTIME_TABLES: [&str; 8] = [
+pub(crate) const RUNTIME_TABLES: [&str; 9] = [
     "limits",
     "supervisor",
     "helpers",
@@ -91,6 +92,7 @@ pub(crate) const RUNTIME_TABLES: [&str; 8] = [
     "web",
     "decisions",
     "modes",
+    "ask",
 ];
 
 /// Whether a key belongs to a runtime table, and so reaches `PaneConfig`.
@@ -343,6 +345,33 @@ static SPECS: &[SettingSpec] = &[
         label: "Decision model",
         description: "The model asked the intent question. Unset means decisions are off.",
         kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "ask.enabled",
+        label: "Ask the person",
+        description: "Whether a running program may put a question to you. Off in `explore`, and off with nobody at the keyboard.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "ask.jev",
+        label: "Ask weighting",
+        description: "`off` asks nothing. `weight` shows the decision model's reading beside each choice. `decide` lets a confident enough answer stand in for you.",
+        kind: Kind::Choice,
+        choices: ASK_JEV,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "ask.decide_above",
+        label: "Ask decide confidence",
+        description: "Confidence at or above which `ask.jev = decide` answers a question instead of putting it to you.",
+        kind: Kind::Float,
         choices: &[],
         basic: false,
         restart: true,

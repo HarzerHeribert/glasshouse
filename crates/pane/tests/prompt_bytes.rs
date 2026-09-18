@@ -113,6 +113,7 @@ fn the_worked_turn_renders_byte_for_byte() {
     let handle_table = render_table(&fixture, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
 
     let result = CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 412,
         description: None,
@@ -379,6 +380,7 @@ fn the_prompt_teaches_the_literal_multiline_content_form() {
 #[test]
 fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     let empty = CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 5,
         description: None,
@@ -403,6 +405,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     assert!(rendered.contains("## Usage"));
 
     let with_stdout = CellResult {
+        ask_answer: None,
         cell: 2,
         elapsed_ms: 5,
         description: None,
@@ -425,6 +428,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
     assert!(!rendered.contains("## Error"));
 
     let with_error = CellResult {
+        ask_answer: None,
         cell: 3,
         elapsed_ms: 5,
         description: None,
@@ -464,6 +468,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
 #[test]
 fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     let below = CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 1,
         description: None,
@@ -484,6 +489,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
     assert!(!prompt::render_result(&below).contains("finish or return"));
 
     let at_ninety = CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 1,
         description: None,
@@ -583,6 +589,7 @@ fn the_prompt_module_never_names_a_tool_use_block() {
 #[test]
 fn an_unattributed_throw_omits_the_position_line() {
     let result = |position: Option<(u64, u64)>| CellResult {
+        ask_answer: None,
         cell: 3,
         elapsed_ms: 5,
         description: None,
@@ -628,6 +635,7 @@ fn an_unattributed_throw_omits_the_position_line() {
 #[test]
 fn a_yield_reason_is_one_line_under_the_cell_line() {
     let result = |error: Option<ErrorSection>| CellResult {
+        ask_answer: None,
         cell: 3,
         elapsed_ms: 5,
         description: None,
@@ -692,6 +700,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
 
     // Assembled exactly as `session.rs` assembles it for the same throw.
     let result = CellResult {
+        ask_answer: None,
         cell: turn.record.cell,
         elapsed_ms: turn.elapsed_ms,
         description: None,
@@ -742,6 +751,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
 
 fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> String {
     prompt::render_result(&CellResult {
+        ask_answer: None,
         cell,
         elapsed_ms: 12,
         description: None,
@@ -798,6 +808,7 @@ fn compaction_removes_only_what_the_newest_result_restates() {
 #[test]
 fn compaction_never_drops_an_error() {
     let rendered = prompt::render_result(&CellResult {
+        ask_answer: None,
         cell: 1,
         elapsed_ms: 1,
         description: None,
@@ -935,6 +946,7 @@ fn repair_fences_are_data_and_cannot_mix_with_executable_code() {
 fn every_descriptor_survives_compaction_when_the_handles_do_not() {
     let described = |cell: u64, description: &str| {
         prompt::render_result(&CellResult {
+            ask_answer: None,
             cell,
             elapsed_ms: 12,
             description: Some(description.to_string()),

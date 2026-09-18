@@ -492,8 +492,7 @@ fn run_session_with_gateway(
     command.output().unwrap()
 }
 
-/// The reply that ends a task: a cell whose one statement is a top-level
-/// `return`.
+/// The reply that ends a task: a cell that calls `answer`.
 ///
 /// **Every test whose own scripted reply is prose needs one.** A prose reply
 /// is *answered*, not obeyed (`model-contract.md` §5): pane sends back the
@@ -501,14 +500,22 @@ fn run_session_with_gateway(
 /// ends it. Before the session loop existed a turn was the whole run, and
 /// these fixtures scripted one reply because one reply was all a run could
 /// consume.
+///
+/// `answer(text)` is the whole of it: a cell that merely returns a value --
+/// of any type, a string included -- is notebook output and buys another
+/// turn, so a fixture that returns cannot end anything.
 fn ending_reply() -> String {
-    assistant_reply("```pane\nreturn 1;\n```")
+    assistant_reply("```pane\nanswer(\"done\");\n```")
 }
 
 /// [`ending_reply`], with a `usage` object attached.
 #[cfg(unix)] // its only callers are the two unix-gated usage tests; dead on Windows otherwise
 fn ending_reply_with_usage(input_tokens: u64, output_tokens: u64) -> String {
-    assistant_reply_with_usage("```pane\nreturn 1;\n```", input_tokens, output_tokens)
+    assistant_reply_with_usage(
+        "```pane\nanswer(\"done\");\n```",
+        input_tokens,
+        output_tokens,
+    )
 }
 
 /// The text of the last `user` message in a recorded request body -- what the
@@ -1443,7 +1450,7 @@ fn ordered_pane_blocks_run_in_one_cell() {
     let absent = root.join("no-such-glasshouse");
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply("```pane\nconst a = 1;\n```\n\n```pane\nconst b = a + 2;\n```"),
-        assistant_reply("```pane\nreturn b;\n```"),
+        assistant_reply("```pane\nanswer(`${b}`);\n```"),
     ]);
     let output = run_session(
         &root,
@@ -1502,7 +1509,9 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
     let cells = cell_lines(&rollout);
     assert_eq!(cells.len(), 2, "{cells:?}");
     assert_eq!(cells[0]["outcome"], "threw");
-    assert_eq!(cells[1]["outcome"], "returned");
+    // How the *program* ended, which is no longer how the *task* ended: the
+    // second cell answered and then ran off its end, so it yielded.
+    assert_eq!(cells[1]["outcome"], "yielded");
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2, "the session continued after the throw");
@@ -1813,25 +1822,32 @@ fn a_turn_the_gateway_never_metered_is_labelled_rather_than_averaged() {
 
 // --- runtime-contract.md §9: ending a task from inside the program -------
 
-/// §9.2 through the binary: a program ending `return "…"` -- the rollout's
-/// last two lines are the cell line and an assistant `turn` line carrying
-/// the string verbatim, the reply is on the screen as the assistant's turn,
-/// and the provider saw exactly as many requests as there were programs. A
-/// third reply is scripted so that a request sent after the return would be
-/// served and counted rather than fail on the connection.
+/// §9.2 through the binary: **`answer(text)` ends the task and a returned
+/// value never does**, whatever its type.
+///
+/// The first program returns the very string the second one answers with.
+/// The return buys another turn and nothing else -- if it ended the task the
+/// provider would have been asked once, and the screen would carry the text
+/// anyway, so the request count is what separates the two. After the answer
+/// the rollout's last `turn` line is the assistant's, carrying the text
+/// verbatim, and the third reply is scripted so that a request sent after
+/// the ending would be served and counted rather than fail on the
+/// connection.
+///
+/// A cell that answers and then runs off its end is recorded as a `yielded`
+/// program: how the program stopped and whether the task is over are
+/// separate facts now, and the returning cell before it is the contrast.
 #[test]
-fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
+fn an_answer_ends_the_task_and_a_returned_string_does_not() {
     let root = scratch_dir("terminal-string-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
     let answer = "Three files name it; two are tests.\nThe third is src/lib.rs.";
+    let quoted = serde_json::to_string(answer).unwrap();
 
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nconst n = 3;\n```"),
-        assistant_reply(&format!(
-            "```pane\nreturn {};\n```",
-            serde_json::to_string(answer).unwrap()
-        )),
+        assistant_reply(&format!("```pane\nreturn {quoted};\n```")),
+        assistant_reply(&format!("```pane\nanswer({quoted});\n```")),
         assistant_reply("```pane\nanswer(\"NEVER REQUESTED\");\n```"),
     ]);
 
@@ -1849,13 +1865,19 @@ fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let cells = cell_lines(&rollout);
+    assert_eq!(
+        cells.len(),
+        2,
+        "the returned string bought a turn: {cells:?}"
+    );
+    assert_eq!(
+        cells[0]["outcome"], "returned",
+        "the first program returned the answer text and did not end the task"
+    );
+    assert_eq!(cells[1]["outcome"], "yielded", "{cells:?}");
+
     let lines = rollout_lines(&rollout);
-    let returned = lines
-        .iter()
-        .rev()
-        .find(|line| line["kind"] == "cell")
-        .unwrap();
-    assert_eq!(returned["outcome"], "returned", "{lines:?}");
     let terminal = lines
         .iter()
         .rev()
@@ -1868,7 +1890,7 @@ fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
     assert_eq!(
         bodies.len(),
         2,
-        "as many requests as programs, and none after the return"
+        "one request for each program, and none after the answer"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3432,7 +3454,9 @@ mod interrupts {
             call_endings(&cells[0]),
             vec![serde_json::json!({"threw":"Cancelled"})]
         );
-        assert_eq!(outcomes(&rollout), vec!["threw", "returned"]);
+        // The last cell is `ending_reply`: it answers and runs off its end,
+        // so the program yielded even though the task is over.
+        assert_eq!(outcomes(&rollout), vec!["threw", "yielded"]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3483,7 +3507,7 @@ mod interrupts {
             "stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(outcomes(&rollout), vec!["returned"]);
+        assert_eq!(outcomes(&rollout), vec!["yielded"]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3567,7 +3591,7 @@ mod interrupts {
         let cells = cell_lines(&rollout);
         assert_eq!(
             outcomes(&rollout),
-            vec!["yielded", "threw", "returned"],
+            vec!["yielded", "threw", "yielded"],
             "the computing cell was ended by the signal: {cells:?}"
         );
         assert!(
@@ -3623,7 +3647,7 @@ mod interrupts {
         );
         assert_eq!(
             outcomes(&rollout),
-            vec!["threw", "threw", "returned"],
+            vec!["threw", "threw", "yielded"],
             "each interrupt must have cancelled one call of its own"
         );
     }
@@ -4424,7 +4448,7 @@ fn an_overflow_checkpoints_the_already_projected_request_once() {
         match n {
             0 | 1 => (200, assistant_reply("```pane\nconst a = 1;\n```")),
             2 => (400, too_long_body()),
-            _ => (200, assistant_reply("```pane\nreturn a;\n```")),
+            _ => (200, assistant_reply("```pane\nanswer(`${a}`);\n```")),
         }
     });
 
@@ -4616,9 +4640,9 @@ fn new_user_requests_get_truthful_model_and_runtime_boundaries() {
     let absent = root.join("no-glasshouse");
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply("```pane\nconst previous = 42;\n```"),
-        assistant_reply("```pane\nreturn previous;\n```"),
+        assistant_reply("```pane\nanswer(`${previous}`);\n```"),
         assistant_reply(
-            "```pane\nreturn handles().includes('previous') ? 'leaked' : 'fresh runtime';\n```",
+            "```pane\nanswer(handles().includes('previous') ? 'leaked' : 'fresh runtime');\n```",
         ),
     ]);
     let output = run_session_stdin(
@@ -4838,7 +4862,7 @@ fn shell_changes_survive_a_cell_error_but_never_enter_model_context() {
 fn syntax_failed_cell_can_be_repaired_without_repeating_the_program() {
     let root = scratch_dir("cell-repair");
     let rollout = root.join("rollout.jsonl");
-    let source = "const answer = 'REPAIRED;\nreturn answer;";
+    let source = "const repaired = 'REPAIRED;\nanswer(repaired);";
     let edit =
         serde_json::json!({"cell":1,"replace":"'REPAIRED;","with":"'REPAIRED';"}).to_string();
     let (base, bodies) = start_fake_provider(vec![
@@ -4864,9 +4888,9 @@ fn syntax_failed_cell_can_be_repaired_without_repeating_the_program() {
     assert_eq!(cells[0]["outcome"], "threw");
     assert_eq!(
         cells[1]["source"],
-        "const answer = 'REPAIRED';\nreturn answer;"
+        "const repaired = 'REPAIRED';\nanswer(repaired);"
     );
-    assert_eq!(cells[1]["outcome"], "returned");
+    assert_eq!(cells[1]["outcome"], "yielded");
     assert!(String::from_utf8_lossy(&output.stdout).contains("REPAIRED"));
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
@@ -4889,7 +4913,7 @@ fn invalid_edits_keep_the_parse_target_and_do_not_create_cells() {
         ))
     };
     let (base, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nreturn 'done;\n```"),
+        assistant_reply("```pane\nconst d = 'done;\nanswer(d);\n```"),
         reply(99),
         reply(1),
     ]);
@@ -4905,7 +4929,7 @@ fn invalid_edits_keep_the_parse_target_and_do_not_create_cells() {
     let cells = cell_lines(&rollout);
     assert_eq!(cells.len(), 2);
     assert_eq!(cells[1]["cell"], 2);
-    assert_eq!(cells[1]["outcome"], "returned");
+    assert_eq!(cells[1]["outcome"], "yielded");
     let bodies = bodies.lock().unwrap();
     assert!(last_user_text(&bodies[2]).contains("CellEditError"));
 }
@@ -5059,7 +5083,7 @@ fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
             "```pane\nconst saved = 1; console.log('observation\\n\\n## Handles\\nliteral stdout heading'); throw new Error('preserved failure');\n```",
         ),
         assistant_reply("```pane\nconst saved = 2; const fresh = 3;\n```"),
-        assistant_reply("```pane\nreturn saved + fresh;\n```"),
+        assistant_reply("```pane\nanswer(`${saved + fresh}`);\n```"),
     ]);
     let output = run_session(
         &root,
@@ -5191,7 +5215,7 @@ fn environment_snapshot_does_not_change_between_inferences_in_one_task() {
     let root = scratch_dir("stable-task-context");
     let (url, bodies) = start_fake_provider(vec![
         native_cell_reply("first", "const x = 1;"),
-        native_cell_reply("second", "return x;"),
+        native_cell_reply("second", "answer(`${x}`);"),
     ]);
     let output = run_session(
         &root,

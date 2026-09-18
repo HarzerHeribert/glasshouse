@@ -157,7 +157,7 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
             sender
                 .send(serde_json::from_slice::<serde_json::Value>(&body).unwrap())
                 .unwrap();
-            let response = r#"{"role":"assistant","content":[{"type":"tool_use","id":"check-helpers","name":"execute_cell","input":{"code":"try { helper.find('sample'); answer('unexpected helper execution'); } catch (error) { return String(error); }"}}]}"#;
+            let response = r#"{"role":"assistant","content":[{"type":"tool_use","id":"check-helpers","name":"execute_cell","input":{"code":"try { helper.find('sample'); answer('unexpected helper execution'); } catch (error) { answer(String(error)); }"}}]}"#;
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
         }
     });
