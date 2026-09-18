@@ -35,6 +35,8 @@ use crate::tools::registry::{self, Tool};
 mod agent;
 mod console;
 mod decide;
+mod helper;
+use helper::{asked_summary, helper_callback};
 mod web;
 use console::console_callback;
 pub(crate) use decide::install_decide;
@@ -595,13 +597,19 @@ fn mcp_call_callback(
         glasshouse: &state.glasshouse,
         session: &state.session,
     };
-    let result = invoke::run_mcp(
-        &context,
-        &state.token.borrow(),
-        &mut state.mcp.borrow_mut(),
-        &name,
-        arguments,
-    );
+    let result = {
+        // An MCP server answering is the cell waiting, not the cell
+        // computing (`RuntimeState::away_from_js`); the call has its own
+        // timeout.
+        let _away = state.away_from_js();
+        invoke::run_mcp(
+            &context,
+            &state.token.borrow(),
+            &mut state.mcp.borrow_mut(),
+            &name,
+            arguments,
+        )
+    };
     record_mcp_call(scope, "mcp.call", &result);
     match result {
         Ok(result) => {
@@ -835,7 +843,11 @@ fn tool_callback(
         // outside watched execution is closed rather than an unbounded wait.
         let isolate = scope.thread_safe_handle();
         let watchdog = state.watchdog_fired.borrow().clone();
-        invoke::run_traced_with_gate(
+        // The pause for a running child is taken *inside* `invoke`, around
+        // the wait itself — not here. A hook (`glasshouse::run`) is also a
+        // child of this call and has no bound of its own, so it must stay on
+        // the cell's clock; that clock is all that ends a hook that hangs.
+        invoke::run_traced_pausing(
             &context,
             &token,
             tool.name(),
@@ -848,6 +860,7 @@ fn tool_callback(
                         .is_none_or(|fired| fired.load(std::sync::atomic::Ordering::SeqCst))
                     || isolate.is_execution_terminating()
             },
+            Some(&state.host_clock),
         )
     };
 
@@ -1756,6 +1769,10 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
         ..crate::helpers::HelperRecord::default()
     });
     let token = state.token.borrow().clone();
+    // A helper thinking is the cell waiting (`RuntimeState::away_from_js`);
+    // the call is bounded by `wire::SIDE_ERRAND_TIMEOUT`, which is longer
+    // than the whole cell limit, so without this one helper could spend it.
+    let _away = state.away_from_js();
     let call = crate::helpers::run(
         spec,
         crate::helpers::HelperRoute {
@@ -2601,136 +2618,6 @@ fn agent_run_callback(
 }
 
 // --- helper.<name> -----------------------------------------------------
-
-/// `helper.<name>(text)` for every roster entry — `little-helpers.md`'s
-/// pulled half: one metered wire call from inside the running cell, so a
-/// question costs no turn.
-///
-/// The invariant: **a helper either answers or throws.** Unconfigured, over
-/// the cell's ceiling, and a call that failed are all a catchable
-/// `ToolError`; nothing here can return text that looks like an answer when
-/// no answer was made. Shaped like `mcp`, not like `bash`: nothing new runs
-/// on the machine, so no grant is consulted.
-///
-/// Which helper this is comes from the function's own data slot, set by
-/// [`install`] from the spec's `name` — the same routing `tool_callback`
-/// uses, and the reason one `fn` item serves the whole roster.
-fn helper_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue,
-) {
-    let name = args.data().to_rust_string_lossy(scope);
-    let Some(spec) = crate::helpers::lookup(&name) else {
-        // Unreachable through `install`, which binds only roster names, and a
-        // refusal rather than a panic if it ever is reached.
-        throw_tool_error(scope, &format!("no helper named `{name}` is in the roster"));
-        return;
-    };
-    let wanted = format!("helper.{name} takes the text to work on");
-    if !args.get(0).is_string() {
-        throw_tool_error(scope, &wanted);
-        return;
-    }
-    let input = args.get(0).to_rust_string_lossy(scope);
-    if input.trim().is_empty() {
-        throw_tool_error(scope, &wanted);
-        return;
-    }
-
-    let state = state(scope);
-    let (model, effort) = match state.helper_route(spec.name) {
-        Ok(route) => route,
-        Err(reason) => {
-            throw_tool_error(scope, &reason);
-            return;
-        }
-    };
-    if let Err(reason) = state.claim_helper_call() {
-        throw_tool_error(scope, &reason);
-        return;
-    }
-
-    let asked = asked_summary(&input);
-    let slot = state.begin_helper(crate::helpers::HelperRecord {
-        helper: spec.name.to_string(),
-        verb: spec.verb.to_string(),
-        asked: asked.clone(),
-        ..crate::helpers::HelperRecord::default()
-    });
-    let input = if spec.name == "check" {
-        format!(
-            "Original checker request:\n{}\n\n{}",
-            input,
-            crate::runtime::checks::checker_evidence(scope)
-        )
-    } else {
-        input
-    };
-
-    let token = state.token.borrow().clone();
-    let call = crate::helpers::run(
-        spec,
-        crate::helpers::HelperRoute {
-            model: &model,
-            effort,
-        },
-        &input,
-        &state.profile,
-        &state.glasshouse,
-        &state.session,
-        &token,
-    );
-    let ok = call.outcome.ok;
-    let cancelled = call.outcome.cancelled;
-    let answer = call.outcome.text.clone();
-    // `turns` is what the call took, not what the spec allowed: a Scout that
-    // burned its ceiling to serve two files is a bad call the inspector must
-    // show as one.
-    state.finish_helper(slot, call);
-    // The trajectory says a helper ran and how big the question was, never
-    // the payload: §9.4 explains the cell, and a build log is not an
-    // explanation.
-    trace(scope).record(CallRecord {
-        tool: format!("helper.{}", spec.name),
-        args: [("asked".to_string(), asked)].into_iter().collect(),
-        evidence: None,
-        lifted_from: None,
-        exit_code: None,
-        repeat_of: None,
-        error: None,
-        ended: if ok {
-            Ended::Ok
-        } else if cancelled {
-            Ended::Threw {
-                class: "Cancelled".into(),
-            }
-        } else {
-            Ended::Threw {
-                class: "ToolError".into(),
-            }
-        },
-    });
-    if cancelled {
-        throw_cancelled(scope, &format!("helper.{name}"));
-        return;
-    }
-    if !ok {
-        throw_tool_error(scope, &answer);
-        return;
-    }
-    let value = js_string(scope, &answer);
-    retval.set(value);
-}
-
-/// What the lane and the `/cell` inspector show for one helper call.
-///
-/// A size, never the payload: the caller still holds the text, the record is
-/// persisted to the rollout, and a 4,000-line build log in a lane line is
-/// neither readable nor cheap.
-fn asked_summary(input: &str) -> String {
-    format!("{} lines", thousands(input.lines().count() as u64))
-}
 
 /// What a task must have left before a subagent may start. One ordinary
 /// turn's ceiling, which is the smallest amount that could produce an answer

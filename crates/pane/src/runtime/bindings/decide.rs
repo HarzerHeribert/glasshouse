@@ -94,7 +94,13 @@ fn decide_choice_callback(
     });
 
     let started = std::time::Instant::now();
-    let answered = crate::decide::judgement(&model, &instructions, &subject, criteria);
+    // Waiting on the decision model is the cell waiting, not the cell
+    // computing (`RuntimeState::away_from_js`); the question carries
+    // `decide::DECISION_TIMEOUT` of its own.
+    let answered = {
+        let _away = state.away_from_js();
+        crate::decide::judgement(&model, &instructions, &subject, criteria)
+    };
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let (ok, text) = match &answered {
         Ok(judgement) => (

@@ -42,6 +42,7 @@ use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
 
 mod decide;
+mod response;
 mod watchdog;
 mod web;
 use watchdog::{EpilogueBudget, Watchdog, gave_up, timed_out};
@@ -62,6 +63,14 @@ pub const DEFAULT_HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 /// seconds is far longer than any cell measured here and far shorter than a
 /// person waiting on a hung session.
 pub const DEFAULT_CELL_WALL_CLOCK_LIMIT: Duration = Duration::from_secs(30);
+
+// **It bounds the cell's own computing, not the work it waits for.** Time
+// inside a host callback -- a granted `cargo test`, an MCP server, a helper,
+// a person at a confirmation -- is subtracted (`RuntimeState::away_from_js`),
+// because a build that takes four minutes is the task rather than a hang, and
+// each of those waits carries its own bound already. Before that separation
+// this limit reaped a running build at thirty seconds and answered the call
+// `cancelled`.
 
 /// The most bytes a returned string may be before the cell yields with the
 /// cap as its reason instead of returning — `runtime-contract.md` §9.2's
@@ -511,7 +520,8 @@ impl Runtime {
     /// Waiting remains subject to the cell's wall-clock and cancellation limits.
     #[must_use]
     pub fn with_approval_gate(self, gate: crate::approval::Gate) -> Self {
-        *self.state.approval_gate.borrow_mut() = Some(gate.with_wait_clock());
+        let clock = std::sync::Arc::clone(&self.state.host_clock);
+        *self.state.approval_gate.borrow_mut() = Some(gate.with_wait_clock(clock));
         self
     }
 
@@ -1316,11 +1326,7 @@ impl Runtime {
                 .running
                 .get()
                 .then(|| self.state.token.borrow().clone()),
-            self.state
-                .approval_gate
-                .borrow()
-                .as_ref()
-                .and_then(crate::approval::Gate::wait_clock),
+            Some(std::sync::Arc::clone(&self.state.host_clock)),
         );
         *self.state.watchdog_fired.borrow_mut() = Some(Arc::clone(&watchdog.fired));
         let ending =
@@ -1556,7 +1562,7 @@ impl Runtime {
                     // again until that has been read off -- measured: a
                     // second read re-entered a getter the watchdog had just
                     // stopped, with no watchdog left to stop it.
-                    match returned(try_catch, &self.state, response_byte_cap, value) {
+                    match response::returned(try_catch, &self.state, response_byte_cap, value) {
                         Ok(ending) => ending,
                         Err(ReadFailed) => {
                             if try_catch.has_terminated() {
@@ -2096,44 +2102,6 @@ impl Stopped {
 /// reader stops at once, because the next read would run that code again.
 struct ReadFailed;
 
-/// A top-level `return`'s value, read for what §9.2 makes of it.
-///
-/// A string is read **in full** — the terminal response is never `marshal`'s
-/// sample — unless it is over the response cap, in which case the cell
-/// yields with the cap as its reason and nothing of the string is rendered
-/// (§9.2: a response is never silently truncated). Any other value becomes
-/// its JSON under [`TERMINAL_JSON_CAP`].
-fn returned(
-    scope: &mut v8::PinScope,
-    state: &Rc<RuntimeState>,
-    response_byte_cap: usize,
-    value: v8::Local<v8::Value>,
-) -> Result<Ending, ReadFailed> {
-    if value.is_string() {
-        let string: v8::Local<v8::String> = value.try_into().expect("is_string");
-        let bytes = string.utf8_length(scope);
-        if bytes > response_byte_cap {
-            return Ok(Ending::Yielded {
-                reason: Some(format!(
-                    "the response is {} bytes, over the cap of {} bytes; return less or yield",
-                    preview::thousands(bytes as u64),
-                    preview::thousands(response_byte_cap as u64)
-                )),
-            });
-        }
-        let text = string.to_rust_string_lossy(scope);
-        return Ok(Ending::Returned(
-            marshal::marshal(scope, value),
-            Terminal::Text(text),
-        ));
-    }
-    // The walk first: it reads every property, so a getter that throws or
-    // never returns is found here, and `marshal` -- which would read the
-    // same getters again -- runs only once every read has answered.
-    let terminal = terminal_json(scope, state, value, TERMINAL_JSON_CAP)?;
-    Ok(Ending::Returned(marshal::marshal(scope, value), terminal))
-}
-
 /// §9.2's rendering of a non-string result: its JSON with values.
 ///
 /// Written by the host rather than by `JSON.stringify` because only the host
@@ -2581,8 +2549,21 @@ mod tests {
     const MARSHAL_SOURCE: &str = include_str!("marshal.rs");
     const WATCHDOG_SOURCE: &str = include_str!("isolate/watchdog.rs");
     const CONSOLE_SOURCE: &str = include_str!("bindings/console.rs");
+    // Every successor of a split, or the split is how a forbidden call gets
+    // into the runtime. `bindings/{agent,decide,web}.rs` and
+    // `isolate/{decide,web}.rs` were extracted on 2026-09-17 and
+    // `bindings/helper.rs` on 2026-09-18, and none of them was added here
+    // until now: for that window the scan below was reading a shrinking
+    // fraction of the module it claims to cover.
+    const AGENT_SOURCE: &str = include_str!("bindings/agent.rs");
+    const BINDINGS_DECIDE_SOURCE: &str = include_str!("bindings/decide.rs");
+    const BINDINGS_WEB_SOURCE: &str = include_str!("bindings/web.rs");
+    const HELPER_SOURCE: &str = include_str!("bindings/helper.rs");
+    const ISOLATE_DECIDE_SOURCE: &str = include_str!("isolate/decide.rs");
+    const ISOLATE_WEB_SOURCE: &str = include_str!("isolate/web.rs");
+    const RESPONSE_SOURCE: &str = include_str!("isolate/response.rs");
 
-    const SOURCES: [(&str, &str); 7] = [
+    const SOURCES: [(&str, &str); 14] = [
         ("isolate.rs", ISOLATE_SOURCE),
         ("bindings.rs", BINDINGS_SOURCE),
         ("state.rs", STATE_SOURCE),
@@ -2590,6 +2571,13 @@ mod tests {
         ("marshal.rs", MARSHAL_SOURCE),
         ("isolate/watchdog.rs", WATCHDOG_SOURCE),
         ("bindings/console.rs", CONSOLE_SOURCE),
+        ("bindings/agent.rs", AGENT_SOURCE),
+        ("bindings/decide.rs", BINDINGS_DECIDE_SOURCE),
+        ("bindings/web.rs", BINDINGS_WEB_SOURCE),
+        ("bindings/helper.rs", HELPER_SOURCE),
+        ("isolate/decide.rs", ISOLATE_DECIDE_SOURCE),
+        ("isolate/web.rs", ISOLATE_WEB_SOURCE),
+        ("isolate/response.rs", RESPONSE_SOURCE),
     ];
 
     /// The production half of a file: everything before its first
@@ -2665,6 +2653,8 @@ mod tests {
         }
         assert!(production(ISOLATE_SOURCE).contains("pub fn run_cell"));
         assert!(production(BINDINGS_SOURCE).contains("invoke::run"));
+        assert!(production(HELPER_SOURCE).contains("fn helper_callback"));
+        assert!(production(RESPONSE_SOURCE).contains("fn returned"));
         assert!(production(CELL_SOURCE).contains("fn compile"));
     }
 

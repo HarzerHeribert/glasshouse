@@ -488,6 +488,22 @@ pub fn run_traced(
 
 /// The exact-call suspension seam. The gate runs after complete argument
 /// admission and before an effect; returning resumes this stack frame only.
+/// How the caller supervises one tool call: the seam that may ask a person,
+/// the flag that says stop, and the clock that stops while this call's child
+/// runs.
+///
+/// One value rather than three parameters because they are one idea — what
+/// the caller does *around* the call, as opposed to what the call is.
+#[derive(Clone, Copy)]
+struct Watching<'a> {
+    gate: Option<&'a crate::approval::Gate>,
+    stopped: &'a dyn Fn() -> bool,
+    /// Stopped while the child runs, never around the whole call: the hooks
+    /// this path delivers have no bound of their own and must stay on the
+    /// caller's clock.
+    waiting: Option<&'a std::sync::Arc<crate::approval::WaitClock>>,
+}
+
 pub(crate) fn run_traced_with_gate(
     ctx: &ToolContext<'_>,
     token: &CancellationToken,
@@ -495,6 +511,25 @@ pub(crate) fn run_traced_with_gate(
     args: &Args,
     gate: Option<&crate::approval::Gate>,
     stopped: &dyn Fn() -> bool,
+) -> Traced {
+    run_traced_pausing(ctx, token, name, args, gate, stopped, None)
+}
+
+/// [`run_traced_with_gate`] with the clock a caller wants stopped while this
+/// call's child runs.
+///
+/// **Only the child's own wait is paused, never the whole call.** The hooks
+/// this path delivers (`glasshouse::run`) are children too and have no
+/// timeout of their own, so they stay on the caller's clock — which is the
+/// only thing that ends a hook that hangs.
+pub(crate) fn run_traced_pausing(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    name: &str,
+    args: &Args,
+    gate: Option<&crate::approval::Gate>,
+    stopped: &dyn Fn() -> bool,
+    waiting: Option<&std::sync::Arc<crate::approval::WaitClock>>,
 ) -> Traced {
     let mut checked = CheckedArgs::new();
     let Some(tool) = registry::lookup(name) else {
@@ -515,7 +550,20 @@ pub(crate) fn run_traced_with_gate(
         ctx,
         tool.name(),
         args.as_json(),
-        || checked_call(ctx, token, tool, args, &mut checked, gate, stopped),
+        || {
+            checked_call(
+                ctx,
+                token,
+                tool,
+                args,
+                &mut checked,
+                Watching {
+                    gate,
+                    stopped,
+                    waiting,
+                },
+            )
+        },
         |outcome| tool_response(tool.name(), outcome),
     );
     Traced { outcome, checked }
@@ -691,9 +739,13 @@ fn checked_call(
     tool: &Tool,
     args: &Args,
     trace: &mut CheckedArgs,
-    gate: Option<&crate::approval::Gate>,
-    stopped: &dyn Fn() -> bool,
+    watching: Watching<'_>,
 ) -> Result<ToolResult, ToolError> {
+    let Watching {
+        gate,
+        stopped,
+        waiting,
+    } = watching;
     let stop = || token.is_cancelled() || stopped();
     if stop() {
         return Err(ToolError::Cancelled {
@@ -754,7 +806,7 @@ fn checked_call(
             // The in-process `grep` prunes the same directories itself.
             argv.insert(1, "--exclude-dir=.git".into());
         }
-        spawn_confined(ctx.profile, &stop, tool, &argv)?
+        spawn_confined(ctx.profile, &stop, tool, &argv, waiting)?
     };
     if tool.name() == "grep" && broad_search {
         result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
@@ -1610,6 +1662,7 @@ fn spawn_confined(
     stopped: &dyn Fn() -> bool,
     tool: &Tool,
     argv: &[std::ffi::OsString],
+    waiting: Option<&std::sync::Arc<crate::approval::WaitClock>>,
 ) -> Result<ToolResult, ToolError> {
     let cancelled = || ToolError::Cancelled {
         tool: tool.name().to_string(),
@@ -1765,6 +1818,12 @@ fn spawn_confined(
 
     let stdout = drain(child.take_stdout());
     let stderr = drain(child.take_stderr());
+
+    // From here to the last byte of the pipes, the caller is waiting on a
+    // child it was granted rather than computing, so its compute clock stops
+    // (`RuntimeState::away_from_js`). `stopped()` still answers, so a person
+    // stopping the task still kills this child on the next poll.
+    let _waiting = waiting.map(|clock| clock.pause());
 
     let status = loop {
         if stopped() {

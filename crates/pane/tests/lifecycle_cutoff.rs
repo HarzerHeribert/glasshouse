@@ -155,8 +155,23 @@ fn provider(first: String) -> (String, Arc<Mutex<Vec<String>>>) {
     (address, bodies)
 }
 
+/// The wall-clock limit bounds the cell's own computing, so a granted child
+/// that outlives it is waited for rather than reaped.
+///
+/// **This expectation genuinely changed on 2026-09-18** (the user: "ein Rust
+/// compile step für glasshouse oder blast radius dauert manchmal mehrere
+/// Minuten"). It read `foreground_deadline_kills_late_write_and_remains_
+/// recoverable` and pinned the opposite: a `sleep 3` under a one-second limit
+/// was killed mid-run and the call answered `cancelled`, because the tool
+/// path polls the watchdog's own flag. A build is the work, not a hang.
+///
+/// What it still pins: the child's output reaches the cell, the write lands
+/// *before* the cell ends rather than after it, and the isolate survives. The
+/// orphaned-child invariant this test used to carry now belongs to
+/// cancellation, where it is pinned by the sibling below -- a person stopping
+/// a task still kills its children.
 #[test]
-fn foreground_deadline_kills_late_write_and_remains_recoverable() {
+fn a_child_that_outlives_the_compute_limit_is_waited_for_not_reaped() {
     let command = "echo $$ > started; sleep 3; printf late > marker";
     let f = Fixture::new();
     let mut runtime = Runtime::with_limits(
@@ -168,22 +183,29 @@ fn foreground_deadline_kills_late_write_and_remains_recoverable() {
     );
     let began = Instant::now();
     let outcome = runtime.run_cell(&format!(
-        "await bash({{command:{}}});",
+        "const r = await bash({{command:{}}}); return r.exit_code;",
         serde_json::to_string(command).unwrap()
     ));
     assert!(f.root.join("started").exists(), "fixture did not run");
     assert!(
-        matches!(&outcome,CellOutcome::Threw {error,..} if error.class=="RuntimeTimeout"),
-        "{outcome:?}"
+        matches!(
+            &outcome,
+            CellOutcome::Returned {
+                value: Value::Number(code),
+                ..
+            } if *code == 0.0
+        ),
+        "a three-second build under a one-second compute limit must finish: {outcome:?}"
     );
     assert!(
-        began.elapsed() < Duration::from_millis(2500),
-        "host ignored the deadline"
+        began.elapsed() >= Duration::from_secs(3),
+        "the cell did not actually wait for its child"
     );
     assert!(
-        !runtime.poisoned(),
-        "a cooperative child poisoned the isolate"
+        f.root.join("marker").exists(),
+        "the child's own write never landed"
     );
+    assert!(!runtime.poisoned(), "waiting poisoned the isolate");
     assert!(matches!(
         runtime.run_cell("return 7;"),
         CellOutcome::Returned {
@@ -191,10 +213,55 @@ fn foreground_deadline_kills_late_write_and_remains_recoverable() {
             ..
         }
     ));
-    std::thread::sleep(Duration::from_secs(3));
+}
+
+/// The reason the limit exists: `while (true) {}` allocates nothing, so the
+/// heap ceiling never sees it. Pausing the clock for host work must not
+/// weaken this.
+#[test]
+fn a_loop_that_only_computes_still_dies_at_the_compute_limit() {
+    let f = Fixture::new();
+    let mut runtime = Runtime::with_limits(
+        &f.profile(),
+        &Glasshouse::None,
+        &SessionId::new("runaway"),
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_secs(1),
+    );
+    let began = Instant::now();
+    let outcome = runtime.run_cell("while (true) {}");
     assert!(
-        !f.root.join("marker").exists(),
-        "a child wrote after timeout"
+        matches!(&outcome, CellOutcome::Threw { error, .. } if error.class == "RuntimeTimeout"),
+        "{outcome:?}"
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "the runaway loop was not stopped near its limit"
+    );
+}
+
+/// A child that hangs still ends the cell -- through its own bound, which is
+/// what the cell now relies on instead of its compute clock.
+#[test]
+fn a_child_that_hangs_ends_by_its_own_timeout_and_says_so() {
+    let f = Fixture::new();
+    let mut runtime = Runtime::with_limits(
+        &f.profile(),
+        &Glasshouse::None,
+        &SessionId::new("hung-child"),
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_secs(1),
+    );
+    let began = Instant::now();
+    let outcome = runtime.run_cell("return await bash({command:'sleep 30', timeout: 1200});");
+    assert!(
+        began.elapsed() < Duration::from_secs(20),
+        "the cell waited past the child's own bound: {outcome:?}"
+    );
+    let rendered = format!("{outcome:?}");
+    assert!(
+        rendered.contains("1200") || rendered.to_lowercase().contains("timeout"),
+        "the ending must name the bound that ended it: {rendered}"
     );
 }
 

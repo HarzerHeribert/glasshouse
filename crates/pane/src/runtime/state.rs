@@ -180,6 +180,12 @@ pub(crate) struct RuntimeState {
     pub(crate) profile: Profile,
     /// Host-only suspension seam; absent in ordinary sessions and subagents.
     pub(crate) approval_gate: RefCell<Option<crate::approval::Gate>>,
+    /// How long this cell has spent inside host callbacks rather than
+    /// executing JavaScript, which its watchdog subtracts from the
+    /// wall-clock limit ([`crate::approval::WaitClock`]). Always present,
+    /// because a `cargo test` is granted to every session while an approval
+    /// gate is granted to almost none.
+    pub(crate) host_clock: Arc<crate::approval::WaitClock>,
     /// The current watchdog's host-visible flag. V8's termination query may
     /// stay false until a blocked Rust callback returns to an interrupt check.
     pub(crate) watchdog_fired: RefCell<Option<Arc<AtomicBool>>>,
@@ -319,6 +325,24 @@ impl Repeat {
 const RESERVED_FOR_THE_MODEL: u32 = 2;
 
 impl RuntimeState {
+    /// Stops the cell's compute clock until the guard is dropped.
+    ///
+    /// **Every host callback that can outlast a keystroke takes one.** The
+    /// cell is not computing while a child process builds, an MCP server
+    /// answers or a helper thinks, and the wall-clock limit is there to stop
+    /// a cell that computes forever. Without this the limit kills the work
+    /// instead: the tool path polls the watchdog's own flag
+    /// (`bindings::tool_callback`'s `stopped` closure), so at 30 seconds a
+    /// `cargo test` was reaped mid-build and the call answered `cancelled`.
+    ///
+    /// The limit still catches `while (true) {}`, and still catches a loop
+    /// that spams host calls -- that loop's own JavaScript keeps accruing
+    /// between calls, so it dies later rather than never, in proportion to
+    /// how much of its time is really its own.
+    pub(crate) fn away_from_js(&self) -> crate::approval::Waiting {
+        self.host_clock.pause()
+    }
+
     /// The narrowing the context is built under — `Every` unless told.
     pub(crate) fn with_globals(mut self, globals: crate::runtime::bindings::HostGlobals) -> Self {
         self.globals = globals;
@@ -332,6 +356,7 @@ impl RuntimeState {
             profile: profile.clone(),
             approval_gate: RefCell::new(None),
             watchdog_fired: RefCell::new(None),
+            host_clock: Arc::new(crate::approval::WaitClock::default()),
             mcp: RefCell::new(crate::tools::mcp::Mcp::default()),
             web: RefCell::new(None),
             globals: crate::runtime::bindings::HostGlobals::Every,

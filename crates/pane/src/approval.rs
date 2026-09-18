@@ -23,6 +23,15 @@ use crate::tools::invoke::CheckedArgs;
 /// Human confirmation is bounded independently of the cell compute clock.
 pub const MAX_APPROVAL_WAIT: Duration = Duration::from_secs(10 * 60);
 
+/// How long a cell has spent **not executing JavaScript**.
+///
+/// The cell's wall-clock limit exists to stop `while (true) {}`, which
+/// allocates nothing and so is invisible to the heap ceiling. Time spent
+/// inside a host callback -- a person deciding, a `cargo test` the cell was
+/// granted, a helper answering -- is not that, and the runtime subtracts it
+/// (`Watchdog::arm_pausing`). One clock serves every such wait: they differ
+/// in what is being waited for and not in what the cell is doing, which is
+/// nothing.
 #[derive(Default)]
 pub(crate) struct WaitClock(Mutex<WaitState>);
 #[derive(Default)]
@@ -38,7 +47,10 @@ impl WaitClock {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accumulated + state.since.map(|since| since.elapsed()).unwrap_or_default()
     }
-    fn pause(self: &Arc<Self>) -> Waiting {
+    /// Stops the clock until the returned guard is dropped. Re-entrant
+    /// waits are not nested: the outer guard owns the span, because
+    /// `since` is a single instant and a nested pause would end it early.
+    pub(crate) fn pause(self: &Arc<Self>) -> Waiting {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -46,7 +58,7 @@ impl WaitClock {
         Waiting(self.clone())
     }
 }
-struct Waiting(Arc<WaitClock>);
+pub(crate) struct Waiting(Arc<WaitClock>);
 impl Drop for Waiting {
     fn drop(&mut self) {
         let mut state = self
@@ -291,13 +303,14 @@ impl Gate {
         })
     }
 
-    pub(crate) fn with_wait_clock(mut self) -> Self {
-        self.wait_clock = Some(Arc::new(WaitClock::default()));
+    /// Attaches the clock the cell's watchdog subtracts, so a confirmation
+    /// the person is still reading does not spend the cell's compute budget.
+    /// The runtime passes **its own** clock, so an approval wait and a
+    /// granted child process accrue into one span rather than two the
+    /// watchdog would have to add up.
+    pub(crate) fn with_wait_clock(mut self, clock: Arc<WaitClock>) -> Self {
+        self.wait_clock = Some(clock);
         self
-    }
-
-    pub(crate) fn wait_clock(&self) -> Option<Arc<WaitClock>> {
-        self.wait_clock.clone()
     }
 
     /// Values that can be displayed without leaking command arguments,

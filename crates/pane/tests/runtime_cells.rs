@@ -1542,9 +1542,53 @@ fn yield_now_ends_the_cell_in_the_yield_slot_and_is_not_an_error() {
     assert_eq!(returned(&next), &Value::Number(6.0), "{next:?}");
 }
 
+/// The free rung of §9.2's ladder: an over-sized response that is mostly
+/// padding is rendered with the padding gone, rather than refused.
+///
+/// No model is asked and nothing is spent — the user, 2026-09-18: *"Erst
+/// deterministisch Müll entsorgen"*. The value the program returned is
+/// untouched; only the view is shortened, and the note says so.
+#[test]
+fn a_padded_response_is_normalised_rather_than_refused() {
+    let fixture = Fixture::new("response-padding");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("response-padding-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let cap = pane::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
+
+    // Just over the cap, and all of the excess is trailing whitespace.
+    let padded = runtime.run_cell(&format!(
+        "return \"line\" + \" \".repeat({}) + \"\\n\\n\\n\\n\" + \"end\";\n",
+        cap
+    ));
+    let CellOutcome::Returned { terminal, .. } = &padded else {
+        panic!("padding alone must not cost the response: {padded:?}");
+    };
+    let pane::runtime::outcome::Terminal::Text(text) = terminal else {
+        panic!("{terminal:?}");
+    };
+    assert!(text.starts_with("line\n\nend"), "{text:?}");
+    assert!(
+        text.contains("whitespace") && text.contains("unchanged"),
+        "the shortening must be disclosed: {text:?}"
+    );
+    assert!(
+        text.len() <= cap,
+        "the view is still bounded: {}",
+        text.len()
+    );
+}
+
 /// §9.2: a returned string over the response cap is not a return. The cell
 /// yields with the size and the cap as its reason, the task continues, and
 /// a string at the cap returns verbatim and in full. Bytes, not characters.
+///
+/// **The reason's wording changed on 2026-09-18** and the change is the
+/// point: it now says the bindings are still live and what to do instead,
+/// because a cap that only states a size leaves the model to guess whether
+/// its value survived. A response of pure content still yields — there is
+/// nothing to remove — which is what this test covers; the rung that removes
+/// provable noise is `a_padded_response_is_normalised_rather_than_refused`.
 #[test]
 fn a_response_over_the_cap_yields_with_the_cap_as_its_reason() {
     let fixture = Fixture::new("response-cap");
@@ -1558,9 +1602,14 @@ fn a_response_over_the_cap_yields_with_the_cap_as_its_reason() {
     let CellOutcome::Yielded { turn } = &over else {
         panic!("a response over the cap must yield, got {over:?}");
     };
-    assert_eq!(
-        turn.yield_reason.as_deref(),
-        Some("the response is 16,385 bytes, over the cap of 16,384 bytes; return less or yield")
+    let reason = turn.yield_reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.starts_with("the response is 16,385 bytes, over the cap of 16,384 bytes"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("still live") && reason.contains("next cell"),
+        "the model must be told its value survived and what to do: {reason}"
     );
     assert_eq!(
         turn.record.outcome,
