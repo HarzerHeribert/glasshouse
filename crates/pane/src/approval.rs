@@ -96,11 +96,58 @@ pub struct Hint {
 struct Decisions {
     model: String,
     mode: crate::config::DecisionMode,
+    /// `[decisions] command_runs_above` — the confidence at or above which
+    /// this model's word lets a command line run without asking.
+    command_runs_above: f64,
     /// This gate's cumulative count of approval hints that answered.
     asked: Arc<AtomicU32>,
     /// This gate's cumulative count of approval-hint requests that failed
     /// or timed out.
     failed: Arc<AtomicU32>,
+}
+
+/// The decision model, asked the one question the static permission reader
+/// could not answer.
+///
+/// It exists for the length of one [`Gate::admit`] call and borrows the
+/// gate's own session-scoped state, so no second copy of the model name,
+/// the mode or the session's memory can drift from the gate's.
+struct ModelJudge<'a> {
+    decisions: &'a Decisions,
+    vouched: &'a crate::permissions::Judged<String>,
+}
+
+impl crate::permissions::CommandJudge for ModelJudge<'_> {
+    fn vouches_for(&self, line: &str) -> bool {
+        let key = line.to_string();
+        if let Some(remembered) = self.vouched.answer(&key) {
+            return remembered;
+        }
+        // Synchronous, and that is the right shape here: the alternative to
+        // waiting is asking the person, which costs far more than the
+        // `DECISION_TIMEOUT` this call is bounded by. It is reached only for
+        // the lines the static reader could not place, and only once per
+        // distinct line per session.
+        let answered = crate::decide::permission(&self.decisions.model, line);
+        match answered {
+            Ok(answer) => {
+                self.decisions.asked.fetch_add(1, Ordering::Relaxed);
+                let vouched = crate::decide::permission_for(
+                    self.decisions.mode,
+                    Some(&answer),
+                    self.decisions.command_runs_above,
+                );
+                self.vouched.remember(key, vouched);
+                vouched
+            }
+            // Not an answer, so not remembered: a timeout must not bar this
+            // line from ever being vouched for again in this session.
+            Err(_) => {
+                self.decisions.failed.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        }
+    }
 }
 
 /// A concrete canonical call. Full argument values are available only by an
@@ -261,6 +308,16 @@ pub struct Gate {
     read_only: Arc<Vec<String>>,
     wait_clock: Option<Arc<WaitClock>>,
     decisions: Option<Decisions>,
+    /// What the decision model has already said about a command line.
+    ///
+    /// **A model answer is exactly the kind that could have been given
+    /// differently**, so unlike a static verdict it is remembered: the same
+    /// line asked twice gets the same answer for the rest of the session,
+    /// and a retry cannot turn a question into a run (the user, 2026-09-18,
+    /// on a classifier that "funktioniert meist wenn du es nochmal
+    /// probierst"). Only a real answer is remembered — a timeout is not an
+    /// answer and must not bar that line for the session.
+    vouched: Arc<crate::permissions::Judged<String>>,
     /// The current task's request text, attached to the clone a `Runtime`
     /// holds for one task (`with_task`) -- `Gate` itself is session-scoped
     /// and outlives any one task.
@@ -279,6 +336,7 @@ impl Gate {
                 read_only: Arc::new(Vec::new()),
                 wait_clock: None,
                 decisions: None,
+                vouched: Arc::new(crate::permissions::Judged::default()),
                 task: None,
             },
             receiver,
@@ -305,10 +363,12 @@ impl Gate {
         mut self,
         model: Option<String>,
         mode: crate::config::DecisionMode,
+        command_runs_above: f64,
     ) -> Self {
         self.decisions = model.map(|model| Decisions {
             model,
             mode,
+            command_runs_above,
             asked: Arc::new(AtomicU32::new(0)),
             failed: Arc::new(AtomicU32::new(0)),
         });
@@ -375,11 +435,20 @@ impl Gate {
             return !stopped();
         }
         drop(remembered);
+        let model = self.decisions.as_ref().and_then(|decisions| {
+            (decisions.mode != crate::config::DecisionMode::Off).then(|| ModelJudge {
+                decisions,
+                vouched: &self.vouched,
+            })
+        });
         match crate::permissions::judge(
             self.ladder.rung(),
             action.tool(),
             action.arguments(),
             &self.read_only,
+            model
+                .as_ref()
+                .map(|judge| judge as &dyn crate::permissions::CommandJudge),
         ) {
             crate::permissions::Verdict::Runs => return !stopped(),
             crate::permissions::Verdict::Refuse(_) => {

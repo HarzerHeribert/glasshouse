@@ -10,6 +10,7 @@ first; routing stays static*. Tier Amber; one Sonnet worker.
     mode        = "shadow"       # "off" | "shadow" | "on"; default "shadow" when a model is set
     hold_above  = 0.85           # confidence at or above which a read-only intent holds; 0.5..=1.0
     scout_above = 0.85           # confidence at or above which needs_exploration adds a scout signal; 0.5..=1.0
+    command_runs_above = 0.85    # confidence at or above which a command line runs unasked on `auto`; 0.5..=1.0
 
 A value outside its range is refused at start with one sentence. `model`
 names no tool, path or grant, exactly as `[supervisor] model` does not.
@@ -132,6 +133,43 @@ shadow` asks and counts it (telemetry's `approval_hints`,
 immediately and never waits for the answer; a failed, slow, or absent
 decision leaves it exactly as it renders today. The hint is a line of text
 and a counter — it never changes `Decision`.
+
+## 7a. The command-permission question (the model half of `auto`)
+
+The `auto` rung's static reader vouches for the lines it can place -- reads,
+and the ordinary build-and-test verbs in `permissions::DEVELOPMENT_COMMANDS`
+-- and puts everything else in front of the person. Measured against the 57
+distinct command lines of a real 120-cell session (2026-09-17, `tlj14m-24r`)
+that is 23 run and 34 asked. The 34 are quote-blind segmentation,
+path-qualified programs, `VAR=x` prefixes, and genuinely mutating lines.
+
+With a model configured and `mode = on`, each of those 34 gets one `Choice`
+question, `permission`, over `{command_line}` (bounded to 4 KiB), with four
+criteria: `reads_only`, `ordinary_development_work`, `needs_a_person`,
+`destructive`. At or above `command_runs_above`, the first two let the line
+run without asking. **The other two change nothing at all.**
+
+Three properties, and all three are load-bearing:
+
+1. **The static half decides first and is never overruled.** A line it can
+   place costs no request and no latency; the model is reached only for the
+   lines it could not.
+2. **The model can vouch and can never condemn.** `needs_a_person` and
+   `destructive` leave the question exactly where it was -- with the person,
+   now carrying the model's word for why. A model answer that could deny
+   would make `auto` stricter than `accept-edits`, where the person is asked
+   and may say yes, and the ladder's one structural property is that a rung
+   may only ever *remove* a question.
+3. **One answer per command line per session.** A model answer is precisely
+   the kind that could have been given differently, so it is remembered
+   (`approval::Gate::vouched`) and a retry cannot turn a question into a run.
+   A timeout is *not* an answer and is not remembered, so a slow gateway
+   never bars a line for the rest of the session.
+
+`shadow` asks and records but does not act, unlike the supervisor's nudge:
+letting a line run without asking *is* changing what runs. `off` does not
+ask. Without a model the rung is exactly its static half, which is the honest
+floor.
 
 ## 8. The drift question (2643)
 

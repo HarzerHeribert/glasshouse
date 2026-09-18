@@ -170,6 +170,15 @@ pub struct DecisionsConfig {
     /// reason to nudge -- any criterion but `making_progress`
     /// (`supervisor.md` §3). `0.5..=1.0`.
     pub supervision_above: f64,
+    /// Confidence at or above which the decision model's word lets a command
+    /// line run on the `auto` rung without asking the person -- and only for
+    /// the lines the static reader could not place. `0.5..=1.0`.
+    ///
+    /// **It can only ever remove a question.** No answer at any confidence
+    /// turns an admitted call into a refusal, so raising this towards 1.0
+    /// asks more often and lowering it asks less, and neither end of the
+    /// range can make Pane refuse something it would otherwise have run.
+    pub command_runs_above: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -190,6 +199,7 @@ impl Default for DecisionsConfig {
             scout_relevance_below: 0.10,
             helper_no_below: 0.10,
             supervision_above: 0.85,
+            command_runs_above: 0.85,
         }
     }
 }
@@ -915,6 +925,8 @@ const HELPER_NO_BELOW_MIN: f64 = 0.0;
 const HELPER_NO_BELOW_MAX: f64 = 0.5;
 const SUPERVISION_ABOVE_MIN: f64 = 0.5;
 const SUPERVISION_ABOVE_MAX: f64 = 1.0;
+const COMMAND_RUNS_ABOVE_MIN: f64 = 0.5;
+const COMMAND_RUNS_ABOVE_MAX: f64 = 1.0;
 
 fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
     let table = table_of(value, "decisions")?;
@@ -937,6 +949,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
             "scout_relevance_below",
             "helper_no_below",
             "supervision_above",
+            "command_runs_above",
         ]
         .contains(&key.as_str())
         {
@@ -1164,6 +1177,22 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         }
     };
 
+    let command_runs_above = match table.get("command_runs_above") {
+        None => defaults.command_runs_above,
+        Some(value) => {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|v| v as f64))
+                .ok_or_else(|| "pane.toml: `command_runs_above` must be a number".to_string())?;
+            if !(COMMAND_RUNS_ABOVE_MIN..=COMMAND_RUNS_ABOVE_MAX).contains(&number) {
+                return Err(format!(
+                    "pane.toml: `command_runs_above` must be between {COMMAND_RUNS_ABOVE_MIN} and {COMMAND_RUNS_ABOVE_MAX}"
+                ));
+            }
+            number
+        }
+    };
+
     Ok(DecisionsConfig {
         model,
         mode,
@@ -1180,6 +1209,7 @@ fn parse_decisions(value: &toml::Value) -> Result<DecisionsConfig, String> {
         scout_relevance_below,
         helper_no_below,
         supervision_above,
+        command_runs_above,
     })
 }
 

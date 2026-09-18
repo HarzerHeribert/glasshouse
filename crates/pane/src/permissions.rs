@@ -243,6 +243,7 @@ pub fn judge(
     tool: &str,
     arguments: &BTreeMap<String, String>,
     extra_read_only: &[String],
+    model: Option<&dyn CommandJudge>,
 ) -> Verdict {
     match rung {
         // Exactly `--ask-approval`'s behaviour, preserved: every gated call.
@@ -260,8 +261,30 @@ pub fn judge(
                     "permissions accept-edits: every command line is confirmed".into(),
                 );
             }
-            judge_command(line, extra_read_only)
+            judge_command(line, extra_read_only, model)
         }
+    }
+}
+
+/// The model half of `auto`, as one question this module can ask without
+/// knowing what answers it.
+///
+/// A trait rather than a function pointer so the implementation can carry
+/// the session's decision model, mode and threshold, and so this module
+/// keeps no dependency on the gateway at all.
+pub trait CommandJudge {
+    /// Whether this command line may run without asking. **Three-valued at
+    /// the seam and two-valued here on purpose**: an implementation that
+    /// cannot place a line, or whose model did not answer in time, returns
+    /// `false` and the person is asked, which is what would have happened
+    /// anyway. It can never turn an admitted call into a refusal
+    /// ([`decide::permission_for`](crate::decide::permission_for) says why).
+    fn vouches_for(&self, line: &str) -> bool;
+
+    /// Why the person is being asked, when this judge has something to add
+    /// beyond *the static reader could not place it*.
+    fn reason(&self, _line: &str) -> Option<String> {
+        None
     }
 }
 
@@ -283,19 +306,33 @@ fn is_a_command(tool: &str) -> bool {
 /// it cannot place it, not that it is dangerous, which is why the unplaced
 /// case is [`Verdict::Ask`] and never [`Verdict::Refuse`].
 ///
-/// The next package asks the decision model the same question about the
-/// lines that land in `Ask`, and returns from right here.
+/// With a decision model configured, the lines the static reader leaves in
+/// `Ask` are put to it, and a line it vouches for runs. The order is the
+/// policy: **the static half decides first and is never overruled**, so a
+/// line the reader can place costs no request and no latency, and the model
+/// is only ever asked to turn a question into a run -- never the other way
+/// round.
 #[must_use]
-pub fn judge_command(line: &str, extra_read_only: &[String]) -> Verdict {
+pub fn judge_command(
+    line: &str,
+    extra_read_only: &[String],
+    model: Option<&dyn CommandJudge>,
+) -> Verdict {
     let admitted: Vec<String> = DEVELOPMENT_COMMANDS
         .iter()
         .map(|pattern| (*pattern).to_string())
         .chain(extra_read_only.iter().cloned())
         .collect();
-    match crate::sandbox::modes::command_reads_only(line, &admitted) {
-        None => Verdict::Runs,
-        Some(why) => Verdict::Ask(why),
+    let Some(why) = crate::sandbox::modes::command_reads_only(line, &admitted) else {
+        return Verdict::Runs;
+    };
+    let Some(model) = model else {
+        return Verdict::Ask(why);
+    };
+    if model.vouches_for(line) {
+        return Verdict::Runs;
     }
+    Verdict::Ask(model.reason(line).unwrap_or(why))
 }
 
 /// Ordinary development commands a person does not need to be asked about,
@@ -402,6 +439,118 @@ impl<K: Ord + Clone> Judged<K> {
 mod tests {
     use super::*;
 
+    /// A judge that answers from a fixed list, so the seam can be tested
+    /// without a model: the point under test is what `judge_command` does
+    /// with an answer, never how the answer was arrived at.
+    struct Fixed {
+        vouches: &'static [&'static str],
+        reason: Option<&'static str>,
+    }
+
+    impl CommandJudge for Fixed {
+        fn vouches_for(&self, line: &str) -> bool {
+            self.vouches.contains(&line)
+        }
+
+        fn reason(&self, _line: &str) -> Option<String> {
+            self.reason.map(str::to_string)
+        }
+    }
+
+    /// The model half turns a question into a run — the whole point of it,
+    /// and the 34 of 57 real command lines the static half leaves asking.
+    #[test]
+    fn a_line_the_model_vouches_for_runs_without_asking() {
+        let judge = Fixed {
+            vouches: &["./scripts/build.sh --release"],
+            reason: None,
+        };
+        assert_eq!(
+            judge_command("./scripts/build.sh --release", &[], Some(&judge)),
+            Verdict::Runs
+        );
+    }
+
+    /// And a line it does not vouch for is still put in front of the person,
+    /// never refused: a rung may only ever remove a question.
+    #[test]
+    fn a_line_the_model_will_not_vouch_for_is_asked_and_never_refused() {
+        let judge = Fixed {
+            vouches: &[],
+            reason: Some("it deletes a directory outside the project".into()),
+        };
+        let verdict = judge_command("rm -rf /etc/somewhere", &[], Some(&judge));
+        assert!(
+            matches!(&verdict, Verdict::Ask(why) if why.contains("deletes a directory")),
+            "{verdict:?}"
+        );
+        assert!(
+            !matches!(verdict, Verdict::Refuse(_)),
+            "the model half can vouch and can never condemn"
+        );
+    }
+
+    /// **The static half decides first and is never overruled.** A line it
+    /// can place costs no request, so a judge that would refuse everything
+    /// cannot make `auto` stricter than it is without a model.
+    #[test]
+    fn a_line_the_static_reader_places_never_reaches_the_model() {
+        struct Never;
+        impl CommandJudge for Never {
+            fn vouches_for(&self, _line: &str) -> bool {
+                panic!("the static reader had already placed this line");
+            }
+        }
+        assert_eq!(
+            judge_command("cargo test -p pane", &[], Some(&Never)),
+            Verdict::Runs
+        );
+    }
+
+    /// `full` answers before any of this: it asks nothing, so it costs no
+    /// request either.
+    #[test]
+    fn the_full_rung_never_reaches_the_model() {
+        struct Never;
+        impl CommandJudge for Never {
+            fn vouches_for(&self, _line: &str) -> bool {
+                panic!("`full` asks nothing and must ask nothing of the model");
+            }
+        }
+        assert_eq!(
+            judge(
+                Rung::Full,
+                "bash",
+                &args(&[("command", "curl -X POST https://example.com")]),
+                &[],
+                Some(&Never),
+            ),
+            Verdict::Runs
+        );
+    }
+
+    /// `accept-edits` confirms every command line by definition, so the
+    /// model is not consulted there either.
+    #[test]
+    fn the_accept_edits_rung_never_reaches_the_model() {
+        struct Never;
+        impl CommandJudge for Never {
+            fn vouches_for(&self, _line: &str) -> bool {
+                panic!("accept-edits confirms every command line");
+            }
+        }
+        assert!(matches!(
+            judge(
+                Rung::AcceptEdits,
+                "bash",
+                &args(&[("command", "ls")]),
+                &[],
+                Some(&Never),
+            ),
+            Verdict::Ask(_)
+        ));
+    }
+
     fn args(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -449,7 +598,7 @@ mod tests {
             (Rung::Full, true, true, true),
         ] {
             let runs = |arguments: &BTreeMap<String, String>, tool| {
-                judge(rung, tool, arguments, &[]) == Verdict::Runs
+                judge(rung, tool, arguments, &[], None) == Verdict::Runs
             };
             assert_eq!(runs(&edit, "edit"), on_edit, "{} edit", rung.name());
             assert_eq!(
@@ -472,13 +621,13 @@ mod tests {
         // The distinction this rung stands on: the static reader not being
         // able to vouch for a line is a reason to ask, never a reason to
         // refuse. Only the model half may refuse, and it is not here yet.
-        let verdict = judge_command("./deploy.sh --prod", &[]);
+        let verdict = judge_command("./deploy.sh --prod", &[], None);
         assert!(
             matches!(verdict, Verdict::Ask(_)),
             "an unplaced command asks: {verdict:?}"
         );
         assert!(
-            !matches!(judge_command("rm -rf /", &[]), Verdict::Refuse(_)),
+            !matches!(judge_command("rm -rf /", &[], None), Verdict::Refuse(_)),
             "nothing static refuses; that is the model half's to add"
         );
     }
@@ -524,14 +673,14 @@ mod tests {
         ];
         for line in runs {
             assert_eq!(
-                judge_command(line, &[]),
+                judge_command(line, &[], None),
                 Verdict::Runs,
                 "ordinary development work must not stop to ask: {line}"
             );
         }
         for line in asks {
             assert!(
-                matches!(judge_command(line, &[]), Verdict::Ask(_)),
+                matches!(judge_command(line, &[], None), Verdict::Ask(_)),
                 "unplaceable, so asked about rather than refused: {line}"
             );
         }
@@ -540,9 +689,9 @@ mod tests {
     #[test]
     fn a_persons_own_read_only_patterns_are_honoured() {
         let line = "./deploy.sh --dry-run";
-        assert!(matches!(judge_command(line, &[]), Verdict::Ask(_)));
+        assert!(matches!(judge_command(line, &[], None), Verdict::Ask(_)));
         assert_eq!(
-            judge_command(line, &["./deploy.sh --dry-run*".to_string()]),
+            judge_command(line, &["./deploy.sh --dry-run*".to_string()], None),
             Verdict::Runs,
             "`[modes] commands` is the person's own list and the ladder honours it"
         );

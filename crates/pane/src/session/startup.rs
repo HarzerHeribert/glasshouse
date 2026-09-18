@@ -153,7 +153,13 @@ pub(super) fn approval_gate(
     let decisions = config.decisions.clone();
     interactive
         .map(|ui| ui.approval_gate(ladder.clone()))
-        .map(|gate| gate.with_decisions(decisions.model, decisions.mode))
+        .map(|gate| {
+            gate.with_decisions(
+                decisions.model,
+                decisions.mode,
+                decisions.command_runs_above,
+            )
+        })
         .map(|gate| gate.with_read_only(config.modes.explore.commands.clone()))
 }
 

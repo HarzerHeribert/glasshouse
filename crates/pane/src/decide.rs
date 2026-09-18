@@ -1020,6 +1020,131 @@ pub fn supervision_for(
     Some(answer.choice.clone())
 }
 
+// --- The model half of the `auto` permission rung -------------------------
+
+/// The key the command-permission question is asked under.
+const PERMISSION_KEY: &str = "permission";
+
+/// The criterion that means *this line only looks at things*.
+pub const COMMAND_READS_ONLY: &str = "reads_only";
+/// The criterion that means *this is the work a developer runs constantly*.
+pub const COMMAND_ORDINARY_WORK: &str = "ordinary_development_work";
+/// The criterion that means *a person should see this before it runs*.
+pub const COMMAND_NEEDS_A_PERSON: &str = "needs_a_person";
+/// The criterion that means *this destroys something or lowers a defence*.
+pub const COMMAND_DESTRUCTIVE: &str = "destructive";
+
+/// The most of a command line the permission question carries. A line longer
+/// than this is a script, and the head of a script is enough to tell that it
+/// is one.
+pub const COMMAND_LINE_BYTES: usize = 4 * 1024;
+
+fn permission_question() -> Question {
+    let mut criteria = BTreeMap::new();
+    criteria.insert(
+        COMMAND_READS_ONLY.to_string(),
+        "it only inspects: it prints, lists, searches, or reports, and changes no file, \
+         no process and nothing outside this machine"
+            .to_string(),
+    );
+    criteria.insert(
+        COMMAND_ORDINARY_WORK.to_string(),
+        "it is the ordinary work of building this project: it compiles, tests, formats, \
+         lints or generates inside the project's own tree and its build directory, and \
+         reaches nothing else"
+            .to_string(),
+    );
+    criteria.insert(
+        COMMAND_NEEDS_A_PERSON.to_string(),
+        "it changes something outside the project's own tree, installs, publishes or \
+         downloads something, touches credentials, or is a line you cannot place with \
+         confidence"
+            .to_string(),
+    );
+    criteria.insert(
+        COMMAND_DESTRUCTIVE.to_string(),
+        "it deletes or overwrites something that cannot be reconstructed, or it turns off \
+         a protection"
+            .to_string(),
+    );
+    Question::Choice {
+        instructions: "A coding agent is about to run this shell command line in a project it \
+             is working in. What kind of line is it?"
+            .to_string(),
+        criteria,
+    }
+}
+
+/// What the decision model answered about one command line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandJudgement {
+    pub choice: String,
+    pub confidence: f64,
+    pub latency_ms: u64,
+}
+
+/// Asks what kind of command line `line` is -- the model half of the `auto`
+/// rung, asked only about the lines the static reader could not place.
+///
+/// One `Choice` question, synchronous, bounded by [`DECISION_TIMEOUT`] like
+/// every other call here. The line travels as state rather than folded into
+/// the instructions: the question is fixed and the evidence is the line.
+pub fn permission(model: &str, line: &str) -> Result<CommandJudgement, DecideError> {
+    let state = serde_json::json!({ "command_line": head(line, COMMAND_LINE_BYTES) });
+    let questions = [(PERMISSION_KEY.to_string(), permission_question())];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{PERMISSION_KEY}`")))?;
+    match decision.answer {
+        Answer::Choice {
+            choice, confidence, ..
+        } => Ok(CommandJudgement {
+            choice,
+            confidence,
+            latency_ms: decision.latency_ms,
+        }),
+        Answer::Noul(_) => Err(DecideError::Parse(format!(
+            "the `{PERMISSION_KEY}` question was answered as a noul, not a choice"
+        ))),
+    }
+}
+
+/// Whether one [`CommandJudgement`] is a reason to let the line run without
+/// asking.
+///
+/// **The model half can vouch, and can never condemn.** Only
+/// [`COMMAND_READS_ONLY`] and [`COMMAND_ORDINARY_WORK`], at or above
+/// `command_runs_above`, turn a question into a run. A `needs_a_person` or
+/// `destructive` answer leaves the question exactly where it was -- in front
+/// of the person, now with the model's word for why -- and never becomes a
+/// refusal. That is not timidity: the ladder's one structural property is
+/// that a rung may only ever *remove* a question, so a model answer that
+/// could deny would make `auto` stricter than the rung below it, where the
+/// person is asked and may say yes.
+///
+/// `shadow` records and changes nothing, as everywhere else: letting a line
+/// run without asking *is* changing what runs.
+#[must_use]
+pub fn permission_for(
+    mode: DecisionMode,
+    answer: Option<&CommandJudgement>,
+    command_runs_above: f64,
+) -> bool {
+    if mode != DecisionMode::On {
+        return false;
+    }
+    let Some(answer) = answer else {
+        return false;
+    };
+    matches!(
+        answer.choice.as_str(),
+        COMMAND_READS_ONLY | COMMAND_ORDINARY_WORK
+    ) && answer.confidence >= command_runs_above
+}
+
 /// The most criteria one cell-authored question may name, and the most bytes
 /// its instructions and each criterion may carry.
 ///
@@ -1603,6 +1728,80 @@ mod tests {
             None
         );
         assert_eq!(supervision_for(DecisionMode::On, None, 0.85), None);
+    }
+
+    fn command_answer(choice: &str, confidence: f64) -> CommandJudgement {
+        CommandJudgement {
+            choice: choice.to_string(),
+            confidence,
+            latency_ms: 7,
+        }
+    }
+
+    /// The two criteria that vouch, and only those two.
+    #[test]
+    fn only_a_reading_or_ordinary_line_is_vouched_for() {
+        for choice in [COMMAND_READS_ONLY, COMMAND_ORDINARY_WORK] {
+            assert!(
+                permission_for(DecisionMode::On, Some(&command_answer(choice, 0.9)), 0.85),
+                "{choice} must let the line run"
+            );
+        }
+        for choice in [COMMAND_NEEDS_A_PERSON, COMMAND_DESTRUCTIVE] {
+            assert!(
+                !permission_for(DecisionMode::On, Some(&command_answer(choice, 0.99)), 0.85),
+                "{choice} must leave the question with the person"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vouch_below_the_threshold_is_not_decisive_and_at_it_is() {
+        let below = command_answer(COMMAND_READS_ONLY, 0.84);
+        assert!(!permission_for(DecisionMode::On, Some(&below), 0.85));
+        let at = command_answer(COMMAND_READS_ONLY, 0.85);
+        assert!(
+            permission_for(DecisionMode::On, Some(&at), 0.85),
+            "at the threshold is decisive, as every other `_above` here is"
+        );
+    }
+
+    /// **Unlike the supervisor's nudge, this one changes what runs**, so
+    /// `shadow` must not act on it — that is the whole difference between
+    /// the two modes.
+    #[test]
+    fn shadow_asks_and_changes_nothing_and_off_does_not_act_either() {
+        let answer = command_answer(COMMAND_READS_ONLY, 0.99);
+        assert!(
+            !permission_for(DecisionMode::Shadow, Some(&answer), 0.85),
+            "letting a line run without asking is changing what runs"
+        );
+        assert!(!permission_for(DecisionMode::Off, Some(&answer), 0.85));
+        assert!(!permission_for(DecisionMode::On, None, 0.85));
+    }
+
+    /// Every criterion the question offers is one of the four this module
+    /// names, so a model answering the question can only ever produce a
+    /// choice `permission_for` knows how to read.
+    #[test]
+    fn the_permission_question_offers_exactly_its_four_criteria() {
+        let Question::Choice { criteria, .. } = permission_question() else {
+            panic!("the permission question is a choice");
+        };
+        let mut names: Vec<&str> = criteria.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        let mut expected = vec![
+            COMMAND_READS_ONLY,
+            COMMAND_ORDINARY_WORK,
+            COMMAND_NEEDS_A_PERSON,
+            COMMAND_DESTRUCTIVE,
+        ];
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        assert!(
+            criteria.values().all(|text| !text.trim().is_empty()),
+            "every criterion says when it applies"
+        );
     }
 
     #[test]
