@@ -413,6 +413,60 @@ impl Gate {
             .unwrap_or_default()
     }
 
+    /// Asks the decision model about every command line the cell already
+    /// spells out, together, before the cell runs.
+    ///
+    /// **It answers nothing that the gate would not answer the same way.**
+    /// Each line goes through the very judge [`Gate::admit`] uses, keyed by
+    /// the same exact line, so a line pre-judged here and then run answers
+    /// from memory instead of asking twice — and a line this never saw is
+    /// met by the gate exactly as before. No person is asked here: a
+    /// confirmation belongs beside the call that needs it, not in a queue at
+    /// the head of a program.
+    ///
+    /// The win is the waiting. Serially, in the middle of a cell, each
+    /// unplaced line costs its own round trip to the decision model; here
+    /// they are asked at once, so a cell with six unplaced lines waits once
+    /// rather than six times.
+    pub(crate) fn prejudge(&self, lines: &[String]) {
+        let Some(decisions) = self.decisions.clone() else {
+            return;
+        };
+        if decisions.mode == crate::config::DecisionMode::Off || self.ladder.rung() != crate::permissions::Rung::Auto
+        {
+            return;
+        }
+        let unanswered: Vec<String> = lines
+            .iter()
+            .filter(|line| self.vouched.answer(line).is_none())
+            .cloned()
+            .collect();
+        if unanswered.is_empty() {
+            return;
+        }
+        // The same pause an approval takes: this is a wait on something
+        // outside the isolate, not the cell computing.
+        let _waiting = self.wait_clock.as_ref().map(WaitClock::pause);
+        let threads: Vec<_> = unanswered
+            .into_iter()
+            .map(|line| {
+                let decisions = decisions.clone();
+                let vouched = self.vouched.clone();
+                thread::spawn(move || {
+                    use crate::permissions::CommandJudge;
+                    ModelJudge {
+                        decisions: &decisions,
+                        vouched: &vouched,
+                    }
+                    .vouches_for(&line);
+                })
+            })
+            .collect();
+        for thread in threads {
+            let _ = thread.join();
+        }
+    }
+
     /// Whether this already-admitted call may run, asking the person when
     /// the rung says to.
     ///
@@ -575,5 +629,113 @@ impl Gate {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permissions::{Ladder, Rung};
+
+    fn bash(line: &str) -> Action {
+        let mut arguments = std::collections::BTreeMap::new();
+        arguments.insert("command".to_string(), line.to_string());
+        Action::new("bash", std::path::Path::new("/tmp/root"), arguments)
+    }
+
+    fn gate_with_a_model(rung: Rung) -> (Gate, mpsc::Receiver<Request>) {
+        let (gate, requests) = Gate::channel(Ladder::new(rung));
+        // A model name no request ever reaches: every test here answers from
+        // the gate's own memory, which is the property under test.
+        (
+            gate.with_decisions(
+                Some("unreachable-model".to_string()),
+                crate::config::DecisionMode::On,
+                0.85,
+            ),
+            requests,
+        )
+    }
+
+    /// **The pre-judgement and the gate share one memory, keyed by the exact
+    /// command line.** Without this the reading done at submit time buys
+    /// nothing: the call would ask again when it happens.
+    #[test]
+    fn a_line_already_vouched_for_runs_without_reaching_anybody() {
+        let (gate, requests) = gate_with_a_model(Rung::Auto);
+        gate.vouched
+            .remember("./scripts/build.sh --release".to_string(), true);
+        assert!(gate.admit(bash("./scripts/build.sh --release"), || false));
+        assert!(
+            requests.try_recv().is_err(),
+            "a remembered answer must cost no confirmation"
+        );
+    }
+
+    /// And a remembered *no* is a question, never a refusal — the ladder's
+    /// one structural property, held at the seam a person meets.
+    #[test]
+    fn a_line_vouched_against_is_put_to_the_person() {
+        let (gate, requests) = gate_with_a_model(Rung::Auto);
+        gate.vouched.remember("rm -rf /var/tmp/x".to_string(), false);
+        let asking = std::thread::spawn(move || gate.admit(bash("rm -rf /var/tmp/x"), || false));
+        let request = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the person must be asked");
+        assert_eq!(request.action().tool(), "bash");
+        assert!(request.respond(Decision::AllowOnce));
+        assert!(asking.join().unwrap());
+    }
+
+    /// `prejudge` is the `auto` rung's own machinery and nothing else's: the
+    /// rungs that ask about every command line must not have their questions
+    /// pre-answered, and `full` asks nothing to begin with.
+    #[test]
+    fn pre_judgement_happens_on_the_auto_rung_alone() {
+        for rung in [Rung::Manual, Rung::AcceptEdits, Rung::Full] {
+            let (gate, _requests) = gate_with_a_model(rung);
+            // The model is unreachable, so a rung that did ask would spend
+            // the decision timeout here and remember nothing either way.
+            gate.prejudge(&["some-unplaceable-line --now".to_string()]);
+            assert!(
+                gate.vouched.is_empty(),
+                "{} must not pre-judge anything",
+                rung.name()
+            );
+        }
+    }
+
+    /// With decisions off there is nothing to ask, and no thread is started
+    /// to discover that.
+    #[test]
+    fn pre_judgement_asks_nothing_with_decisions_off() {
+        let (gate, _requests) = Gate::channel(Ladder::new(Rung::Auto));
+        gate.prejudge(&["some-unplaceable-line --now".to_string()]);
+        assert!(gate.vouched.is_empty());
+
+        let (gate, _requests) = Gate::channel(Ladder::new(Rung::Auto));
+        let gate = gate.with_decisions(
+            Some("unreachable-model".to_string()),
+            crate::config::DecisionMode::Off,
+            0.85,
+        );
+        gate.prejudge(&["some-unplaceable-line --now".to_string()]);
+        assert!(gate.vouched.is_empty());
+    }
+
+    /// A line already answered is not asked about again, however many times
+    /// it appears — the bound that keeps a loop of one command cheap.
+    #[test]
+    fn a_line_already_answered_is_not_asked_again() {
+        let (gate, _requests) = gate_with_a_model(Rung::Auto);
+        gate.vouched.remember("already --answered".to_string(), true);
+        // Reaching the model would block for the decision timeout against a
+        // name that does not resolve; returning at once is the assertion.
+        let started = Instant::now();
+        gate.prejudge(&["already --answered".to_string()]);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "an answered line must not be asked again"
+        );
     }
 }

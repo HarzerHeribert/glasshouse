@@ -166,6 +166,24 @@ Three properties, and all three are load-bearing:
    A timeout is *not* an answer and is not remembered, so a slow gateway
    never bars a line for the rest of the session.
 
+**The lines a cell already spells out are judged together, before it runs.**
+A cell is a program and a program can be read: `runtime::commands` walks the
+submitted source and reports every `bash({command: "…"})` whose line is a
+string literal or a substitution-free template, in source order, up to 32 of
+them. Those go to the decision model at once, in parallel, and the answers
+land in the gate's own memory keyed by the same exact line — so the calls
+that follow read them instead of asking again, and a cell with six unplaceable
+lines waits once rather than six times. **Only what is certain is read out**:
+a line assembled from a variable, a call or a template with a substitution in
+it is not reported at all and meets the gate as it always did, because
+pre-answering a question about a line that never runs is worse than asking
+nothing. Nothing is granted here and nobody is asked: a confirmation belongs
+beside the call that needs it. This runs on the `auto` rung alone — the rungs
+that confirm every command line must not have their questions pre-answered,
+and `full` asks nothing to begin with. **Limit:** the gate exists only in a
+session with a terminal to ask at, so a headless `--task` run pre-judges
+nothing, which is also the run where nobody would have been asked.
+
 `shadow` asks and records but does not act, unlike the supervisor's nudge:
 letting a line run without asking *is* changing what runs. `off` does not
 ask. Without a model the rung is exactly its static half, which is the honest
