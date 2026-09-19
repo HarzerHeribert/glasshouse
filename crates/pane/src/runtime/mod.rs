@@ -19,7 +19,9 @@ pub mod observation;
 pub mod outcome;
 pub mod preview;
 pub mod reduce;
+pub mod reduce_filter;
 pub mod reduce_rules;
+pub mod reduce_sample;
 pub mod repair;
 pub mod state;
 
