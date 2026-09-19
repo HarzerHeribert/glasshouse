@@ -513,7 +513,14 @@ fn sidebar_count_is_live_and_narrow_terminal_stays_without_sidebar() {
     assert!(!render(80, &notebook).contains("handlers 1"));
     r.off_handler("noise");
     notebook.handlers = r.handlers();
-    assert!(render(140, &notebook).contains("handlers 0"));
+    // The count is live, and a count of none is shown by the line going away:
+    // the readout draws a handler row only when one is standing, so "handlers"
+    // vanishing is what proves the `off` reached the sidebar. Asserted against
+    // a render that is otherwise intact, so a broken draw cannot pass as an
+    // absent handler.
+    let after = render(140, &notebook);
+    assert!(!after.contains("handlers 1"), "the handler is still counted");
+    assert!(!after.contains("handlers"), "no handler row is drawn for none");
 }
 
 #[test]
