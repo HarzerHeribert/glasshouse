@@ -294,7 +294,8 @@ fn an_unconfigured_helper_roster_says_so_where_it_is_declared() {
     let configured = declarations::helper_declaration(true);
 
     assert_eq!(
-        configured, declarations::HELPER_DECLARATION,
+        configured,
+        declarations::HELPER_DECLARATION,
         "a configured session reads the table form unchanged"
     );
     assert!(
@@ -342,5 +343,8 @@ fn the_runtime_block_of_an_unhelped_session_carries_the_refusal() {
     // A caller that does not know renders the table form, so no existing
     // surface silently starts claiming helpers are missing.
     let unstated = prompt::render_runtime_reaching(globals, prompt::Reach::default());
-    assert!(!unstated.contains("no helper model is configured"), "{unstated}");
+    assert!(
+        !unstated.contains("no helper model is configured"),
+        "{unstated}"
+    );
 }

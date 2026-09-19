@@ -536,7 +536,67 @@ pub struct HelperCall {
 pub struct HelperRoute<'a> {
     pub model: &'a str,
     pub effort: wire::Effort,
+    /// This call's ceiling on the whole response, when the work itself
+    /// decides it rather than the roster. `None` means [`HelperSpec::max_tokens`].
+    ///
+    /// Only the reducer sets it, and [`reduction_cap`] says why: the answer a
+    /// reduction owes is a fraction of what it is reducing, and a constant is
+    /// the wrong shape at both ends of the range.
+    pub cap: Option<u32>,
 }
+
+impl<'a> HelperRoute<'a> {
+    /// A route that takes the spec's own declared cap.
+    #[must_use]
+    pub fn new(model: &'a str, effort: wire::Effort) -> Self {
+        Self {
+            model,
+            effort,
+            cap: None,
+        }
+    }
+
+    /// The ceiling this call will actually carry.
+    #[must_use]
+    pub fn cap_for(&self, spec: &HelperSpec) -> u32 {
+        self.cap.unwrap_or(spec.max_tokens)
+    }
+}
+
+/// How much answer a reduction of `input_tokens` is allowed.
+///
+/// **The invariant is not "at most 1,024" -- it is that a reduction stays a
+/// fraction of what it replaces.** A constant expressed that cheaply and got
+/// both ends wrong: a dense failure log could not be represented at all, and
+/// paid for a request that returned a refusal.
+///
+/// Measured on real `cargo test` failures, 2026-09-19, against the text a
+/// faithful reduction has to carry -- the result line plus every distinct
+/// failure with its assertion:
+///
+/// | log | input | irreducible core | core / input |
+/// |---|---|---|---|
+/// | 100 terse failures | ~6,644 tok | ~1,505 tok | 0.23 |
+/// | 30 verbose failures | ~3,722 tok | ~455 tok | 0.12 |
+///
+/// [`REDUCTION_DIVISOR`] is 4 because the worst measured shape needs 0.23 of
+/// its own size and a divisor of 6 does not fit it. The ceiling is where
+/// summarising stops being the answer: above it the honest reduction is
+/// partial, the provenance line says so, and the remedy is to narrow the
+/// command. The floor is a safety net that the `reduce_above_tokens`
+/// threshold means is rarely reached.
+#[must_use]
+pub fn reduction_cap(input_tokens: usize) -> u32 {
+    let scaled = u32::try_from(input_tokens / REDUCTION_DIVISOR as usize).unwrap_or(u32::MAX);
+    scaled.clamp(REDUCTION_FLOOR, REDUCTION_CEILING)
+}
+
+/// The fraction of its input a reduction may spend on its answer.
+pub const REDUCTION_DIVISOR: u32 = 4;
+/// The smallest answer a reduction is ever given.
+pub const REDUCTION_FLOOR: u32 = 512;
+/// The largest, past which a reduction is honestly partial rather than longer.
+pub const REDUCTION_CEILING: u32 = 4096;
 
 /// Run any helper in the roster: the one entry point a caller uses.
 ///
@@ -638,6 +698,7 @@ fn run_unprepared(
         };
     }
     if one_shot(spec) {
+        let cap = route.cap_for(spec);
         let spec = *spec;
         let model = route.model.to_string();
         let effort = route.effort;
@@ -646,7 +707,7 @@ fn run_unprepared(
         usage.begin_request();
         let worker_usage = usage.clone();
         match wait_for_helper(token, move || {
-            run_once_metered(&spec, &model, effort, &input, &worker_usage)
+            run_once_metered(&spec, &model, effort, cap, &input, &worker_usage)
         }) {
             HelperWait::Returned(call) => call,
             HelperWait::Cancelled => HelperCall {
@@ -725,13 +786,15 @@ fn one_shot(spec: &HelperSpec) -> bool {
 pub fn run_once(spec: &HelperSpec, route: HelperRoute<'_>, input: &str) -> HelperOutcome {
     let usage = HelperUsageTracker::new(route.model);
     usage.begin_request();
-    run_once_metered(spec, route.model, route.effort, input, &usage).outcome
+    let cap = route.cap_for(spec);
+    run_once_metered(spec, route.model, route.effort, cap, input, &usage).outcome
 }
 
 fn run_once_metered(
     spec: &HelperSpec,
     model: &str,
     effort: wire::Effort,
+    cap: u32,
     input: &str,
     usage: &HelperUsageTracker,
 ) -> HelperCall {
@@ -750,7 +813,7 @@ fn run_once_metered(
         &conversation,
         model,
         effort,
-        spec.max_tokens,
+        cap,
         Some(PURPOSE_HEADER),
     ) {
         Ok(turn) => {
@@ -1661,6 +1724,56 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "cancellation waited for the owned helper operation"
+        );
+    }
+
+    /// **A reduction is always a fraction of what it replaces.**
+    ///
+    /// The property, not three spot checks: across every size that can reach
+    /// the reducer, the allowance leaves a real saving and never falls below
+    /// the floor. The economics test in `reduce_oversized` spends a request
+    /// only when `tokens - allowance` clears half the threshold, and that is
+    /// guaranteed here rather than hoped for.
+    #[test]
+    fn a_reduction_is_always_a_fraction_of_what_it_replaces() {
+        // The threshold is the smallest input that reaches the reducer at
+        // all; above it, every decade up to a very large log.
+        for input in [2_049usize, 4_000, 6_644, 16_000, 50_000, 500_000] {
+            let cap = reduction_cap(input);
+            assert!(
+                cap >= REDUCTION_FLOOR,
+                "{input} tokens gave {cap}, below the floor"
+            );
+            assert!(
+                cap <= REDUCTION_CEILING,
+                "{input} tokens gave {cap}, above the ceiling"
+            );
+            assert!(
+                (cap as usize) < input,
+                "{input} tokens gave {cap}: a reduction that big replaces nothing"
+            );
+        }
+    }
+
+    /// The floor and the ceiling each bind at their own end, and the middle
+    /// of the range is neither -- so a change to one clamp cannot silently
+    /// swallow the whole function.
+    #[test]
+    fn the_floor_and_the_ceiling_each_bind_at_their_own_end() {
+        assert_eq!(reduction_cap(0), REDUCTION_FLOOR, "the floor binds below");
+        assert_eq!(
+            reduction_cap(1_000_000),
+            REDUCTION_CEILING,
+            "the ceiling binds above"
+        );
+        // Measured 2026-09-19: 100 terse `cargo test` failures are ~6,644
+        // tokens and need ~1,505 to name every distinct one. The constant
+        // 1,024 this replaced could not carry that and returned a refusal.
+        let measured = reduction_cap(6_644);
+        assert_eq!(measured, 1_661, "the divisor is what the middle uses");
+        assert!(
+            measured > 1_505,
+            "the measured irreducible core must fit: {measured}"
         );
     }
 }

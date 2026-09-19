@@ -740,11 +740,10 @@ pub fn render_runtime_reaching(globals: HostGlobals, reach: Reach<'_>) -> String
                 || binding.declaration.to_string(),
                 declarations::agent_declaration,
             ),
-            "helper" => reach
-                .helpers
-                .map_or_else(|| binding.declaration.to_string(), |configured| {
-                    declarations::helper_declaration(configured)
-                }),
+            "helper" => reach.helpers.map_or_else(
+                || binding.declaration.to_string(),
+                |configured| declarations::helper_declaration(configured),
+            ),
             _ => binding.declaration.to_string(),
         })
         .collect::<Vec<_>>()

@@ -406,6 +406,7 @@ fn call_reducer(fixture: &Fixture, judge: Option<HelperJudge<'_>>) -> HelperCall
         HelperRoute {
             model: "helper-model",
             effort: Effort::Low,
+            cap: None,
         },
         "a build log",
         context,

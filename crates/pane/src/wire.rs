@@ -361,11 +361,84 @@ pub fn request_body_for_surface(
         build_request_body(model, max_tokens, conversation, surface),
         model,
         effort,
-        max_tokens,
+        Allowance::Model(max_tokens),
     )
 }
 
-fn configure_effort(body: Vec<u8>, model: &str, effort: Effort, response_tokens: u32) -> Vec<u8> {
+/// The smallest `budget_tokens` a provider will accept, and the reason a
+/// small [`Allowance::Capped`] asks for no thinking at all.
+///
+/// The Anthropic-shaped leg requires `budget_tokens` to be **at least this
+/// and strictly less than `max_tokens`**. Those two together are unsatisfiable
+/// below 2 x this value, so a helper that declares a 1,024-token answer is
+/// not a helper that reasons a little -- it is one that does not reason.
+pub const THINKING_MIN_BUDGET: u32 = 1024;
+
+/// What a request's `max_tokens` means to the caller who supplied it.
+///
+/// The distinction exists because one number was being read two ways.
+/// [`configure_effort`] adds a reasoning budget on top of it, which is right
+/// for the model's own published maximum and inverts the intent of a
+/// deliberately small cap: `REDUCER` declares 1,024 tokens to keep a
+/// reduction terse, and the same arithmetic put **17,408** on the wire at
+/// `medium` -- sixteen seventeenths of it reasoning. Measured against 77
+/// lines of test output on 2026-09-19: `6886 in, 4227 out`. A reducer that
+/// emits 4,227 tokens has not reduced anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Allowance {
+    /// The model's own maximum ([`max_tokens_for`]). A thinking budget is
+    /// space the provider needs *beside* the answer, so it is added on top.
+    Model(u32),
+    /// A caller's ceiling on the whole response. Thinking fits inside it or
+    /// is not asked for; the number the caller wrote is the number that
+    /// bounds the answer.
+    Capped(u32),
+}
+
+impl Allowance {
+    /// The figure the caller supplied, whichever meaning it carries.
+    #[must_use]
+    pub fn declared(self) -> u32 {
+        match self {
+            Allowance::Model(tokens) | Allowance::Capped(tokens) => tokens,
+        }
+    }
+}
+
+/// The reasoning budget one effort level asks for, before any allowance
+/// narrows it.
+fn effort_budget(effort: Effort) -> u32 {
+    match effort {
+        Effort::Low => 4096,
+        Effort::Medium => 16384,
+        Effort::High => 32769,
+        Effort::Xhigh => 49152,
+        // `Default` never reaches here through [`configure_effort`]; this arm
+        // is `Max` and the compiler cannot see that, so it is spelled rather
+        // than a wildcard that would silently absorb a sixth level.
+        Effort::Max | Effort::Default => 65536,
+    }
+}
+
+/// What `max_tokens` a request built from this allowance will actually carry.
+///
+/// **The one answer, so a caller reasoning about cost cannot disagree with
+/// the wire.** `reduce_oversized` spends a helper request only when the
+/// saving is positive, and it computed that against the *declared* 1,024
+/// while 17,408 went out -- an economics test written to prevent exactly the
+/// waste it then permitted. It asks this function now.
+#[must_use]
+pub fn wire_max_tokens(model: &str, allowance: Allowance, effort: Effort) -> u32 {
+    if effort == Effort::Default || model.contains("claude") {
+        return allowance.declared();
+    }
+    match allowance {
+        Allowance::Model(response_tokens) => effort_budget(effort) + response_tokens,
+        Allowance::Capped(cap) => cap,
+    }
+}
+
+fn configure_effort(body: Vec<u8>, model: &str, effort: Effort, allowance: Allowance) -> Vec<u8> {
     if effort == Effort::Default {
         return body;
     }
@@ -378,19 +451,36 @@ fn configure_effort(body: Vec<u8>, model: &str, effort: Effort, response_tokens:
     if !model.contains("claude") {
         // A budget as well, for the Anthropic-shaped leg that reads one --
         // Glasshouse's codec keeps both and gives each target the form it
-        // uses. Leave response space above the thinking allocation.
-        let budget = match effort {
-            Effort::Low => 4096,
-            Effort::Medium => 16384,
-            Effort::High => 32769,
-            Effort::Xhigh => 49152,
-            // `Default` returned above; this arm is `Max` and the compiler
-            // cannot see that, so it is spelled rather than a wildcard that
-            // would silently absorb a sixth level.
-            Effort::Max | Effort::Default => 65536,
+        // uses.
+        let ladder = effort_budget(effort);
+        let budget = match allowance {
+            // Leave response space above the thinking allocation.
+            Allowance::Model(response_tokens) => {
+                value["max_tokens"] = serde_json::json!(ladder + response_tokens);
+                Some(ladder)
+            }
+            // **A declared cap is a cap.** `max_tokens` stays what the caller
+            // wrote and the budget is measured inside it, leaving half the
+            // allowance for the answer the caller actually asked for. Below
+            // [`THINKING_MIN_BUDGET`] no budget is expressible inside the cap
+            // at all, so none is asked for -- the effort word still rides
+            // along, and a provider that reasons adaptively still may.
+            Allowance::Capped(cap) => {
+                value["max_tokens"] = serde_json::json!(cap);
+                Some(ladder.min(cap / 2)).filter(|budget| *budget >= THINKING_MIN_BUDGET)
+            }
         };
-        value["thinking"] = serde_json::json!({"type":"enabled", "budget_tokens":budget});
-        value["max_tokens"] = serde_json::json!(budget + response_tokens);
+        match budget {
+            Some(budget) => {
+                value["thinking"] = serde_json::json!({"type":"enabled", "budget_tokens":budget});
+            }
+            None => {
+                value
+                    .as_object_mut()
+                    .expect("request is an object")
+                    .remove("thinking");
+            }
+        }
     }
     serde_json::to_vec(&value).expect("serialized request")
 }
@@ -902,7 +992,7 @@ fn send_errand_within(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
         effort,
-        max_tokens,
+        Allowance::Capped(max_tokens),
     );
 
     // Read on this thread, where the env lock a test may hold still applies.
@@ -1015,7 +1105,7 @@ pub fn send_turn_with_usage_configured(
         build_request_body(model, max_tokens, conversation, Surface::TextOnly),
         model,
         effort,
-        max_tokens,
+        Allowance::Capped(max_tokens),
     );
 
     let mut request = ureq::post(&url)
@@ -1467,7 +1557,7 @@ pub fn send_turn_streaming_on(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
         effort,
-        MAX_TOKENS,
+        Allowance::Model(MAX_TOKENS),
     );
 
     let mut request = ureq::post(&url)
@@ -2198,6 +2288,95 @@ mod effort_tests {
         // The word rides along on the translated leg too, because a budget
         // saturates and cannot say `xhigh` or `max`.
         assert_eq!(translated["output_config"]["effort"], "medium");
+    }
+
+    /// **A declared cap is a cap, at every level a person can pick.**
+    ///
+    /// `REDUCER` names 1,024 tokens to keep a reduction terse and the wire
+    /// carried 17,408 at `medium` -- the thinking ladder, sized for the task
+    /// model's 8,192-token response half, added on top of a cap that exists
+    /// to be small. Measured against 77 lines of test output on 2026-09-19:
+    /// `6886 in, 4227 out`. This is the invariant that makes that impossible.
+    #[test]
+    fn a_declared_cap_bounds_the_whole_response_at_every_effort() {
+        let conversation = Conversation {
+            system: "system".into(),
+            messages: vec![],
+        };
+        let levels = [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ];
+        // REDUCER's and ACCEPTANCE's real caps, plus two either side.
+        for cap in [512u32, 1024, 2048, 8192] {
+            for effort in levels {
+                let value: serde_json::Value = serde_json::from_slice(&configure_effort(
+                    build_request_body("deepseek-v4-flash", cap, &conversation, Surface::TextOnly),
+                    "deepseek-v4-flash",
+                    effort,
+                    Allowance::Capped(cap),
+                ))
+                .unwrap();
+
+                assert_eq!(
+                    value["max_tokens"].as_u64().unwrap(),
+                    u64::from(cap),
+                    "cap {cap} at {} must bound the whole response",
+                    effort.name()
+                );
+                assert_eq!(value["output_config"]["effort"], effort.name());
+                assert_eq!(
+                    wire_max_tokens("deepseek-v4-flash", Allowance::Capped(cap), effort),
+                    cap,
+                    "the figure a caller can reason about must equal the wire's"
+                );
+                if let Some(budget) = value
+                    .get("thinking")
+                    .and_then(|thinking| thinking["budget_tokens"].as_u64())
+                {
+                    assert!(
+                        budget >= u64::from(THINKING_MIN_BUDGET) && budget < u64::from(cap),
+                        "a budget must be at least {THINKING_MIN_BUDGET} and below the cap, got {budget} inside {cap}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The task model keeps every token it had. Tuning a helper's allowance
+    /// must not quietly narrow the model that does the work, so the figures
+    /// are spelled out rather than derived -- a future reader changing the
+    /// ladder has to change this test on purpose.
+    #[test]
+    fn the_task_paths_allowance_is_unchanged_at_every_effort() {
+        let conversation = Conversation {
+            system: "system".into(),
+            messages: vec![],
+        };
+        for (effort, budget) in [
+            (Effort::Low, 4096u64),
+            (Effort::Medium, 16384),
+            (Effort::High, 32769),
+            (Effort::Xhigh, 49152),
+            (Effort::Max, 65536),
+        ] {
+            let value: serde_json::Value = serde_json::from_slice(&request_body_configured(
+                &conversation,
+                "deepseek-v4-flash",
+                effort,
+            ))
+            .unwrap();
+            assert_eq!(value["thinking"]["budget_tokens"].as_u64().unwrap(), budget);
+            assert_eq!(
+                value["max_tokens"].as_u64().unwrap(),
+                budget + u64::from(MAX_TOKENS),
+                "the task path adds its reasoning budget on top, at {}",
+                effort.name()
+            );
+        }
     }
 
     /// Five levels a person can pick must be five things on the wire.

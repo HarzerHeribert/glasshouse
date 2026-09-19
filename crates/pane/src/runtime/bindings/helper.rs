@@ -80,10 +80,7 @@ pub(super) fn helper_callback(
     let _away = state.away_from_js();
     let call = crate::helpers::run(
         spec,
-        crate::helpers::HelperRoute {
-            model: &model,
-            effort,
-        },
+        crate::helpers::HelperRoute::new(&model, effort),
         &input,
         &state.profile,
         &state.glasshouse,
@@ -137,6 +134,6 @@ pub(super) fn helper_callback(
 /// A size, never the payload: the caller still holds the text, the record is
 /// persisted to the rollout, and a 4,000-line build log in a lane line is
 /// neither readable nor cheap.
-pub(super) fn asked_summary(input: &str) -> String {
+pub(crate) fn asked_summary(input: &str) -> String {
     format!("{} lines", thousands(input.lines().count() as u64))
 }

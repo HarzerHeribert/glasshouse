@@ -48,6 +48,9 @@ pub struct ReductionStats {
     pub failed: u64,
     /// Results served from the digest cache without a request.
     pub cached: u64,
+    /// Results the deterministic rules brought under the threshold on their
+    /// own, so no request was made and no cheap-model token was spent.
+    pub ruled: u64,
     /// Bytes of exact output handed to the reducer.
     pub bytes_in: u64,
     /// Bytes of reduction returned.
@@ -60,6 +63,7 @@ impl ReductionStats {
         self.made = self.made.saturating_add(other.made);
         self.failed = self.failed.saturating_add(other.failed);
         self.cached = self.cached.saturating_add(other.cached);
+        self.ruled = self.ruled.saturating_add(other.ruled);
         self.bytes_in = self.bytes_in.saturating_add(other.bytes_in);
         self.bytes_out = self.bytes_out.saturating_add(other.bytes_out);
     }

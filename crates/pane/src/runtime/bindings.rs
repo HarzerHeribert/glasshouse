@@ -25,7 +25,7 @@ use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
 use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence};
 use crate::runtime::preview::{
-    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, estimate_tokens, thousands,
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
 };
 use crate::runtime::state::{RecordedCall, RuntimeState, provenance};
 use crate::sandbox::profile::PermissionDenied;
@@ -36,8 +36,8 @@ mod agent;
 mod ask;
 mod console;
 mod decide;
-mod helper;
-use helper::{asked_summary, helper_callback};
+pub(super) mod helper;
+use helper::helper_callback;
 mod web;
 use console::console_callback;
 pub(crate) use decide::install_decide;
@@ -1247,9 +1247,9 @@ fn typed_result<'s>(
         // of "No failures."
         _ => {
             let reduction = if tool.name() == "bash" {
-                reduce_oversized(result, state)
+                crate::runtime::reduce::reduce_oversized(result, state)
             } else {
-                Reduction::NotAttempted
+                crate::runtime::reduce::Reduction::NotAttempted
             };
             let (value, preview) = build_bash(scope, result, &reduction);
             (value, preview, "Bash.Result")
@@ -1721,137 +1721,10 @@ fn build_glob<'s>(
     )
 }
 
-/// What became of a pushed reduction, for a caller that must tell "not needed"
-/// from "attempted and failed".
-///
-/// The distinction is the whole point (user ruling, 2026-09-10): a reducer is
-/// never handed a truncated log, so an output too large for the helper model
-/// fails the request — and a parent that cannot see that failure cannot do the
-/// one thing that fixes it, which is narrow the command and run it again. An
-/// absent key used to mean both "small enough to read yourself" and "we tried
-/// and could not", which are opposite instructions.
-enum Reduction {
-    /// Under the cap, or no helper configured: nothing was attempted.
-    NotAttempted,
-    Made(String),
-    /// Attempted and failed, with the one sentence the parent needs.
-    Failed(String),
-}
-
-/// `little-helpers.md`'s `CallSite::PostResult`: a command result the model
-/// would otherwise have to page is reduced by REDUCER, without the model
-/// spending a turn to ask.
-///
-/// **Cheap-model tokens are spent only to remove parent tokens, never to add
-/// a second view of a small output.** The trigger is `[helpers]
-/// reduce_above_tokens`, and above it a request is made only when the
-/// expected saving is positive: the output's estimated tokens minus the
-/// reducer's own `max_tokens` must exceed half the threshold. Below either
-/// line the parent reads the output itself.
-///
-/// Only [`typed_result`]'s command-output arm reaches here, so `read`,
-/// `context`, `edit`, `grep` and `glob` — every shape a model edits or quotes
-/// from — are excluded structurally. The exact `stdout` and `stderr` stay
-/// complete on the result; the reduction is one more property beside them,
-/// and a helper failing here is never fatal.
-fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction {
-    let threshold = state.reduce_above_tokens();
-    let tokens = estimate_tokens(&result.stdout) + estimate_tokens(&result.stderr);
-    if tokens <= threshold {
-        return Reduction::NotAttempted;
-    }
-    let Some(spec) = crate::helpers::HELPERS.iter().find(|spec| {
-        spec.call_sites
-            .contains(&crate::helpers::CallSite::PostResult)
-    }) else {
-        return Reduction::NotAttempted;
-    };
-    if tokens.saturating_sub(spec.max_tokens as usize) <= threshold / 2 {
-        return Reduction::NotAttempted;
-    }
-    let Ok((model, effort)) = state.helper_route(spec.name) else {
-        return Reduction::NotAttempted;
-    };
-
-    // Both streams, because a build writes its failures to whichever it
-    // likes and the reduction is of the output, not of one pipe.
-    let mut text = result.stdout.clone();
-    text.push_str(&result.stderr);
-    use sha2::{Digest, Sha256};
-    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
-    if let Some(reduction) = state.reduction_of(&digest) {
-        state.count_reduction(|stats| {
-            stats.cached += 1;
-            stats.bytes_out += reduction.len() as u64;
-        });
-        return Reduction::Made(reduction);
-    }
-    // After the cache and before the call: a served reduction spends neither
-    // a request nor a slot, and a claimed slot is always a request made.
-    if state.claim_pushed_helper_call().is_err() {
-        return Reduction::NotAttempted;
-    }
-    state.count_reduction(|stats| {
-        stats.attempted += 1;
-        stats.bytes_in += text.len() as u64;
-    });
-
-    let asked = asked_summary(&text);
-    let slot = state.begin_helper(crate::helpers::HelperRecord {
-        helper: spec.name.to_string(),
-        verb: spec.verb.to_string(),
-        asked: asked.clone(),
-        ..crate::helpers::HelperRecord::default()
-    });
-    let token = state.token.borrow().clone();
-    // A helper thinking is the cell waiting (`RuntimeState::away_from_js`);
-    // the call outlasts the whole cell limit by design — a one-shot errand
-    // ends on silence (`wire::SIDE_ERRAND_SILENCE`) and never on duration —
-    // so without this one helper could spend the cell's clock.
-    let _away = state.away_from_js();
-    let call = crate::helpers::run(
-        spec,
-        crate::helpers::HelperRoute {
-            model: &model,
-            effort,
-        },
-        &text,
-        &state.profile,
-        &state.glasshouse,
-        &state.session,
-        &token,
-    );
-    let ok = call.outcome.ok;
-    let cancelled = call.outcome.cancelled;
-    let reduction = call.outcome.text.clone();
-    state.finish_helper(slot, call);
-    if cancelled {
-        return Reduction::NotAttempted;
-    }
-    if !ok {
-        state.count_reduction(|stats| stats.failed += 1);
-        // The exact output is untouched and still on the result; what the
-        // parent is being told is that it will not get a summary of it unless
-        // it narrows what the command prints.
-        return Reduction::Failed(format!(
-            "This output was too large to summarise and no summary was made \
-             ({reduction}). `stdout` and `stderr` are complete and unchanged. \
-             Narrow what the command prints, or select the part you need, \
-             before relying on a summary."
-        ));
-    }
-    state.count_reduction(|stats| {
-        stats.made += 1;
-        stats.bytes_out += reduction.len() as u64;
-    });
-    state.remember_reduction(digest, reduction.clone());
-    Reduction::Made(reduction)
-}
-
 fn build_bash<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: &ToolResult,
-    reduction: &Reduction,
+    reduction: &crate::runtime::reduce::Reduction,
 ) -> (v8::Local<'s, v8::Value>, Value) {
     let object = v8::Object::new(scope);
     let stdout = js_string(scope, &result.stdout);
@@ -1882,13 +1755,13 @@ fn build_bash<'s>(
     // and failed, and neither when none was needed. Three states, because an
     // absent key alone cannot say which of the other two happened.
     match reduction {
-        Reduction::NotAttempted => {}
-        Reduction::Made(reduced) => {
+        crate::runtime::reduce::Reduction::NotAttempted => {}
+        crate::runtime::reduce::Reduction::Made(reduced) => {
             let value = js_string(scope, reduced);
             set_key(scope, object, "reduced", value);
             entries.push(("reduced".to_string(), Value::string(reduced)));
         }
-        Reduction::Failed(why) => {
+        crate::runtime::reduce::Reduction::Failed(why) => {
             let value = js_string(scope, why);
             set_key(scope, object, "reduction_error", value);
             entries.push(("reduction_error".to_string(), Value::string(why)));

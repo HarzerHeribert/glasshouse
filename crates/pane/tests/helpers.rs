@@ -398,11 +398,22 @@ fn a_one_shot_helper_records_every_reported_token_class() {
     let bodies = provider.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["output_config"]["effort"], "high");
-    assert_eq!(bodies[0]["thinking"]["budget_tokens"], 32_769);
-    assert_eq!(
-        bodies[0]["max_tokens"],
-        32_769 + REDUCER.max_tokens,
-        "reasoning budget must leave the reducer's own response allowance intact"
+    // **The declared cap is the cap.** This used to assert `32_769 +
+    // REDUCER.max_tokens`, on the reading that a reasoning budget must leave
+    // the reducer's response allowance intact -- which made the 1,024 tokens
+    // that exist to keep a reduction terse into a floor under 33,793, and put
+    // 4,227 output tokens on the wire against 77 lines of input. A budget
+    // must be at least 1,024 and strictly below `max_tokens`, so none is
+    // expressible inside this cap and none is asked for; the effort word
+    // still rides along.
+    assert_eq!(bodies[0]["max_tokens"], REDUCER.max_tokens);
+    assert!(
+        bodies[0]
+            .get("thinking")
+            .is_none_or(serde_json::Value::is_null),
+        "no thinking budget fits inside a {}-token answer cap: {}",
+        REDUCER.max_tokens,
+        bodies[0]
     );
     let records = runtime.helper_records();
     let usage = &records[0].usage;
@@ -486,6 +497,7 @@ fn a_multiturn_helper_sums_each_response_once_with_cache_coverage() {
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Medium,
+            cap: None,
         },
         "inspect this",
         &fixture.profile(),
@@ -567,6 +579,7 @@ fn cancellation_keeps_completed_usage_and_marks_the_inflight_request_unknown() {
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Medium,
+            cap: None,
         },
         "inspect this",
         &fixture.profile(),
@@ -613,6 +626,7 @@ fn preflight_carries_its_helper_usage_into_the_returned_record() {
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Low,
+            cap: None,
         },
         &fixture.profile(),
         &Glasshouse::None,
@@ -699,6 +713,7 @@ fn a_helper_runs_past_every_former_ceiling_and_answers() {
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Medium,
+            cap: None,
         },
         "take as long as you need",
         &fixture.profile(),
@@ -749,6 +764,7 @@ fn a_helper_that_stops_without_returning_is_not_a_healthy_answer() {
         pane::helpers::HelperRoute {
             model: "test-helper-model",
             effort: pane::wire::Effort::Medium,
+            cap: None,
         },
         "answer this",
         &fixture.profile(),
@@ -1353,14 +1369,95 @@ fn an_oversized_command_result_is_reduced_and_the_full_output_remains() {
         length / 4 > pane::runtime::preview::STDOUT_TOKEN_CAP,
         "the full output must still be there, and over the cap: {length} chars"
     );
-    assert_eq!(
-        reduction, "3 distinct failures",
-        "the reduction must reach the program as `reduced`"
+    assert!(
+        reduction.ends_with("3 distinct failures"),
+        "the reduction must reach the program as `reduced`: {reduction}"
+    );
+    // The reduction states its own lossiness, so a reader can tell three
+    // failures out of three from three out of two hundred without going and
+    // looking. A summary that looks complete is never re-checked.
+    assert!(
+        reduction.starts_with("[pane:reduction 4,000 lines / 66,893 bytes → "),
+        "the reduction must lead with what it left out: {reduction}"
+    );
+    assert!(
+        reduction.contains("`stdout` and `stderr` on this result are complete and unchanged"),
+        "the reduction must name where the whole output still is: {reduction}"
     );
     assert_eq!(
         provider.requests.load(Ordering::SeqCst),
         1,
         "one oversized result is one reduction"
+    );
+}
+
+/// **The deterministic rung spends no request at all.**
+///
+/// Four thousand passing test lines are the ordinary shape of the output
+/// that trips the threshold, and every one of them is already counted by the
+/// `test result:` line beneath it. A rule removes them for free; a model
+/// removing them costs a request, a wait, and -- measured on 2026-09-19 --
+/// up to 4,227 output tokens against 77 lines of input.
+///
+/// Its opposite is `an_oversized_command_result_is_reduced_and_the_full_output_remains`
+/// above: four thousand distinct `error: boom N` lines, which no rule may
+/// touch, still reach the helper and still cost exactly one request.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn rules_alone_bring_a_test_log_under_the_threshold_and_no_request_is_made() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-ruled");
+    let provider = provider("a reduction nobody should need");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-ruled"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = r#"printf 'test suite::case_%s ... ok\n' {1..4000}"#;
+    let (length, reduction) = reported(&runtime.run_cell(&report_program(command)));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        0,
+        "a rule removed every line; no cheap-model token may be spent"
+    );
+    assert!(
+        runtime.helper_records().is_empty(),
+        "no helper ran: {:?}",
+        runtime.helper_records()
+    );
+    assert!(
+        length / 4 > pane::runtime::preview::STDOUT_TOKEN_CAP,
+        "the exact output must still be there, and over the cap: {length} chars"
+    );
+    assert!(
+        reduction.contains("4000 passing or ignored test lines removed"),
+        "the reduction must say what it removed and how much: {reduction}"
+    );
+    // The rung's own elision markers and the lossiness line answer different
+    // questions -- which rule dropped what, and how big the whole thing was
+    // -- so both belong, and neither repeats the other's number.
+    assert!(
+        reduction.starts_with("[pane:reduction 4,000 lines / "),
+        "a rules-only reduction states its sizes too: {reduction}"
+    );
+    assert!(
+        reduction.contains("rules only, no model: passing-test-lines"),
+        "and says no model was spent, naming the rules that fired: {reduction}"
+    );
+    assert_eq!(
+        reduction.matches("[pane:reduction").count(),
+        1,
+        "exactly one lossiness line, never one per rung: {reduction}"
     );
 }
 
@@ -1396,10 +1493,18 @@ fn the_same_output_is_never_reduced_twice() {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
+    // Both halves carry the same served reduction, lossiness line included —
+    // a cached reduction is the same answer, so it says the same thing about
+    // itself.
+    let text = returned_text(&outcome);
+    let (first_half, second_half) = text.split_once("|").expect("two reductions");
     assert_eq!(
-        returned_text(&outcome),
-        "3 distinct failures|3 distinct failures",
-        "the second identical result must still carry the reduction"
+        first_half, second_half,
+        "the second identical result must still carry the reduction: {text}"
+    );
+    assert!(
+        first_half.starts_with("[pane:reduction ") && first_half.ends_with("3 distinct failures"),
+        "the served reduction keeps its lossiness line: {text}"
     );
     assert_eq!(
         provider.requests.load(Ordering::SeqCst),
@@ -1518,9 +1623,12 @@ fn only_a_command_results_output_is_ever_reduced() {
     let pane::runtime::preview::Value::String(text) = value else {
         panic!("expected a string, got {value:?}");
     };
-    assert_eq!(
-        text.head(),
-        "true|true|3 distinct failures",
+    // The shape under test is *which* results carry a reduction at all, so
+    // this reads the two flags and the presence of bash's reduction rather
+    // than its exact text — which now leads with its own lossiness line.
+    let head = text.head();
+    assert!(
+        head.starts_with("true|true|[pane:reduction ") && head.ends_with("3 distinct failures"),
         "jq's output is oversized and carries no reduction, while bash's still does: {outcome:?}"
     );
 
@@ -1575,10 +1683,10 @@ fn the_cell_ceiling_bounds_reductions_nobody_asked_for() {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
-    assert_eq!(
-        returned_text(&outcome),
-        "3 distinct failures|none",
-        "the call past the ceiling must be skipped, not thrown"
+    let text = returned_text(&outcome);
+    assert!(
+        text.starts_with("[pane:reduction ") && text.ends_with("3 distinct failures|none"),
+        "the call past the ceiling must be skipped, not thrown: {text}"
     );
     assert_eq!(
         provider.requests.load(Ordering::SeqCst),
@@ -1645,5 +1753,154 @@ fn a_pushed_reduction_leaves_slots_for_the_models_own_calls() {
         returned_text(&outcome),
         "reduced",
         "the model's own helper call must survive the pushed reductions"
+    );
+}
+
+/// **A crowded reduction says so, because nothing else can.**
+///
+/// A provider that truncates sets `stop_reason: "max_tokens"` and the call
+/// fails outright — that answer never becomes `reduced`. The dangerous case
+/// is the one this covers: an answer that stopped on its own with almost
+/// none of its allowance left. It reads exactly like a complete summary, and
+/// only the arithmetic between what it spent and what it was given can tell
+/// a reader to go and check `stdout`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_reduction_that_used_nearly_all_its_room_says_to_read_the_output_instead() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-crowded");
+    // 4,000 `error:` lines are ~16.7k tokens, so the scaled cap lands on its
+    // 4,096 ceiling; 4,000 output tokens is 98% of it.
+    let provider = provider_with_usage(
+        "3 distinct failures",
+        serde_json::json!({"input_tokens": 10, "output_tokens": 4000}),
+    );
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-crowded"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+    let (_, reduction) = reported(&runtime.run_cell(
+        "return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n",
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert!(
+        reduction.contains("of its 4,096-token allowance"),
+        "a crowded reduction must name what it spent against what it had: {reduction}"
+    );
+    assert!(
+        reduction.contains("read it as partial"),
+        "a crowded reduction must say plainly that it is partial: {reduction}"
+    );
+    assert!(
+        reduction.ends_with("3 distinct failures"),
+        "the answer itself still arrives: {reduction}"
+    );
+}
+
+/// **A roomy reduction does not cry wolf.**
+///
+/// The sibling of the test above, and the reason it is a separate one: a
+/// partial-answer warning on every reduction would be noise, and noise is
+/// how a real warning stops being read.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_reduction_with_room_to_spare_carries_no_warning() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-roomy");
+    let provider = provider("3 distinct failures");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-roomy"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+    let (_, reduction) = reported(&runtime.run_cell(
+        "return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n",
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    assert!(
+        !reduction.contains("read it as partial"),
+        "five output tokens against a 4,096 allowance is not crowded: {reduction}"
+    );
+    assert!(
+        reduction.starts_with("[pane:reduction "),
+        "it still states its sizes: {reduction}"
+    );
+}
+
+/// **A provider that truncates produces no `reduced` at all.**
+///
+/// The hard case, kept beside the soft one so the two are read together:
+/// `stop_reason: "max_tokens"` is a failed call, and a failed call carries
+/// `reduction_error` with the remedy rather than a half-summary the parent
+/// might trust.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_truncated_reduction_is_a_failure_and_never_reaches_the_program_as_an_answer() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-truncated");
+    let provider = scripted_provider(vec![serde_json::json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "3 distinct fail"}],
+        "stop_reason": "max_tokens",
+        "usage": {"input_tokens": 10, "output_tokens": 4096}
+    })]);
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-truncated"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+    let answer = returned_text(&runtime.run_cell(
+        "return (r.reduced === undefined ? \"none\" : \"reduced\")\n\
+         \x20 + \"|\" + (r.reduction_error === undefined ? \"none\" : r.reduction_error);\n",
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let (reduced, error) = answer.split_once('|').expect("two fields");
+    assert_eq!(
+        reduced, "none",
+        "a truncated answer must never arrive as `reduced`: {answer}"
+    );
+    assert!(
+        error.contains("`stdout` and `stderr` are complete and unchanged"),
+        "the failure names where the whole output still is: {answer}"
     );
 }

@@ -43,6 +43,7 @@ impl TaskSpend {
             made: current.made.saturating_sub(seen.made),
             failed: current.failed.saturating_sub(seen.failed),
             cached: current.cached.saturating_sub(seen.cached),
+            ruled: current.ruled.saturating_sub(seen.ruled),
             bytes_in: current.bytes_in.saturating_sub(seen.bytes_in),
             bytes_out: current.bytes_out.saturating_sub(seen.bytes_out),
         }
@@ -905,7 +906,7 @@ impl TaskState {
                 };
                 if let Some((record, judged)) = crate::helpers::check_completion_judged(
                     &evidence,
-                    crate::helpers::HelperRoute { model, effort },
+                    crate::helpers::HelperRoute::new(model, effort),
                     helper_context,
                     checker_judge,
                 ) {

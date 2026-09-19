@@ -334,7 +334,12 @@ fn a_result_above_the_configured_threshold_is_reduced_once_and_counted() {
         length / 4 < pane::runtime::preview::STDOUT_TOKEN_CAP,
         "the old cap must not be what fired: {length} chars"
     );
-    assert_eq!(reduction, "3 distinct failures");
+    // The answer arrives behind the line that says how much was left out.
+    assert!(
+        reduction.starts_with("[pane:reduction 600 lines / ")
+            && reduction.ends_with("3 distinct failures"),
+        "{reduction}"
+    );
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     let stats = runtime.reduction_stats();
     assert_eq!(stats.attempted, 1, "{stats:?}");
@@ -342,7 +347,9 @@ fn a_result_above_the_configured_threshold_is_reduced_once_and_counted() {
     assert_eq!(stats.failed, 0, "{stats:?}");
     assert_eq!(stats.cached, 0, "{stats:?}");
     assert_eq!(stats.bytes_in, length as u64, "{stats:?}");
-    assert_eq!(stats.bytes_out, "3 distinct failures".len() as u64);
+    // `bytes_out` measures the answer the program received, lossiness line
+    // included, so a served copy and a fresh one count the same value.
+    assert_eq!(stats.bytes_out, reduction.len() as u64);
 
     runtime.end_task();
     assert_eq!(runtime.reduction_stats(), Default::default());
@@ -370,16 +377,19 @@ fn an_identical_output_is_served_from_the_cache_and_counted() {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
-    assert_eq!(
-        returned_text(&outcome),
-        "3 distinct failures|3 distinct failures"
+    let text = returned_text(&outcome);
+    let (first, second) = text.split_once('|').expect("two reductions");
+    assert_eq!(first, second, "the served copy is the same answer: {text}");
+    assert!(
+        first.starts_with("[pane:reduction ") && first.ends_with("3 distinct failures"),
+        "{text}"
     );
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     let stats = runtime.reduction_stats();
     assert_eq!(stats.attempted, 1, "{stats:?}");
     assert_eq!(stats.made, 1, "{stats:?}");
     assert_eq!(stats.cached, 1, "{stats:?}");
-    assert_eq!(stats.bytes_out, 2 * "3 distinct failures".len() as u64);
+    assert_eq!(stats.bytes_out, 2 * first.len() as u64);
     let _ = std::fs::remove_dir_all(root);
 }
 

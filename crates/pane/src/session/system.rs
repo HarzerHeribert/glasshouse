@@ -106,7 +106,7 @@ pub(super) fn acceptance_block(
     session.interrupt.arm(token.clone());
     let record = crate::helpers::acceptance_list(
         task,
-        crate::helpers::HelperRoute { model, effort },
+        crate::helpers::HelperRoute::new(model, effort),
         session.profile,
         session.glasshouse,
         session.id,
@@ -527,7 +527,7 @@ pub(super) fn preflight_block(
     };
     let Some(judged) = crate::helpers::preflight_judged(
         &brief,
-        crate::helpers::HelperRoute { model, effort },
+        crate::helpers::HelperRoute::new(model, effort),
         helper_context,
         rank,
         judge,
