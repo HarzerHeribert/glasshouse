@@ -89,6 +89,12 @@ pub enum CallSite {
     Cell,
     /// Deriving the acceptance list from the request, before the first turn.
     Acceptance,
+    /// A cell that did not parse, before its failure reaches the parent.
+    ///
+    /// Its own site rather than [`CallSite::PostResult`]: there is no result
+    /// to be after, and `reduce.rs` finds the reducer by looking for that
+    /// one, so a second helper wearing it would make a `find` ambiguous.
+    ParseFailure,
 }
 
 /// One helper, entirely as data.
@@ -282,8 +288,61 @@ pub const ACCEPTANCE: HelperSpec = HelperSpec {
     call_sites: &[CallSite::Acceptance],
 };
 
+/// Repair a cell that failed to parse, and change nothing about what it
+/// means.
+///
+/// `tools` is empty and one turn: the whole failed program is handed in and
+/// the answer is one fence, so there is nothing to look up and nothing to
+/// compose. The host applies the fence, re-parses, and runs the cell -- so
+/// unlike every other helper, this one's answer changes what executes, which
+/// is why its preamble spends most of its length on the one line it must not
+/// cross.
+pub const MENDER: HelperSpec = HelperSpec {
+    name: "mend",
+    summary: "Repair the syntax of a cell that failed to parse, changing nothing about what it means.",
+    verb: "mending",
+    preamble: "You repair the syntax of a program that failed to parse. You are shown the \
+        parser's own error, the line it pointed at, and the whole program. It never ran, so \
+        there is nothing to undo and nothing to be careful of except what the program means.\n\
+        \n\
+        Answer with one fence and nothing else:\n\
+        \n\
+        ```pane-edit\n\
+        {\"cell\":7,\"replace\":\"exact text occurring once\",\"with\":\"replacement\"}\n\
+        ```\n\
+        \n\
+        `replace` must occur **exactly once** in the program exactly as it stands there — \
+        copy it from what you were shown rather than retyping it, and take as much \
+        surrounding text as you need to make it unique. `with` is what stands there instead. \
+        Nothing else in the program changes.\n\
+        \n\
+        **Fix the syntax. Change nothing about what the program means.** You are not \
+        improving this code and you are not its author: not a clearer name, not a tidier \
+        line, not a call you would have written differently, and above all not a statement \
+        removed to make the error go away. Deleting code parses beautifully and is the one \
+        answer that is always wrong. If the only way you can see to make it parse is to take \
+        something out, say so in one line instead of sending a fence.\n\
+        \n\
+        Most parse failures are punctuation: a quote that was never closed, a brace that was \
+        never matched, an escape that meant one thing to the language you were writing and \
+        another to the language you were writing it into. That last one is the common case \
+        here — a string built in one language and embedded in another carries two levels of \
+        escaping, and the fix is almost always to correct the levels rather than to rewrite \
+        the text.\n\
+        \n\
+        Send one fence. If you cannot see the fix, or the only fix you can see would change \
+        what the program does, say that in one line and send no fence — the program's author \
+        gets it back and is better placed than you are.",
+    tools: &[],
+    max_tokens: 1024,
+    max_turns: 1,
+    input: InputKind::Text,
+    output: OutputKind::Reduction,
+    call_sites: &[CallSite::ParseFailure],
+};
+
 /// The roster. **This array is the whole extension point.**
-pub const HELPERS: &[HelperSpec] = &[SCOUT, REDUCER, CHECKER, ACCEPTANCE];
+pub const HELPERS: &[HelperSpec] = &[SCOUT, REDUCER, CHECKER, ACCEPTANCE, MENDER];
 
 /// Find a helper by the name the model calls it with.
 pub fn lookup(name: &str) -> Option<&'static HelperSpec> {
@@ -1648,9 +1707,13 @@ mod tests {
         // offered to a cell.
         assert!(lookup("accept").is_some());
         assert!(!ACCEPTANCE.call_sites.contains(&CallSite::Cell));
+        // The mender (2026-09-19) is the fifth, and the first that repairs
+        // rather than reports: it is reached only from a parse failure, where
+        // nothing ran and so nothing can be undone.
+        assert!(lookup("mend").is_some());
         assert_eq!(
             HELPERS.len(),
-            4,
+            5,
             "the roster is the whole extension point; nothing else may be in it"
         );
     }
@@ -1686,6 +1749,28 @@ mod tests {
     #[test]
     fn every_helper_states_the_two_contracts_in_its_own_preamble() {
         for spec in HELPERS {
+            // **The mender is the one helper that proposes a change, because
+            // that is its whole job.** The three phrases below bind a helper
+            // that REPORTS: a wrong diagnosis the caller trusts is worse than
+            // no diagnosis, so it returns evidence and never a fix. A
+            // repairing helper needs the other discipline instead, asserted
+            // below -- exempting it from a sentence it cannot honestly say is
+            // not a hole, because the sentence it must say is stricter.
+            if spec.name == MENDER.name {
+                for phrase in [
+                    "Change nothing about what the program means",
+                    "you are not its author",
+                    "Deleting code parses beautifully",
+                ] {
+                    assert!(
+                        spec.preamble.contains(phrase),
+                        "`{}` must say `{phrase}`: it changes code, so it says what it may \
+                         never change",
+                        spec.name
+                    );
+                }
+                continue;
+            }
             for phrase in [
                 "you are returning evidence",
                 "Never propose a fix",

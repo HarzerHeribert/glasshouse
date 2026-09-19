@@ -367,6 +367,8 @@ pub struct HelperEfforts {
     pub check: crate::wire::Effort,
     /// The acceptance lister: fixed line forms from a request.
     pub accept: crate::wire::Effort,
+    /// The mender: the punctuation of a cell that did not parse.
+    pub mend: crate::wire::Effort,
 }
 
 impl HelperEfforts {
@@ -376,6 +378,7 @@ impl HelperEfforts {
             "reduce" => Some(self.reduce),
             "check" => Some(self.check),
             "accept" => Some(self.accept),
+            "mend" => Some(self.mend),
             // No silent provider-default fallback: a new helper must choose a
             // hard policy and become a config key before it can run.
             _ => None,
@@ -393,6 +396,11 @@ impl Default for HelperEfforts {
             reduce: crate::wire::Effort::Medium,
             check: crate::wire::Effort::High,
             accept: crate::wire::Effort::Low,
+            // A parse failure is punctuation, and the mender is shown the
+            // parser's own verdict on where it is -- there is nothing to
+            // deliberate about, and a model reasoning at length over a
+            // missing brace is spending the turn this exists to save.
+            mend: crate::wire::Effort::Low,
         }
     }
 }
@@ -1487,9 +1495,9 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
 fn parse_helper_efforts(value: &toml::Value) -> Result<HelperEfforts, String> {
     let table = table_of(value, "helpers.effort")?;
     for key in table.keys() {
-        if !["find", "reduce", "check", "accept"].contains(&key.as_str()) {
+        if !["find", "reduce", "check", "accept", "mend"].contains(&key.as_str()) {
             return Err(format!(
-                "pane.toml: unknown key `{key}` in [helpers.effort]; only `find`, `reduce`, `check` and `accept` are recognised"
+                "pane.toml: unknown key `{key}` in [helpers.effort]; only `find`, `reduce`, `check`, `accept` and `mend` are recognised"
             ));
         }
     }
@@ -1518,6 +1526,7 @@ fn parse_helper_efforts(value: &toml::Value) -> Result<HelperEfforts, String> {
         reduce: read("reduce", defaults.reduce)?,
         accept: read("accept", defaults.accept)?,
         check: read("check", defaults.check)?,
+        mend: read("mend", defaults.mend)?,
     })
 }
 

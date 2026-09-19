@@ -667,6 +667,12 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let mut rollout = Rollout::create(&rollout_path, session_id.clone(), &conversation.system)
         .map_err(|e| format!("could not open {}: {e}", rollout_path.display()))?;
 
+    // The live stream sits beside the rollout and shares its stem, so a tool
+    // that found one has found the other. On by default: an observability
+    // surface nobody knows to ask for is one nobody uses, and the cost is one
+    // short append per transition against a rollout that is far larger.
+    let observe = crate::observe::Observer::beside(&rollout_path, session_id.as_str());
+
     // A resumed conversation's cells are not replayed (`runtime-contract.md`
     // §4), so the notebook starts empty and pads: an earlier cell renders
     // with no view of its own rather than with the next task's.
@@ -686,6 +692,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
 
     glasshouse::emit_lifecycle(&glasshouse, &session_id, LifecycleEvent::SessionStart);
+    // Beside the lifecycle hook rather than instead of it: that one runs a
+    // `glasshouse` command and is silent when the binary is absent
+    // (`the_binary_emits_session_start_to_the_hook_command` pins it), while
+    // this one is a line in a file that needs nothing installed.
+    observe.session_begin(&rollout_path, &args.root);
 
     // The local store lives beside the rollout, so a project's notes travel
     // with the session that made them. `glasshouse.rs` owns the fallback
@@ -757,6 +768,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let session = Session {
         selected_profile: args.profile.clone(),
         pending_images: RefCell::new(images),
+        observe: observe.clone(),
         approval_gate,
         ask_gate,
         ladder: Some(ladder.clone()),
@@ -865,6 +877,10 @@ struct Session<'a> {
     /// and asks it to forget the interrupt a cancelled call has delivered.
     interrupt: &'a Interrupter,
     profile: &'a Profile,
+    /// The live event stream, for a program watching this session while it
+    /// works (`observe.rs`). `Observer::none()` is a session nobody is
+    /// watching and every emit on it is a no-op.
+    observe: crate::observe::Observer,
     /// Memory and hooks only, and optional: a session runs with no
     /// `glasshouse` binary anywhere.
     glasshouse: &'a Glasshouse,
@@ -1103,7 +1119,20 @@ fn run_task(
     // the UI thread that made them writes nothing itself.
     rollout.record_moves(session.ladder.as_ref());
     let (mode, started) = (session.mode.get(), std::time::SystemTime::now());
+    session.observe.task_begin(
+        task,
+        session.mode.get().name(),
+        session
+            .ladder
+            .as_ref()
+            .map_or("unset", |ladder| ladder.rung().name()),
+        &session.model.borrow(),
+    );
     let result = run_task_inner(task, session, transcript, rollout);
+    session.observe.task_end(match &result {
+        Ok(()) => "answered",
+        Err(reason) => reason.as_str(),
+    });
     rollout.record_moves(session.ladder.as_ref());
     if mode == RequestMode::Plan
         && let Some(plan) = modes::written_plan(session.profile.root(), started)
@@ -2044,6 +2073,21 @@ fn act_on(
         return Ok(step);
     }
 
+    // The pre-cell seam, and the one an observer is told about before
+    // anything runs: the source is parsed, the certain command lines are
+    // already known, and no side effect has happened yet. A line the program
+    // will assemble at runtime is deliberately absent and arrives as its own
+    // `command.judge` when it is made.
+    // The runtime's own number, not a count kept here: the span in this
+    // stream is then the same integer as the `cell` on the rollout's line,
+    // so a reader correlating the two files never has to translate.
+    let submitted = runtime.next_cell() as usize;
+    session.observe.cell_submit(
+        submitted,
+        &source,
+        description.as_deref(),
+        &crate::runtime::commands::literal_lines(&source),
+    );
     let before = crate::changes::Snapshot::capture(profile);
     let outcome = if lowered.is_some() {
         runtime.run_direct_frame(&source)
@@ -2052,6 +2096,15 @@ fn act_on(
     };
     let after = crate::changes::Snapshot::capture(profile);
     let changes = before.diff(&after);
+    session.observe.cell_end(
+        submitted,
+        match outcome.turn().record.outcome {
+            crate::runtime::outcome::CellOutcomeKind::Yielded => "yielded",
+            crate::runtime::outcome::CellOutcomeKind::Returned => "returned",
+            crate::runtime::outcome::CellOutcomeKind::Threw => "threw",
+        },
+        outcome.turn().record.calls.len(),
+    );
     let rollback = changes.is_some().then(|| (before.clone(), after.clone()));
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
@@ -3016,6 +3069,7 @@ mod tests {
         let live = Session {
             selected_profile: None,
             pending_images: RefCell::new(Vec::new()),
+            observe: crate::observe::Observer::none(),
             approval_gate: None,
             ask_gate: None,
             ladder: None,

@@ -1169,6 +1169,7 @@ mod tests {
         let memory = LocalMemory::new(&root);
         let interrupt = Interrupter::new(id.clone());
         let session = Session {
+            observe: crate::observe::Observer::none(),
             selected_profile: None,
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,
@@ -1243,6 +1244,7 @@ mod tests {
         let memory = LocalMemory::new(root);
         let interrupt = Interrupter::new(id.clone());
         let session = Session {
+            observe: crate::observe::Observer::none(),
             selected_profile: selected.map(str::to_string),
             pending_images: RefCell::new(Vec::new()),
             approval_gate: None,

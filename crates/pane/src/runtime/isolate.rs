@@ -30,13 +30,14 @@ use crate::events::BatchStore;
 use crate::events::batch::Batch;
 use crate::glasshouse::Glasshouse;
 use crate::runtime::bindings::{self, CellTrace};
-use crate::runtime::cell::{self, CellError, CompiledCell, LINE_OFFSET};
+use crate::runtime::cell::{self, CompiledCell, LINE_OFFSET};
 use crate::runtime::handles::{self, HandleMeta};
 use crate::runtime::marshal;
 use crate::runtime::outcome::{
     CellOutcome, CellOutcomeKind, CellRecord, CellTurn, HandleRecord, TERMINAL_JSON_CAP, Terminal,
 };
 use crate::runtime::preview::{self, ErrorValue, PREVIEW_TOKEN_CAP, StackFrame, Value};
+use crate::runtime::repair;
 use crate::runtime::state::{HeapGuard, RuntimeState};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
@@ -506,7 +507,7 @@ pub struct Runtime {
     /// it is set nothing in this type enters the isolate again — see
     /// [`Runtime::poisoned`].
     poisoned_by: Option<Poisoned>,
-    syntax_failure: Option<crate::runtime::repair::SyntaxFailure>,
+    syntax_failure: Option<repair::SyntaxFailure>,
 }
 
 impl Drop for Runtime {
@@ -1107,7 +1108,7 @@ impl Runtime {
     }
 
     /// The most recent parse failure, until another cell attempt or task end.
-    pub fn syntax_failure(&self) -> Option<&crate::runtime::repair::SyntaxFailure> {
+    pub fn syntax_failure(&self) -> Option<&repair::SyntaxFailure> {
         self.syntax_failure.as_ref()
     }
 
@@ -1190,8 +1191,19 @@ impl Runtime {
     /// (`sandbox-grants.md` §1.4), and a program that will not compile is a
     /// throw in the same turn slot. Nothing about a cell is an error of the
     /// runtime's.
+    /// One cell the model sent, with one chance at having its punctuation
+    /// repaired before the failure costs the parent a turn — see
+    /// [`crate::runtime::repair::mend`] for what that is and why the single
+    /// attempt is structural rather than counted.
     pub fn run_cell(&mut self, source: &str) -> CellOutcome {
-        self.run_program(source, None)
+        let outcome = self.run_program(source, None);
+        let failed = self.syntax_failure.as_ref();
+        let Some(mended) = repair::mend_after(&self.state, failed, &outcome) else {
+            return outcome;
+        };
+        let mut repaired = self.run_program(&mended.amended, None);
+        repair::announce(&mut repaired, &mended.note);
+        repaired
     }
 
     /// Runs one frame lowered from direct provider tool calls.
@@ -1298,10 +1310,9 @@ impl Runtime {
             Ok(compiled) => compiled,
             Err(error) => {
                 if let cell::CellError::Parse { line, column, .. } = &error {
-                    self.syntax_failure =
-                        crate::runtime::repair::SyntaxFailure::new(cell, source, *line, *column);
+                    self.syntax_failure = repair::SyntaxFailure::new(cell, source, *line, *column);
                 }
-                let value = compile_error_value(&error);
+                let value = cell::error_value(&error);
                 return self.finish(
                     cell,
                     source,
@@ -1320,7 +1331,7 @@ impl Runtime {
         // the model's own line and column, in the turn that wrote it.
         if let Some((name, offset)) = self.first_undefined_name(&compiled) {
             let (line, column) = cell::line_and_column(source, offset);
-            let value = compile_error_value(&cell::CellError::UndefinedName { name, line, column });
+            let value = cell::error_value(&cell::CellError::UndefinedName { name, line, column });
             return self.finish(
                 cell,
                 source,
@@ -2468,19 +2479,6 @@ fn plain_error(class: &str, message: &str) -> ErrorValue {
         message: message.to_string(),
         line: None,
         column: None,
-        stack: Vec::new(),
-    }
-}
-
-fn compile_error_value(error: &CellError) -> ErrorValue {
-    let (line, column) = error
-        .position()
-        .map_or((None, None), |(l, c)| (Some(l), Some(c)));
-    ErrorValue {
-        class: error.class().to_string(),
-        message: error.message(),
-        line,
-        column,
         stack: Vec::new(),
     }
 }

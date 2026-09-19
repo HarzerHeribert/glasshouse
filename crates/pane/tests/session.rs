@@ -7202,3 +7202,109 @@ fn a_poisoned_inherited_global_config_never_reaches_the_session() {
          inherited from the process environment: {request}"
     );
 }
+
+/// The live event stream: a session announces itself, its task and each cell
+/// **before** the work happens, so a program tailing the file can say what is
+/// happening rather than only what happened.
+///
+/// The rollout answers the second question and cannot answer the first: its
+/// `cell` line is written when the cell is over. This asserts the ordering
+/// that makes the difference — `cell.submit` lands before the command inside
+/// that cell has run, which is the whole reason the file exists.
+#[test]
+fn the_event_stream_announces_a_cell_before_it_runs() {
+    let root = scratch_dir("observe-root");
+    let rollout = root.join("rollout.jsonl");
+    let marker = root.join("the-cell-ran");
+    let (base_url, _bodies) = start_fake_provider(vec![
+        assistant_reply(&format!(
+            "```pane\nawait bash({{ command: \"touch {}\" }});\nreturn 1;\n```",
+            marker.display()
+        )),
+        assistant_reply("done\n<!-- pane:done -->"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(&root, &rollout, "sess-observe", "go", &base_url, None);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = root.join("rollout.events.jsonl");
+    let text = fs::read_to_string(&events)
+        .unwrap_or_else(|e| panic!("no stream beside the rollout at {}: {e}", events.display()));
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every line is one JSON object"))
+        .collect();
+    let kinds: Vec<&str> = lines
+        .iter()
+        .map(|line| line["kind"].as_str().expect("a kind"))
+        .collect();
+
+    for expected in [
+        "session.begin",
+        "task.begin",
+        "cell.submit",
+        "cell.end",
+        "task.end",
+    ] {
+        assert!(kinds.contains(&expected), "no {expected} in {kinds:?}");
+    }
+
+    // The ordering that matters: submitted before run, ended after.
+    let submit = kinds.iter().position(|k| *k == "cell.submit").unwrap();
+    let end = kinds.iter().position(|k| *k == "cell.end").unwrap();
+    let task_begin = kinds.iter().position(|k| *k == "task.begin").unwrap();
+    assert!(task_begin < submit, "the task opens before its first cell");
+    assert!(submit < end, "a cell is announced before it is finished");
+
+    // `cell.submit` carries what a reader at that seam would decide on: the
+    // source, and the command line the program spells out.
+    let submitted = &lines[submit];
+    assert_eq!(
+        submitted["span"], lines[end]["span"],
+        "one span, two halves"
+    );
+    let commands = submitted["commands"]
+        .as_array()
+        .expect("certain command lines");
+    assert!(
+        commands.iter().any(|c| c
+            .as_str()
+            .is_some_and(|c| c.starts_with("touch ") && c.contains("the-cell-ran"))),
+        "the literal command line is named before it runs: {commands:?}"
+    );
+    assert!(
+        submitted["program"]
+            .as_str()
+            .is_some_and(|s| s.contains("await bash(")),
+        "the whole program is carried for a reader that may refuse it"
+    );
+    // Every line keeps the envelope's own `source`: the program is spelled
+    // `program` precisely so it cannot displace it, which it once did.
+    for (line, kind) in lines.iter().zip(&kinds) {
+        assert_eq!(
+            line["source"].as_str(),
+            Some("session/sess-observe"),
+            "{kind} lost the envelope's source"
+        );
+    }
+
+    // And the span number is the rollout's own cell number, so a reader
+    // correlating the two files never has to translate between them.
+    let rollout_text = fs::read_to_string(&rollout).unwrap();
+    let cell_number = rollout_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|line| line["kind"] == "cell")
+        .and_then(|line| line["cell"].as_u64())
+        .expect("the rollout recorded a cell");
+    assert_eq!(
+        submitted["cell"].as_u64(),
+        Some(cell_number),
+        "the stream's cell number is the rollout's"
+    );
+}
