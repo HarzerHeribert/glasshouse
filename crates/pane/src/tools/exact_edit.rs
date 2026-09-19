@@ -84,9 +84,14 @@ pub fn apply(
         return Err("replacement would make no change".into());
     }
     let source = open(profile, path, expected_sha256)?;
-    let offset = locate(&source.before, expected).map_err(|reason| match reason {
-        Match::Missing => EditError::new("missing_match", "exact match was not found"),
-        Match::Ambiguous => EditError::new("ambiguous_match", "exact match is ambiguous"),
+    // The kind is named in the message as well as the field: `Display` is
+    // all a `ToolError` carries, and `abi::telemetry` reads these words to
+    // tell a mutation conflict from an ordinary runtime failure.
+    let offset = locate(&source.before, expected).map_err(|reason| {
+        EditError::new(
+            reason.kind(),
+            format!("{}: {}", reason.kind(), reason.sentence()),
+        )
     })?;
     let mut after = String::with_capacity(source.before.len() - expected.len() + replacement.len());
     after.push_str(&source.before[..offset]);
@@ -138,15 +143,11 @@ pub fn apply_hunks(
     // cannot depend on what an earlier hunk changed.
     let mut located: Vec<(usize, usize)> = Vec::with_capacity(olds.len());
     for (index, old) in olds.iter().enumerate() {
-        let offset = locate(&source.before, old).map_err(|reason| match reason {
-            Match::Missing => EditError::new(
-                "missing_match",
-                format!("hunk {index} (missing_match): exact match was not found"),
-            ),
-            Match::Ambiguous => EditError::new(
-                "ambiguous_match",
-                format!("hunk {index} (ambiguous_match): exact match is ambiguous"),
-            ),
+        let offset = locate(&source.before, old).map_err(|reason| {
+            EditError::new(
+                reason.kind(),
+                format!("hunk {index} ({}): {}", reason.kind(), reason.sentence()),
+            )
         })?;
         located.push((offset, index));
     }
@@ -158,7 +159,11 @@ pub fn apply_hunks(
         if first_offset + olds[first].len() > second_offset {
             return Err(EditError::new(
                 "overlapping_hunks",
-                format!("hunks {first} and {second} (overlapping_hunks): their matches overlap"),
+                format!(
+                    "hunks {first} and {second} (overlapping_hunks): their matches overlap at \
+                     line {}; narrow one of them so they cover different text",
+                    line_at(&source.before, second_offset)
+                ),
             ));
         }
     }
@@ -192,9 +197,105 @@ struct Source {
     before_hash: String,
 }
 
+/// Why a hunk's text is not at exactly one place, and where it is instead.
+///
+/// **A refusal is a diagnosis, never a second matching mode.** Only an exact,
+/// unique match is ever written; everything here exists so the next attempt
+/// can be a correction rather than another reading of the file.
 enum Match {
-    Missing,
-    Ambiguous,
+    /// The text occurs nowhere, with a proven near miss when one exists.
+    Missing(Option<NearMiss>),
+    /// The text occurs more than once, at these 1-based lines.
+    Ambiguous {
+        /// The first [`SHOWN_MATCHES`] lines a match starts on.
+        lines: Vec<usize>,
+        /// How many matches were counted, which stops at [`COUNTED_MATCHES`].
+        total: usize,
+        /// Whether counting stopped there rather than at the last match.
+        capped: bool,
+    },
+}
+
+/// Where the same text sits under one whitespace or line-ending difference.
+///
+/// The cause is proven by re-finding the text under that one normalisation,
+/// not guessed from the shape of the anchor.
+struct NearMiss {
+    cause: &'static str,
+    line: usize,
+}
+
+/// How many match positions a refusal names before it stops listing them.
+/// Five is enough to see the pattern a sixth would repeat.
+const SHOWN_MATCHES: usize = 5;
+
+/// Where counting matches stops. Past this an anchor is hopeless rather than
+/// merely ambiguous, and the exact figure would not change what to do about
+/// it; stopping also bounds the scan a one-character anchor would otherwise
+/// run over a 16 MiB file.
+const COUNTED_MATCHES: usize = 1_000;
+
+/// The longest anchor the near-miss probe will try to place. A refusal is
+/// rare, but it must not become the expensive path.
+const PROBE_LINES: usize = 40;
+
+/// How many candidate start lines the probe verifies before giving up. An
+/// anchor whose first line is blank matches everywhere, and that must not
+/// turn a diagnosis into a scan of the file for every one of them.
+const PROBE_CANDIDATES: usize = 64;
+
+impl Match {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Missing(_) => "missing_match",
+            Self::Ambiguous { .. } => "ambiguous_match",
+        }
+    }
+
+    /// What the refusal says, without the hunk prefix a caller may add.
+    fn sentence(&self) -> String {
+        match self {
+            Self::Missing(None) => "exact match was not found".to_string(),
+            Self::Missing(Some(near)) => format!(
+                "exact match was not found, but the same text is at line {} with {}; \
+                 copy it from the file rather than retyping it",
+                near.line, near.cause
+            ),
+            Self::Ambiguous {
+                lines,
+                total,
+                capped,
+            } => format!(
+                "this text occurs {}{} times, at {}; extend the anchor with a \
+                 neighbouring line so it occurs once",
+                if *capped { "more than " } else { "" },
+                total,
+                places(lines, *total)
+            ),
+        }
+    }
+}
+
+/// `lines 610 and 618`, or `lines 3, 5, 7, 9, 11 and 2 more`.
+fn places(lines: &[usize], total: usize) -> String {
+    let named: Vec<String> = lines.iter().map(usize::to_string).collect();
+    if named.is_empty() {
+        return "no line this refusal could name".to_string();
+    }
+    let rest = total.saturating_sub(named.len());
+    let noun = if named.len() == 1 && rest == 0 {
+        "line"
+    } else {
+        "lines"
+    };
+    let list = if rest > 0 {
+        format!("{} and {rest} more", named.join(", "))
+    } else if let Some((last, head)) = named.split_last().filter(|(_, head)| !head.is_empty()) {
+        format!("{} and {last}", head.join(", "))
+    } else {
+        named.join(", ")
+    };
+    format!("{noun} {list}")
 }
 
 fn open(profile: &Profile, path: &Path, expected_sha256: &str) -> Result<Source, EditError> {
@@ -242,22 +343,150 @@ fn open(profile: &Profile, path: &Path, expected_sha256: &str) -> Result<Source,
 
 fn locate(before: &str, expected: &str) -> Result<usize, Match> {
     let mut matches = before.match_indices(expected);
-    let Some((offset, _)) = matches.next() else {
-        return Err(Match::Missing);
+    let Some((first, _)) = matches.next() else {
+        return Err(Match::Missing(near_miss(before, expected)));
     };
-    if matches.next().is_some() {
-        return Err(Match::Ambiguous);
+    let Some((second, _)) = matches.next() else {
+        return Ok(first);
+    };
+    // Offsets arrive ascending, so one forward walk counts every line rather
+    // than each one counting from the start of the file again.
+    let mut walk = Lines::new(before);
+    let mut lines = vec![walk.at(first), walk.at(second)];
+    let mut total = 2;
+    for (offset, _) in matches {
+        total += 1;
+        if lines.len() < SHOWN_MATCHES {
+            lines.push(walk.at(offset));
+        }
+        if total == COUNTED_MATCHES {
+            return Err(Match::Ambiguous {
+                lines,
+                total,
+                capped: true,
+            });
+        }
     }
-    Ok(offset)
+    Err(Match::Ambiguous {
+        lines,
+        total,
+        capped: false,
+    })
+}
+
+/// The 1-based line `offset` falls on, counted the way a reader counts.
+///
+/// `\n` cannot occur inside a multi-byte sequence, so counting bytes is
+/// counting lines whatever the text holds.
+fn line_at(before: &str, offset: usize) -> usize {
+    before[..offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+/// [`line_at`] for ascending offsets, counted once across the text instead
+/// of from the start for each. The two agree by construction, and
+/// `the_walking_counter_agrees_with_the_direct_one` keeps them that way.
+struct Lines<'a> {
+    text: &'a str,
+    counted_to: usize,
+    line: usize,
+}
+
+impl<'a> Lines<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            counted_to: 0,
+            line: 1,
+        }
+    }
+    fn at(&mut self, offset: usize) -> usize {
+        self.line += self.text[self.counted_to..offset]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        self.counted_to = offset;
+        self.line
+    }
+}
+
+/// Where the anchor sits under one proven whitespace or line-ending
+/// difference, or `None` when nothing places it.
+///
+/// **Nothing here feeds [`locate`].** It produces a line number for a
+/// sentence; the edit that follows still has to match exactly and uniquely.
+fn near_miss(before: &str, expected: &str) -> Option<NearMiss> {
+    line_ending_miss(before, expected).or_else(|| whitespace_miss(before, expected))
+}
+
+fn line_ending_miss(before: &str, expected: &str) -> Option<NearMiss> {
+    if expected.contains('\n') && !expected.contains('\r') {
+        let crlf = expected.replace('\n', "\r\n");
+        if let Some(offset) = before.find(&crlf) {
+            return Some(NearMiss {
+                cause: "CRLF line endings",
+                line: line_at(before, offset),
+            });
+        }
+    }
+    if expected.contains("\r\n") {
+        let lf = expected.replace("\r\n", "\n");
+        if let Some(offset) = before.find(&lf) {
+            return Some(NearMiss {
+                cause: "LF line endings",
+                line: line_at(before, offset),
+            });
+        }
+    }
+    None
+}
+
+/// The three differences worth naming, in the order a reader meets them.
+const NORMALISERS: [(&str, fn(&str) -> &str); 3] = [
+    ("different trailing whitespace", str::trim_end),
+    ("different indentation", str::trim_start),
+    ("different leading and trailing whitespace", str::trim),
+];
+
+fn whitespace_miss(before: &str, expected: &str) -> Option<NearMiss> {
+    let wanted: Vec<&str> = expected.lines().collect();
+    if wanted.is_empty() || wanted.len() > PROBE_LINES {
+        return None;
+    }
+    let have: Vec<&str> = before.lines().collect();
+    let last_start = have.len().checked_sub(wanted.len())?;
+    for (cause, normalise) in NORMALISERS {
+        let first = normalise(wanted[0]);
+        let mut tried = 0usize;
+        for start in 0..=last_start {
+            if normalise(have[start]) != first {
+                continue;
+            }
+            tried += 1;
+            if tried > PROBE_CANDIDATES {
+                break;
+            }
+            if wanted
+                .iter()
+                .zip(&have[start..])
+                .all(|(want, has)| normalise(want) == normalise(has))
+            {
+                return Some(NearMiss {
+                    cause,
+                    line: start + 1,
+                });
+            }
+        }
+    }
+    None
 }
 
 fn changed_lines(before: &str, offset: usize, expected: &str, replacement: &str) -> ChangedLines {
     ChangedLines {
-        start: before[..offset]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1,
+        start: line_at(before, offset),
         before: line_count(expected),
         after: line_count(replacement),
     }
@@ -367,4 +596,49 @@ fn install(temp: &Path, target: &Path) -> Result<(), EditError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The walking counter exists only so a run of ascending offsets is not
+    /// counted from the start of the file each time. If it ever disagreed
+    /// with [`line_at`], a refusal would name a line the result does not.
+    #[test]
+    fn the_walking_counter_agrees_with_the_direct_one() {
+        let text = "a\nbb\n\nccc\ndddd\ne\n";
+        let mut walk = Lines::new(text);
+        let mut offset = 0;
+        while offset <= text.len() {
+            assert_eq!(
+                walk.at(offset),
+                line_at(text, offset),
+                "offset {offset} of {text:?}"
+            );
+            offset += 1;
+        }
+    }
+
+    /// `line_at` counts `\n` bytes, and a multi-byte character cannot hold
+    /// one — so a file of them still reports the line a reader counts.
+    #[test]
+    fn a_multi_byte_file_reports_the_line_a_reader_counts() {
+        let text = "straße\nΩmega\n🙂🙂🙂\nziel\n";
+        let offset = text.find("ziel").expect("present");
+        assert_eq!(line_at(text, offset), 4);
+        let mut walk = Lines::new(text);
+        assert_eq!(walk.at(offset), 4);
+    }
+
+    #[test]
+    fn places_names_a_pair_a_list_and_a_remainder() {
+        assert_eq!(places(&[610, 618], 2), "lines 610 and 618");
+        assert_eq!(
+            places(&[3, 5, 7, 9, 11], 7),
+            "lines 3, 5, 7, 9, 11 and 2 more"
+        );
+        assert_eq!(places(&[42], 1), "line 42");
+        assert_eq!(places(&[], 0), "no line this refusal could name");
+    }
 }

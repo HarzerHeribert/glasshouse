@@ -1,6 +1,6 @@
 //! Deterministic, bounded source context assembled without subprocesses.
 use crate::sandbox::profile::{Access, Profile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -29,12 +29,12 @@ const SKIP: &[&str] = &[
     ".venv",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineRange {
     pub start: usize,
     pub end: usize,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextRole {
     CompleteFile,
@@ -47,7 +47,7 @@ pub enum ContextRole {
     Caller,
     Test,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceExcerpt {
     pub role: ContextRole,
     pub path: String,
@@ -55,7 +55,7 @@ pub struct SourceExcerpt {
     pub text: String,
     pub complete: bool,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceContext {
     pub path: String,
     pub sha256: String,
@@ -93,6 +93,55 @@ impl SourceContext {
             o.push_str(&format!("omission: {x}\n"))
         }
         o
+    }
+
+    /// Sheds lowest-ranked supporting excerpts until `fits` is satisfied,
+    /// answering whether it became satisfiable.
+    ///
+    /// `supporting` is assembled in rank order -- imports, then nearby
+    /// definitions, then callers and tests -- so its tail is always the
+    /// least valuable thing still present, and a caller needing room takes
+    /// it from there without deciding anything itself.
+    ///
+    /// **One omission carrying a count, never a line per excerpt.** A note
+    /// per shed is about eighty characters, so shedding a dozen short
+    /// excerpts can add more text than it removes and the loop stops
+    /// converging. The single note is rewritten in place as the count grows,
+    /// which also keeps it inside every `fits` measurement after the first
+    /// shed rather than arriving as a surprise at the end.
+    ///
+    /// **The target is never shed.** It is what was asked for and what an
+    /// `edit` binds to byte-exact, so a context carries it whole or is not
+    /// delivered at all; there is no narrowing that leaves half a definition
+    /// behind for something to edit against.
+    fn shed_until(&mut self, note: fn(usize) -> String, fits: impl Fn(&Self) -> bool) -> bool {
+        let mut shed = 0usize;
+        let mut at: Option<usize> = None;
+        while !fits(self) {
+            if self.supporting.pop().is_none() {
+                return false;
+            }
+            shed += 1;
+            match at {
+                Some(index) => self.omissions[index] = note(shed),
+                None => {
+                    at = Some(self.omissions.len());
+                    self.omissions.push(note(shed));
+                }
+            }
+        }
+        true
+    }
+
+    pub fn narrow_to(&mut self, budget: usize) -> bool {
+        self.shed_until(
+            |shed| {
+                format!(
+                    "{shed} lower-ranked supporting excerpt(s) omitted to fit this turn's feedback budget"
+                )
+            },
+            |context| context.render().chars().count() <= budget,
+        )
     }
 }
 
@@ -209,12 +258,18 @@ pub fn pack(
         complete,
         omissions,
     };
-    while result.render().len() > RENDER_CAP && !result.supporting.is_empty() {
-        result.supporting.pop();
-        result
-            .omissions
-            .push("one lower-ranked supporting excerpt omitted to fit the delivery cap".into());
-    }
+    // Bytes here, characters in `narrow_to`: this cap bounds one rendered
+    // context and the turn budget counts what the console keeps. The policy
+    // -- which excerpt goes, and what that says -- is `shed_one`'s either
+    // way, so the two measures cannot disagree about the order.
+    // Bytes here, characters in `narrow_to`: this cap bounds one rendered
+    // context and the turn budget counts what the console keeps. Which
+    // excerpt goes, and what that says, is `shed_until`'s either way, so the
+    // two measures cannot disagree about the order.
+    result.shed_until(
+        |shed| format!("{shed} lower-ranked supporting excerpt(s) omitted to fit the delivery cap"),
+        |context| context.render().len() <= RENDER_CAP,
+    );
     if result.render().len() > RENDER_CAP {
         return Err(ContextError(format!(
             "context exceeds the {RENDER_CAP} byte render cap; nothing packed"

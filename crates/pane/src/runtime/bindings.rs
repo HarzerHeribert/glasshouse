@@ -23,7 +23,9 @@ use crate::runtime::excerpt::{self, SampledLine};
 use crate::runtime::handles::HandleMeta;
 use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
-use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence};
+use crate::runtime::outcome::{
+    CallRecord, Ended, PlanItem, PlanStatus, SourceEvidence, SourceRange,
+};
 use crate::runtime::preview::{
     ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
 };
@@ -965,46 +967,62 @@ fn tool_callback(
         }
         _ => None,
     };
+    // A `context` result carries the packed context itself, so one that does
+    // not fit what is left of this turn's feedback budget is **narrowed to
+    // what is left rather than refused**: the file was already opened, the
+    // definition already found, and discarding that spends a whole round
+    // trip to learn what is already in hand.
+    //
+    // The cell keeps running either way. A context nobody could deliver is
+    // an omission on its own record -- carrying the two numbers, so the next
+    // request can be aimed instead of repeated -- and never the end of a
+    // turn that had eight other contexts in it.
     let evidence = traced
         .outcome
         .as_ref()
         .ok()
         .filter(|_| tool.name() == "context")
-        .and_then(|result| serde_json::from_str::<SourceEvidence>(&result.stdout).ok());
-    let mut context_fits = true;
-    if let Some(evidence) = &evidence {
-        let text = traced
-            .outcome
-            .as_ref()
-            .ok()
-            .and_then(|result| serde_json::from_str::<serde_json::Value>(&result.stdout).ok())
-            .and_then(|payload| {
-                payload
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_default();
-        context_fits = state.note_source_context(evidence, text);
-    }
+        .and_then(|result| {
+            serde_json::from_str::<crate::project::source_context::SourceContext>(&result.stdout)
+                .ok()
+        })
+        .map(|mut packed| {
+            let budget = state.remaining_context_budget();
+            let delivered = packed.narrow_to(budget);
+            // Rebuilt from the narrowed context, never copied from the
+            // tool's own payload: a record that named ranges the turn never
+            // received would be describing a delivery that did not happen.
+            let mut evidence = SourceEvidence {
+                path: packed.path.clone(),
+                sha256: packed.sha256.clone(),
+                complete: packed.complete,
+                ranges: context_ranges(&packed),
+                omissions: packed.omissions.clone(),
+            };
+            if delivered {
+                // Certification rides on `complete`, which describes the
+                // TARGET and which narrowing never touches -- only
+                // supporting excerpts are shed, so a delivered context's
+                // target is byte-exact exactly as it was before.
+                state.note_source_context(&evidence, packed.render());
+            } else {
+                evidence.omissions.push(format!(
+                    "not delivered to this turn's feedback: {budget} characters remained and the bare target renders {}; ask for it first in the next cell, or name a narrower symbol",
+                    packed.render().chars().count()
+                ));
+            }
+            evidence
+        });
     trace(scope).record(CallRecord {
         tool: tool.name().to_string(),
         args: traced.checked.clone(),
-        evidence: evidence.filter(|_| context_fits),
+        evidence,
         lifted_from: lifted_from.clone(),
         exit_code,
         repeat_of: repeat.as_ref().map(|repeat| repeat.cell),
         error,
         ended,
     });
-
-    if !context_fits {
-        trace(scope).request_yield(Some(
-            "the complete source-context batch fills this turn's feedback budget; this last context was read but not delivered—request it in the next cell".into(),
-        ));
-        scope.terminate_execution();
-        return;
-    }
 
     if traced.outcome.is_ok() && state.instruction_file_written(tool.name(), &call_args) {
         trace(scope).request_yield(Some(format!(
@@ -1051,6 +1069,27 @@ fn tool_callback(
         Err(ToolError::Cancelled { tool }) => throw_cancelled(scope, &tool),
         Err(other) => throw_tool_error(scope, &other.to_string()),
     }
+}
+
+/// The ranges a packed context actually carries, target first.
+///
+/// Built from the context in hand rather than copied from the tool's
+/// payload, so a narrowed delivery reports the excerpts that survived it.
+/// The role spelling comes from the same `Serialize` the tool used, so the
+/// two cannot drift apart.
+fn context_ranges(packed: &crate::project::source_context::SourceContext) -> Vec<SourceRange> {
+    std::iter::once(&packed.target)
+        .chain(packed.supporting.iter())
+        .map(|excerpt| SourceRange {
+            path: excerpt.path.clone(),
+            start: excerpt.range.start,
+            end: excerpt.range.end,
+            role: serde_json::to_value(&excerpt.role)
+                .ok()
+                .and_then(|role| role.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// Reads the call's single object argument into [`Args`], or the message the

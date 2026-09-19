@@ -291,7 +291,22 @@ fn a_full_context_batch_preserves_whole_evidence_and_does_not_certify_overflow()
         );
     }
     assert!(!inspected.turn().stdout_tail.contains("c-BEGIN"));
-    assert!(inspected.turn().record.calls[2].evidence.is_none());
+    // The read happened, so its record survives even though the turn had no
+    // room to echo it -- and it carries both numbers, so the next request
+    // can be aimed rather than repeated verbatim.
+    let overflowed = inspected.turn().record.calls[2]
+        .evidence
+        .as_ref()
+        .expect("an undelivered context keeps its record");
+    let note = overflowed
+        .omissions
+        .iter()
+        .find(|note| note.contains("not delivered"))
+        .unwrap_or_else(|| panic!("no undelivered note: {:?}", overflowed.omissions));
+    assert!(
+        note.contains("characters remained") && note.contains("renders"),
+        "both numbers: {note}"
+    );
     let feedback = pane::prompt::CellResult {
         ask_answer: None,
         cell: 1,
@@ -426,5 +441,54 @@ fn a_guessed_symbol_does_not_take_its_sibling_context_calls_down() {
         "the miss names what the file does define: {}",
         turn.stdout_tail
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A batch that outgrows the turn's feedback budget narrows what is left
+/// instead of ending the cell: the reads already happened, and the calls
+/// after the one that did not fit still run.
+#[test]
+fn a_context_batch_past_the_feedback_budget_narrows_and_the_cell_runs_on() {
+    let root = fixture("budget-runs-on");
+    for name in ["a", "b", "c"] {
+        let body = format!(
+            "# {name}-BEGIN\n{}# {name}-END\nvalue = 1\n",
+            format!("# {}\n", "x".repeat(120)).repeat(100)
+        );
+        std::fs::write(root.join(format!("src/{name}.py")), body).unwrap();
+    }
+    let profile = Profile::compile(&root, None);
+    let mut runtime = Runtime::new(
+        &profile,
+        &Glasshouse::None,
+        &SessionId::new("budget-runs-on"),
+    );
+
+    let cell = runtime.run_cell(
+        "await context({path:'src/a.py'});\nawait context({path:'src/b.py'});\nawait context({path:'src/c.py'});\nconsole.log('reached-the-end');",
+    );
+    let turn = cell.turn();
+
+    assert!(
+        turn.stdout_tail.contains("reached-the-end"),
+        "the cell must run past a context the budget could not hold: {:?}",
+        turn.yield_reason
+    );
+    assert!(
+        !turn
+            .yield_reason
+            .as_deref()
+            .is_some_and(|why| why.contains("request it in the next cell")),
+        "the old refusal ended the cell; it must not: {:?}",
+        turn.yield_reason
+    );
+    assert_eq!(turn.record.calls.len(), 3, "{:?}", turn.record.calls);
+    for call in &turn.record.calls {
+        assert_eq!(call.tool, "context");
+        assert!(
+            call.evidence.is_some(),
+            "every context keeps its record, delivered or not: {call:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(root);
 }

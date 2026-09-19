@@ -66,6 +66,11 @@ pub(crate) struct ConsoleCapture {
 /// `chars / 4` estimate the whole crate shares.
 const KEEP_CHARS: usize = preview::STDOUT_TOKEN_CAP * 4;
 
+/// Room the console's true-tail marker keeps for itself, so no context
+/// promoted as visible can have its beginning cut off by the renderer that
+/// writes that marker. Reserved whatever else is queued.
+const CONTEXT_MARKER_RESERVE: usize = 256;
+
 /// How many `CallSite::PostResult` reductions one task remembers, so a
 /// repeated command is served rather than reduced again.
 ///
@@ -803,13 +808,34 @@ impl RuntimeState {
         *self.reduction.borrow_mut() = ReductionStats::default();
     }
 
-    /// Queue only whole contexts that fit the existing feedback budget. Keep
-    /// space for the console omission marker: no context promoted as visible
-    /// may have its beginning cut off by the true-tail renderer.
+    /// How many characters this turn's feedback budget still holds for
+    /// source context.
+    ///
+    /// Asked before a context is queued, so one that does not fit can be
+    /// narrowed to what is left rather than refused. A caller that only
+    /// learns "it did not fit" has to spend a round trip discovering by how
+    /// much; this is that number, given before the decision instead of
+    /// after it.
+    pub(crate) fn remaining_context_budget(&self) -> usize {
+        let output = self.pending_context_output.borrow();
+        let used: usize = output.iter().map(|s| s.chars().count() + 1).sum();
+        KEEP_CHARS
+            .saturating_sub(CONTEXT_MARKER_RESERVE)
+            .saturating_sub(used)
+            // The newline `flush_source_context` writes after this one.
+            .saturating_sub(1)
+    }
+
+    /// Queue a context that fits the remaining feedback budget, answering
+    /// whether it did.
+    ///
+    /// Callers narrow to [`Self::remaining_context_budget`] first, so a
+    /// refusal here means the bare target alone is larger than what is left
+    /// -- the one case there is nothing to deliver.
     pub(crate) fn note_source_context(&self, evidence: &SourceEvidence, text: String) -> bool {
         let mut output = self.pending_context_output.borrow_mut();
         let used: usize = output.iter().map(|s| s.chars().count() + 1).sum();
-        if used + text.chars().count() + 1 > KEEP_CHARS.saturating_sub(256) {
+        if used + text.chars().count() + 1 > KEEP_CHARS.saturating_sub(CONTEXT_MARKER_RESERVE) {
             return false;
         }
         let path = self.absolute_source_path(Path::new(&evidence.path));

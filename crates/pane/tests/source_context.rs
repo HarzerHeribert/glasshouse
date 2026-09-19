@@ -526,3 +526,86 @@ fn symlink_escape_is_refused_by_profile() {
     assert!(pack(&f.profile(), &link, None).is_err());
     let _ = fs::remove_file(outside);
 }
+
+/// A context with supporting excerpts sheds them from the tail and keeps the
+/// target byte-exact, because the target is what an `edit` binds to.
+#[test]
+fn narrowing_sheds_supporting_excerpts_and_never_the_target() {
+    let f = Fixture::new("narrow-sheds");
+    let padding = "# padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "import os\nfrom lib import Thing\n\ndef helper(x):\n    return x + 1\n\ndef target(value):\n    return helper(value)\n\ndef after():\n    return 'outside'\n{padding}"
+    );
+    let path = f.put("src/mod.py", &source);
+    f.put("src/use.py", "from mod import target\nresult = target(2)\n");
+    f.put(
+        "tests/test_mod.py",
+        "def test_target():\n    assert target(1) == 2\n",
+    );
+
+    let packed = pack(&f.profile(), &path, Some("target")).unwrap();
+    assert!(
+        !packed.supporting.is_empty(),
+        "this fixture exists to have supporting excerpts to shed"
+    );
+    let target_text = packed.target.text.clone();
+    let bare = {
+        let mut only = packed.clone();
+        only.supporting.clear();
+        only.render().chars().count()
+    };
+
+    let budget = bare + 256;
+    let mut narrowed = packed.clone();
+    assert!(
+        narrowed.narrow_to(budget),
+        "a budget above the bare target must be satisfiable by shedding: full {} bare {bare}",
+        packed.render().chars().count()
+    );
+    assert!(narrowed.render().chars().count() <= budget);
+    assert!(
+        narrowed.supporting.len() < packed.supporting.len(),
+        "something must actually have been shed"
+    );
+    assert_eq!(
+        narrowed.target.text, target_text,
+        "the target is never narrowed"
+    );
+    assert!(
+        narrowed
+            .omissions
+            .iter()
+            .any(|note| note.contains("feedback budget")),
+        "a narrowed context names what it dropped: {:?}",
+        narrowed.omissions
+    );
+}
+
+/// Below the bare target there is nothing left to shed, and narrowing says
+/// so rather than cutting the definition in half.
+#[test]
+fn a_budget_under_the_bare_target_is_refused_with_the_target_intact() {
+    let f = Fixture::new("narrow-floor");
+    let padding = "# padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "import os\n\ndef target(value):\n    return value + 1\n\ndef after():\n    return 0\n{padding}"
+    );
+    let path = f.put("src/mod.py", &source);
+
+    let packed = pack(&f.profile(), &path, Some("target")).unwrap();
+    let target_text = packed.target.text.clone();
+
+    let mut narrowed = packed.clone();
+    assert!(
+        !narrowed.narrow_to(10),
+        "ten characters cannot hold a rendered context"
+    );
+    assert!(
+        narrowed.supporting.is_empty(),
+        "everything sheddable must have been shed before refusing"
+    );
+    assert_eq!(
+        narrowed.target.text, target_text,
+        "a refusal leaves the target whole rather than truncating it"
+    );
+}

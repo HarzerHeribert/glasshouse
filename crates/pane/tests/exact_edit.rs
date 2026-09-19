@@ -210,3 +210,108 @@ fn the_single_form_reports_its_hunk_in_both_fields() {
     assert_eq!(result.hunks, vec![result.changed_lines.clone()]);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A refusal is only worth a round trip if the next attempt can be a
+/// correction. These pin what a reader is actually told.
+#[test]
+fn an_ambiguous_anchor_names_the_lines_it_matched() {
+    let root = fixture("ambiguous-lines");
+    let path = root.join("file.txt");
+    // Two character-identical lines, the shape a "one field read in many
+    // places" refactor meets constantly.
+    let text = "alpha\nsame line\nbeta\ngamma\nsame line\ndelta\n";
+    std::fs::write(&path, text).unwrap();
+    let profile = Profile::compile(&root, None);
+
+    let error =
+        exact_edit::apply(&profile, &path, &hash(text), "same line\n", "other\n").unwrap_err();
+    assert_eq!(error.kind, "ambiguous_match");
+    assert!(error.message.contains("occurs 2 times"), "{error:?}");
+    assert!(error.message.contains("lines 2 and 5"), "{error:?}");
+    // The kind is in the message too: `Display` is all a ToolError carries.
+    assert!(error.message.contains("ambiguous_match"), "{error:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+    let s = |items: &[&str]| items.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+    let hunked = exact_edit::apply_hunks(
+        &profile,
+        &path,
+        &hash(text),
+        &s(&["alpha", "same line\n"]),
+        &s(&["a", "other\n"]),
+    )
+    .unwrap_err();
+    assert!(
+        hunked.message.starts_with("hunk 1 (ambiguous_match):"),
+        "{hunked:?}"
+    );
+    assert!(hunked.message.contains("lines 2 and 5"), "{hunked:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_hopeless_anchor_names_a_bounded_list_and_says_how_many() {
+    let root = fixture("ambiguous-many");
+    let path = root.join("file.txt");
+    let text: String = (0..3_000).map(|_| "x\n").collect();
+    std::fs::write(&path, &text).unwrap();
+    let profile = Profile::compile(&root, None);
+    let error = exact_edit::apply(&profile, &path, &hash(&text), "x", "y").unwrap_err();
+    assert_eq!(error.kind, "ambiguous_match");
+    assert!(error.message.contains("more than 1000 times"), "{error:?}");
+    assert!(
+        error.message.contains("lines 1, 2, 3, 4, 5 and 995 more"),
+        "{error:?}"
+    );
+    // Bounded: five named, never three thousand.
+    assert!(
+        error.message.len() < 200,
+        "{} chars: {}",
+        error.message.len(),
+        error.message
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_missing_anchor_names_the_whitespace_that_made_it_miss() {
+    let root = fixture("missing-whitespace");
+    let path = root.join("file.txt");
+    let text = "fn main() {\n    let answer = 42;\n}\n";
+    std::fs::write(&path, text).unwrap();
+    let profile = Profile::compile(&root, None);
+
+    // Right text, wrong indentation — what retyping from memory produces.
+    let error = exact_edit::apply(
+        &profile,
+        &path,
+        &hash(text),
+        "\t\tlet answer = 42;\n",
+        "x\n",
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "missing_match");
+    assert!(error.message.contains("different indentation"), "{error:?}");
+    assert!(error.message.contains("line 2"), "{error:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+    // Right text, wrong line endings.
+    let crlf = "alpha\r\nbeta\r\n";
+    let crlf_path = root.join("crlf.txt");
+    std::fs::write(&crlf_path, crlf).unwrap();
+    let ending =
+        exact_edit::apply(&profile, &crlf_path, &hash(crlf), "alpha\nbeta\n", "x\n").unwrap_err();
+    assert!(ending.message.contains("CRLF line endings"), "{ending:?}");
+    assert!(ending.message.contains("line 1"), "{ending:?}");
+
+    // Nothing provable: the old sentence, unchanged.
+    let blank = exact_edit::apply(&profile, &path, &hash(text), "nowhere at all", "x").unwrap_err();
+    assert!(
+        blank.message.contains("exact match was not found"),
+        "{blank:?}"
+    );
+    assert!(!blank.message.contains("but the same text"), "{blank:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
