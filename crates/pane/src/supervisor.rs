@@ -205,16 +205,6 @@ impl Supervisor {
     }
 }
 
-/// Consecutive looks that all decided to intervene before the task is ended.
-///
-/// **Three, because three is what a person would call patience**: at the
-/// default cadence of one look every four cells, that is a dozen cells during
-/// which the supervisor said something was wrong, the model was told in the
-/// head of its next message, and nothing changed. Two would end a task that
-/// took one nudge to correct; more than three spends the session watching a
-/// trajectory everyone already agrees is going nowhere.
-pub const DEFAULT_VERDICT_LIMIT: u32 = 3;
-
 /// A criterion as a short noun phrase, for the sentence that ends a task.
 ///
 /// Deliberately not [`criterion_reason`], which is an instruction to a model

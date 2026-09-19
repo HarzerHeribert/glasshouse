@@ -7,16 +7,32 @@
 //! did not compile, cancelling that session's own `cargo test` job on the way
 //! out. Neither survives.
 //!
-//! What ends a task now is either a ceiling **this person set themselves**, or
-//! evidence that the task has stopped producing anything:
+//! **The user's ruling of 2026-09-19, after an audit of every cap here:
+//! "alles was den Harness gegen sich selbst arbeiten lässt muss raus — ganz
+//! klare Linie."** Two more enders went with it, and what is left is two:
 //!
-//! - the supervisor's repeated verdict — the judged ender, absent when no
-//!   model is configured to judge with;
+//! - a ceiling **this person set themselves**;
 //! - a run of stall windows — the deterministic ender, which needs no model
-//!   and is what an unsupervised session falls back on;
-//! - turns that ran no program at all, which is the one thing still counted
-//!   anywhere, because a turn without a cell writes no record for either of
-//!   the other two to read.
+//!   and is the only thing standing between an unattended session and a task
+//!   that has genuinely stopped producing anything.
+//!
+//! What went, and why each was the harness working against itself:
+//!
+//! - **the supervisor's repeated verdict.** Three consecutive *model
+//!   opinions* ended the task, and the criteria it matches on
+//!   (`looping_over_the_same_reads`) describe exactly what a careful re-read
+//!   looks like — so a supervisor with a wrong prior ended real work and the
+//!   model had no appeal. Measured across three benchmark runs on
+//!   2026-09-19, the supervisor's nudge fired four, two and five times and
+//!   was ignored every time with no consequence: simultaneously too weak to
+//!   help and strong enough to kill. It nudges now and does not end.
+//! - **turns that ran no program.** A pure count of work, and
+//!   `session.rs`'s own field doc had already concluded the right thing —
+//!   *"a model reasoning its way toward a hard decision in prose is
+//!   indistinguishable, to a counter, from a model stuck"* — before the
+//!   count came back anyway. A prose turn is observed by the stall now,
+//!   fingerprinted by what it said, so repeating oneself is a stall and
+//!   thinking out loud is not.
 //!
 //! The order matters and is tested: a ceiling the person set is reported as
 //! theirs before anything infers a reason on their behalf.
@@ -28,42 +44,22 @@ use crate::prompt::ExhaustedReason;
 /// A plain snapshot rather than a borrow of the loop's state, so the decision
 /// is a pure function of observations and can be read — and tested — without
 /// a session.
-pub(super) struct Ending<'a> {
+pub(super) struct Ending {
     /// `[limits] cells`, when this person set one, and whether it is reached.
     pub(super) cap: Option<u64>,
     pub(super) cap_reached: bool,
-    /// Consecutive supervisor looks that decided to intervene, and the
-    /// criterion the last of them chose.
-    pub(super) verdicts: u32,
-    pub(super) criterion: Option<&'a str>,
-    /// Turns in a row that carried no program at all.
-    pub(super) turns_without_a_program: u32,
-    /// Whole stall windows since the last progress of any kind.
+    /// Whole stall windows since the last frame this task had not seen.
     pub(super) stalled_windows: u32,
 }
 
 /// The reason this task ends now, or `None` to keep going.
 pub(super) fn exhausted(
-    ending: &Ending<'_>,
-    verdict_limit: u32,
-    program_limit: u32,
+    ending: &Ending,
     stall_limit: u32,
     stall_window: u32,
 ) -> Option<ExhaustedReason> {
     if let Some(cap) = ending.cap.filter(|_| ending.cap_reached) {
         return Some(ExhaustedReason::CellLimit { cap });
-    }
-    if ending.verdicts >= verdict_limit {
-        return Some(ExhaustedReason::Supervised {
-            reason: crate::supervisor::criterion_phrase(ending.criterion.unwrap_or_default())
-                .to_string(),
-            looks: ending.verdicts,
-        });
-    }
-    if ending.turns_without_a_program >= program_limit {
-        return Some(ExhaustedReason::NoProgram {
-            turns: ending.turns_without_a_program,
-        });
     }
     if ending.stalled_windows >= stall_limit {
         return Some(ExhaustedReason::Stalled {
@@ -108,19 +104,16 @@ pub(super) fn announce(
 mod tests {
     use super::*;
 
-    fn nothing() -> Ending<'static> {
+    fn nothing() -> Ending {
         Ending {
             cap: None,
             cap_reached: false,
-            verdicts: 0,
-            criterion: None,
-            turns_without_a_program: 0,
             stalled_windows: 0,
         }
     }
 
-    fn decide(ending: &Ending<'_>) -> Option<ExhaustedReason> {
-        exhausted(ending, 3, 6, 3, 6)
+    fn decide(ending: &Ending) -> Option<ExhaustedReason> {
+        exhausted(ending, 3, 6)
     }
 
     #[test]
@@ -130,8 +123,6 @@ mod tests {
         // reached: none of these is a reason on its own.
         let working = Ending {
             cap: Some(40),
-            verdicts: 2,
-            turns_without_a_program: 5,
             stalled_windows: 2,
             ..nothing()
         };
@@ -140,17 +131,38 @@ mod tests {
 
     #[test]
     fn a_ceiling_this_person_set_is_reported_as_theirs_first() {
-        // Every other reason is also true here; the configured one wins,
-        // because inferring a reason over the person's own is presumptuous.
+        // The stall is also true here; the configured one wins, because
+        // inferring a reason over the person's own is presumptuous.
         let ended = Ending {
             cap: Some(40),
             cap_reached: true,
-            verdicts: 9,
-            criterion: Some("repeating_a_failing_call"),
-            turns_without_a_program: 9,
             stalled_windows: 9,
         };
         assert_eq!(decide(&ended), Some(ExhaustedReason::CellLimit { cap: 40 }));
+    }
+
+    /// The two enders removed on 2026-09-19 stay removed: neither a
+    /// supervisor's opinion nor a run of prose turns is a reason here, and
+    /// `Ending` no longer carries a field for either to arrive in.
+    #[test]
+    fn neither_an_opinion_nor_a_count_of_turns_can_end_a_task_any_more() {
+        let only_a_stall_ends_it = Ending {
+            stalled_windows: 3,
+            ..nothing()
+        };
+        assert!(matches!(
+            decide(&only_a_stall_ends_it),
+            Some(ExhaustedReason::Stalled { .. })
+        ));
+        // A task under the stall threshold cannot be ended by anything else
+        // this function knows, however long it has been talking.
+        assert_eq!(
+            decide(&Ending {
+                stalled_windows: 2,
+                ..nothing()
+            }),
+            None
+        );
     }
 
     #[test]
@@ -164,29 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn the_verdict_names_the_criterion_and_the_stall_names_its_cells() {
-        let judged = Ending {
-            verdicts: 3,
-            criterion: Some("looping_over_the_same_reads"),
-            ..nothing()
-        };
-        assert_eq!(
-            decide(&judged),
-            Some(ExhaustedReason::Supervised {
-                reason: "the same files keep being read without a change".to_string(),
-                looks: 3,
-            })
-        );
-        // An unknown criterion still says something true rather than nothing.
-        let vague = Ending {
-            verdicts: 3,
-            criterion: None,
-            ..nothing()
-        };
-        assert!(matches!(
-            decide(&vague),
-            Some(ExhaustedReason::Supervised { .. })
-        ));
+    fn the_stall_names_its_cells() {
         let stalled = Ending {
             stalled_windows: 3,
             ..nothing()
@@ -197,20 +187,6 @@ mod tests {
                 windows: 3,
                 cells: 18,
             })
-        );
-    }
-
-    #[test]
-    fn turns_without_a_program_end_a_task_the_other_enders_cannot_see() {
-        // A prose turn writes no record, so the stall counter and the
-        // supervisor's cadence both stay at zero however long it goes on.
-        let talking = Ending {
-            turns_without_a_program: 6,
-            ..nothing()
-        };
-        assert_eq!(
-            decide(&talking),
-            Some(ExhaustedReason::NoProgram { turns: 6 })
         );
     }
 }

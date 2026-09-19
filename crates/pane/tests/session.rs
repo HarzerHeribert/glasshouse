@@ -2123,12 +2123,80 @@ fn no_count_of_cells_ends_a_task_that_keeps_producing_something() {
     );
 }
 
+/// An investigation that only ever reads is work, and the harness has no
+/// business ranking it below writing.
+///
+/// **The defect this pins.** Progress used to mean a tree change, a new
+/// capsule fact or a verification result — *wrote a file or ran a test*. A
+/// read-only task sets none of the three, so eighteen cells of reading were
+/// ended as a stall while working perfectly. Every cell here reads a
+/// different file and changes nothing; twenty-four are scripted, well past
+/// the old eighteen, so a task ended on the old definition would be served
+/// and counted.
+#[test]
+fn an_investigation_that_only_ever_reads_is_never_ended_as_a_stall() {
+    let root = scratch_dir("read-only-investigation");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    for i in 0..24 {
+        fs::write(root.join(format!("f{i}.txt")), format!("file {i}\n")).unwrap();
+    }
+    fs::create_dir_all(root.join(".pane")).unwrap();
+    fs::write(
+        root.join(".pane/config.toml"),
+        "[permissions]\nallow = [\"Read(**)\"]\n",
+    )
+    .unwrap();
+
+    let mut replies: Vec<String> = (0..24)
+        .map(|i| {
+            assistant_reply(&format!(
+                "```pane\nconst seen{i} = await read({{path: \"f{i}.txt\"}});\n```"
+            ))
+        })
+        .collect();
+    replies.push(ending_reply());
+    let (base_url, bodies) = start_fake_provider(replies);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-read-only",
+        "look around",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "a task that keeps reading new files must finish on its own terms; \
+         stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        25,
+        "every scripted read ran, then the model's own ending"
+    );
+    for (index, body) in bodies.iter().enumerate() {
+        let text = last_user_text(body);
+        assert!(
+            !text.starts_with("Nothing has changed"),
+            "turn {index} read a file it had not read: {text}"
+        );
+        assert!(
+            !text.contains("No progress for"),
+            "turn {index} was not a repeat: {text}"
+        );
+    }
+}
+
 /// The ender that needs no model: whole windows in which nothing changed.
 ///
 /// These cells run the same no-op forever — no file, no fact, no verification
 /// — which is the one thing that must still end a task without a person
-/// watching it. Three stall windows of six cells is the patience; the
-/// nineteenth turn is the final-answer turn the preamble asks for.
+/// watching it. Three stall windows of six repeats is the patience; the
+/// twentieth turn is the final-answer turn the preamble asks for.
 #[test]
 fn a_task_that_stops_producing_anything_ends_on_the_stall_with_its_reason() {
     let root = scratch_dir("stall-end-root");
@@ -2157,34 +2225,34 @@ fn a_task_that_stops_producing_anything_ends_on_the_stall_with_its_reason() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        19,
-        "three windows of six cells, then one turn to answer"
+        20,
+        "the first cell was new, then three windows of six repeats, then one \
+         turn to answer"
     );
-    let last = last_user_text(&bodies[18]);
+    let last = last_user_text(&bodies[19]);
     assert!(
         last.starts_with("Nothing has changed for 18 cells across 3 notices"),
         "the ending sentence names what was observed: {last}"
     );
     assert!(
-        !last_user_text(&bodies[17]).starts_with("Nothing has changed"),
+        !last_user_text(&bodies[18]).starts_with("Nothing has changed"),
         "the window before it ends nothing"
     );
 }
 
-/// A turn that runs no program is the one thing still counted anywhere in the
-/// loop, and the count is six rather than three (the user, 2026-09-17: limits
-/// are dumb for abstract tasks, and a model reasoning in prose toward a hard
-/// decision is not a model stuck).
+/// A turn that runs no program is observed by the stall like any other, and
+/// nothing counts turns any more (the user, 2026-09-19: everything that makes
+/// the harness work against itself goes).
 ///
-/// **It is counted because nothing else can see it**: a prose turn runs no
-/// cell, so it writes no record, so `progress::Stall` never observes it and
-/// the supervisor's cadence never advances. Six turns is what it costs to find
-/// out; hundreds of requests was the alternative.
+/// **A prose turn writes no cell record**, so it used to be invisible to both
+/// enders and a count of six was the patch. It is fingerprinted by what it
+/// said instead: saying something new is progress, saying the same thing
+/// again is not — which is the distinction a count could never draw between a
+/// model reasoning toward a hard decision and a model stuck.
 ///
-/// The sixth carries the exhausted preamble naming the reason, the task ends
-/// after one more turn whatever the model does, and the fifth ends nothing. An
-/// eighth reply is scripted so a loop that ran on would be served and counted.
-/// A program in between resets the count.
+/// Here every reply is byte-identical, so the first is new and the rest are
+/// repeats: three windows of six, the exhausted preamble, then one more turn
+/// whatever the model does. A program in between resets the streak.
 #[test]
 fn repeated_malformed_executable_replies_are_bounded() {
     let prose = || assistant_reply("<php-pane>read({path: 'roman.py'});</php-pane>");
@@ -2192,7 +2260,8 @@ fn repeated_malformed_executable_replies_are_bounded() {
     let root = scratch_dir("prose-cap-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, bodies) = start_fake_provider((0..8).map(|_| prose()).collect());
+    // Twenty, so a loop that ran on would be served and counted.
+    let (base_url, bodies) = start_fake_provider((0..24).map(|_| prose()).collect());
     let output = run_session(
         &root,
         &rollout,
@@ -2209,20 +2278,21 @@ fn repeated_malformed_executable_replies_are_bounded() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        7,
-        "the sixth prose turn buys exactly one more turn"
+        20,
+        "the first reply was new, then three windows of six repeats, then one \
+         turn to answer"
     );
-    for (index, body) in bodies.iter().enumerate().take(6) {
+    for (index, body) in bodies.iter().enumerate().take(19) {
         assert!(
-            !last_user_text(body).contains("No program has run"),
+            !last_user_text(body).starts_with("Nothing has changed"),
             "prose turn {index} ends nothing: {}",
             last_user_text(body)
         );
     }
     assert!(
-        last_user_text(&bodies[6]).starts_with("No program has run for 6 turns;"),
-        "the sixth carries the exhausted preamble naming the reason: {}",
-        last_user_text(&bodies[6])
+        last_user_text(&bodies[19]).starts_with("Nothing has changed for 18"),
+        "the eighteenth repeat carries the exhausted preamble: {}",
+        last_user_text(&bodies[19])
     );
     drop(bodies);
 
@@ -2250,10 +2320,10 @@ fn repeated_malformed_executable_replies_are_bounded() {
         String::from_utf8_lossy(&output.stderr)
     );
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 6, "a program resets the count");
+    assert_eq!(bodies.len(), 6, "a program resets the streak");
     for body in bodies.iter() {
         assert!(
-            !last_user_text(body).contains("No program has run"),
+            !last_user_text(body).starts_with("Nothing has changed"),
             "{}",
             last_user_text(body)
         );
@@ -4999,12 +5069,12 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
     let edit = assistant_reply(
         "```pane-edit\n{\"cell\":1,\"replace\":\"throw\",\"with\":\"return\"}\n```",
     );
-    // One program, then edits that run nothing. Eight replies are scripted so
-    // a loop that ran past the bound would be served and counted.
+    // One program, then edits that run nothing. Twenty-four replies are
+    // scripted so a loop that ran past the bound would be served and counted.
     let mut replies = vec![assistant_reply(
         "```pane\nconst before = 1; throw new SyntaxError('runtime');\n```",
     )];
-    replies.extend(std::iter::repeat_n(edit, 8));
+    replies.extend(std::iter::repeat_n(edit, 24));
     let (base, bodies) = start_fake_provider(replies);
     let output = run_session(
         &root,
@@ -5019,9 +5089,9 @@ fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        8,
-        "the first reply is a program, so six edits that run nothing land on the \
-         seventh turn, and the eighth is the final-answer turn"
+        21,
+        "the program and the first edit are each new, then three windows of six \
+         identical edits that run nothing, then the final-answer turn"
     );
     assert!(!last_user_text(&bodies[1]).contains("pane-edit"));
     assert!(last_user_text(&bodies[2]).contains("No syntax-failed cell"));

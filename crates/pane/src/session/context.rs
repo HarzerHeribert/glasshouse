@@ -214,7 +214,18 @@ pub(super) fn send_task_turn_recovering(
     };
     let first_request = provider_view(transcript);
     let first = match timed_send_task_turn(&first_request, session, task, cause) {
-        Ok(turn) => return Ok(turn),
+        Ok(sent) => {
+            // A turn that hit the provider's output ceiling still carries
+            // whatever the model finished before it, and saying so is the
+            // difference between a short reply and a cut one.
+            if sent.0.truncated {
+                session_println!(
+                    "the model reached its output limit for this turn; what it had finished was \
+                     kept and the rest of what it was writing did not arrive"
+                );
+            }
+            return Ok(sent);
+        }
         Err(error) if error.is_context_overflow() => error,
         Err(error) => return Err(format!("request failed: {error}")),
     };

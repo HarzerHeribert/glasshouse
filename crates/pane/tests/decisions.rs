@@ -1994,15 +1994,22 @@ fn a_confident_loop_buys_exactly_one_line_and_nudges_with_it() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// **The supervisor is what ends a task now, and it takes three verdicts.**
+/// **The supervisor nudges and no longer ends a task** (the user,
+/// 2026-09-19: everything that makes the harness work against itself goes).
 ///
-/// A nudge never ends anything; three looks in a row that all decided to
-/// intervene do — at the default cadence, a dozen cells of being told the same
-/// thing and carrying on. The ending sentence names the criterion layer 2
-/// chose, never the prose layer 3 wrote: no model-written sentence is ever
-/// interpolated into a preamble.
+/// Three consecutive looks that all decided to intervene used to end the
+/// task. Three *model opinions* is not evidence, and the criteria the
+/// supervisor matches on — `looping_over_the_same_reads` among them —
+/// describe exactly what a careful re-read looks like, so a supervisor with
+/// a wrong prior ended real work and the model had no appeal. Measured
+/// across three benchmark runs the same day, its nudge fired four, two and
+/// five times and was ignored every time with no consequence: too weak to
+/// help and strong enough to kill.
+///
+/// The deterministic stall is the ender now, and it reads the trajectory
+/// rather than an opinion of it.
 #[test]
-fn three_verdicts_in_a_row_end_the_task_and_name_the_criterion() {
+fn three_verdicts_in_a_row_nudge_and_never_end_the_task() {
     let root = root("supervision-ends");
     write_config(&root, SUPERVISED_BY_THE_DECISION_MODEL);
     let never_returns: Vec<Value> = (0..12)
@@ -2014,22 +2021,18 @@ fn three_verdicts_in_a_row_end_the_task_and_name_the_criterion() {
             .map(|_| Decision::Answer(supervision_answer("repeating_a_failing_call", 0.95)))
             .collect(),
     );
-    // Whatever the model does with its last turn, the loop stops there: the
-    // twelve scripted cells are far more than the three looks it takes.
     let _ = exec_bounded(&root, &endpoint, "keep going", None);
     let messages = messages.lock().unwrap();
     assert!(
-        messages.len() <= 5,
-        "the task stops on the third verdict, not after twelve cells: {}",
+        messages.len() > 5,
+        "three verdicts no longer stop the task at the third look: {}",
         messages.len()
     );
-    let ending = messages
-        .iter()
-        .find(|body| body.contains("The supervisor has said 3 times"))
-        .unwrap_or_else(|| panic!("the task ends on the third verdict: {messages:?}"));
     assert!(
-        ending.contains("the same call keeps failing the same way"),
-        "the sentence names the criterion, not the phrased nudge: {ending}"
+        !messages
+            .iter()
+            .any(|body| body.contains("The supervisor has said")),
+        "no count of verdicts may end a task: {messages:?}"
     );
     let _ = std::fs::remove_dir_all(root);
 }

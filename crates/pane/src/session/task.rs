@@ -521,11 +521,9 @@ impl TaskState {
         plan: &[crate::runtime::outcome::PlanItem],
         snapshots: Option<(&crate::changes::Snapshot, &crate::changes::Snapshot)>,
     ) -> Observed {
-        let mut progressed = false;
         if let Some((before, after)) = snapshots {
             let changed = before.changed_paths(after);
             if !changed.is_empty() {
-                progressed = true;
                 self.files.observe(&changed);
                 self.last_mutation_cell = Some(record.cell);
                 let digest = after.digest();
@@ -535,18 +533,9 @@ impl TaskState {
         }
         self.capsule
             .observe_cell(record, error, plan, self.tree_digest.as_deref());
-        if self
-            .capsule
-            .facts()
-            .last()
-            .is_some_and(|fact| fact.evidence.cell == record.cell)
-        {
-            progressed = true;
-        }
         if let Some(verification) = self.capsule.last_verification()
             && verification.cell == record.cell
         {
-            progressed = true;
             self.last_verification_cell = Some(verification.cell);
             self.checkpoints.note_verification(
                 verification.cell,
@@ -562,21 +551,21 @@ impl TaskState {
                 .calls
                 .iter()
                 .any(|call| !matches!(call.ended, Ended::Ok));
+        // One fingerprint, two readers: the guard asks "again?" of a failing
+        // frame, the stall asks "ever?" of every frame.
+        let frame = crate::progress::fingerprint(record, error, self.tree_digest.as_deref());
         if failed {
-            if let Some(notice) = self.guard.observe(crate::progress::fingerprint(
-                record,
-                error,
-                self.tree_digest.as_deref(),
-            )) {
+            if let Some(notice) = self.guard.observe(frame.clone()) {
                 output::no_progress_notice();
                 notices.push(notice);
             }
         } else {
             self.guard.reset();
         }
-        // A stall is a run of cells that changed nothing: no tree change, no
-        // new fact, no verification. It is a notice, never a stop.
-        if let Some(notice) = self.stall.observe(progressed) {
+        // A stall is a run of cells producing nothing this task has not
+        // already seen. One is a notice; `DEFAULT_STALL_LIMIT` of them in a
+        // row is what ends an unattended task.
+        if let Some(notice) = self.stall.observe(&frame) {
             output::stall_notice();
             notices.push(notice);
         }

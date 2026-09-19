@@ -424,9 +424,9 @@ pub fn exhausted_preamble(reason: &ExhaustedReason) -> String {
              returning a final answer string at top level."
         ),
         ExhaustedReason::Stalled { windows, cells } => format!(
-            "Nothing has changed for {cells} cells across {windows} notices — no file, no fact, \
-             no verification; the only action this turn may take is returning a final answer \
-             string at top level."
+            "Nothing has changed for {cells} cells across {windows} notices — every call, every \
+             result and the tree were already seen; the only action this turn may take is \
+             returning a final answer string at top level."
         ),
     }
 }

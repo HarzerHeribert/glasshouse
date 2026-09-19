@@ -100,12 +100,23 @@ pub const MODEL: &str = "claude-opus-5";
 
 /// The `max_tokens` pane asks for when nothing published says otherwise.
 ///
-/// **A documented fallback, not a policy.** It bounds what the model may say
-/// *and* write in one turn, so a large file plus its reasoning has to fit in
-/// it, and a truncated program then fails to parse and costs the whole turn.
-/// The right figure is the model's own, which [`max_tokens_for`] uses when
-/// the gateway publishes one; no catalogue we consume publishes it today, so
-/// this number is what every turn still gets.
+/// **A documented fallback, not a policy, and no longer the common case.**
+/// It bounds what the model may say *and* write in one turn, so a large file
+/// plus its reasoning has to fit in it. The right figure is the model's own,
+/// which [`max_tokens_for`] uses whenever the gateway published one --
+/// measured 2026-09-19, `inference-gateway models --json` carries
+/// `max_output_tokens` for 170 of 647 entries, including every model this
+/// project actually runs (`gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-6-astra` and
+/// `claude-opus-5` each publish 128,000), and `session.rs` asks for them
+/// unconditionally at startup. An earlier revision of this comment said no
+/// catalogue publishes it; that was true when it was written and is not now.
+///
+/// So this number is reached only where there is nothing to read: no
+/// gateway, or a model absent from its catalogue. It stays deliberately
+/// conservative, because the two ways to be wrong are not symmetric -- above
+/// what a provider accepts is a rejected request and the turn is refused,
+/// while below it is a truncation the turn now survives (see
+/// [`Turn::truncated`]).
 pub const MAX_TOKENS: u32 = 8192;
 
 /// What one turn of `model` may produce: the model's own published maximum,
@@ -589,6 +600,21 @@ impl Usage {
 pub struct Turn {
     pub message: Message,
     pub usage: Option<Usage>,
+    /// The provider stopped at its output ceiling, and this turn is what
+    /// survived it.
+    ///
+    /// The invariant: **a turn is truncated or it is not, and the blocks it
+    /// carries are complete either way.** A response that runs out of room
+    /// after finishing a tool call has produced a program the model really
+    /// wrote, and destroying it costs the whole turn for nothing --
+    /// `parse_response` and [`Streamed::finish`] therefore deliver every
+    /// block they can prove finished and set this. What is *not* proven
+    /// finished is dropped, never repaired: a truncated `input` that happens
+    /// to parse would be a program nobody wrote.
+    ///
+    /// A caller that appends this turn owes the person and the model a word
+    /// about it; the rest of the plan the model was writing did not arrive.
+    pub truncated: bool,
 }
 
 fn to_usage(row: Option<UsageRow>) -> Option<Usage> {
@@ -1156,26 +1182,74 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
     if parsed.role != "assistant" {
         return Err(WireError::UnexpectedRole(parsed.role));
     }
-    if parsed.stop_reason.as_deref() == Some("max_tokens") {
-        return Err(WireError::IncompleteResponse {
-            partial_text: parsed
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    WireBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+    let truncated = parsed.stop_reason.as_deref() == Some("max_tokens");
+    if truncated {
+        // **Only the last block was cut.** Generation stops where the budget
+        // runs out, so every block before the final one was finished before
+        // the ceiling was reached; the final one is the casualty. Nothing
+        // here inspects a block's *contents* to judge it -- a truncated
+        // `input` object that still parses is exactly the case that inference
+        // cannot see, and position is a fact rather than a guess.
+        let finished = parsed.content.len().saturating_sub(1);
+        let salvaged = deliver(parsed.content.iter().take(finished))?;
+        // **Prose alone is not worth salvaging, and both paths agree on
+        // that.** There is nothing to run in it, and appending a reply that
+        // stops mid-thought is the outcome `Streamed::finish` was written to
+        // prevent. What this exists to rescue is a finished program, so a
+        // salvage without one is the error it always was.
+        if !salvaged
+            .iter()
+            .any(|block| matches!(block, Block::ToolUse { .. }))
+        {
+            return Err(WireError::IncompleteResponse {
+                partial_text: parsed
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        WireBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
+        return Ok(Turn {
+            message: Message {
+                role: Role::Assistant,
+                content: salvaged,
+                historical: None,
+            },
+            usage: to_usage(parsed.usage),
+            truncated: true,
         });
     }
+    let content = deliver(parsed.content.iter())?;
+    Ok(Turn {
+        message: Message {
+            role: Role::Assistant,
+            content,
+            historical: None,
+        },
+        usage: to_usage(parsed.usage),
+        truncated: false,
+    })
+}
+
+/// The assistant blocks a non-streamed response hands to the session.
+///
+/// One reader for both the whole response and the salvaged prefix of a
+/// truncated one, so the two cannot come to disagree about what an assistant
+/// block is or which of them are refused outright.
+fn deliver<'a>(blocks: impl Iterator<Item = &'a WireBlock>) -> Result<Vec<Block>, WireError> {
     let mut content = Vec::new();
-    for block in parsed.content {
+    for block in blocks {
         match block {
-            WireBlock::Text { text } => content.push(Block::Text(text)),
-            WireBlock::ToolUse { id, name, input } => {
-                content.push(Block::ToolUse { id, name, input })
-            }
+            WireBlock::Text { text } => content.push(Block::Text(text.clone())),
+            WireBlock::ToolUse { id, name, input } => content.push(Block::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
             WireBlock::Image { .. } => {
                 return Err(WireError::Stream(
                     "assistant response contained a user-only image block".into(),
@@ -1189,14 +1263,7 @@ fn parse_response(text: &str) -> Result<Turn, WireError> {
             WireBlock::Other => {}
         }
     }
-    Ok(Turn {
-        message: Message {
-            role: Role::Assistant,
-            content,
-            historical: None,
-        },
-        usage: to_usage(parsed.usage),
-    })
+    Ok(content)
 }
 
 /// Builds one [`Turn`] out of a Messages stream, one `data:` payload at a
@@ -1473,16 +1540,60 @@ impl StreamAccumulator {
             ));
         }
         if self.stopped_at_max_tokens {
-            return Err(WireError::IncompleteResponse {
-                partial_text: self
-                    .blocks
-                    .values()
-                    .filter_map(|block| match block {
-                        PendingBlock::Text(text) => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            // **`stopped` is proof, not an inference.** It is set in exactly
+            // one place -- `content_block_stop`, where the accumulated
+            // `input` is parsed and a malformed one is already an error -- so
+            // a tool block carrying it is one the provider finished sending.
+            // A block without it is dropped whatever its `partial` looks
+            // like: a cut `input` that happens to parse is a program the
+            // model never wrote, and running it is worse than losing the
+            // turn. Text is kept as the model sent it; it is prose, it is
+            // never executed, and `truncated` is what tells the reader it
+            // stops mid-thought.
+            let mut salvaged = Vec::new();
+            for block in self.blocks.values() {
+                match block {
+                    PendingBlock::Text(text) if !text.is_empty() => {
+                        salvaged.push(Block::Text(text.clone()));
+                    }
+                    PendingBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        stopped: true,
+                        ..
+                    } => salvaged.push(Block::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    }),
+                    _ => {}
+                }
+            }
+            if !salvaged
+                .iter()
+                .any(|block| matches!(block, Block::ToolUse { .. }))
+            {
+                return Err(WireError::IncompleteResponse {
+                    partial_text: self
+                        .blocks
+                        .values()
+                        .filter_map(|block| match block {
+                            PendingBlock::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                });
+            }
+            return Ok(Turn {
+                message: Message {
+                    role: Role::Assistant,
+                    content: salvaged,
+                    historical: None,
+                },
+                usage: to_usage(self.usage),
+                truncated: true,
             });
         }
         let mut content = Vec::new();
@@ -1511,6 +1622,7 @@ impl StreamAccumulator {
                 historical: None,
             },
             usage: to_usage(self.usage),
+            truncated: false,
         })
     }
 }
@@ -2014,7 +2126,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_native_block_rejects_late_input_duplicate_stop_and_max_tokens() {
+    fn a_stopped_native_block_rejects_late_input_and_survives_the_ceiling() {
         fn ready() -> StreamAccumulator {
             let mut acc = StreamAccumulator::new();
             acc.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
@@ -2029,12 +2141,19 @@ mod tests {
                 .event(r#"{"type":"content_block_stop","index":0}"#)
                 .is_err()
         );
+        // **The two transports answer this differently on purpose, because
+        // they hold different proof.** A stream saw `content_block_stop` for
+        // this block, so it is known finished and it runs. A whole response
+        // carries no such marker, so the only honest reading of a lone block
+        // under `max_tokens` is that it is the one the ceiling cut.
         let mut capped = ready();
         capped.event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":10}}"#).unwrap();
         capped.event(r#"{"type":"message_stop"}"#).unwrap();
+        let salvaged = capped.finish().expect("a block the stream finished runs");
+        assert!(salvaged.truncated);
         assert!(matches!(
-            capped.finish(),
-            Err(WireError::IncompleteResponse { partial_text }) if partial_text.is_empty()
+            salvaged.message.content.as_slice(),
+            [Block::ToolUse { id, .. }] if id == "x"
         ));
 
         let whole = r#"{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"tool_use","id":"x","name":"execute_cell","input":{"code":"return 1"}}]}"#;
@@ -2105,6 +2224,59 @@ mod tests {
         streamed.event(r#"{"type":"message_stop"}"#).unwrap();
         assert!(
             matches!(streamed.finish(), Err(WireError::IncompleteResponse { partial_text }) if partial_text == "Partial explanation")
+        );
+    }
+
+    /// The case that cost a whole turn: the model finished a program and ran
+    /// out of room in the prose after it.
+    #[test]
+    fn a_program_finished_before_the_ceiling_still_runs_and_says_it_was_cut() {
+        let whole = r#"{"role":"assistant","stop_reason":"max_tokens","content":[{"type":"tool_use","id":"x","name":"execute_cell","input":{"code":"return 1"}},{"type":"text","text":"and then I will"}]}"#;
+        let turn = parse_response(whole).expect("a finished program survives its turn being cut");
+        assert!(turn.truncated, "the turn must admit it was cut");
+        assert!(
+            matches!(
+                turn.message.content.as_slice(),
+                [Block::ToolUse { name, input, .. }]
+                    if name == "execute_cell" && input["code"] == "return 1"
+            ),
+            "the finished program is delivered and the cut prose is not: {:?}",
+            turn.message.content
+        );
+    }
+
+    /// The same shape over the stream, where `stopped` rather than position
+    /// is the proof.
+    #[test]
+    fn a_stopped_stream_block_runs_while_an_unstopped_one_is_dropped() {
+        let mut streamed = StreamAccumulator::new();
+        streamed.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"execute_cell","input":{}}}"#).unwrap();
+        streamed.event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"return 1\"}"}}"#).unwrap();
+        streamed
+            .event(r#"{"type":"content_block_stop","index":0}"#)
+            .unwrap();
+        streamed.event(r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"y","name":"execute_cell","input":{}}}"#).unwrap();
+        streamed.event(r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"return"}}"#).unwrap();
+        streamed
+            .event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#)
+            .unwrap();
+        streamed.event(r#"{"type":"message_stop"}"#).unwrap();
+
+        let turn = streamed.finish().expect("the stopped block survives");
+        assert!(turn.truncated);
+        let tools: Vec<_> = turn
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                Block::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            vec!["x"],
+            "only the block the provider finished sending may run"
         );
     }
 

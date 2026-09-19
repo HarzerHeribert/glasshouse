@@ -401,39 +401,45 @@ fn an_unmet_acceptance_item_holds_the_completion_with_what_was_observed() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// The stall notice (`progress::Stall`): six cells in a row that change
-/// nothing — no tree change, no new fact, no verification — get one notice
-/// at the head of the next feedback, counted, and the task goes on.
+/// The stall notice (`progress::Stall`): six cells in a row producing nothing
+/// this task has not already seen get one notice at the head of the next
+/// feedback, counted, and the task goes on.
+///
+/// **Seven reads, six repeats.** The first read of a file is new information
+/// however many times the model reads it afterwards, so a run of identical
+/// frames starts counting on the second. The variable name differs on every
+/// cell here and changes nothing: `progress::fingerprint` reads the calls,
+/// their arguments and the tree, never the model's source.
 #[test]
-fn six_cells_without_progress_get_one_stall_notice_and_the_task_continues() {
+fn six_repeated_cells_get_one_stall_notice_and_the_task_continues() {
     let root = root("stall");
     let mut responses = vec![cell(
         "c1",
         "await write({path: \"notes.txt\", content: \"hello\\n\"});",
     )];
-    for i in 0..6 {
+    for i in 0..7 {
         responses.push(cell(
             &format!("r{i}"),
             &format!("const look{i} = await read({{path: \"notes.txt\"}});"),
         ));
     }
-    responses.push(prose("Done: read it six times."));
+    responses.push(prose("Done: read it seven times."));
     let (endpoint, bodies) = providers(responses);
     let result = exec_json(&root, &endpoint);
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 8);
+    assert_eq!(bodies.len(), 9);
     assert!(
-        !bodies[6].contains("No progress for"),
-        "five idle cells are not yet a stall: {}",
-        bodies[6]
+        !bodies[7].contains("No progress for"),
+        "the first read was new, so five repeats are not yet a stall: {}",
+        bodies[7]
     );
     assert!(
-        bodies[7].contains("No progress for 6 cells"),
-        "the sixth idle cell is noticed: {}",
-        bodies[7]
+        bodies[8].contains("No progress for 6 cells"),
+        "the sixth repeat is noticed: {}",
+        bodies[8]
     );
     assert_eq!(result["telemetry"]["progress"]["stall_notices"], 1);
     assert_eq!(result["telemetry"]["progress"]["no_progress_notices"], 0);
-    assert_eq!(result["answer"], "Done: read it six times.");
+    assert_eq!(result["answer"], "Done: read it seven times.");
     let _ = std::fs::remove_dir_all(root);
 }

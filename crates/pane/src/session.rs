@@ -49,16 +49,6 @@ use crate::tui::{
 };
 use crate::wire;
 
-/// Turns in a row that ran no program before the task ends.
-///
-/// **The one count left in this loop, and it counts the absence of work
-/// rather than its amount.** A prose turn runs no cell, so it writes no
-/// record: `progress::Stall` never observes it and the supervisor's cadence
-/// never advances, which means a model that only ever talks is invisible to
-/// both enders. Six, because that is what it costs to find out — the old cap
-/// was three, and hundreds of requests was the alternative the primary named
-/// on 2026-09-06.
-const TURNS_WITHOUT_A_PROGRAM: u32 = 6;
 const REQUEST_MEASUREMENT_CAP: usize = 64;
 
 macro_rules! session_println {
@@ -1257,12 +1247,10 @@ fn run_task_inner(
     let mut final_turn = false;
     let mut terminal_failure = None;
     let mut incomplete;
-    // Consecutive looks that decided to intervene, and the criterion the last
-    // of them chose. `supervisor::DEFAULT_VERDICT_LIMIT` of these in a row end
-    // the task -- the supervisor's judgement, not a count of work.
-    let mut verdicts = 0u32;
-    let mut verdict_criterion: Option<String> = None;
-    let mut turns_without_a_program = 0u32;
+    // The supervisor nudges and no longer ends: three consecutive model
+    // opinions used to end a task, and the criteria it matches on describe
+    // exactly what a careful re-read looks like (`ending.rs` carries the
+    // reasoning and the measurement behind it).
     // The deliberate sweep's two pieces of memory: where the conversation
     // stood when it was last swept, so a session that sits above the
     // fraction does not rewrite the provider's cached prefix every turn; and
@@ -1528,11 +1516,22 @@ fn run_task_inner(
                 .record_context(&transcript.conversation.system)
                 .map_err(|e| format!("could not record directory instructions: {e}"))?;
         }
-        turns_without_a_program = if step.prose {
-            turns_without_a_program + 1
-        } else {
-            0
-        };
+        // A prose turn runs no cell, so `task_state.observe` never sees it and
+        // the stall would sit at zero however long a model talked. It is
+        // observed here instead, fingerprinted by what it said: saying
+        // something new is progress, saying it again is not. This is what
+        // replaced the count of prose turns -- a count cannot tell a model
+        // reasoning toward a hard decision from a model stuck.
+        if step.prose {
+            let said = step
+                .response
+                .as_deref()
+                .or(step.answer.as_deref())
+                .unwrap_or_default();
+            task_state
+                .stall
+                .observe(&crate::progress::prose_fingerprint(said));
+        }
         let helper_delivered_interrupt = step
             .view
             .helpers
@@ -1587,16 +1586,6 @@ fn run_task_inner(
                     &trajectory,
                     task_state.stall.since_progress(),
                 );
-                if decision.intervene {
-                    verdicts += 1;
-                    verdict_criterion = decision.criterion.clone();
-                } else if decision.ok {
-                    // A look that ran and saw nothing wrong clears the streak:
-                    // patience is consecutive, not cumulative. A look that
-                    // could not be made says nothing either way and leaves it.
-                    verdicts = 0;
-                    verdict_criterion = None;
-                }
                 let (nudge, status) = crate::supervisor::outcome(decision);
                 nudge_reason = nudge;
                 transcript.notebook.supervisor = Some(status);
@@ -1616,13 +1605,8 @@ fn run_task_inner(
             &ending::Ending {
                 cap: session.config().limits.cells,
                 cap_reached: budget.cell_limit_reached(),
-                verdicts,
-                criterion: verdict_criterion.as_deref(),
-                turns_without_a_program,
                 stalled_windows: task_state.stall.stalled_windows(),
             },
-            crate::supervisor::DEFAULT_VERDICT_LIMIT,
-            TURNS_WITHOUT_A_PROGRAM,
             crate::progress::DEFAULT_STALL_LIMIT,
             crate::progress::DEFAULT_STALL_WINDOW,
         );
