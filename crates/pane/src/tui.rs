@@ -24,6 +24,7 @@ mod markdown;
 mod ribbon;
 mod scroll;
 mod startup;
+mod value;
 pub use scroll::SCROLL_INDICATOR_LINGER;
 use scroll::render_scrollbar;
 mod status;
@@ -1817,7 +1818,7 @@ fn notebook_lines(
                 // Set when this message drew a cell field, so the field's
                 // closing rule can be pushed after the regions rather than
                 // between them.
-                let mut footer: Option<usize> = None;
+                let mut footer: Option<(usize, usize)> = None;
                 let view = notebook.cell(cell);
                 answered = view.is_some_and(|view| view.answered);
                 after_return = view.is_some_and(|view| view.returned.is_some());
@@ -1881,7 +1882,24 @@ fn notebook_lines(
                                     lines.push(Line::from(""));
                                 }
                                 headers.push((lines.len(), cell));
-                                lines.push(poster::field_header(cell, state, width, theme, tick));
+                                // **Only the cell doing work moves.** Every
+                                // cell used to be handed the same
+                                // `animation_frame`, so a screen of twenty
+                                // finished records cycled the reveal ramp in
+                                // lockstep -- the user, watching a live run:
+                                // *"vor allem dass alle blinken"* (2026-09-19).
+                                // A finished cell is a record, and a record
+                                // does not shimmer; a tick of zero is the
+                                // still render `/motion off` already draws.
+                                let cell_tick =
+                                    if state == poster::State::Preparing && cell == total_cells {
+                                        tick
+                                    } else {
+                                        0
+                                    };
+                                lines.push(poster::field_header(
+                                    cell, state, width, theme, cell_tick,
+                                ));
                                 let fold = helper_fold(view);
                                 if !fold.is_empty() {
                                     lines.push(Line::styled(
@@ -1936,7 +1954,7 @@ fn notebook_lines(
                                         // kinds and their counts are what a
                                         // reader acts on and they stay here.
                                         lines.push(poster::call_bar(
-                                            &summary, None, width, theme, tick,
+                                            &summary, None, width, theme, cell_tick,
                                         ));
                                     } else {
                                         push_text_region(&mut lines, actual);
@@ -1958,7 +1976,7 @@ fn notebook_lines(
                                 // it *after* the regions below rather than
                                 // here: a rule drawn between the bar and the
                                 // bindings would cut the cell in half.
-                                footer = Some(cell);
+                                footer = Some((cell, cell_tick));
                             }
                         }
                         Extracted::Invalid(error) => {
@@ -2031,17 +2049,28 @@ fn notebook_lines(
                     );
                     if let Some(output) = view.and_then(|v| v.output.as_deref()) {
                         turn_header(&mut lines, "OUTPUT".into(), MUTED);
-                        lines.extend(markdown::render(&pretty_json(output), width));
+                        // A value is drawn by its shape. `to_string_pretty`
+                        // escapes the newlines inside a string, so a diff
+                        // returned as a field arrived as one enormous line of
+                        // `\n` -- the user, on their own screen: *"und das
+                        // als Output interessiert einen Menschen auch nicht"*
+                        // (2026-09-19). A value this module has no opinion
+                        // about keeps the rendering it always had.
+                        if !value::push_value(&mut lines, output, width, theme) {
+                            lines.extend(markdown::render(&pretty_json(output), width));
+                        }
                     }
                     if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
                         push_changes(&mut lines, changes, true);
                     }
                     if let Some(returned) = view.and_then(|v| v.returned.as_deref()) {
                         turn_header(&mut lines, "PANE".into(), ACCENT);
-                        lines.extend(markdown::render(&pretty_json(returned), width));
+                        if !value::push_value(&mut lines, returned, width, theme) {
+                            lines.extend(markdown::render(&pretty_json(returned), width));
+                        }
                     }
-                    if let Some(cell) = footer {
-                        poster::push_footer(&mut lines, cell, width, theme, tick);
+                    if let Some((cell, footer_tick)) = footer {
+                        poster::push_footer(&mut lines, cell, width, theme, footer_tick);
                     }
                     if !after.trim().is_empty() {
                         lines.extend(markdown::render(after.trim(), width));

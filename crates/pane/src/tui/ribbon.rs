@@ -19,7 +19,7 @@
 //! A purely byte-driven band would freeze during thinking, which is the one
 //! failure this surface cannot have.
 
-use super::ScreenState;
+use super::{Activity, ScreenState};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -83,14 +83,118 @@ fn row(width: usize, head: usize, band: usize, offset: usize) -> String {
         .collect()
 }
 
-/// The band, still or moving.
+/// A bar whose weight changes in place and never travels.
 ///
-/// `reduced_motion` fixes the head rather than emptying the band: a still
+/// **Thinking is pressure that goes nowhere**, so its form does not move
+/// across the strip. A travelling band would say the same thing as receiving,
+/// which is the confusion this whole dispatch exists to remove.
+fn breathing(width: usize, band: usize, frame: usize, offset: usize) -> String {
+    let step = (frame / 2 + offset) % (RAMP.len() * 2);
+    let weight = if step < RAMP.len() {
+        step
+    } else {
+        RAMP.len() * 2 - 1 - step
+    };
+    let glyph = RAMP[weight.min(RAMP.len() - 1)];
+    let start = width.saturating_sub(band) / 2;
+    (0..width)
+        .map(|x| {
+            if x >= start && x < start + band {
+                glyph
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+/// Two heads leaving the centre and returning to it.
+///
+/// **Searching goes out and comes back**, which is the one thing that makes
+/// it not executing. The pair is symmetric about the centre, so the return is
+/// as legible as the departure.
+fn sweeping_out(width: usize, band: usize, frame: usize, offset: usize) -> String {
+    let half = width / 2;
+    let span = half.max(1);
+    let phase = (frame + offset) % (span * 2);
+    let reach = if phase < span {
+        phase
+    } else {
+        span * 2 - phase
+    };
+    let mut row = vec![' '; width];
+    for depth in 0..band.min(RAMP.len() * 2) {
+        let glyph = RAMP[(RAMP.len() - 1).saturating_sub(depth * RAMP.len() / band.max(1))];
+        for side in [reach.saturating_sub(depth), reach + depth] {
+            for x in [half.saturating_sub(side), (half + side).min(width - 1)] {
+                if x < width && row[x] == ' ' {
+                    row[x] = glyph;
+                }
+            }
+        }
+    }
+    row.into_iter().collect()
+}
+
+/// A hard-edged block marching one way, with no wake behind it.
+///
+/// **Executing goes forward and does not come back.** Solid rather than
+/// dithered: a cell's program is the most definite thing the session does,
+/// and the ramp is what the tentative states use.
+fn marching(width: usize, band: usize, frame: usize, offset: usize) -> String {
+    let span = width + band;
+    let head = (frame * 2 + offset) % span;
+    (0..width)
+        .map(|x| {
+            let distance = (x + span - head) % span;
+            if distance < band { RAMP[3] } else { ' ' }
+        })
+        .collect()
+}
+
+/// Both ends closing toward the centre.
+///
+/// **Compacting is compression**, so the form compresses: the run shortens
+/// from both sides rather than travelling.
+fn converging(width: usize, frame: usize, offset: usize) -> String {
+    let half = width / 2;
+    let phase = (frame + offset) % (half.max(1));
+    (0..width)
+        .map(|x| {
+            let from_edge = x.min(width.saturating_sub(x + 1));
+            if from_edge >= phase && from_edge < phase + 2 {
+                RAMP[2]
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+/// A sparse drift: the least motion that still proves a session is alive.
+fn drifting(width: usize, frame: usize, offset: usize) -> String {
+    let span = width.max(1);
+    let head = (frame / 3 + offset) % span;
+    (0..width)
+        .map(|x| if x == head { RAMP[1] } else { ' ' })
+        .collect()
+}
+
+/// The band, still or moving, in the form its state calls for.
+///
+/// **Every mode had the same shape and the strip said only "something is
+/// happening".** The user, watching a live run (2026-09-19): *"ich finde es
+/// schade, dass alle Modes … eben über dem Prompt anzeigen. Hier wäre
+/// Diversity gefragt."* The forms differ structurally rather than by colour,
+/// because a colour-only distinction dies on Mono and this crate has eight
+/// palettes.
+///
+/// `reduced_motion` fixes the frame rather than emptying the band: a still
 /// screen still shows what the surface is, and a reader who turned motion off
 /// asked for stillness, not for a blank strip.
 pub(super) fn lines(width: usize, height: usize, state: &ScreenState) -> Vec<Line<'static>> {
     let band = band_width(&state.pulse.deliveries);
-    let head = if state.reduced_motion {
+    let frame = if state.reduced_motion {
         width / 3
     } else {
         state.animation_frame.wrapping_mul(SPEED)
@@ -98,8 +202,20 @@ pub(super) fn lines(width: usize, height: usize, state: &ScreenState) -> Vec<Lin
     let ink = Style::default().fg(state.theme.accent());
     (0..height)
         .map(|index| {
+            let offset = index * 2;
+            let text = match state.activity {
+                Activity::Thinking => breathing(width, band, frame, offset),
+                Activity::Searching => sweeping_out(width, band, frame, offset),
+                Activity::Executing => marching(width, band, frame, offset),
+                Activity::Compacting => converging(width, frame, offset),
+                Activity::Waiting => drifting(width, frame, offset),
+                // Receiving keeps the raking sweep, which is the one form
+                // that already widened with arrivals -- a stream is the state
+                // that has a rate, and the only one whose form should show it.
+                _ => row(width, frame, band, offset),
+            };
             Line::from(Span::styled(
-                row(width, head, band, index * 2),
+                text,
                 if index == 0 {
                     ink.add_modifier(Modifier::BOLD)
                 } else {
@@ -154,6 +270,118 @@ mod tests {
         };
         state.pulse.deliveries = deliveries;
         state
+    }
+
+    fn mode_state(activity: Activity, frame: usize) -> ScreenState {
+        ScreenState {
+            theme: Theme::Neon,
+            activity,
+            animation_frame: frame,
+            ..Default::default()
+        }
+    }
+
+    fn drawn(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn show_every_mode() {
+        if std::env::var("SHOW_MODES").is_err() {
+            return;
+        }
+        for activity in [
+            Activity::Thinking,
+            Activity::Streaming,
+            Activity::Searching,
+            Activity::Executing,
+            Activity::Compacting,
+            Activity::Waiting,
+        ] {
+            println!("--- {} ---", activity.label().to_uppercase());
+            for frame in [0usize, 2, 4, 6] {
+                for row in drawn(&lines(56, 2, &mode_state(activity, frame))) {
+                    println!("|{row}|");
+                }
+                println!();
+            }
+        }
+    }
+
+    #[test]
+    fn every_mode_is_distinguishable_from_every_other_at_one_frame() {
+        let modes = [
+            Activity::Thinking,
+            Activity::Streaming,
+            Activity::Searching,
+            Activity::Executing,
+            Activity::Compacting,
+            Activity::Waiting,
+        ];
+        let shapes: Vec<Vec<String>> = modes
+            .iter()
+            .map(|a| drawn(&lines(56, 2, &mode_state(*a, 5))))
+            .collect();
+        for (i, a) in shapes.iter().enumerate() {
+            for (j, b) in shapes.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    a, b,
+                    "{:?} and {:?} draw the same shape",
+                    modes[i], modes[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_mode_moves_between_frames_and_freezes_under_reduced_motion() {
+        for activity in [
+            Activity::Thinking,
+            Activity::Streaming,
+            Activity::Searching,
+            Activity::Executing,
+            Activity::Compacting,
+            Activity::Waiting,
+        ] {
+            let a = drawn(&lines(56, 2, &mode_state(activity, 6)));
+            let b = drawn(&lines(56, 2, &mode_state(activity, 9)));
+            assert_ne!(a, b, "{activity:?} never moves, so it reads as stalled");
+            let mut still = mode_state(activity, 6);
+            still.reduced_motion = true;
+            let mut later = mode_state(activity, 91);
+            later.reduced_motion = true;
+            assert_eq!(
+                drawn(&lines(56, 2, &still)),
+                drawn(&lines(56, 2, &later)),
+                "{activity:?} moved with motion off"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mode_fits_its_width_at_sixty_columns_and_narrower() {
+        for activity in [
+            Activity::Thinking,
+            Activity::Searching,
+            Activity::Executing,
+            Activity::Compacting,
+            Activity::Waiting,
+            Activity::Streaming,
+        ] {
+            for width in [24usize, 46, 60, 120] {
+                for line in lines(width, 2, &mode_state(activity, 7)) {
+                    assert_eq!(line.width(), width, "{activity:?} at {width}");
+                }
+            }
+        }
     }
 
     #[test]

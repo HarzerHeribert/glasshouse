@@ -346,6 +346,12 @@ pub(super) struct Row {
     pub name: String,
     pub type_label: String,
     pub count: Option<String>,
+    /// Whether an earlier cell produced this binding and this one only
+    /// carried it. `render_table_delta` decides it, not this module: an
+    /// entry declared, replaced or changed in the current cell renders in
+    /// full, and every other live entry renders as one line saying which
+    /// cell it last changed in.
+    pub carried: bool,
 }
 
 /// Reads the handle table's own rendering back into rows.
@@ -378,6 +384,7 @@ pub(super) fn rows_of(table: &str) -> Vec<Row> {
                 name,
                 type_label,
                 count,
+                carried: line.contains(CARRIED),
             })
         })
         .collect()
@@ -451,6 +458,11 @@ pub(super) fn value_rows(
 /// How many bindings a compact cell shows before it says how many are left.
 const BINDING_ROWS: usize = 8;
 
+/// The marker `render_table_delta` writes on a live binding the current cell
+/// did not change. Matching on the rendering rather than on a value is the
+/// same deliberate choice [`rows_of`] documents: one renderer, one answer.
+const CARRIED: &str = "(unchanged since cell ";
+
 /// The cell's bindings, as rows — or its raw stdout when it has no table.
 ///
 /// A cell that never ran has no handle table, and a resumed session's earlier
@@ -469,7 +481,26 @@ pub(super) fn push_bindings(
         .map(rows_of)
         .unwrap_or_default();
     if !rows.is_empty() {
-        lines.extend(value_rows(&rows, width, BINDING_ROWS, theme));
+        // **A cell shows what it produced, not the task's whole table.** The
+        // accumulation grows every cell, so by cell ten a reader was looking
+        // at a list that was almost entirely earlier cells' work -- the user,
+        // on their own screen: *"wie das hier stacked ist, ist ganz
+        // schlimm"* (2026-09-19). The carried ones are history and Ctrl-O
+        // has them; the count stays, because a reader who wonders where a
+        // binding went must not have to guess that it still exists.
+        let (produced, carried): (Vec<Row>, Vec<Row>) =
+            rows.into_iter().partition(|row| !row.carried);
+        lines.extend(value_rows(&produced, width, BINDING_ROWS, theme));
+        if !carried.is_empty() {
+            lines.push(Line::styled(
+                format!(
+                    "   {} binding{} carried from earlier cells · Ctrl-O expands",
+                    carried.len(),
+                    if carried.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(MUTED),
+            ));
+        }
         return;
     }
     if let Some(stdout) = stdout.filter(|s| !s.trim().is_empty() && s.trim() != "undefined") {
@@ -548,7 +579,11 @@ fn wrap(text: &str, width: usize, limit: usize) -> Vec<String> {
 /// notice sits on `dock()` rather than on the accent, which is what keeps
 /// Mono legible -- its accent is white, and a white label would be a bar of
 /// light above the composer.
-pub(super) fn notice(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &super::ScreenState) {
+pub(super) fn notice(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &super::ScreenState,
+) {
     let Some(notice) = &state.notice else {
         return;
     };
@@ -662,6 +697,62 @@ mod tests {
     }
 
     #[test]
+    fn a_still_tick_renders_a_field_identically_on_every_frame() {
+        // The caller decides which cell is live; this is the contract it
+        // relies on -- a tick of zero is the same field every frame, so a
+        // finished cell handed zero cannot shimmer.
+        for state in [State::Executed, State::Threw, State::Repaired] {
+            let a = text(&field_header(3, state, 80, Theme::Neon, 0));
+            let b = text(&field_header(3, state, 80, Theme::Neon, 0));
+            assert_eq!(a, b, "{state:?} moved between consecutive frames");
+            assert!(
+                !a.contains(RAMP[0]) && !a.contains(RAMP[1]) && !a.contains(RAMP[2]),
+                "a still field used a reveal glyph: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_tick_still_moves_so_the_running_cell_reads_as_alive() {
+        let a = text(&field_header(3, State::Preparing, 80, Theme::Neon, 9));
+        let b = text(&field_header(3, State::Preparing, 80, Theme::Neon, 10));
+        assert_ne!(a, b, "the running cell stopped moving");
+    }
+
+    #[test]
+    fn a_carried_binding_is_counted_rather_than_listed() {
+        let table = concat!(
+            "fresh         Array         n=3   inline cost ~12 tok\n",
+            "    [0] 1\n",
+            "architecture  File          (unchanged since cell 1)\n",
+            "exactHits     Grep.Match[]  (unchanged since cell 1)\n",
+        );
+        let rows = rows_of(table);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(
+            rows.iter().filter(|row| row.carried).count(),
+            2,
+            "the carried marker was not read: {rows:?}"
+        );
+        let mut lines = Vec::new();
+        push_bindings(&mut lines, Some(table), None, 80, Theme::Neon);
+        let drawn: Vec<String> = lines.iter().map(text).collect();
+        let all = drawn.join("\n");
+        assert!(
+            all.contains("fresh"),
+            "the produced binding is missing: {all}"
+        );
+        assert!(
+            !all.contains("architecture") && !all.contains("exactHits"),
+            "a carried binding was listed again: {all}"
+        );
+        assert!(
+            all.contains("2 bindings carried from earlier cells"),
+            "the carried count is missing: {all}"
+        );
+    }
+
+    #[test]
     fn motion_off_draws_every_run_at_full_strength() {
         let still = text(&field_header(4, State::Executed, 80, Theme::Neon, 0));
         assert!(
@@ -739,6 +830,7 @@ mod tests {
                 name: format!("binding{i}"),
                 type_label: "Array".into(),
                 count: Some("3".into()),
+                carried: false,
             })
             .collect();
         let rendered: Vec<String> = value_rows(&rows, 80, 4, Theme::Neon)

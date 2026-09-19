@@ -18,7 +18,17 @@ use super::{CellError, MUTED, NO_OUTPUTS, turn_header};
 /// Expanded view (Ctrl-O) shows original code, as do cells with source-position errors.
 pub(super) fn push_changes(lines: &mut Vec<Line<'static>>, changes: &str, compact: bool) {
     turn_header(lines, "CHANGES OBSERVED".into(), Color::LightCyan);
-    let limit = if compact { 18 } else { usize::MAX };
+    push_diff(lines, changes, if compact { 18 } else { usize::MAX });
+}
+
+/// A unified diff's body: a gutter by line kind, bounded, control characters
+/// neutralised.
+///
+/// Split out of [`push_changes`] so the cell's own return value can render a
+/// diff the same way rather than through a second renderer that could drift
+/// from it. The caller supplies the heading, because a diff that arrived as
+/// a field of a returned object is not a "change observed".
+pub(super) fn push_diff(lines: &mut Vec<Line<'static>>, changes: &str, limit: usize) {
     for line in changes.lines().take(limit) {
         let color = if line.starts_with("+++") || line.starts_with("---") {
             Color::LightCyan

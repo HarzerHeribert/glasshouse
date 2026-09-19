@@ -137,13 +137,7 @@ pub(super) fn render(tick: usize, width: usize, theme: Theme, still: bool) -> Ve
 ///
 /// `still` is `reduced_motion` or a keypress; both land on the settled frame
 /// rather than on a blank.
-pub(super) fn render_into(
-    frame: &mut Frame,
-    area: Rect,
-    tick: usize,
-    theme: Theme,
-    still: bool,
-) {
+pub(super) fn render_into(frame: &mut Frame, area: Rect, tick: usize, theme: Theme, still: bool) {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     if !fits(width, height) {

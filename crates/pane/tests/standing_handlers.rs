@@ -519,8 +519,14 @@ fn sidebar_count_is_live_and_narrow_terminal_stays_without_sidebar() {
     // a render that is otherwise intact, so a broken draw cannot pass as an
     // absent handler.
     let after = render(140, &notebook);
-    assert!(!after.contains("handlers 1"), "the handler is still counted");
-    assert!(!after.contains("handlers"), "no handler row is drawn for none");
+    assert!(
+        !after.contains("handlers 1"),
+        "the handler is still counted"
+    );
+    assert!(
+        !after.contains("handlers"),
+        "no handler row is drawn for none"
+    );
 }
 
 #[test]

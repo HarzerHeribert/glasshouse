@@ -722,11 +722,25 @@ fn bare_pane_opens_the_live_composer_in_its_current_project() {
     // One file per session now, named by the id `/exit` prints, so the
     // assertion is that a rollout was written -- not where a single
     // project-wide one used to live.
-    let sessions: Vec<_> = std::fs::read_dir(app.root.join(".pane/sessions"))
+    let written: Vec<String> = std::fs::read_dir(app.root.join(".pane/sessions"))
         .expect(".pane/sessions")
         .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(sessions.len(), 1, "one session, one rollout");
+    // One session writes one rollout, and its event stream sits beside it
+    // sharing the stem -- a reader that found either finds the other by
+    // changing the extension. Counting directory entries would now count
+    // both, so the rollout is named rather than counted.
+    let rollouts: Vec<&String> = written
+        .iter()
+        .filter(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
+        .collect();
+    assert_eq!(rollouts.len(), 1, "one session, one rollout: {written:?}");
+    let stem = rollouts[0].trim_end_matches(".jsonl");
+    assert!(
+        written.iter().any(|name| name == &format!("{stem}.events.jsonl")),
+        "the event stream shares the rollout's stem: {written:?}"
+    );
     assert!(!app.screen.screen().alternate_screen());
 }
 

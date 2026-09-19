@@ -1839,6 +1839,48 @@ fn poster_fixture() -> (Conversation, Notebook) {
 /// kilobytes of one-line JSON. Rows, with the name, the type and the length —
 /// and never a brace.
 #[test]
+fn a_finished_cell_is_identical_across_frames_while_a_live_one_moves() {
+    // The user, watching a live run: *"vor allem dass alle blinken"*. Every
+    // cell used to be handed the same `animation_frame`, so a screen of
+    // finished records cycled the reveal ramp in lockstep. This asserts the
+    // wiring, not the contract: `poster` already renders a still field for a
+    // tick of zero, and what was wrong was which cells got one.
+    let (c, n) = poster_fixture();
+    let mut early = state();
+    early.compact = true;
+    early.animation_frame = 9;
+    let mut later = state();
+    later.compact = true;
+    later.animation_frame = 10;
+    let a = text(&draw(120, 34, &early, &c, &n));
+    let b = text(&draw(120, 34, &later, &c, &n));
+    let header = |screen: &str| {
+        screen
+            .lines()
+            .find(|line| line.contains("/ CELL"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        header(&a),
+        header(&b),
+        "a finished cell moved between frames:\n{a}"
+    );
+
+    // And the guard against over-fixing: a cell still running must move, or
+    // the screen reads as stalled.
+    let mut running = n.clone();
+    running.cells[0].execution = None;
+    let live_a = text(&draw(120, 34, &early, &c, &running));
+    let live_b = text(&draw(120, 34, &later, &c, &running));
+    assert_ne!(
+        header(&live_a),
+        header(&live_b),
+        "the running cell stopped moving:\n{live_a}"
+    );
+}
+
+#[test]
 fn a_cells_bindings_are_rows_and_never_json() {
     let (c, n) = poster_fixture();
     let mut state = state();
