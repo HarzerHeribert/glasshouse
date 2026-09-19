@@ -6,16 +6,30 @@ use pane::runtime::outcome::CellOutcome;
 use pane::sandbox::profile::Profile;
 use std::io::{BufRead, BufReader, Read, Write};
 
+/// `ANTHROPIC_BASE_URL` is process-global, and `setenv` on macOS may
+/// reallocate the environment block while another thread is inside
+/// `getenv` -- which every `Fixture::new` here is, by way of
+/// `std::env::temp_dir`. So the one test that points the variable at a
+/// fixture takes this lock for writing and every other test takes it for
+/// reading, which is the same serialisation `wire.rs` and `tests/helpers.rs`
+/// already use. Four flaky reds in the week to 2026-09-19 were this and the
+/// fixture-name collision below; both are removed rather than re-run.
+/// Poisoning is stepped over deliberately: one failing test here must
+/// report one red, not six.
+static ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 struct Fixture(std::path::PathBuf);
 impl Fixture {
+    /// A counter, not a clock. `SystemTime::now().as_nanos()` names
+    /// nanoseconds but does not resolve them, so two fixtures built in the
+    /// same microsecond shared a directory -- and then one test's rewrite
+    /// landed in another's snapshot.
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-custom-agents-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(root.join(".pane/agents")).unwrap();
         Self(root)
@@ -35,6 +49,7 @@ impl Drop for Fixture {
 
 #[test]
 fn definitions_cannot_grant_permissions_and_validate_routing_defaults() {
+    let _env = ENV_LOCK.read().unwrap_or_else(|poison| poison.into_inner());
     for text in [
         "instructions='Review'\npermissions=['Bash(*)']",
         "instructions='Review'\nmodel='off'",
@@ -54,6 +69,7 @@ fn definitions_cannot_grant_permissions_and_validate_routing_defaults() {
 
 #[test]
 fn catalog_is_a_permission_checked_immutable_snapshot() {
+    let _env = ENV_LOCK.read().unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     fixture.write("review", "instructions='original'\neffort='high'");
     let catalog = Catalog::load(&fixture.profile());
@@ -76,6 +92,7 @@ fn catalog_is_a_permission_checked_immutable_snapshot() {
 #[cfg(unix)]
 #[test]
 fn external_symlink_definition_is_refused() {
+    let _env = ENV_LOCK.read().unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     let outside = Fixture::new();
     outside.write("external", "instructions='outside'");
@@ -94,6 +111,7 @@ fn external_symlink_definition_is_refused() {
 
 #[test]
 fn invalid_profile_throws_before_a_background_agent_is_created() {
+    let _env = ENV_LOCK.read().unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     let id = SessionId::new("invalid-custom-profile");
     let mut runtime = Runtime::new(&fixture.profile(), &Glasshouse::None, &id);
@@ -107,6 +125,7 @@ fn invalid_profile_throws_before_a_background_agent_is_created() {
 
 #[test]
 fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_override() {
+    let _env = ENV_LOCK.write().unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     std::fs::create_dir_all(fixture.0.join(".glasshouse")).unwrap();
     std::fs::write(
@@ -162,8 +181,9 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
         }
     });
     let previous = std::env::var_os("ANTHROPIC_BASE_URL");
-    // SAFETY: only this test in this integration-test process mutates the
-    // provider environment, and restoration follows agent thread teardown.
+    // SAFETY: `ENV_LOCK` is held for writing, so no other test in this
+    // process is inside `getenv` while this runs, and restoration follows
+    // agent thread teardown.
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", endpoint);
     }
@@ -219,6 +239,7 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
 /// into "define this file" advice about a file that already exists.
 #[test]
 fn a_definition_past_the_catalogue_limit_is_named_as_unloaded_not_as_missing() {
+    let _env = ENV_LOCK.read().unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     for index in 0..129 {
         fixture.write(
