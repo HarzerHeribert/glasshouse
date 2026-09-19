@@ -21,6 +21,9 @@ fn provider(status: u16, response: Value) -> String {
     providers(vec![(status, response)])
 }
 
+#[path = "support/sse.rs"]
+mod sse;
+
 fn providers(responses: Vec<(u16, Value)>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -48,8 +51,13 @@ fn providers(responses: Vec<(u16, Value)>) -> String {
             reader.read_exact(&mut body).unwrap();
             let request: Value = serde_json::from_slice(&body).unwrap();
             assert!(request["messages"].is_array());
-            let response = response.to_string();
-            write!(stream, "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            // The preflight Scout holds tools, so its loop streams: its
+            // ceiling measures silence rather than duration
+            // (`wire::SIDE_ERRAND_SILENCE`). A fixture that always wrote
+            // JSON answered it with a body carrying no `message_stop`, and
+            // the helper's tokens then went missing from the telemetry.
+            let (content_type, response) = sse::response_for(&request, &response.to_string());
+            write!(stream, "HTTP/1.1 {status} Reply\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
         }
     });
     url

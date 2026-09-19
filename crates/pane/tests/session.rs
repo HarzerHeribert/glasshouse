@@ -137,6 +137,9 @@ where
     (format!("http://127.0.0.1:{port}"), bodies)
 }
 
+#[path = "support/sse.rs"]
+mod sse;
+
 fn handle_one_request<F: Fn(&str) -> String>(
     mut stream: TcpStream,
     answer: &F,
@@ -162,11 +165,19 @@ fn handle_one_request<F: Fn(&str) -> String>(
     }
     let body = String::from_utf8_lossy(&body).into_owned();
     let reply = answer(&body);
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
     bodies.lock().unwrap().push(body);
 
+    // **Answer in the transport the request asked for.** A narrowed helper
+    // loop — SCOUT, CHECKER — streams, because its ceiling measures silence
+    // rather than duration (`wire::SIDE_ERRAND_SILENCE`). A fixture that
+    // always wrote JSON left such a caller reading a body with no
+    // `message_stop` in it, which is how a resolved Scout went missing from
+    // the notebook here.
+    let (content_type, reply) = sse::response_for(&request, &reply);
     let response_body = reply.as_bytes();
     let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         response_body.len()
     );
     let _ = stream.write_all(response.as_bytes());

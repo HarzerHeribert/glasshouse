@@ -982,21 +982,65 @@ pub fn send_errand_streaming(
         conversation,
         model,
         effort,
-        max_tokens,
+        Allowance::Capped(max_tokens),
+        Surface::TextOnly,
         extra_header,
         SIDE_ERRAND_FIRST_EVENT,
         SIDE_ERRAND_SILENCE,
     )
 }
 
-/// [`send_errand_streaming`] with its two windows supplied, so a test can
-/// exercise the reset without spending the real ones. Private on purpose:
-/// the constants above are the only windows production has.
+/// One turn of a **narrowed agent loop**, streamed, and ended by silence
+/// rather than by duration.
+///
+/// The invariant it restores: **a helper is cut off for going silent, never
+/// for taking its time** — which [`send_errand_streaming`] already gave the
+/// one-shot errand and the loop did not have. A narrowed loop used to pass
+/// [`SIDE_ERRAND_TIMEOUT`] to [`send_turn_bounded_with`], where it became a
+/// `timeout_global` on a non-streamed request: a whole-answer ceiling, the
+/// quantity [`SIDE_ERRAND_SILENCE`] is written against. Measured 2026-09-19:
+/// `CHECKER` died at exactly that ceiling with the answer still arriving,
+/// and the quality miss it ran to catch shipped.
+///
+/// The two differences from a one-shot errand are the whole point of it
+/// being a separate entry rather than an argument: this request carries a
+/// real tool surface, and its allowance is [`Allowance::Model`] — a
+/// per-turn cap belongs to an errand that declared its answer short, and on
+/// a loop it would truncate a turn mid-`tool_use`, throwing away a call the
+/// provider had already finished.
+///
+/// [`SIDE_ERRAND_BACKSTOP`] still bounds the request thread, because the
+/// reason a narrowed loop was ever bounded is unchanged: it runs inside a
+/// native v8 callback that `terminate_execution` cannot reach.
+pub fn send_narrowed_turn_streaming(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    extra_header: Option<(&str, &str)>,
+    surface: Surface,
+) -> Result<Turn, WireError> {
+    send_errand_within(
+        conversation,
+        model,
+        effort,
+        Allowance::Model(max_tokens_for(model)),
+        surface,
+        extra_header,
+        SIDE_ERRAND_FIRST_EVENT,
+        SIDE_ERRAND_SILENCE,
+    )
+}
+
+/// The streamed request both entries above are, with its two windows
+/// supplied so a test can exercise the reset without spending the real
+/// ones. Private on purpose: the constants above are the only windows
+/// production has.
 fn send_errand_within(
     conversation: &Conversation,
     model: &str,
     effort: Effort,
-    max_tokens: u32,
+    allowance: Allowance,
+    surface: Surface,
     extra_header: Option<(&str, &str)>,
     first_event: std::time::Duration,
     silence: std::time::Duration,
@@ -1009,16 +1053,16 @@ fn send_errand_within(
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let mut body = RequestBody::new(
         model,
-        max_tokens,
+        allowance.declared(),
         conversation,
-        Surface::TextOnly.tool_definitions(),
+        surface.tool_definitions(),
     );
     body.stream = Some(true);
     let body = configure_effort(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
         effort,
-        Allowance::Capped(max_tokens),
+        allowance,
     );
 
     // Read on this thread, where the env lock a test may hold still applies.
@@ -1663,13 +1707,20 @@ pub fn send_turn_streaming_on(
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let mut body = RequestBody::new(model, MAX_TOKENS, conversation, surface.tool_definitions());
+    // **The same allowance the whole-response path asks for.** This read
+    // `MAX_TOKENS` — the 8,192-token documented fallback — while
+    // [`request_body_for_surface`] beside it asked `max_tokens_for(model)`,
+    // so turning streaming on silently cut a turn to a sixteenth of what
+    // every model this project runs publishes (128,000), and the truncation
+    // arrived as a turn that stopped mid-sentence.
+    let max_tokens = max_tokens_for(model);
+    let mut body = RequestBody::new(model, max_tokens, conversation, surface.tool_definitions());
     body.stream = Some(true);
     let body = configure_effort(
         serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
         model,
         effort,
-        Allowance::Model(MAX_TOKENS),
+        Allowance::Model(max_tokens),
     );
 
     let mut request = ureq::post(&url)
@@ -1849,7 +1900,8 @@ mod tests {
             &sample_conversation(),
             "a-test-model",
             Effort::Default,
-            128,
+            Allowance::Capped(128),
+            Surface::TextOnly,
             None,
             std::time::Duration::from_millis(600),
             std::time::Duration::from_millis(300),
@@ -1872,7 +1924,8 @@ mod tests {
             &sample_conversation(),
             "a-test-model",
             Effort::Default,
-            128,
+            Allowance::Capped(128),
+            Surface::TextOnly,
             None,
             std::time::Duration::from_millis(600),
             std::time::Duration::from_millis(250),

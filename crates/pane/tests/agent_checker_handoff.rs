@@ -67,6 +67,9 @@ fn reply(id: &str, code: &str) -> serde_json::Value {
     })
 }
 
+#[path = "support/sse.rs"]
+mod sse;
+
 fn scripted_provider(replies: Vec<serde_json::Value>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -95,15 +98,18 @@ fn scripted_provider(replies: Vec<serde_json::Value>) -> (String, Arc<Mutex<Vec<
             if reader.read_exact(&mut body).is_err() {
                 return;
             }
-            recorded
-                .lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&body).into_owned());
+            let text = String::from_utf8_lossy(&body).into_owned();
+            let request: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            recorded.lock().unwrap().push(text);
 
-            let payload = reply.to_string();
+            // CHECKER holds tools, so its loop streams and is bounded by
+            // silence rather than by duration (`wire::SIDE_ERRAND_SILENCE`).
+            // Answer in whichever transport the request asked for.
+            let (content_type, payload) = sse::response_for(&request, &reply.to_string());
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 payload.len(),
                 payload
             );

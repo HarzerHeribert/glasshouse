@@ -432,19 +432,34 @@ pub(crate) fn run_narrowed_metered(
         let mut request = conversation.clone();
         prompt::project_runtime_history(&mut request, 0);
         // A narrowed loop is a helper: its provider request can outlive the
-        // caller that stopped waiting, so the wire request keeps a hard bound.
-        let deadline = narrowed.map(|_| wire::SIDE_ERRAND_TIMEOUT);
+        // caller that stopped waiting, so it keeps a hard bound on the wire.
+        //
+        // **That bound is silence, not duration.** It used to be
+        // `SIDE_ERRAND_TIMEOUT` on a non-streamed request, which is a
+        // whole-answer ceiling — and a whole-answer ceiling cannot tell a
+        // model that is thinking from a socket that has died, so it lands on
+        // the thinking model. Measured 2026-09-19: `CHECKER` died at exactly
+        // 120s with its answer still arriving, and the miss it ran to catch
+        // shipped. `wire::send_turn_streaming_on` bounds the same request by
+        // the gap between events, and `SIDE_ERRAND_BACKSTOP` still ends the
+        // thread the callback cannot reach.
+        //
+        // The task path is untouched: a person is watching it and stops it.
         let purpose = narrowed.map(|_| crate::helpers::PURPOSE_HEADER);
         if let Some(usage) = helper_usage {
             usage.begin_request();
         }
-        let sent = match wire::send_turn_bounded_with(
-            &request,
-            &options.model,
-            options.effort,
-            deadline,
-            purpose,
-        ) {
+        let sent = match if narrowed.is_some() {
+            wire::send_narrowed_turn_streaming(
+                &request,
+                &options.model,
+                options.effort,
+                purpose,
+                wire::Surface::cells(),
+            )
+        } else {
+            wire::send_turn_bounded_with(&request, &options.model, options.effort, None, purpose)
+        } {
             Ok(sent) => sent,
             Err(error) => {
                 journal.write(&conversation);

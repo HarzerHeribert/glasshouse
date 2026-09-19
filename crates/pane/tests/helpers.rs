@@ -521,6 +521,125 @@ fn a_multiturn_helper_sums_each_response_once_with_cache_coverage() {
     assert!(call.usage.complete());
 }
 
+/// **A helper is cut off for going silent, never for taking its time — on
+/// the loop as well as on the one-shot errand.**
+///
+/// The narrowed loop used to hand `wire::SIDE_ERRAND_TIMEOUT` to a
+/// non-streamed request, where it became a `timeout_global`: a whole-answer
+/// ceiling, which is the quantity `wire::SIDE_ERRAND_SILENCE`'s own doc
+/// comment says cannot distinguish a model that is thinking from a socket
+/// that has died. Measured 2026-09-19: `CHECKER` died at exactly 120s with
+/// its answer still arriving, and the quality miss it ran to catch shipped.
+///
+/// The ceiling itself is 120s of silence and no test can spend it, so what is
+/// asserted here is the thing that decides it — the request the loop actually
+/// puts on the wire. Three properties, each killed by a different way of
+/// getting this wrong:
+///
+/// * `stream` is true, so the bound is the gap between events (revert the
+///   `agent.rs` branch and this fails);
+/// * `max_tokens` is the model's own, not the spec's. A spec's figure means
+///   *this answer is short*, which is true of a one-shot errand and false of
+///   a turn in a loop, where it would stop a response mid-`tool_use` and
+///   throw away a call the provider had already finished;
+/// * the request still declares tools, because a narrowed loop is narrowed to
+///   a toolset and not to prose.
+#[test]
+fn a_narrowed_loops_turn_is_streamed_with_the_models_own_allowance() {
+    const LOOPING: HelperSpec = HelperSpec {
+        name: "streamed_loop_test",
+        summary: "test helper",
+        verb: "testing",
+        preamble: "Use a cell, then return.",
+        tools: &[],
+        // Deliberately tiny, and deliberately not what reaches the wire.
+        max_tokens: 128,
+        max_turns: 2,
+        input: pane::helpers::InputKind::Text,
+        output: pane::helpers::OutputKind::Reduction,
+        call_sites: &[CallSite::Cell],
+    };
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("narrowed-streams");
+    let provider = scripted_provider(vec![
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "cell-1", "name": "execute_cell",
+                "input": {"code": "console.log(1);"}
+            }]
+        }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "cell-2", "name": "execute_cell",
+                "input": {"code": "answer(\"done\");"}
+            }]
+        }),
+    ]);
+    unsafe { std::env::set_var("ANTHROPIC_BASE_URL", &provider.url) };
+
+    let call = pane::helpers::run(
+        &LOOPING,
+        pane::helpers::HelperRoute {
+            model: "test-helper-model",
+            effort: pane::wire::Effort::Medium,
+            cap: None,
+        },
+        "inspect this",
+        &fixture.profile(),
+        &Glasshouse::None,
+        &SessionId::new("helpers-narrowed-streams"),
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe { std::env::remove_var("ANTHROPIC_BASE_URL") };
+
+    assert!(call.outcome.ok, "{call:?}");
+    assert_eq!(call.outcome.text, "done");
+
+    let bodies = provider.bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2, "both turns should have reached the wire");
+    let allowed = pane::wire::max_tokens_for("test-helper-model");
+    assert_ne!(
+        allowed, LOOPING.max_tokens,
+        "this test cannot tell the two allowances apart unless they differ"
+    );
+    for (turn, body) in bodies.iter().enumerate() {
+        assert_eq!(
+            body.get("stream").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "turn {turn} was not streamed, so its ceiling measures duration: {body}"
+        );
+        // `Allowance::Model` is the model's own maximum with the reasoning
+        // budget added *on top*, since thinking is space the provider needs
+        // beside the answer. Under a spec's `Allowance::Capped(128)` the
+        // budget would not fit at all (`wire::THINKING_MIN_BUDGET` is 1,024)
+        // and `max_tokens` would be the 128 itself, so this arithmetic is
+        // what tells the two allowances apart.
+        let asked = body
+            .get("max_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let budget = body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        assert_eq!(
+            asked - budget,
+            u64::from(allowed),
+            "turn {turn} left the answer a cap that is not the model's own \
+             (asked {asked}, of which {budget} is reasoning): {body}"
+        );
+        assert!(
+            body.get("tools")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|tools| !tools.is_empty()),
+            "turn {turn} declared no tool, so the loop cannot act: {body}"
+        );
+    }
+}
+
 #[test]
 fn cancellation_keeps_completed_usage_and_marks_the_inflight_request_unknown() {
     const TWO_TURN: HelperSpec = HelperSpec {
