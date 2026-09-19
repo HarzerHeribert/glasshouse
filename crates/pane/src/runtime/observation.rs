@@ -51,7 +51,22 @@ pub struct ReductionStats {
     /// Results the deterministic rules brought under the threshold on their
     /// own, so no request was made and no cheap-model token was spent.
     pub ruled: u64,
-    /// Bytes of exact output handed to the reducer.
+    /// Reductions a filter the model wrote produced, rather than prose it
+    /// retyped.
+    pub filtered: u64,
+    /// Reductions a filter written for an *earlier* result produced, so no
+    /// request was made. This is the cache that matters: the digest one above
+    /// needs the same bytes twice, and this one needs only the same shape.
+    pub filter_reused: u64,
+    /// Filters that came back and did not survive validation, after the one
+    /// retry. The rules or today's refusal answered instead.
+    pub filter_rejected: u64,
+    /// Bytes handed to the reducer — the *sample*, not the output.
+    ///
+    /// A filter is written from the shape of an output rather than from all
+    /// of it, so what travels is sizes, a histogram of line shapes, head,
+    /// tail and the lines that must survive. Measured on a 600-line log:
+    /// 9,492 bytes of output, 1,865 of sample.
     pub bytes_in: u64,
     /// Bytes of reduction returned.
     pub bytes_out: u64,
@@ -64,6 +79,9 @@ impl ReductionStats {
         self.failed = self.failed.saturating_add(other.failed);
         self.cached = self.cached.saturating_add(other.cached);
         self.ruled = self.ruled.saturating_add(other.ruled);
+        self.filtered = self.filtered.saturating_add(other.filtered);
+        self.filter_reused = self.filter_reused.saturating_add(other.filter_reused);
+        self.filter_rejected = self.filter_rejected.saturating_add(other.filter_rejected);
         self.bytes_in = self.bytes_in.saturating_add(other.bytes_in);
         self.bytes_out = self.bytes_out.saturating_add(other.bytes_out);
     }

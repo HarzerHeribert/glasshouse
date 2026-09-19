@@ -44,6 +44,9 @@ impl TaskSpend {
             failed: current.failed.saturating_sub(seen.failed),
             cached: current.cached.saturating_sub(seen.cached),
             ruled: current.ruled.saturating_sub(seen.ruled),
+            filtered: current.filtered.saturating_sub(seen.filtered),
+            filter_reused: current.filter_reused.saturating_sub(seen.filter_reused),
+            filter_rejected: current.filter_rejected.saturating_sub(seen.filter_rejected),
             bytes_in: current.bytes_in.saturating_sub(seen.bytes_in),
             bytes_out: current.bytes_out.saturating_sub(seen.bytes_out),
         }

@@ -157,6 +157,17 @@ static V8_ONCE: Once = Once::new();
 /// [`DEFAULT_CELL_WALL_CLOCK_LIMIT`] exists.
 const V8_FLAGS: &str = "--no-turbofan";
 
+/// [`initialize_v8`] for the one other place in this crate that runs a
+/// model's JavaScript: [`super::reduce_run`]'s filter isolate.
+///
+/// It is the same initialisation and deliberately not a second one — the
+/// flags above are set once per process, so a filter isolate built without
+/// going through here would inherit whichever tier the first caller happened
+/// to choose. `--no-turbofan` is the reason a filter can be stopped at all.
+pub(crate) fn initialize_v8_for_filter() {
+    initialize_v8();
+}
+
 fn initialize_v8() {
     V8_ONCE.call_once(|| {
         // Before the platform, because a flag read at initialisation is

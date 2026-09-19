@@ -373,6 +373,65 @@ fn sample_line(line: &str) -> String {
     )
 }
 
+/// How many lines of one shape the must-keep list shows before it counts the
+/// rest.
+///
+/// **Three rather than one, because the normaliser's judgment of "the same
+/// shape" is itself fallible.** Two unlike failures that happen to collapse
+/// into one shape are invisible at one sample and usually obvious at three,
+/// and three of a genuinely repetitive shape costs almost nothing.
+const MUST_KEEP_PER_SHAPE: usize = 3;
+
+/// The lines a filter is required to keep, bounded.
+///
+/// Every match in full is the honest default and it does not survive contact
+/// with a log whose every line carries a failure marker: `error: boom 1`
+/// through `error: boom 4000` makes the must-keep list the whole input, and
+/// then no filter can get under the threshold and the mechanism cannot work
+/// at all. Bounding it by *shape* keeps the property that matters — the
+/// model is shown every distinct failure — and drops only further copies of
+/// something it has already seen three of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MustKeep {
+    /// The lines themselves, in the order they first appeared. This is also
+    /// what a filter is held to: the model can only be required to keep what
+    /// it was shown.
+    pub lines: Vec<String>,
+    /// Further lines that wore a shape already represented.
+    pub elided: usize,
+    /// How many distinct shapes `lines` covers.
+    pub shapes: usize,
+}
+
+/// Group `lines` by normalised shape and keep a few of each.
+///
+/// Frequency is computed over these lines alone: the question here is whether
+/// two *failures* are alike, which the surrounding passing output would only
+/// blur.
+#[must_use]
+pub fn must_keep(lines: &[String]) -> MustKeep {
+    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let frequency = document_frequency(&borrowed);
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kept = Vec::new();
+    let mut elided = 0usize;
+    for line in lines {
+        let shape = normalise(line, &frequency, borrowed.len());
+        let count = seen.entry(shape).or_insert(0);
+        *count += 1;
+        if *count <= MUST_KEEP_PER_SHAPE {
+            kept.push(line.clone());
+        } else {
+            elided += 1;
+        }
+    }
+    MustKeep {
+        lines: kept,
+        elided,
+        shapes: seen.len(),
+    }
+}
+
 /// How much of the head and tail a sample carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
@@ -401,12 +460,14 @@ impl Width {
 
 /// The text a reducer is shown in place of the whole output.
 ///
-/// `must_survive` is every line the caller requires the filter to keep, in
-/// full and never sampled: a model that was not shown a failure writes a
-/// filter that discards it, and the validator would then reject a filter the
-/// model had no way to write correctly.
+/// `must_survive` is what the caller requires the filter to keep, and it is
+/// reproduced in full rather than sampled: a model that was not shown a
+/// failure writes a filter that discards it, and the validator would then
+/// reject a filter the model had no way to write correctly. [`must_keep`]
+/// is what bounds that list, and it bounds it by shape rather than by
+/// truncation for the same reason.
 #[must_use]
-pub fn sample(text: &str, must_survive: &[String], width: Width) -> String {
+pub fn sample(text: &str, must_survive: &MustKeep, width: Width) -> String {
     let shapes = shapes_of(text);
     let lines: Vec<&str> = text.lines().collect();
     let context = width.context();
@@ -455,15 +516,24 @@ pub fn sample(text: &str, must_survive: &[String], width: Width) -> String {
         }
     }
 
-    if !must_survive.is_empty() {
+    if !must_survive.lines.is_empty() {
         let _ = writeln!(
             out,
             "\n## Lines your filter must keep — every one of them, in full\n\
              These matched the caller's own failure markers. A filter that drops \
              any of them is rejected."
         );
-        for line in must_survive {
+        for line in &must_survive.lines {
             let _ = writeln!(out, "{}", sample_line(line));
+        }
+        if must_survive.elided > 0 {
+            let _ = writeln!(
+                out,
+                "… and {} further marked lines wearing one of the {} shapes above; \
+                 they are not required, and your filter may keep or drop them …",
+                super::preview::thousands(must_survive.elided as u64),
+                super::preview::thousands(must_survive.shapes as u64),
+            );
         }
     }
     out
@@ -632,7 +702,7 @@ alpha keeps stopping
             .map(|n| format!("routine line {n}\n"))
             .chain(["the one that matters: assertion failed\n".to_string()])
             .collect();
-        let must = vec!["the one that matters: assertion failed".to_string()];
+        let must = must_keep(&["the one that matters: assertion failed".to_string()]);
         let sample = sample(&text, &must, Width::Ordinary);
         assert!(
             sample.contains("the one that matters: assertion failed"),
@@ -645,11 +715,104 @@ alpha keeps stopping
     #[test]
     fn a_very_long_line_is_bounded_rather_than_reproduced() {
         let text = format!("{}\n", "x".repeat(MAX_LINE_BYTES * 3));
-        let sample = sample(&text, &[], Width::Ordinary);
+        let sample = sample(&text, &must_keep(&[]), Width::Ordinary);
         assert!(sample.contains("more bytes on this line"));
         assert!(
             sample.len() < MAX_LINE_BYTES * 2,
             "a minified bundle must not become the sample",
+        );
+    }
+
+    /// The bound that makes the mechanism work at all on a log whose every
+    /// line carries a failure marker. Every match in full is the honest
+    /// default and it makes the must-keep list the whole input, and then no
+    /// filter can get under the threshold.
+    #[test]
+    fn the_must_keep_list_shows_three_of_each_shape_and_counts_the_rest() {
+        let lines: Vec<String> = (0..100)
+            .map(|n| format!("error: boom {n}"))
+            .chain((0..4).map(|n| format!("error: other kind of trouble {n}")))
+            .collect();
+        let must = must_keep(&lines);
+        assert_eq!(must.shapes, 2, "two distinct failures: {must:?}");
+        assert_eq!(must.lines.len(), 6, "three of each: {must:?}");
+        assert_eq!(must.elided, 98, "and the rest are counted: {must:?}");
+        assert!(
+            must.lines.iter().any(|line| line.contains("other kind")),
+            "a shape with four examples is not lost behind one with a hundred: {must:?}",
+        );
+        assert_eq!(must.lines[0], "error: boom 0", "first appearance first");
+    }
+
+    /// A model that was not shown a failure cannot be held to keeping it, so
+    /// the sample says plainly that more existed.
+    #[test]
+    fn a_bounded_must_keep_list_says_what_it_left_out() {
+        let text: String = (0..100).map(|n| format!("error: boom {n}\n")).collect();
+        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let sample = sample(&text, &must_keep(&lines), Width::Ordinary);
+        assert!(
+            sample.contains("further marked lines wearing one of the"),
+            "the elision is stated, not silent: {sample}",
+        );
+    }
+
+    /// **The measurement this module exists for, and the fidelity bound on
+    /// it.**
+    ///
+    /// A dense failure log: three distinct failure shapes among four
+    /// thousand lines of noise. The sample must be a small fraction of the
+    /// output *and* must still show the model every distinct failure — a
+    /// model cannot write a filter that keeps a shape it was never shown, so
+    /// the compression is bounded by fidelity rather than the other way
+    /// round. If a change ever buys a smaller sample by dropping a shape,
+    /// this fails on the second half rather than passing on the first.
+    ///
+    /// Measured on this fixture, 2026-09-19: **115,113 bytes of output
+    /// become 3,121 of sample**, a factor of 36.9, with every one of the five
+    /// marked failures in front of the model.
+    #[test]
+    fn a_dense_failure_log_samples_small_and_still_shows_every_distinct_failure() {
+        let mut lines: Vec<String> = Vec::new();
+        for n in 0..4_000 {
+            lines.push(format!("test suite::case_{n} ... ok"));
+            if n % 1_500 == 0 {
+                lines.push(format!("error[E0308]: mismatched types at src/lib.rs:{n}"));
+            }
+        }
+        lines.push("thread 'main' panicked at src/main.rs:12:5:".to_string());
+        lines.push("assertion `left == right` failed".to_string());
+        let text = lines.join("\n");
+
+        let marked: Vec<String> = text
+            .lines()
+            .filter(|line| crate::runtime::reduce_rules::never_drop(line))
+            .map(str::to_string)
+            .collect();
+        let must = must_keep(&marked);
+        let sample = sample(&text, &must, Width::Ordinary);
+
+        assert!(
+            sample.len() * 8 < text.len(),
+            "the sample is a fraction of the output: {} bytes of sample for {} of output",
+            sample.len(),
+            text.len(),
+        );
+        // Fidelity: every distinct failure the caller marked is in front of
+        // the model, in full.
+        for failure in [
+            "error[E0308]: mismatched types at src/lib.rs:0",
+            "thread 'main' panicked at src/main.rs:12:5:",
+            "assertion `left == right` failed",
+        ] {
+            assert!(
+                sample.contains(failure),
+                "a filter cannot keep what the model was never shown: {failure:?} is missing",
+            );
+        }
+        assert!(
+            sample.contains("test ‹ident› ... ok"),
+            "and the bulk it may drop is named as one shape: {sample}",
         );
     }
 
@@ -667,8 +830,8 @@ alpha keeps stopping
     #[test]
     fn a_wide_sample_shows_more_of_the_same_and_nothing_new() {
         let text: String = (0..400).map(|n| format!("line {n}\n")).collect();
-        let ordinary = sample(&text, &[], Width::Ordinary);
-        let wide = sample(&text, &[], Width::Wide);
+        let ordinary = sample(&text, &must_keep(&[]), Width::Ordinary);
+        let wide = sample(&text, &must_keep(&[]), Width::Wide);
         assert!(wide.len() > ordinary.len());
         for heading in ["## The output", "## Line shapes"] {
             assert!(ordinary.contains(heading) && wide.contains(heading));
@@ -680,4 +843,3 @@ alpha keeps stopping
         );
     }
 }
-

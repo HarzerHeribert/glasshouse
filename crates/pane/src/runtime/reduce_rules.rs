@@ -31,7 +31,12 @@ const FOLD_RUN: usize = 3;
 /// Folding does not consult this list: a run of identical lines folded with
 /// its own count keeps every word it had, which is the form `REDUCER`'s
 /// preamble asks for anyway ("and how many times it repeated").
-const NEVER_DROP: [&str; 10] = [
+///
+/// It is also the caller's own definition of a failure line, which is what
+/// [`super::reduce`] builds a filter's `must_survive` list from: the rung
+/// that may not drop these and the validator that may not accept a filter
+/// dropping them are then reading one list rather than two that could drift.
+pub(crate) const NEVER_DROP: [&str; 10] = [
     "error",
     "Error",
     "ERROR",
@@ -62,7 +67,8 @@ impl Reduced {
     }
 }
 
-fn never_drop(line: &str) -> bool {
+/// Whether a line carries one of [`NEVER_DROP`]'s markers.
+pub(crate) fn never_drop(line: &str) -> bool {
     NEVER_DROP.iter().any(|marker| line.contains(marker))
 }
 

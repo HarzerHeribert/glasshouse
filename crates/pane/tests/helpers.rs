@@ -1234,6 +1234,19 @@ fn the_narrowed_loop_is_what_asks_for_a_narrowed_runtime() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const PRINTF_ONLY: &str = r#"{"permissions":{"allow":["Bash(printf*)"]}}"#;
 
+/// A reducer's answer in the shape the reducer now answers in: one
+/// ```pane-filter``` fence holding a function of the text, and prose beside
+/// it.
+///
+/// The filter keeps the first three lines, which is exactly the must-keep
+/// list `reduce_sample::must_keep` produces for an output whose every line
+/// wears one failure shape — so it passes validation without the fixture
+/// having to know what the marker was.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reducer_answer(prose: &str) -> String {
+    format!("```pane-filter\n(text) => text.split('\\n').slice(0, 3).join('\\n')\n```\n{prose}")
+}
+
 /// A command line whose output is comfortably over
 /// `preview::STDOUT_TOKEN_CAP`, so the automatic reduction's own trigger is
 /// what fires rather than a number this file chose.
@@ -1318,7 +1331,7 @@ fn a_small_command_result_is_untouched_and_costs_no_helper_call() {
 fn an_oversized_command_result_is_reduced_and_the_full_output_remains() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-big");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -1471,7 +1484,7 @@ fn rules_alone_bring_a_test_log_under_the_threshold_and_no_request_is_made() {
 fn the_same_output_is_never_reduced_twice() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-twice");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -1483,10 +1496,15 @@ fn the_same_output_is_never_reduced_twice() {
     )
     .with_helpers(configured("test-helper-model", 8));
     let command = oversized_command("error: boom");
+    // Compared inside the program rather than by joining both into one
+    // returned string: a reduction now carries its provenance and its
+    // partiality, and two of them joined exceed the preview head — which
+    // would fail this test for the length of its own evidence.
     let outcome = runtime.run_cell(&format!(
         "const first = await bash({{ command: {command:?} }});\n\
          const second = await bash({{ command: {command:?} }});\n\
-         return first.reduced + \"|\" + second.reduced;\n"
+         return (first.reduced === second.reduced ? \"same\" : \"differs\")\n\
+         \x20 + \"|\" + first.reduced.slice(0, 40);\n"
     ));
 
     unsafe {
@@ -1497,13 +1515,13 @@ fn the_same_output_is_never_reduced_twice() {
     // a cached reduction is the same answer, so it says the same thing about
     // itself.
     let text = returned_text(&outcome);
-    let (first_half, second_half) = text.split_once("|").expect("two reductions");
+    let (same, head) = text.split_once("|").expect("a verdict and a head");
     assert_eq!(
-        first_half, second_half,
-        "the second identical result must still carry the reduction: {text}"
+        same, "same",
+        "the second identical result must carry the very same reduction: {text}"
     );
     assert!(
-        first_half.starts_with("[pane:reduction ") && first_half.ends_with("3 distinct failures"),
+        head.starts_with("[pane:reduction "),
         "the served reduction keeps its lossiness line: {text}"
     );
     assert_eq!(
@@ -1582,7 +1600,7 @@ fn an_oversized_result_is_untouched_when_helpers_are_unconfigured() {
 fn only_a_command_results_output_is_ever_reduced() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-jq");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -1657,7 +1675,7 @@ fn only_a_command_results_output_is_ever_reduced() {
 fn the_cell_ceiling_bounds_reductions_nobody_asked_for() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-ceiling");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -1756,23 +1774,26 @@ fn a_pushed_reduction_leaves_slots_for_the_models_own_calls() {
     );
 }
 
-/// **A crowded reduction says so, because nothing else can.**
+/// **A partial reduction says which part is missing, because nothing else
+/// can.**
 ///
 /// A provider that truncates sets `stop_reason: "max_tokens"` and the call
 /// fails outright — that answer never becomes `reduced`. The dangerous case
-/// is the one this covers: an answer that stopped on its own with almost
-/// none of its allowance left. It reads exactly like a complete summary, and
-/// only the arithmetic between what it spent and what it was given can tell
-/// a reader to go and check `stdout`.
+/// is the one this covers: a reduction that reads exactly like a complete
+/// one and is not. Four thousand lines carry a failure marker here and the
+/// reducer is shown three of them, because a must-keep list of four thousand
+/// is the whole input and then no filter can shrink anything. So the model
+/// could not have kept what it never saw, and the count of what it did not
+/// see is the fact a reader needs — computed here, never estimated.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn a_reduction_that_used_nearly_all_its_room_says_to_read_the_output_instead() {
+fn a_partial_reduction_counts_the_marked_lines_the_reducer_never_saw() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-crowded");
     // 4,000 `error:` lines are ~16.7k tokens, so the scaled cap lands on its
     // 4,096 ceiling; 4,000 output tokens is 98% of it.
     let provider = provider_with_usage(
-        "3 distinct failures",
+        &reducer_answer("3 distinct failures"),
         serde_json::json!({"input_tokens": 10, "output_tokens": 4000}),
     );
     unsafe {
@@ -1798,12 +1819,12 @@ fn a_reduction_that_used_nearly_all_its_room_says_to_read_the_output_instead() {
     }
 
     assert!(
-        reduction.contains("of its 4,096-token allowance"),
-        "a crowded reduction must name what it spent against what it had: {reduction}"
+        reduction.contains("3,997 further marked lines"),
+        "a partial reduction must count exactly what the reducer never saw: {reduction}"
     );
     assert!(
-        reduction.contains("read it as partial"),
-        "a crowded reduction must say plainly that it is partial: {reduction}"
+        reduction.contains("read this as partial"),
+        "and say plainly that it is partial: {reduction}"
     );
     assert!(
         reduction.ends_with("3 distinct failures"),
@@ -1821,7 +1842,7 @@ fn a_reduction_that_used_nearly_all_its_room_says_to_read_the_output_instead() {
 fn a_reduction_with_room_to_spare_carries_no_warning() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new("post-result-roomy");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -1832,7 +1853,9 @@ fn a_reduction_with_room_to_spare_carries_no_warning() {
         &SessionId::new("post-result-roomy"),
     )
     .with_helpers(configured("test-helper-model", 8));
-    let command = oversized_command("error: boom");
+    // Nothing marked, so nothing was withheld from the reducer and the
+    // selection is far under its budget: there is no partiality to report.
+    let command = oversized_command("routine line");
     runtime.run_cell(&format!(
         "const r = await bash({{ command: {command:?} }});\n"
     ));
@@ -1845,8 +1868,8 @@ fn a_reduction_with_room_to_spare_carries_no_warning() {
     }
 
     assert!(
-        !reduction.contains("read it as partial"),
-        "five output tokens against a 4,096 allowance is not crowded: {reduction}"
+        !reduction.contains("read this as partial"),
+        "a three-line selection with nothing withheld is not partial: {reduction}"
     );
     assert!(
         reduction.starts_with("[pane:reduction "),
@@ -1903,4 +1926,193 @@ fn a_truncated_reduction_is_a_failure_and_never_reaches_the_program_as_an_answer
         error.contains("`stdout` and `stderr` are complete and unchanged"),
         "the failure names where the whole output still is: {answer}"
     );
+}
+
+/// **A filter is written once and answers every later run of the same tool.**
+///
+/// This is the cache that pays, and the reason the key is a shape and not a
+/// digest. `reduction_of` is keyed on the SHA-256 of the exact bytes, so it
+/// hits only when a command produced byte-identical output twice — true
+/// inside a loop and almost never otherwise, because two runs of one tool
+/// differ in their counts. A filter written for `error: boom 1..4000` is
+/// correct for `error: boom 1..3900`, and `Shapes::signature` deliberately
+/// drops the counts so the two share a key.
+///
+/// Measured here: three oversized results of one shape, one request.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_filter_written_for_one_shape_answers_every_later_run_of_it() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-shape");
+    let provider = provider(&reducer_answer("3 distinct failures"));
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-shape"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    // Three different outputs — different byte counts, different digests —
+    // wearing one shape.
+    let outcome = runtime.run_cell(
+        "const a = await bash({ command: \"printf 'error: boom %s\\\\n' {1..4000}\" });\n\
+         const b = await bash({ command: \"printf 'error: boom %s\\\\n' {1..3900}\" });\n\
+         const c = await bash({ command: \"printf 'error: boom %s\\\\n' {1..3800}\" });\n\
+         return [a, b, c].map(r => r.reduced === undefined ? \"none\" : r.reduced.split(\"\\n\")[0]).join(\"@\");\n",
+    );
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    // **The provenance is recomputed per application, never cached with the
+    // filter.** A reused filter runs against a *different* log, so a served
+    // line saying "4,000 lines → 3" about the 3,900-line run is precisely the
+    // silent wrong answer this package exists to prevent — and it is the one
+    // mistake a cache makes by default.
+    let text = returned_text(&outcome);
+    let lines: Vec<&str> = text.split('@').collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    for (index, expected) in ["4,000 lines", "3,900 lines", "3,800 lines"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            lines[index].starts_with(&format!("[pane:reduction {expected} / ")),
+            "reduction {index} must state its own output's size, not an earlier one's: {}",
+            lines[index],
+        );
+    }
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        1,
+        "one filter answers all three; the later two spend no request"
+    );
+    let stats = runtime.reduction_stats();
+    assert_eq!(stats.filtered, 1, "{stats:?}");
+    assert_eq!(stats.filter_reused, 2, "{stats:?}");
+    assert_eq!(
+        stats.cached, 0,
+        "the digest cache cannot help here — three distinct outputs: {stats:?}"
+    );
+}
+
+/// **The evidence and the reading of it are never the same text.**
+///
+/// A filter's output is evidence: every line occurred in the output, and the
+/// validator is what makes that true. The prose beside it is the model's
+/// reading, which is the half a filter cannot produce and the half that can
+/// be wrong. A reader who cannot tell them apart has the worse of both, so
+/// the prose is last and behind a marker naming whose words it is.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_reductions_evidence_and_its_prose_are_marked_apart() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-prose");
+    let provider = provider(&reducer_answer(
+        "two hundred failures, three distinct shapes",
+    ));
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-prose"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+    let (_, reduction) = reported(&runtime.run_cell(
+        "return r.stdout.length + \"|\" + (r.reduced === undefined ? \"none\" : r.reduced);\n",
+    ));
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let (evidence, prose) = reduction
+        .split_once("[pane:reduction notes, the reducer's own words]")
+        .unwrap_or_else(|| panic!("the prose must be marked as the model's: {reduction}"));
+    assert!(
+        prose.trim() == "two hundred failures, three distinct shapes",
+        "the model's own words come last: {prose:?}"
+    );
+    // Every line of the evidence half really occurred in the output.
+    for line in evidence.lines().skip(1).filter(|line| !line.is_empty()) {
+        assert!(
+            line.starts_with("error: boom "),
+            "the evidence half holds selected lines and nothing else: {line:?}"
+        );
+    }
+}
+
+/// **A filter that composes a line is refused, and the caller ends exactly
+/// where it does today.**
+///
+/// The guarantee is that a reduction cannot say something the output did
+/// not. So a filter returning a line nobody printed is rejected, the retry
+/// is given the reason, and a second refusal leaves the parent with the
+/// same `reduction_error` a failed helper has always produced — never a
+/// composed line wearing evidence's clothes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_filter_that_writes_its_own_line_is_refused_and_nothing_is_lost() {
+    let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new("post-result-composed");
+    let provider =
+        provider("```pane-filter\n(text) => '1 test failed out of 4000'\n```\nmy own summary");
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
+    }
+
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(PRINTF_ONLY),
+        &Glasshouse::None,
+        &SessionId::new("post-result-composed"),
+    )
+    .with_helpers(configured("test-helper-model", 8));
+    let command = oversized_command("error: boom");
+    runtime.run_cell(&format!(
+        "const r = await bash({{ command: {command:?} }});\n"
+    ));
+    let outcome = runtime.run_cell(
+        "return (r.reduced === undefined ? \"no-reduced\" : r.reduced)\n\
+         \x20 + \"|\" + (r.reduction_error === undefined ? \"none\" : r.reduction_error)\n\
+         \x20 + \"|\" + r.stdout.length;\n",
+    );
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let text = returned_text(&outcome);
+    let parts: Vec<&str> = text.splitn(3, '|').collect();
+    assert_eq!(
+        parts[0], "no-reduced",
+        "a composed line never reaches the program as a reduction: {text}"
+    );
+    assert!(
+        parts[1].contains("does not occur in the input"),
+        "and the parent is told why it got none: {text}"
+    );
+    assert!(
+        parts[2].parse::<usize>().expect(parts[2]) > 40_000,
+        "the exact output is untouched and still there: {text}"
+    );
+    assert_eq!(
+        provider.requests.load(Ordering::SeqCst),
+        2,
+        "one retry, carrying the reason, and then it stops"
+    );
+    let stats = runtime.reduction_stats();
+    assert_eq!(stats.filtered, 0, "{stats:?}");
+    assert_eq!(stats.filter_rejected, 1, "{stats:?}");
+    assert_eq!(stats.failed, 1, "{stats:?}");
 }

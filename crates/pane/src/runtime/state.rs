@@ -272,6 +272,17 @@ pub(crate) struct RuntimeState {
     /// the output -- one helper `max_tokens` each -- so a long task pays a
     /// small fixed cost rather than one that grows with it.
     reductions: RefCell<Vec<(String, String)>>,
+    /// Filters this task has written, by the shape signature of the output
+    /// each was written for.
+    ///
+    /// **This is the cache that pays.** [`reductions`](Self::reductions) is
+    /// keyed by the digest of the exact bytes, so it answers "has this task
+    /// already reduced *this* output" — true inside a loop and almost never
+    /// otherwise, because two runs of one command differ in their counts. A
+    /// filter is written for a *shape*, and two runs of one tool share one:
+    /// so a filter written in an early cell answers every later run of the
+    /// same tool for nothing.
+    filters: RefCell<Vec<(String, String)>>,
     /// Versions whose exact editing context has crossed a completed cell
     /// boundary and therefore reached the model.
     visible_sources: RefCell<HashMap<PathBuf, String>>,
@@ -389,6 +400,7 @@ impl RuntimeState {
             agents: RefCell::new(crate::config::AgentsConfig::default()),
             decisions: RefCell::new(crate::config::DecisionsConfig::default()),
             reductions: RefCell::new(Vec::new()),
+            filters: RefCell::new(Vec::new()),
             visible_sources: RefCell::new(HashMap::new()),
             pending_sources: RefCell::new(Vec::new()),
             pending_context_output: RefCell::new(Vec::new()),
@@ -727,6 +739,29 @@ impl RuntimeState {
         reductions.push((digest, reduction));
     }
 
+    /// The filter this task already wrote for output of this shape.
+    ///
+    /// Read before the economics test and before any slot is claimed, so a
+    /// hit costs neither a request nor a wait -- it is one `run_filter` over
+    /// the new text, and the provenance line is recomputed from *that* text
+    /// rather than served with the filter.
+    pub(crate) fn filter_of(&self, signature: &str) -> Option<String> {
+        self.filters
+            .borrow()
+            .iter()
+            .find(|(seen, _)| seen == signature)
+            .map(|(_, filter)| filter.clone())
+    }
+
+    /// Keeps one filter against the shape signature it was written for.
+    pub(crate) fn remember_filter(&self, signature: String, filter: String) {
+        let mut filters = self.filters.borrow_mut();
+        if filters.len() >= REDUCTIONS_KEPT {
+            filters.remove(0);
+        }
+        filters.push((signature, filter));
+    }
+
     /// Every helper call the cell that just ran completed, in call order.
     pub(crate) fn helper_records(&self) -> Vec<HelperRecord> {
         self.current.borrow().helpers.clone()
@@ -758,6 +793,7 @@ impl RuntimeState {
         // Reductions describe results that were held behind the handles this
         // just dropped, so they end with them.
         self.reductions.borrow_mut().clear();
+        self.filters.borrow_mut().clear();
         self.visible_sources.borrow_mut().clear();
         self.pending_sources.borrow_mut().clear();
         self.pending_context_output.borrow_mut().clear();

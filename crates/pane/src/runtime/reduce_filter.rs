@@ -19,6 +19,100 @@ use std::collections::HashSet;
 
 use super::preview::{estimate_tokens, thousands};
 
+/// The info string of the one fence a reducer's answer may carry.
+///
+/// The grammar is `prompt::protocol`'s, deliberately: three backticks at the
+/// start of a line, an exactly matching info string, and a closing line of
+/// exactly three backticks. It is parsed here rather than there because that
+/// parser reads the *parent's* executable channel, where `pane-filter` is
+/// not a thing a turn may contain and must keep being refused.
+const FENCE: &str = "pane-filter";
+
+/// The largest filter this accepts. A filter is a few lines; anything at
+/// this size is a program that wandered in, and running it is the one thing
+/// this module exists to be careful about.
+const MAX_FILTER_BYTES: usize = 8 * 1024;
+
+/// What a reducer answered: the filter to run, and the prose beside it.
+///
+/// **The two halves are kept apart from here to the result.** A filter's
+/// output is evidence — every line of it occurred in the input, and
+/// [`validate`] is what makes that true. Prose is the model's reading of the
+/// evidence, which is the half a filter genuinely cannot produce ("two
+/// hundred failures, but only three distinct shapes") and the half that can
+/// be wrong. A reader who cannot tell them apart has the worse of both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub filter: String,
+    /// Everything outside the fence, trimmed. Empty is ordinary.
+    pub prose: String,
+}
+
+/// Pull the one `pane-filter` fence out of a reducer's answer.
+///
+/// The error is the sentence the model is shown on its retry, for the same
+/// reason [`Rejected::sentence`] is.
+pub fn parse(answer: &str) -> Result<Answer, String> {
+    let lines: Vec<&str> = answer.lines().collect();
+    let mut filter: Option<String> = None;
+    let mut prose: Vec<&str> = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let Some(info) = lines[index].strip_prefix("```") else {
+            prose.push(lines[index]);
+            index += 1;
+            continue;
+        };
+        let info = info.trim();
+        let mut body: Vec<&str> = Vec::new();
+        let mut end = index + 1;
+        while end < lines.len() && lines[end] != "```" {
+            body.push(lines[end]);
+            end += 1;
+        }
+        let closed = end < lines.len();
+        if info == FENCE {
+            if !closed {
+                return Err(format!(
+                    "your ```{FENCE} fence was never closed. Close it with a line of \
+                     exactly three backticks."
+                ));
+            }
+            if filter.is_some() {
+                return Err(format!(
+                    "you sent more than one ```{FENCE} fence. Send exactly one, \
+                     holding the whole filter."
+                ));
+            }
+            filter = Some(body.join("\n"));
+        }
+        // A fence of any other language is an example and is prose.
+        index = if closed { end + 1 } else { end };
+    }
+
+    let Some(filter) = filter else {
+        return Err(format!(
+            "your answer carried no ```{FENCE} fence. Answer with one fence holding a \
+             JavaScript function of the text, and any notes outside it."
+        ));
+    };
+    if filter.trim().is_empty() {
+        return Err(format!("your ```{FENCE} fence was empty."));
+    }
+    if filter.len() > MAX_FILTER_BYTES {
+        return Err(format!(
+            "your filter is {} bytes against a limit of {}. A filter is a few lines \
+             that select; it is not a program.",
+            thousands(filter.len() as u64),
+            thousands(MAX_FILTER_BYTES as u64),
+        ));
+    }
+    Ok(Answer {
+        filter,
+        prose: prose.join("\n").trim().to_string(),
+    })
+}
+
 /// Why a filter's output was not accepted.
 ///
 /// The text is handed back to the model on its one retry, so each variant
@@ -282,6 +376,49 @@ test result: FAILED. 2 passed; 1 failed
                 "{rejected:?} must name what it is about",
             );
         }
+    }
+
+    #[test]
+    fn one_fence_is_the_filter_and_everything_else_is_prose() {
+        let answer = parse(
+            "Three distinct failures.\n\
+             ```pane-filter\n(t) => t\n```\n\
+             All of them in one crate.",
+        )
+        .expect("one fence");
+        assert_eq!(answer.filter, "(t) => t");
+        assert_eq!(
+            answer.prose,
+            "Three distinct failures.\nAll of them in one crate."
+        );
+    }
+
+    /// A fenced example in another language is prose, exactly as it is in the
+    /// parent's own channel.
+    #[test]
+    fn a_fence_of_another_language_is_not_a_filter() {
+        let error = parse("```js\n(t) => t\n```").expect_err("no filter fence");
+        assert!(error.contains("no ```pane-filter fence"), "{error}");
+    }
+
+    #[test]
+    fn two_filters_are_ambiguous_and_neither_runs() {
+        let error =
+            parse("```pane-filter\na\n```\n```pane-filter\nb\n```").expect_err("two fences");
+        assert!(error.contains("more than one"), "{error}");
+    }
+
+    #[test]
+    fn an_unclosed_fence_says_so_rather_than_running_half_a_filter() {
+        let error = parse("```pane-filter\n(t) => t").expect_err("unclosed");
+        assert!(error.contains("never closed"), "{error}");
+    }
+
+    #[test]
+    fn a_filter_larger_than_a_filter_is_refused() {
+        let huge = "x".repeat(MAX_FILTER_BYTES + 1);
+        let error = parse(&format!("```pane-filter\n{huge}\n```")).expect_err("oversized");
+        assert!(error.contains("not a program"), "{error}");
     }
 
     #[test]

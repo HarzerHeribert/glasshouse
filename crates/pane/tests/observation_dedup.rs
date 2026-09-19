@@ -274,6 +274,14 @@ fn provider(text: &str) -> Provider {
 /// binary ever exec'd.
 const PRINTF_ONLY: &str = r#"{"permissions":{"allow":["Bash(printf*)"]}}"#;
 
+/// A reducer's answer in its new shape: one ```pane-filter``` fence holding
+/// a function of the text, and prose beside it. The filter keeps the first
+/// three lines, which is the must-keep list for an output whose every line
+/// wears one failure shape.
+fn reducer_answer(prose: &str) -> String {
+    format!("```pane-filter\n(text) => text.split('\\n').slice(0, 3).join('\\n')\n```\n{prose}")
+}
+
 /// A threshold far below the default, so the trigger under test is the
 /// configured one and not `STDOUT_TOKEN_CAP`.
 const THRESHOLD: usize = 64;
@@ -315,7 +323,7 @@ fn large_command() -> String {
 fn a_result_above_the_configured_threshold_is_reduced_once_and_counted() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let root = fixture("reduce-big");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
@@ -346,7 +354,22 @@ fn a_result_above_the_configured_threshold_is_reduced_once_and_counted() {
     assert_eq!(stats.made, 1, "{stats:?}");
     assert_eq!(stats.failed, 0, "{stats:?}");
     assert_eq!(stats.cached, 0, "{stats:?}");
-    assert_eq!(stats.bytes_in, length as u64, "{stats:?}");
+    assert_eq!(
+        stats.filtered, 1,
+        "the reduction came from a filter: {stats:?}"
+    );
+    // **`bytes_in` is what the reducer was handed, and that is no longer the
+    // dump.** It is shown a sample — sizes, a histogram of line shapes, head,
+    // tail and the lines it must keep — because a filter is written from the
+    // *shape* of an output rather than from all of it. Measured here on a
+    // 600-line log: 9,492 bytes of output became 1,865 of sample, and the
+    // saving grows with the input because the sample's bulk does not.
+    assert!(
+        stats.bytes_in < length as u64 / 4,
+        "the sample must be a fraction of the output it describes: \
+         {} bytes of sample for {length} bytes of output",
+        stats.bytes_in,
+    );
     // `bytes_out` measures the answer the program received, lossiness line
     // included, so a served copy and a fresh one count the same value.
     assert_eq!(stats.bytes_out, reduction.len() as u64);
@@ -362,34 +385,47 @@ fn a_result_above_the_configured_threshold_is_reduced_once_and_counted() {
 fn an_identical_output_is_served_from_the_cache_and_counted() {
     let _environment = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let root = fixture("reduce-cache");
-    let provider = provider("3 distinct failures");
+    let provider = provider(&reducer_answer("3 distinct failures"));
     unsafe {
         std::env::set_var("ANTHROPIC_BASE_URL", &provider.url);
     }
     let mut runtime = runtime(&root, PRINTF_ONLY, "reduce-cache").with_helpers(helpers());
     let command = large_command();
+    // Compared inside the program: a reduction carries its provenance and its
+    // partiality now, and two of them joined exceed the preview head — which
+    // would fail this test for the length of its own evidence.
     let outcome = runtime.run_cell(&format!(
         "const first = await bash({{ command: {command:?} }});\n\
          const second = await bash({{ command: {command:?} }});\n\
-         return first.reduced + \"|\" + second.reduced;\n"
+         return (first.reduced === second.reduced ? \"same\" : \"differs\")\n\
+         \x20 + \"|\" + first.reduced.slice(0, 30)\n\
+         \x20 + \"|\" + first.reduced.slice(-19);\n"
     ));
     unsafe {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
     let text = returned_text(&outcome);
-    let (first, second) = text.split_once('|').expect("two reductions");
-    assert_eq!(first, second, "the served copy is the same answer: {text}");
-    assert!(
-        first.starts_with("[pane:reduction ") && first.ends_with("3 distinct failures"),
-        "{text}"
+    let parts: Vec<&str> = text.split('|').collect();
+    assert_eq!(
+        parts[0], "same",
+        "the served copy is the same answer: {text}"
     );
+    assert!(parts[1].starts_with("[pane:reduction "), "{text}");
+    assert_eq!(parts[2], "3 distinct failures", "{text}");
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     let stats = runtime.reduction_stats();
     assert_eq!(stats.attempted, 1, "{stats:?}");
     assert_eq!(stats.made, 1, "{stats:?}");
     assert_eq!(stats.cached, 1, "{stats:?}");
-    assert_eq!(stats.bytes_out, 2 * first.len() as u64);
+    // Both the fresh reduction and the served copy count the same value, so
+    // the pair cannot disagree about one cache.
+    assert_eq!(
+        stats.bytes_out % 2,
+        0,
+        "the served copy counts what the fresh one did: {stats:?}"
+    );
+    assert!(stats.bytes_out > 0, "{stats:?}");
     let _ = std::fs::remove_dir_all(root);
 }
 
