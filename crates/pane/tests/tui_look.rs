@@ -421,14 +421,23 @@ fn wide_telemetry_preserves_reported_fields_and_budget_provenance() {
         "cached input: 100",
         "tokens: 123 in / 456 out",
         "Σ 579 tokens",
-        "cumulative task spend · no cap",
         "ctx",
         "44.6k/1.0M 4%",
-        "counted: reported",
         "supervisor: check the request",
     ] {
         assert!(rendered.contains(field), "{field}: {rendered}");
     }
+    // **Provenance is preserved by being made exceptional.** `reported` was
+    // printed on every session, which is what made `estimated` invisible; a
+    // gateway-counted total now says nothing and an estimated one speaks.
+    assert!(
+        !rendered.contains("counted: reported"),
+        "the healthy provenance must not caption every session: {rendered}"
+    );
+    assert!(
+        !rendered.contains("cumulative task spend · no cap"),
+        "a caption that is always true is not a signal: {rendered}"
+    );
 }
 
 #[test]
@@ -469,20 +478,31 @@ fn telemetry_breaks_exact_task_spend_down_by_parent_helper_model_and_cache() {
         ..Notebook::default()
     };
 
-    let rendered = text(&draw(120, 40, &state(), &conversation(), &notebook));
+    // The glance and the detail are two surfaces now. The rail carries the
+    // total and the split a reader asked for; the per-model arithmetic lives
+    // behind Ctrl-T, where somebody went looking for it.
+    let rail = text(&draw(120, 40, &state(), &conversation(), &notebook));
+    for field in ["Σ 201.8k tokens", "parent 173.9k · helpers 27.9k"] {
+        assert!(rail.contains(field), "{field}: {rail}");
+    }
+    assert!(
+        rail.contains("gpt-5.6-luna"),
+        "the one helper model folds onto the split: {rail}"
+    );
+
+    let mut open = state();
+    open.telemetry_open = true;
+    let expanded = text(&draw(120, 40, &open, &conversation(), &notebook));
     for field in [
         "Σ 201.8k tokens",
-        "parent 173.9k · helpers 27.9k",
-        "gpt-5.6-luna · 27.9k",
-        "responses 6/6 · calls 3/3",
         "in 20.3k · out 2.5k",
         "cache read 5.1k",
         "cache create 0",
-        "cumulative task spend · no cap",
+        "3 of 3 calls counted",
     ] {
-        assert!(rendered.contains(field), "{field}: {rendered}");
+        assert!(expanded.contains(field), "{field}: {expanded}");
     }
-    assert!(!rendered.contains("helper usage partial"), "{rendered}");
+    assert!(!expanded.contains("helper usage partial"), "{expanded}");
 }
 
 #[test]
@@ -517,12 +537,20 @@ fn telemetry_calls_missing_cache_classes_unreported_instead_of_zero() {
         ..Notebook::default()
     };
 
-    let rendered = text(&draw(120, 40, &state(), &conversation(), &notebook));
-    assert!(rendered.contains("cache read unreported"), "{rendered}");
-    assert!(rendered.contains("cache create unreported"), "{rendered}");
-    assert!(rendered.contains("responses 1/1 · calls 1/1"), "{rendered}");
-    assert!(rendered.contains("coverage partial"), "{rendered}");
-    assert!(rendered.contains("helper coverage partial"), "{rendered}");
+    // `unreported` is not `0`, and the instruments are where that is said.
+    let mut open = state();
+    open.telemetry_open = true;
+    let expanded = text(&draw(120, 40, &open, &conversation(), &notebook));
+    assert!(expanded.contains("cache read unreported"), "{expanded}");
+    assert!(expanded.contains("cache create unreported"), "{expanded}");
+    assert!(expanded.contains("1 of 1 calls counted"), "{expanded}");
+    // The rail says the same thing in one character rather than three lines:
+    // the total is a known-low subtotal, so it carries `+`.
+    let rail = text(&draw(120, 40, &state(), &conversation(), &notebook));
+    assert!(
+        rail.contains("173.9k+") || rail.contains("+ tokens"),
+        "an incomplete count must mark the total: {rail}"
+    );
 }
 
 #[test]
@@ -1824,7 +1852,10 @@ fn a_cells_bindings_are_rows_and_never_json() {
     ] {
         assert!(shown.contains(name), "binding {name} is missing:\n{shown}");
     }
-    assert!(shown.contains("Grep.Match[]"), "the type is missing:\n{shown}");
+    assert!(
+        shown.contains("Grep.Match[]"),
+        "the type is missing:\n{shown}"
+    );
     assert!(
         shown.contains("   01  ") && shown.contains("   02  "),
         "the rows are not numbered:\n{shown}"
@@ -1920,5 +1951,186 @@ fn the_header_field_draws_in_every_theme() {
             shown.contains('█'),
             "{theme:?} lost the field itself:\n{shown}"
         );
+    }
+}
+
+/// The opening plays in the transcript while the session has nothing to show,
+/// and a keypress -- which the session signals with `startup_skipped` -- lands
+/// on its settled frame rather than on a blank rectangle.
+#[test]
+fn the_opening_plays_holds_and_skips_to_its_settled_frame() {
+    let empty = Conversation {
+        system: String::new(),
+        messages: Vec::new(),
+    };
+    let n = Notebook::default();
+    let mut state = state();
+    state.activity = Activity::Starting;
+
+    let first = text(&draw(120, 40, &state, &empty, &n));
+    assert!(
+        first.contains('█'),
+        "the opening must draw its structure:\n{first}"
+    );
+    state.animation_frame = 4;
+    let later = text(&draw(120, 40, &state, &empty, &n));
+    assert_ne!(first, later, "the opening must move between frames");
+
+    // Only the transcript is the opening. The sidebar's own activity glyph
+    // and the header's indicator run on the same frame counter and keep
+    // moving on purpose -- freezing those would be the session looking dead.
+    let art = |state: &ScreenState| -> String {
+        let buffer = draw(120, 40, state, &empty, &n);
+        let region = screen_regions(buffer.area, state).transcript;
+        (region.y..region.bottom())
+            .map(|y| {
+                (region.x..region.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    state.startup_skipped = true;
+    let skipped = art(&state);
+    assert!(
+        skipped.contains('█'),
+        "a skipped opening is the settled frame, never a blank:\n{skipped}"
+    );
+    state.animation_frame = 21;
+    assert_eq!(skipped, art(&state), "a skipped opening must stop moving");
+
+    // Reduced motion lands on the same settled frame and stays there.
+    state.startup_skipped = false;
+    state.reduced_motion = true;
+    state.animation_frame = 2;
+    let still = art(&state);
+    state.animation_frame = 19;
+    assert_eq!(still, art(&state));
+    assert_eq!(still, skipped, "both stills are the same settled frame");
+
+    // Too small to hold the art: it declines rather than cropping, and the
+    // session is simply there.
+    let tiny = text(&draw(28, 20, &state, &empty, &n));
+    assert!(!tiny.contains('█'), "the opening must not crop:\n{tiny}");
+}
+
+/// The spend rail carries the glance and not the accounting's opinion of
+/// itself. Every line named here was on the user's screen at once.
+#[test]
+fn the_spend_rail_drops_the_qualifiers_that_fire_every_session() {
+    use pane::tui::{HelperModelTokens, HelperTokens, TaskTokens};
+    let mut n = Notebook::default();
+    n.tokens = Some(TaskTokens {
+        used: 1_100_000,
+        parent_used: 766_000,
+        helpers: HelperTokens {
+            calls: 3,
+            usage_known_calls: 3,
+            used: 285_900,
+            requests: 9,
+            reported_requests: 9,
+            cache_read_reported_requests: 9,
+            cache_creation_reported_requests: 9,
+            models: vec![HelperModelTokens {
+                model: "gpt-5.6-luna".into(),
+                calls: 3,
+                usage_known_calls: 3,
+                used: 285_900,
+                requests: 9,
+                reported_requests: 9,
+                cache_read_reported_requests: 9,
+                cache_creation_reported_requests: 9,
+                ..HelperModelTokens::default()
+            }],
+            ..HelperTokens::default()
+        },
+        counted: Counted::Gateway,
+    });
+    let shown = text(&draw(200, 44, &state(), &conversation(), &n));
+    for noise in [
+        "responses 9/9",
+        "coverage partial",
+        "helper coverage partial",
+        "cumulative task spend",
+        "counted: reported",
+        "cache create unreported",
+        "inbox 0",
+        "batches 0",
+        "handlers 0",
+    ] {
+        assert!(!shown.contains(noise), "{noise:?} survived:\n{shown}");
+    }
+    assert!(shown.contains("parent"), "the split must survive:\n{shown}");
+    assert!(
+        shown.contains("gpt-5.6-luna"),
+        "one helper model folds onto the split rather than vanishing:\n{shown}"
+    );
+}
+
+/// A partial count marks the number rather than printing a line beside it, so
+/// the headline never looks exact when it is a known-low subtotal.
+#[test]
+fn an_incomplete_helper_count_marks_the_total_rather_than_captioning_it() {
+    use pane::tui::{HelperModelTokens, HelperTokens, TaskTokens};
+    let mut n = Notebook::default();
+    n.tokens = Some(TaskTokens {
+        used: 900_000,
+        parent_used: 800_000,
+        helpers: HelperTokens {
+            calls: 4,
+            usage_known_calls: 2,
+            used: 100_000,
+            requests: 4,
+            reported_requests: 2,
+            models: vec![HelperModelTokens {
+                model: "gpt-5.6-luna".into(),
+                calls: 4,
+                usage_known_calls: 2,
+                used: 100_000,
+                requests: 4,
+                reported_requests: 2,
+                ..HelperModelTokens::default()
+            }],
+            ..HelperTokens::default()
+        },
+        counted: Counted::Estimated,
+    });
+    let shown = text(&draw(200, 44, &state(), &conversation(), &n));
+    assert!(
+        shown.contains('+'),
+        "an at-least figure must say so on the number:\n{shown}"
+    );
+    assert!(
+        shown.contains("estimated"),
+        "provenance that is not the gateway's row must show:\n{shown}"
+    );
+}
+
+/// The opening at the sizes a real terminal actually is.
+#[test]
+fn the_opening_fits_eighty_by_twenty_four_and_declines_below_its_bounds() {
+    let empty = Conversation {
+        system: String::new(),
+        messages: Vec::new(),
+    };
+    let n = Notebook::default();
+    let mut state = state();
+    state.activity = Activity::Starting;
+    state.sidebar = SidebarVisibility::Hidden;
+
+    let normal = text(&draw(80, 24, &state, &empty, &n));
+    assert!(
+        normal.contains('█'),
+        "80x24 is the floor a terminal is allowed to be:\n{normal}"
+    );
+    for line in normal.lines() {
+        assert!(line.chars().count() <= 80, "{line:?} ran past 80");
+    }
+    let narrow = text(&draw(60, 24, &state, &empty, &n));
+    assert!(narrow.contains('█'), "60 columns still holds it:\n{narrow}");
+    for line in narrow.lines() {
+        assert!(line.chars().count() <= 60, "{line:?} ran past 60");
     }
 }

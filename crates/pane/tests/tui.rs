@@ -1141,7 +1141,10 @@ fn sidebar_shows_real_inbox_and_batch_counts_without_changing_narrow_layout() {
     );
     let text = buffer_text(&buffer);
     assert!(text.contains("inbox 7 · batches 12"), "{text}");
-    assert!(text.contains("handlers 0"), "{text}");
+    // A zero earns no room: the two live counts are drawn and the idle
+    // handler count is not, so the line is worth reading on the occasion a
+    // handler actually is live.
+    assert!(!text.contains("handlers 0"), "{text}");
     let narrow = rendered_sized(
         &conversation,
         &known_served_by(),

@@ -23,6 +23,7 @@ mod lane;
 mod markdown;
 mod ribbon;
 mod scroll;
+mod startup;
 pub use scroll::SCROLL_INDICATOR_LINGER;
 use scroll::render_scrollbar;
 mod status;
@@ -175,6 +176,15 @@ pub struct ScreenState {
     /// Raw native tool-input fragments, presentation-only; never executed or shown as results.
     pub streaming_tool_input: Option<String>,
     pub animation_frame: usize,
+    /// A keystroke landed while the opening was playing, so it shows its
+    /// settled frame from here on.
+    ///
+    /// **Set on the keystroke, never on the draw.** The opening is art and
+    /// the session is the point; a person who typed has said which one they
+    /// want, and the answer must not wait for the next animation tick. The
+    /// keystroke itself is still delivered to the composer -- skipping is a
+    /// side effect of typing, never a key that gets eaten.
+    pub startup_skipped: bool,
     pub completion_tick: Option<usize>,
     /// Rows back from the transcript's end; zero follows the current turn.
     pub scrollback: usize,
@@ -1023,7 +1033,13 @@ pub(crate) fn render_screen_with_geometry(
         }
     }
     if state.activity == Activity::Starting && conversation.messages.is_empty() {
-        render_startup(frame, regions.transcript, state.animation_frame);
+        startup::render_into(
+            frame,
+            regions.transcript,
+            state.animation_frame,
+            state.theme,
+            state.reduced_motion || state.startup_skipped,
+        );
     } else {
         render_conversation(
             frame,
@@ -1071,20 +1087,7 @@ pub(crate) fn render_screen_with_geometry(
         geometry.panel = controls::render_panel(frame, regions.transcript, panel, state.theme);
     }
     ribbon::activity(frame, regions.activity, state);
-    if let Some(notice) = &state.notice {
-        let error = notice.starts_with("ERROR:");
-        frame.render_widget(
-            Paragraph::new(notice.as_str())
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::TOP).title(if error {
-                    " ERROR "
-                } else {
-                    " notice "
-                }))
-                .style(Style::default().fg(if error { Color::Red } else { MUTED })),
-            regions.notice,
-        );
-    }
+    poster::notice(frame, regions.notice, state);
     let completion_skip = state
         .completion_selected
         .saturating_sub(usize::from(regions.completions.height).saturating_sub(1));
@@ -1416,19 +1419,6 @@ pub(crate) fn render_screen_with_geometry(
 
 /// Startup is caller-driven and immediately replaced by any real transcript.
 /// One small assembling wireframe; no timer, sleep or terminal ownership here.
-fn render_startup(frame: &mut Frame, area: Rect, tick: usize) {
-    let frames = [
-        "     .     .\n\n  .     .\n\n  .     .",
-        "     +-----+\n    /     /\n  +-----+\n  |     |\n  +-----+",
-        "     +-----+\n    /     /|\n  +-----+  +\n  |  /  | /\n  +-----+/",
-        "     +-----+\n    /     /|\n  +-----+  +\n  |     | /\n  +-----+/",
-    ];
-    frame.render_widget(
-        Paragraph::new(frames[tick % frames.len()]).style(Style::default().fg(ACCENT)),
-        area,
-    );
-}
-
 fn abbreviate(text: &str, width: usize) -> String {
     if Line::from(text).width() <= width {
         return text.to_string();

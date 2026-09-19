@@ -84,80 +84,136 @@ fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
         })
         .collect()
 }
+/// The spend panel as the rail shows it: the glance, and nothing else.
+///
+/// **A qualifier that fires every session is not a signal.** The panel used
+/// to carry `cumulative task spend · no cap`, `counted: reported`, `coverage
+/// partial`, `responses 9/9 · calls 3/3` and `cache create unreported` all at
+/// once -- five lines about the accounting's own confidence, four of which
+/// said the healthy thing and so said nothing. What survives is the total,
+/// the split a reader actually asked for, and the two caveats that are true
+/// rarely enough to mean something. The dropped detail is not gone: it is in
+/// [`task_spend_detail`], which the expanded view (Ctrl-T) draws.
+///
+/// **The caveats fold into the number rather than sitting beside it.** A
+/// partial figure carries `+`, read as *at least this much*, because a
+/// separate line saying "partial" leaves the headline looking exact; and
+/// provenance appears only when it is not the gateway's own row, since
+/// `reported` on every session is what makes `estimated` invisible.
 fn task_spend(notebook: &Notebook, _width: usize) -> Vec<Line<'static>> {
     let Some(tokens) = notebook.tokens.as_ref() else {
         return vec![muted("No task spend yet")];
     };
+    let partial = tokens.helpers.calls > 0 && !tokens.helpers.complete();
     let mut lines = vec![Line::styled(
-        format!("Σ {} tokens", super::compact_tokens(tokens.used)),
+        format!(
+            "Σ {}{} tokens",
+            super::compact_tokens(tokens.used),
+            if partial { "+" } else { "" }
+        ),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
     if tokens.helpers.calls > 0 {
+        // One helper model is the ordinary case, and then its name belongs on
+        // the split rather than on a line of its own repeating the same
+        // figure. Several models earn their own rows.
+        let single = match tokens.helpers.models.as_slice() {
+            [only] if !only.model.is_empty() => Some(only.model.as_str()),
+            _ => None,
+        };
         lines.push(muted(format!(
-            "parent {} · helpers {}",
+            "parent {} · helpers {}{}",
             super::compact_tokens(tokens.parent_used),
-            super::compact_tokens(tokens.helpers.used)
+            super::compact_tokens(tokens.helpers.used),
+            single.map(|name| format!(" · {name}")).unwrap_or_default()
         )));
-        for model in &tokens.helpers.models {
-            let name = if model.model.is_empty() {
-                "model unreported"
-            } else {
-                &model.model
-            };
-            lines.push(muted(format!(
-                "{name} · {}",
-                super::compact_tokens(model.used)
-            )));
-            lines.push(muted(format!(
-                "responses {}/{} · calls {}/{}",
-                model.reported_requests, model.requests, model.usage_known_calls, model.calls,
-            )));
-            if !model.complete() {
-                lines.push(muted("coverage partial"));
+        if single.is_none() {
+            for model in &tokens.helpers.models {
+                let name = if model.model.is_empty() {
+                    "model unreported"
+                } else {
+                    &model.model
+                };
+                lines.push(muted(format!(
+                    "{name} · {}{}",
+                    super::compact_tokens(model.used),
+                    if model.complete() { "" } else { "+" }
+                )));
             }
-            lines.push(muted(format!(
-                "in {} · out {}",
-                helper_metric(
-                    model.input_tokens,
-                    model.reported_requests,
-                    model.requests,
-                    model.usage_known_calls,
-                    model.calls,
-                ),
-                helper_metric(
-                    model.output_tokens,
-                    model.reported_requests,
-                    model.requests,
-                    model.usage_known_calls,
-                    model.calls,
-                )
-            )));
-            lines.push(muted(format!(
-                "cache read {}",
-                helper_metric(
-                    model.cache_read_input_tokens,
-                    model.cache_read_reported_requests,
-                    model.reported_requests,
-                    model.usage_known_calls,
-                    model.calls,
-                )
-            )));
-            lines.push(muted(format!(
-                "cache create {}",
-                helper_metric(
-                    model.cache_creation_input_tokens,
-                    model.cache_creation_reported_requests,
-                    model.reported_requests,
-                    model.usage_known_calls,
-                    model.calls,
-                )
-            )));
         }
     }
-    lines.push(muted("cumulative task spend · no cap"));
-    lines.push(muted(format!("counted: {}", tokens.counted.as_str())));
-    if tokens.helpers.calls > 0 && !tokens.helpers.complete() {
-        lines.push(muted("helper coverage partial"));
+    if tokens.counted != super::Counted::Gateway {
+        lines.push(muted(tokens.counted.as_str()));
+    }
+    lines
+}
+
+/// The spend panel with its coverage arithmetic, for the expanded view.
+///
+/// Everything the rail sheds is here, where a reader went looking for it:
+/// per-model input and output, cache read and creation, and the reported
+/// fractions behind a `+`. A figure nobody reported is omitted rather than
+/// printed as `unreported` -- an absent line and a line saying "absent" carry
+/// the same fact, and only one of them costs a row.
+fn task_spend_detail(notebook: &Notebook, width: usize) -> Vec<Line<'static>> {
+    let mut lines = task_spend(notebook, width);
+    let Some(tokens) = notebook.tokens.as_ref() else {
+        return lines;
+    };
+    for model in &tokens.helpers.models {
+        let name = if model.model.is_empty() {
+            "model unreported"
+        } else {
+            &model.model
+        };
+        lines.push(muted(format!(
+            "{name} · {} of {} calls counted",
+            model.usage_known_calls, model.calls
+        )));
+        lines.push(muted(format!(
+            "in {} · out {}",
+            helper_metric(
+                model.input_tokens,
+                model.reported_requests,
+                model.requests,
+                model.usage_known_calls,
+                model.calls,
+            ),
+            helper_metric(
+                model.output_tokens,
+                model.reported_requests,
+                model.requests,
+                model.usage_known_calls,
+                model.calls,
+            )
+        )));
+        // **`unreported` is not `0`, and this view is where that matters.**
+        // A helper that reported its tokens and not its cache figures is a
+        // different fact from one that cached nothing, and a reader who
+        // opened the instruments is the reader entitled to the difference --
+        // `telemetry_calls_missing_cache_classes_unreported_instead_of_zero`
+        // exists because that distinction was once lost. So both classes are
+        // always drawn here, however they came back.
+        lines.push(muted(format!(
+            "cache read {}",
+            helper_metric(
+                model.cache_read_input_tokens,
+                model.cache_read_reported_requests,
+                model.reported_requests,
+                model.usage_known_calls,
+                model.calls,
+            )
+        )));
+        lines.push(muted(format!(
+            "cache create {}",
+            helper_metric(
+                model.cache_creation_input_tokens,
+                model.cache_creation_reported_requests,
+                model.reported_requests,
+                model.usage_known_calls,
+                model.calls,
+            )
+        )));
     }
     lines
 }
@@ -291,14 +347,21 @@ pub(super) fn rail(
         "02 / TASK SPEND"
     }));
     lines.extend(task_spend(notebook, width.min(30)));
-    let metrics = [
-        format!("inbox {}", notebook.inbox_depth),
-        format!("batches {}", notebook.batches_delivered),
-        format!(
-            "handlers {}",
-            notebook.handlers.iter().filter(|h| h.active).count()
-        ),
-    ];
+    // Inbox, batches and handlers: **a zero earns no row.** All three are
+    // zero for the whole of an ordinary session, and three zeroes across two
+    // lines is the shape a reader learns to skip -- which is how they come to
+    // skip the line on the one occasion a handler is live. Only what is
+    // actually happening is drawn, and then it is worth reading.
+    let handlers = notebook.handlers.iter().filter(|h| h.active).count();
+    let metrics: Vec<String> = [
+        ("inbox", notebook.inbox_depth as u64),
+        ("batches", notebook.batches_delivered),
+        ("handlers", handlers as u64),
+    ]
+    .into_iter()
+    .filter(|(_, value)| *value > 0)
+    .map(|(name, value)| format!("{name} {value}"))
+    .collect();
     let mut metric_line = String::new();
     for metric in metrics {
         if !metric_line.is_empty()
@@ -311,7 +374,9 @@ pub(super) fn rail(
         }
         metric_line.push_str(&metric);
     }
-    lines.push(muted(metric_line));
+    if !metric_line.is_empty() {
+        lines.push(muted(metric_line));
+    }
     if let Some(status) = &notebook.supervisor {
         lines.push(muted(super::supervisor_line(status)));
     }
@@ -539,7 +604,7 @@ pub(super) fn expanded(
     ));
     instruments.push(Line::default());
     instruments.push(label("03 / TASK SPEND"));
-    instruments.extend(task_spend(notebook, usize::from(left.width).min(34)));
+    instruments.extend(task_spend_detail(notebook, usize::from(left.width).min(34)));
     if wide {
         instruments.push(Line::default());
         instruments.push(label("04 / REQUEST HISTORY"));

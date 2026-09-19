@@ -124,7 +124,13 @@ fn run(n: usize, glyph: char, tick: usize) -> String {
 /// shed, because which cell this is and what became of it is the whole
 /// message. At the narrowest the line is `10 / CELL · EXECUTED`, which still
 /// carries both.
-pub(super) fn field_header(cell: usize, state: State, width: usize, theme: Theme, tick: usize) -> Line<'static> {
+pub(super) fn field_header(
+    cell: usize,
+    state: State,
+    width: usize,
+    theme: Theme,
+    tick: usize,
+) -> Line<'static> {
     let (runs, label) = field_style(theme, state);
     let left = format!(" {cell:02} / CELL ");
     let right = format!(" {} ", state.label());
@@ -175,17 +181,21 @@ pub(super) fn intent_block(text: &str, width: usize, theme: Theme) -> Vec<Line<'
         return Vec::new();
     }
     let (head, tail) = split_intent(text);
-    let mut lines: Vec<Line<'static>> = wrap(&head.to_uppercase(), width.saturating_sub(1), HEADLINE_LINES)
-        .into_iter()
-        .map(|row| {
-            Line::styled(
-                format!(" {row}"),
-                Style::default()
-                    .fg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect();
+    let mut lines: Vec<Line<'static>> = wrap(
+        &head.to_uppercase(),
+        width.saturating_sub(1),
+        HEADLINE_LINES,
+    )
+    .into_iter()
+    .map(|row| {
+        Line::styled(
+            format!(" {row}"),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+    })
+    .collect();
     if !tail.is_empty() {
         for (index, row) in wrap(tail, width.saturating_sub(3), QUALIFIER_LINES)
             .into_iter()
@@ -285,7 +295,13 @@ pub(super) fn call_summary(execution: &str) -> Option<String> {
 /// belongs in inspection rather than in the flow. `summary` already names the
 /// kinds and their counts -- mixed kinds read `rg ×4 · context ×2`, never a
 /// bare total, because which tools ran is the half a reader acts on.
-pub(super) fn call_bar(summary: &str, trailing: Option<String>, width: usize, theme: Theme, tick: usize) -> Line<'static> {
+pub(super) fn call_bar(
+    summary: &str,
+    trailing: Option<String>,
+    width: usize,
+    theme: Theme,
+    tick: usize,
+) -> Line<'static> {
     let ink = Style::default().fg(theme.accent());
     let label = Style::default()
         .fg(theme.accent())
@@ -321,10 +337,7 @@ pub(super) fn call_bar(summary: &str, trailing: Option<String>, width: usize, th
 
 /// The rule that closes a cell.
 pub(super) fn closing_rule(width: usize, theme: Theme, tick: usize) -> Line<'static> {
-    Line::styled(
-        run(width, FIELD, tick),
-        Style::default().fg(theme.accent()),
-    )
+    Line::styled(run(width, FIELD, tick), Style::default().fg(theme.accent()))
 }
 
 /// One binding of a cell's handle table, as a numbered row.
@@ -375,7 +388,12 @@ pub(super) fn rows_of(table: &str) -> Vec<Row> {
 /// Numbered like the sidebar's panels, aligned on the widest name so the type
 /// column reads as a column. A row never carries the token costs the model's
 /// copy does.
-pub(super) fn value_rows(rows: &[Row], width: usize, limit: usize, theme: Theme) -> Vec<Line<'static>> {
+pub(super) fn value_rows(
+    rows: &[Row],
+    width: usize,
+    limit: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return Vec::new();
     }
@@ -517,6 +535,51 @@ fn wrap(text: &str, width: usize, limit: usize) -> Vec<String> {
     rows
 }
 
+/// The transient notice, as signage on a rule.
+///
+/// **The rule stays.** It divides the composer from the transcript, and a
+/// rule that divides honestly is not decoration -- it is the thing that makes
+/// a notice legible as a notice. What changed is the label on it: uppercase
+/// signage in this module's own voice rather than a lowercase word nested in
+/// a border.
+///
+/// An error inverts, the way [`State::Threw`]'s field does and for the same
+/// reason: it is the one a reader must not be able to skim past. A plain
+/// notice sits on `dock()` rather than on the accent, which is what keeps
+/// Mono legible -- its accent is white, and a white label would be a bar of
+/// light above the composer.
+pub(super) fn notice(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &super::ScreenState) {
+    let Some(notice) = &state.notice else {
+        return;
+    };
+    let error = notice.starts_with("ERROR:");
+    let label = if error {
+        Style::default()
+            .fg(state.theme.dock())
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(state.theme.accent())
+            .bg(state.theme.dock())
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(notice.as_str())
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::TOP)
+                    .title(Span::styled(
+                        if error { " ERROR " } else { " NOTICE " },
+                        label,
+                    )),
+            )
+            .style(Style::default().fg(if error { Color::Red } else { MUTED })),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,11 +635,14 @@ mod tests {
                 .find(|span| span.content.contains("CELL"))
                 .expect("the cell label is a span of its own");
             assert_ne!(
-                label.style.fg,
-                label.style.bg,
+                label.style.fg, label.style.bg,
                 "{theme:?} drew its label in its own ground"
             );
-            assert_eq!(label.style.bg, Some(theme.dock()), "{theme:?} lost its field");
+            assert_eq!(
+                label.style.bg,
+                Some(theme.dock()),
+                "{theme:?} lost its field"
+            );
         }
     }
 
@@ -602,7 +668,10 @@ mod tests {
             !still.contains(RAMP[0]) && !still.contains(RAMP[1]) && !still.contains(RAMP[2]),
             "a still frame used a reveal glyph: {still}"
         );
-        assert!(still.contains(FIELD), "a still frame lost its field: {still}");
+        assert!(
+            still.contains(FIELD),
+            "a still frame lost its field: {still}"
+        );
     }
 
     #[test]
@@ -656,7 +725,9 @@ mod tests {
         assert!(rendered[0].contains("01"), "{rendered:?}");
         assert!(rendered[0].contains("profileCoupling"), "{rendered:?}");
         assert!(
-            rendered.iter().all(|row| !row.contains('{') && !row.contains('"')),
+            rendered
+                .iter()
+                .all(|row| !row.contains('{') && !row.contains('"')),
             "a row carried JSON: {rendered:?}"
         );
     }
@@ -680,7 +751,13 @@ mod tests {
 
     #[test]
     fn a_call_bar_names_mixed_kinds_rather_than_a_bare_total() {
-        let rendered = text(&call_bar("rg ×4 · context ×2", Some("2.4s".into()), 80, Theme::Neon, 0));
+        let rendered = text(&call_bar(
+            "rg ×4 · context ×2",
+            Some("2.4s".into()),
+            80,
+            Theme::Neon,
+            0,
+        ));
         assert!(rendered.contains("rg ×4"), "{rendered}");
         assert!(rendered.contains("context ×2"), "{rendered}");
         assert!(rendered.contains("2.4s"), "{rendered}");

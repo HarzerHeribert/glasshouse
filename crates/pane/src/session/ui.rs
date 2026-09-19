@@ -1166,6 +1166,12 @@ fn run(
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 dirty = true;
+                // Typing ends the opening instantly, before this keystroke is
+                // dispatched anywhere: a person who pressed a key wants the
+                // session, and waiting for the next animation tick to notice
+                // would be the delay the opening was built not to have. The
+                // key itself falls through and is handled as it always was.
+                state.startup_skipped = true;
                 if let Some(request) = approvals.front() {
                     let complete = request.action().confirmation().complete;
                     let decision = match key.code {
