@@ -1805,8 +1805,9 @@ fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) -> Reduction 
     });
     let token = state.token.borrow().clone();
     // A helper thinking is the cell waiting (`RuntimeState::away_from_js`);
-    // the call is bounded by `wire::SIDE_ERRAND_TIMEOUT`, which is longer
-    // than the whole cell limit, so without this one helper could spend it.
+    // the call outlasts the whole cell limit by design — a one-shot errand
+    // ends on silence (`wire::SIDE_ERRAND_SILENCE`) and never on duration —
+    // so without this one helper could spend the cell's clock.
     let _away = state.away_from_js();
     let call = crate::helpers::run(
         spec,

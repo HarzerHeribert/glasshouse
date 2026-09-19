@@ -27,6 +27,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "support/sse.rs"]
+mod sse;
+
 /// `ANTHROPIC_BASE_URL` is process-global, so every test that sets it is
 /// serialised against the others in this file, exactly as `tests/helpers.rs`
 /// serialises its own.
@@ -141,15 +144,17 @@ fn fake(message_reply: &str, script: SystemOne) -> (String, Arc<AtomicUsize>, Ar
                 );
             } else {
                 seen_messages.fetch_add(1, Ordering::SeqCst);
-                let payload = serde_json::json!({
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let whole = serde_json::json!({
                     "role": "assistant",
                     "content": [{"type": "text", "text": reply}],
                     "usage": {"input_tokens": 10, "output_tokens": 5},
                 })
                 .to_string();
+                let (content_type, payload) = sse::response_for(&request, &whole);
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
                     payload.len()
                 );
             }

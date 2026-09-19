@@ -22,6 +22,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "support/sse.rs"]
+mod sse;
+
 fn root(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "pane-decisions-{label}-{}-{}",
@@ -258,6 +261,8 @@ fn providers_full(
                 }
             } else {
                 let is_look = body_text.contains(SUPERVISOR_MARKER);
+                let request: serde_json::Value =
+                    serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
                 seen_messages.lock().unwrap().push(body_text);
                 let response = if is_look {
                     json!({"role": "assistant", "content": [{"type": "text", "text": LOOK_LINE}],
@@ -268,10 +273,10 @@ fn providers_full(
                     };
                     response
                 };
-                let response = response.to_string();
+                let (content_type, response) = sse::response_for(&request, &response.to_string());
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
                     response.len()
                 );
             }

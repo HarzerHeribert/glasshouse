@@ -742,7 +742,11 @@ fn run_once_metered(
         system: spec.preamble.to_string(),
         messages: vec![Message::text(Role::User, input)],
     };
-    let outcome = match wire::send_turn_with_usage_configured(
+    // Streamed, so the ceiling on this call can measure silence rather than
+    // duration: a reasoning helper that is working keeps the socket busy with
+    // `ping` and `thinking` events, and only a dead one goes quiet
+    // (`wire::SIDE_ERRAND_SILENCE`).
+    let outcome = match wire::send_errand_streaming(
         &conversation,
         model,
         effort,
@@ -804,8 +808,10 @@ pub fn run_with_tools(
         // *"how does it know if it runs out of turns? And if a helper returns
         // nonsense that can do more harm than good. So it should run as long
         // as it needs."* What bounds this call is real: every provider
-        // request carries `wire::SIDE_ERRAND_TIMEOUT`, and the caller's
-        // cancellation token — the person's `/stop` — ends the wait. See
+        // request on this narrowed path carries `wire::SIDE_ERRAND_TIMEOUT`
+        // (a one-shot errand streams instead, and ends on silence), and the
+        // caller's cancellation token — the person's `/stop` — ends the
+        // wait. See
         // `spec.max_turns`, which is now a declaration and not a limit.
         turns: None,
         model: route.model.to_string(),

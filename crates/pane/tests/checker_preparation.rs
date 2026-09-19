@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
+#[path = "support/sse.rs"]
+mod sse;
+
 #[test]
 fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evidence() {
     let root = std::env::temp_dir().join(format!("pane-checker-prepare-{}", std::process::id()));
@@ -63,9 +66,11 @@ fn checker_first_request_receives_actual_named_check_then_reuses_unchanged_evide
             assert!(length < 1024 * 1024);
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
-            requests.push(serde_json::from_slice::<serde_json::Value>(&body).unwrap());
-            let reply = r#"{"role":"assistant","content":[{"type":"text","text":"holds\ninput.txt:1 FIRST-VERIFIED. Only the provided observation was checked."}],"usage":{"input_tokens":10,"output_tokens":5}}"#;
-            write!(stream,"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
+            let request = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            requests.push(request.clone());
+            let whole = r#"{"role":"assistant","content":[{"type":"text","text":"holds\ninput.txt:1 FIRST-VERIFIED. Only the provided observation was checked."}],"usage":{"input_tokens":10,"output_tokens":5}}"#;
+            let (content_type, reply) = sse::response_for(&request, whole);
+            write!(stream,"HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
         }
         requests
     });

@@ -23,6 +23,9 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[path = "support/sse.rs"]
+mod sse;
+
 /// A grant that admits the shell command the lifting test writes, so the
 /// only thing under test is whether the two spellings dedup against each
 /// other.
@@ -244,15 +247,18 @@ fn provider(text: &str) -> Provider {
                 return;
             }
             seen.fetch_add(1, Ordering::SeqCst);
-            let payload = serde_json::json!({
+            let request: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            let whole = serde_json::json!({
                 "role": "assistant",
                 "content": [{"type": "text", "text": reply}],
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             })
             .to_string();
+            let (content_type, payload) = sse::response_for(&request, &whole);
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 payload.len(),
                 payload
             );

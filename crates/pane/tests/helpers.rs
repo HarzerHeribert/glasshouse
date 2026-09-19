@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "support/sse.rs"]
+mod sse;
+
 /// `ANTHROPIC_BASE_URL` is process-global, so the tests that set it are
 /// serialised against each other exactly as `turns.rs` serialises its own.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -103,20 +106,19 @@ fn provider_with_usage(text: &str, usage: serde_json::Value) -> Provider {
             if reader.read_exact(&mut body).is_err() {
                 return;
             }
-            captured
-                .lock()
-                .unwrap()
-                .push(serde_json::from_slice(&body).unwrap());
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            captured.lock().unwrap().push(request.clone());
             seen.fetch_add(1, Ordering::SeqCst);
-            let payload = serde_json::json!({
+            let whole = serde_json::json!({
                 "role": "assistant",
                 "content": [{"type": "text", "text": reply}],
                 "usage": usage
             })
             .to_string();
+            let (content_type, payload) = sse::response_for(&request, &whole);
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 payload.len(),
                 payload
             );
@@ -168,16 +170,14 @@ fn scripted_provider_with_delays(payloads: Vec<(serde_json::Value, Duration)>) -
             if reader.read_exact(&mut body).is_err() {
                 return;
             }
-            captured
-                .lock()
-                .unwrap()
-                .push(serde_json::from_slice(&body).unwrap());
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            captured.lock().unwrap().push(request.clone());
             seen.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(delay);
-            let payload = payload.to_string();
+            let (content_type, payload) = sse::response_for(&request, &payload.to_string());
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 payload.len(),
                 payload
             );

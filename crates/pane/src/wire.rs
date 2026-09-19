@@ -791,6 +791,189 @@ pub fn send_turn_bounded_on(
 /// against a hang.
 pub const SIDE_ERRAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How long a streamed side errand may go with the socket saying **nothing
+/// at all** before Pane stops waiting for it.
+///
+/// The invariant: **a helper is cut off for going silent, never for taking
+/// its time.** [`SIDE_ERRAND_TIMEOUT`] measures a whole answer, which is the
+/// wrong quantity — on a non-streamed call a model that is thinking and a
+/// socket that is dead produce the same observation, so the ceiling written
+/// against the dead socket lands on the thinking model instead. Measured
+/// 2026-09-19: `helper.reduce` on `gpt-5.6-luna`, a reasoning model, died at
+/// exactly 120.0s having done nothing wrong.
+///
+/// A gap *between* events is a far smaller quantity than a whole answer: a
+/// provider sends `message_start` at once, `ping` keepalives throughout, and
+/// a delta per token. 45s sits above the largest complete-answer figure this
+/// module ever measured (32s for a reasoning model), so any errand that used
+/// to fit inside the old whole-answer ceiling fits inside a single silence
+/// window now, and it stays finite against a socket that has died.
+pub const SIDE_ERRAND_SILENCE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// The allowance before the **first** event of a streamed side errand.
+///
+/// Time to first token is the one window where a reasoning model really is
+/// silent: the request is out, the provider may be queuing it, and nothing
+/// has come back. An inactivity ceiling cannot tell that from a hang either,
+/// so this window is deliberately the old [`SIDE_ERRAND_TIMEOUT`] unchanged.
+///
+/// That equality is the point, and it is what makes this change incapable of
+/// a regression: 120s used to have to cover the *whole answer* and now has
+/// only to cover the *first byte*, so every errand that succeeded before
+/// still succeeds, and the ones that died mid-answer no longer do.
+pub const SIDE_ERRAND_FIRST_EVENT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The absolute ceiling on the request thread a streamed side errand owns.
+///
+/// [`SIDE_ERRAND_SILENCE`] is what the *model* experiences; this is what
+/// guarantees the *thread* ends, which is the whole reason a side errand was
+/// ever bounded: it runs inside a native v8 callback that
+/// `terminate_execution` cannot reach. The two ceilings have different jobs
+/// and neither replaces the other.
+///
+/// It can afford to be generous precisely because it is no longer what stops
+/// a cell. Once the silence window fires the caller returns, drops the
+/// receiving end, and the worker stops at its very next line — so this only
+/// governs a socket so dead that no further line ever arrives, where the
+/// cost is one parked thread holding one socket rather than a cell that
+/// cannot continue.
+pub const SIDE_ERRAND_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// A one-shot side errand over a stream, ended by silence rather than by
+/// duration (`SIDE_ERRAND_SILENCE`, `SIDE_ERRAND_FIRST_EVENT`).
+///
+/// Same body as [`send_turn_with_usage_configured`] apart from `stream`, and
+/// the same [`Surface::TextOnly`]: a helper reaches no tool either way.
+///
+/// The provider request runs on its own thread and reports liveness over a
+/// channel, because the reading side blocks in the socket and cannot be
+/// interrupted from outside — ureq offers a total body deadline, never a
+/// per-read one. The thread is bounded by [`SIDE_ERRAND_BACKSTOP`] and, when
+/// this function has already given up, by the dropped receiver that makes
+/// its next line the last.
+///
+/// What bounds a provider that streams forever is the request's own
+/// `max_tokens`, which [`configure_effort`] may enlarge but always leaves
+/// finite; [`SIDE_ERRAND_BACKSTOP`] is the floor under that.
+pub fn send_errand_streaming(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    max_tokens: u32,
+    extra_header: Option<(&str, &str)>,
+) -> Result<Turn, WireError> {
+    send_errand_within(
+        conversation,
+        model,
+        effort,
+        max_tokens,
+        extra_header,
+        SIDE_ERRAND_FIRST_EVENT,
+        SIDE_ERRAND_SILENCE,
+    )
+}
+
+/// [`send_errand_streaming`] with its two windows supplied, so a test can
+/// exercise the reset without spending the real ones. Private on purpose:
+/// the constants above are the only windows production has.
+fn send_errand_within(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    max_tokens: u32,
+    extra_header: Option<(&str, &str)>,
+    first_event: std::time::Duration,
+    silence: std::time::Duration,
+) -> Result<Turn, WireError> {
+    enum Tick {
+        Alive,
+        Done(Box<Result<Turn, WireError>>),
+    }
+
+    let url = format!("{}{MESSAGES_PATH}", base_url());
+    let mut body = RequestBody::new(
+        model,
+        max_tokens,
+        conversation,
+        Surface::TextOnly.tool_definitions(),
+    );
+    body.stream = Some(true);
+    let body = configure_effort(
+        serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
+        model,
+        effort,
+        max_tokens,
+    );
+
+    // Read on this thread, where the env lock a test may hold still applies.
+    let credential = credential_header();
+    let model = model.to_string();
+    let extra_header = extra_header.map(|(name, value)| (name.to_string(), value.to_string()));
+
+    let (sender, receiver) = std::sync::mpsc::channel::<Tick>();
+    let liveness = sender.clone();
+    std::thread::spawn(move || {
+        let mut request = ureq::post(&url)
+            .config()
+            .http_status_as_error(false)
+            .timeout_global(Some(SIDE_ERRAND_BACKSTOP))
+            .build()
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header(MODEL_HEADER, &model);
+        if let Some((name, value)) = &extra_header {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some((name, value)) = &credential {
+            request = request.header(*name, value.as_str());
+        }
+        let outcome = (|| {
+            let mut response = request
+                .send(body.as_slice())
+                .map_err(|err| WireError::Http(Box::new(err)))?;
+            let status = response.status().as_u16();
+            if !response.status().is_success() {
+                let text = response
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|err| WireError::Http(Box::new(err)))?;
+                return Err(WireError::Status {
+                    status,
+                    body_head: body_head(&text),
+                });
+            }
+            read_sse_stream(
+                &mut response,
+                &mut || liveness.send(Tick::Alive).is_ok(),
+                &mut |_| {},
+            )
+        })();
+        let _ = sender.send(Tick::Done(Box::new(outcome)));
+    });
+
+    let mut window = first_event;
+    loop {
+        match receiver.recv_timeout(window) {
+            Ok(Tick::Alive) => window = silence,
+            Ok(Tick::Done(outcome)) => return *outcome,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(WireError::Stream(format!(
+                    "the provider sent nothing for {}s",
+                    window.as_secs()
+                )));
+            }
+            // The worker always sends `Done` before it ends, so a bare
+            // disconnect means it panicked rather than answered.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(WireError::Stream(
+                    "the request thread ended without a reply".to_string(),
+                ));
+            }
+        }
+    }
+}
+
 pub fn send_turn_with(
     conversation: &Conversation,
     model: &str,
@@ -1277,8 +1460,6 @@ pub fn send_turn_streaming_on(
     surface: Surface,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
-    use std::io::{BufRead, BufReader};
-
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let mut body = RequestBody::new(model, MAX_TOKENS, conversation, surface.tool_definitions());
     body.stream = Some(true);
@@ -1316,10 +1497,39 @@ pub fn send_turn_streaming_on(
         });
     }
 
+    read_sse_stream(&mut response, &mut || true, on_delta)
+}
+
+/// The SSE half of a streamed turn, shared by the task path
+/// ([`send_turn_streaming_on`]) and a side errand
+/// ([`send_errand_streaming`]).
+///
+/// **`on_line` fires for every line the socket yields, `on_delta` only for
+/// the ones that carry text.** The two are not the same signal and a caller
+/// that confuses them measures the wrong thing: a provider sends
+/// `message_start` immediately, then `ping` keepalives, then `thinking`
+/// blocks that produce no delta at all. A reasoning model is therefore
+/// *noisy* on the wire while it is silent in the transcript, which is
+/// exactly what lets an inactivity ceiling tell working from hung.
+/// `on_line` returns whether to keep reading: a side errand whose caller has
+/// already stopped waiting says `false` and the socket is dropped at the next
+/// line, rather than dribbling into a channel nobody holds.
+fn read_sse_stream(
+    response: &mut ureq::http::Response<ureq::Body>,
+    on_line: &mut dyn FnMut() -> bool,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<Turn, WireError> {
+    use std::io::{BufRead, BufReader};
+
     let mut accumulator = StreamAccumulator::new();
     let reader = BufReader::new(response.body_mut().as_reader());
     for line in reader.lines() {
         let line = line.map_err(|err| WireError::Http(Box::new(err.into())))?;
+        if !on_line() {
+            return Err(WireError::Stream(
+                "the caller stopped waiting for this errand".to_string(),
+            ));
+        }
         // SSE: `event:` names the type, `data:` carries it, a blank line ends
         // one event. Every payload here is self-describing by its own `type`
         // field, so only `data:` is read and the framing needs no state.
@@ -1340,6 +1550,177 @@ pub fn send_turn_streaming_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ANTHROPIC_BASE_URL` is process-global, so the tests here that point
+    /// it at a fixture serialise against each other exactly as `turns.rs`
+    /// and `tests/helpers.rs` serialise their own. Nothing else in this
+    /// crate's unit tests writes it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A listener that answers one Messages request with SSE, writing each
+    /// frame after `gap` and then, if `then_go_silent`, holding the socket
+    /// open saying nothing. Returns its base URL.
+    fn streaming_provider(
+        frames: Vec<String>,
+        gap: std::time::Duration,
+        then_go_silent: bool,
+    ) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; length];
+            if reader.read_exact(&mut body).is_err() {
+                return;
+            }
+            if write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n"
+            )
+            .is_err()
+            {
+                return;
+            }
+            let _ = stream.flush();
+            for frame in frames {
+                std::thread::sleep(gap);
+                if write!(stream, "data: {frame}\n\n").is_err() || stream.flush().is_err() {
+                    return;
+                }
+            }
+            if then_go_silent {
+                // Hold the socket open, saying nothing. This is the shape the
+                // ceiling exists for and the one a whole-response call cannot
+                // tell apart from a model that is thinking.
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn errand_frames(text: &str) -> Vec<String> {
+        vec![
+            r#"{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":9,"output_tokens":0}}}"#.to_string(),
+            r#"{"type":"ping"}"#.to_string(),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            serde_json::json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"text_delta","text":text}})
+            .to_string(),
+            r#"{"type":"content_block_stop","index":0}"#.to_string(),
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#.to_string(),
+            r#"{"type":"message_stop"}"#.to_string(),
+        ]
+    }
+
+    /// The contract: an errand whose provider keeps talking is never cut off,
+    /// however long the whole answer takes. Seven frames 120ms apart run the
+    /// call well past the 300ms silence window it is given, and every one of
+    /// them resets it.
+    #[test]
+    fn a_talking_provider_outlives_any_single_silence_window() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let url = streaming_provider(
+            errand_frames("reduced"),
+            std::time::Duration::from_millis(120),
+            false,
+        );
+        // SAFETY: `_guard` serialises every base-url mutation in this module.
+        unsafe { env::set_var("ANTHROPIC_BASE_URL", &url) };
+        let turn = send_errand_within(
+            &sample_conversation(),
+            "a-test-model",
+            Effort::Default,
+            128,
+            None,
+            std::time::Duration::from_millis(600),
+            std::time::Duration::from_millis(300),
+        );
+        unsafe { env::remove_var("ANTHROPIC_BASE_URL") };
+        let turn = turn.expect("a provider that keeps talking must not be cut off");
+        assert_eq!(turn.message.content, vec![Block::Text("reduced".into())]);
+    }
+
+    /// The other half: silence still ends the call, and says so.
+    #[test]
+    fn a_provider_that_goes_quiet_is_ended_by_the_silence_window() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut frames = errand_frames("never finished");
+        frames.truncate(2);
+        let url = streaming_provider(frames, std::time::Duration::from_millis(10), true);
+        // SAFETY: `_guard` serialises every base-url mutation in this module.
+        unsafe { env::set_var("ANTHROPIC_BASE_URL", &url) };
+        let outcome = send_errand_within(
+            &sample_conversation(),
+            "a-test-model",
+            Effort::Default,
+            128,
+            None,
+            std::time::Duration::from_millis(600),
+            std::time::Duration::from_millis(250),
+        );
+        unsafe { env::remove_var("ANTHROPIC_BASE_URL") };
+        let error = outcome.expect_err("a silent provider must not be waited on forever");
+        assert!(
+            error.to_string().contains("sent nothing for"),
+            "the refusal must name the silence: {error}"
+        );
+    }
+
+    /// A caller that has stopped waiting takes the socket with it at the next
+    /// line, rather than leaving the worker dribbling into a channel nobody
+    /// holds until the backstop.
+    #[test]
+    fn a_reader_whose_caller_gave_up_stops_at_the_next_line() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let url = streaming_provider(
+            errand_frames("unwanted"),
+            std::time::Duration::from_millis(1),
+            false,
+        );
+        // SAFETY: `_guard` serialises every base-url mutation in this module.
+        unsafe { env::set_var("ANTHROPIC_BASE_URL", &url) };
+        let mut response = ureq::post(format!("{url}{MESSAGES_PATH}"))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .send(request_body(&sample_conversation()).as_slice())
+            .expect("the fixture answered");
+        unsafe { env::remove_var("ANTHROPIC_BASE_URL") };
+        let mut lines = 0usize;
+        let outcome = read_sse_stream(
+            &mut response,
+            &mut || {
+                lines += 1;
+                false
+            },
+            &mut |_| {},
+        );
+        assert_eq!(lines, 1, "reading must stop at the first line, not run on");
+        let error = outcome.expect_err("a reader that gave up does not return a turn");
+        assert!(
+            error.to_string().contains("stopped waiting"),
+            "the reason must name the caller: {error}"
+        );
+    }
 
     fn sample_conversation() -> Conversation {
         Conversation {

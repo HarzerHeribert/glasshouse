@@ -13,6 +13,9 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+#[path = "support/sse.rs"]
+mod sse;
+
 fn root(label: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "pane-gate-{label}-{}-{}",
@@ -58,8 +61,10 @@ fn providers(responses: Vec<Value>) -> (String, Arc<Mutex<Vec<String>>>) {
             seen.lock()
                 .unwrap()
                 .push(String::from_utf8_lossy(&body).into_owned());
-            let response = response.to_string();
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            let request: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            let (content_type, response) = sse::response_for(&request, &response.to_string());
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
         }
     });
     (url, bodies)
