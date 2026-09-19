@@ -10,7 +10,7 @@
 //! objects.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -294,6 +294,16 @@ pub(crate) struct RuntimeState {
     /// Context produced in the cell currently running. It becomes visible at
     /// the next cell boundary, never earlier merely because code holds it.
     pending_sources: RefCell<Vec<(PathBuf, String)>>,
+    /// Paths a context was queued for in the cell currently running WITHOUT
+    /// its target whole -- an oversized definition delivered short, or a
+    /// window where no boundary was found. They never certify a version.
+    pending_incomplete: RefCell<Vec<PathBuf>>,
+    /// The same, once they have crossed a cell boundary and therefore
+    /// reached the model. Kept for one reason only: so a refused `edit` can
+    /// say which of two things happened -- nothing was read, or something
+    /// was and not enough of it. A complete context for the same path
+    /// supersedes the entry, because then enough of it has been read.
+    incomplete_sources: RefCell<HashSet<PathBuf>>,
     pending_context_output: RefCell<Vec<String>>,
     /// Every pure observation this task has made, by tool, checked arguments
     /// and result digest, with the first call that made it.
@@ -408,6 +418,8 @@ impl RuntimeState {
             filters: RefCell::new(Vec::new()),
             visible_sources: RefCell::new(HashMap::new()),
             pending_sources: RefCell::new(Vec::new()),
+            pending_incomplete: RefCell::new(Vec::new()),
+            incomplete_sources: RefCell::new(HashSet::new()),
             pending_context_output: RefCell::new(Vec::new()),
             observations: RefCell::new(HashMap::new()),
             bindings: RefCell::new(HashMap::new()),
@@ -470,6 +482,9 @@ impl RuntimeState {
         self.visible_sources
             .borrow_mut()
             .extend(self.pending_sources.borrow_mut().drain(..));
+        self.incomplete_sources
+            .borrow_mut()
+            .extend(self.pending_incomplete.borrow_mut().drain(..));
         let cell = self.cell.get() + u64::from(!self.handlers.running.get());
         self.cell.set(cell);
         let mut current = self.current.borrow_mut();
@@ -662,8 +677,13 @@ impl RuntimeState {
         };
         let mut current = self.current.borrow_mut();
         if current.helper_calls >= available {
+            // Names the ceiling and the key that sets it, and does not tell
+            // the program what to do about it. This refusal throws into the
+            // cell rather than ending it, so the control flow is the
+            // program's own; a message that said "yield" was the ceiling
+            // dictating a round trip it had no business dictating.
             return Err(format!(
-                "this cell has used its {ceiling} helper call(s); yield and start another cell"
+                "this cell has spent its {ceiling} helper call(s); `[helpers] calls_per_cell` sets that ceiling and accepts up to 64"
             ));
         }
         current.helper_calls += 1;
@@ -801,6 +821,8 @@ impl RuntimeState {
         self.filters.borrow_mut().clear();
         self.visible_sources.borrow_mut().clear();
         self.pending_sources.borrow_mut().clear();
+        self.pending_incomplete.borrow_mut().clear();
+        self.incomplete_sources.borrow_mut().clear();
         self.pending_context_output.borrow_mut().clear();
         self.observations.borrow_mut().clear();
         self.bindings.borrow_mut().clear();
@@ -840,12 +862,58 @@ impl RuntimeState {
         }
         let path = self.absolute_source_path(Path::new(&evidence.path));
         if evidence.complete {
+            self.incomplete_sources.borrow_mut().remove(&path);
             self.pending_sources
                 .borrow_mut()
                 .push((path, evidence.sha256.clone()));
+        } else {
+            self.pending_incomplete.borrow_mut().push(path);
         }
         output.push(text);
         true
+    }
+
+    /// Why an `edit` is not yet bound to a version of its path, in terms the
+    /// program can act on rather than the rule restated.
+    ///
+    /// **The cross-turn requirement is not a formality and is not loosened
+    /// here.** `begin_cell` is what moves a context from pending to visible,
+    /// and `flush_source_context` writes the text after the cell's own
+    /// output -- so a version becomes bindable exactly when the model has
+    /// actually read it. An edit in the same cell as its context would bind
+    /// to bytes nobody had seen. What was wrong was the message: it told a
+    /// caller to do the thing it had just done, without saying which of four
+    /// situations it was in.
+    pub(crate) fn edit_binding_gap(&self, args: &crate::tools::invoke::Args) -> String {
+        let Some(named) = args.get("path") else {
+            return "`edit` did not run: it names no `path` to bind a version to".into();
+        };
+        let path = self.absolute_source_path(Path::new(named));
+        if self
+            .pending_sources
+            .borrow()
+            .iter()
+            .any(|(p, _)| p == &path)
+        {
+            return format!(
+                "`edit` did not run: a context for `{named}` is in this turn's feedback and you have not read it yet; it binds from the next cell, so make the edit there"
+            );
+        }
+        if self.pending_incomplete.borrow().contains(&path)
+            || self.incomplete_sources.borrow().contains(&path)
+        {
+            return format!(
+                "`edit` did not run: the context for `{named}` reached you without its target whole, so no version binds to it; name an inner symbol that fits, read that result, and edit in the next cell"
+            );
+        }
+        if self.visible_sources.borrow().contains_key(&path) {
+            return format!(
+                "`edit` did not run: the version of `{named}` you read is not the one this edit names; call `context` for its current bytes and edit in the next cell"
+            );
+        }
+        format!(
+            "`edit` did not run: nothing has shown you `{named}`'s current bytes; call `context` with the target symbol, read its result, and edit in the next cell"
+        )
     }
 
     /// Appends the complete batch after model-authored output. Contexts that

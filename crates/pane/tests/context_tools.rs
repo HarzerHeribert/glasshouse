@@ -56,21 +56,78 @@ fn context_cannot_be_used_for_a_semantic_edit_before_it_reaches_the_model() {
     std::fs::write(&path, "value = 1\n").unwrap();
     let profile = Profile::compile(&root, None);
     let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("same-cell"));
+    // The rule is unchanged -- a version binds when the model has actually
+    // read it, which is the next cell. What changed is that enforcing it
+    // costs the call and not the cell: the refusal is the program's to catch,
+    // and it names which of the four situations this is instead of telling a
+    // caller to do the thing it has just done.
+    let marker = root.join("reached.txt");
     let result = runtime.run_cell(&format!(
-        "const ctx = await context({{path:{path:?}}});\nawait edit({{path:{path:?}, old:\"value = 1\", replacement:\"value = 2\"}});"
+        "const ctx = await context({{path:{path:?}}});\n\
+         try {{\n\
+           await edit({{path:{path:?}, old:\"value = 1\", replacement:\"value = 2\"}});\n\
+           throw new Error(\"the edit must not have run\");\n\
+         }} catch (e) {{\n\
+           const m = String(e.message ?? e);\n\
+           if (!m.includes(\"in this turn's feedback\")) throw new Error(\"wrong refusal: \" + m);\n\
+         }}\n\
+         await write({{path:{marker:?}, content:\"reached\"}});"
     ));
-    assert!(matches!(result, CellOutcome::Yielded { .. }), "{result:?}");
-    assert_eq!(result.turn().record.calls.len(), 1);
-    assert_eq!(result.turn().record.calls[0].tool, "context");
     assert!(
-        result
-            .turn()
-            .yield_reason
-            .as_deref()
-            .unwrap()
-            .contains("next turn")
+        !matches!(result, CellOutcome::Threw { .. }),
+        "the refusal is catchable and the cell runs past it: {result:?}"
     );
+    assert!(
+        marker.exists(),
+        "the program kept its control flow after the refusal"
+    );
+    assert_eq!(result.turn().record.calls[0].tool, "context");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "value = 1\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_incomplete_context_says_why_no_version_binds_to_it() {
+    let root = fixture("incomplete-binding");
+    let path = root.join("src/big.py");
+    // One definition past the 24,000-byte target cap: delivered short, and
+    // therefore never certified for an `expected_sha256` edit.
+    let body: String = (0..1_200)
+        .map(|i| format!("    line_{i} = \"padding padding padding\"\n"))
+        .collect();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("def target():\n{body}")).unwrap();
+    let profile = Profile::compile(&root, None);
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("incomplete"));
+
+    let first = runtime.run_cell(&format!(
+        "const ctx = await context({{path:{path:?}, symbol:'target'}});"
+    ));
+    assert!(
+        !matches!(first, CellOutcome::Threw { .. }),
+        "an oversized definition is delivered, not thrown: {first:?}"
+    );
+
+    let marker = root.join("reached.txt");
+    let second = runtime.run_cell(&format!(
+        "try {{\n\
+           await edit({{path:{path:?}, old:\"line_0\", replacement:\"line_x\"}});\n\
+           throw new Error(\"the edit must not have run\");\n\
+         }} catch (e) {{\n\
+           const m = String(e.message ?? e);\n\
+           if (!m.includes(\"without its target whole\")) throw new Error(\"wrong refusal: \" + m);\n\
+         }}\n\
+         await write({{path:{marker:?}, content:\"reached\"}});"
+    ));
+    assert!(
+        !matches!(second, CellOutcome::Threw { .. }),
+        "the refusal is catchable: {second:?}"
+    );
+    assert!(marker.exists(), "the cell ran past the refusal");
+    assert!(
+        std::fs::read_to_string(&path).unwrap().contains("line_0"),
+        "nothing was written against a target nobody saw whole"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

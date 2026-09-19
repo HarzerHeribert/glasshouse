@@ -9,7 +9,15 @@ use std::{
     path::Path,
 };
 
-const SOURCE_CAP: u64 = 1_048_576;
+/// The largest source file `context` will pack.
+///
+/// **One number with `exact_edit`'s `MAX_FILE_BYTES`, deliberately.** Any
+/// file `edit` will write, `context` can pack: the two disagreed by sixteen
+/// times, and because `edit` requires a delivered `context` first, every
+/// file between the two numbers was writable in principle and unreachable in
+/// practice. Raising this to meet the writer closes that, rather than
+/// lowering the writer and taking away something that worked.
+pub const SOURCE_CAP: u64 = 16 * 1024 * 1024;
 const SMALL: usize = 16_384;
 const DEF_CAP: usize = 24_000;
 const RENDER_CAP: usize = 30_000;
@@ -17,6 +25,10 @@ const SUPPORT_CAP: usize = 18;
 const VISIT_CAP: usize = 2_048;
 const OUTLINE_CAP: usize = 40;
 const SCAN_CAP: u64 = 131_072;
+/// How many unscanned files the reference note names before counting the
+/// rest: enough to recognise the shape of what was skipped, bounded so the
+/// note cannot itself become the omission.
+const UNSCANNED_SHOWN: usize = 5;
 const SKIP: &[&str] = &[
     ".git",
     ".pane",
@@ -222,11 +234,31 @@ pub fn pack(
         }
         (ContextRole::CompleteFile, (0, n), n == lines.len())
     };
-    let body = drawn.unwrap_or_else(|| slice(&lines, range));
+    // **A definition larger than the cap is delivered short, never refused.**
+    // The file was opened, the boundary was found and the body is in hand;
+    // returning `Err` here threw into the program, and inside a `Promise.all`
+    // that took every sibling context down with it. Worse, it could not be
+    // recovered from: `edit` requires a delivered `context`, so every retry
+    // threw identically and a definition past this cap could never be edited
+    // at all. What is given back instead is the head of it, `complete: false`
+    // so nothing certifies it for an `expected_sha256` edit, and an omission
+    // carrying both numbers so the next request can be aimed.
+    let sliced = drawn.is_none();
+    let mut body = drawn.unwrap_or_else(|| slice(&lines, range));
+    let mut range = range;
+    let mut complete = complete;
     if body.len() > DEF_CAP {
-        return Err(ContextError(format!(
-            "target definition exceeds the {DEF_CAP} byte cap; nothing packed"
-        )));
+        let total = body.lines().count();
+        let kept = bounded_body_lines(&body, DEF_CAP);
+        omissions.push(format!(
+            "target is {} bytes and the {DEF_CAP} byte cap holds {kept} of its {total} lines; it is delivered incomplete, so no edit binds to it -- name an inner symbol for a complete target",
+            body.len()
+        ));
+        body = body.lines().take(kept).collect::<Vec<_>>().join("\n");
+        if sliced {
+            range = (range.0, range.0 + kept);
+        }
+        complete = false;
     }
     let target = make(role, rel.clone(), range, body, complete);
     let mut supporting = vec![];
@@ -259,21 +291,25 @@ pub fn pack(
         omissions,
     };
     // Bytes here, characters in `narrow_to`: this cap bounds one rendered
-    // context and the turn budget counts what the console keeps. The policy
-    // -- which excerpt goes, and what that says -- is `shed_one`'s either
-    // way, so the two measures cannot disagree about the order.
-    // Bytes here, characters in `narrow_to`: this cap bounds one rendered
     // context and the turn budget counts what the console keeps. Which
     // excerpt goes, and what that says, is `shed_until`'s either way, so the
     // two measures cannot disagree about the order.
+    //
+    // **Shedding everything and still not fitting is an omission, not a
+    // refusal.** The target alone is bounded by `DEF_CAP` above, so the only
+    // way past this line is a header and omissions larger than the slack
+    // between the two caps -- and a caller that asked for a context is
+    // better served by an oversized one it can read than by a throw that
+    // costs it the cell.
     result.shed_until(
         |shed| format!("{shed} lower-ranked supporting excerpt(s) omitted to fit the delivery cap"),
         |context| context.render().len() <= RENDER_CAP,
     );
-    if result.render().len() > RENDER_CAP {
-        return Err(ContextError(format!(
-            "context exceeds the {RENDER_CAP} byte render cap; nothing packed"
-        )));
+    let rendered = result.render().len();
+    if rendered > RENDER_CAP {
+        result.omissions.push(format!(
+            "context renders {rendered} bytes against the {RENDER_CAP} byte delivery cap with nothing left to shed; it is delivered over the cap rather than withheld"
+        ));
     }
     Ok(result)
 }
@@ -1379,8 +1415,17 @@ fn references(profile: &Profile, target: &Path, symbol: &str) -> (Vec<SourceExce
     }
     files.sort();
     let mut hits = vec![];
+    // **A file the scan could not read is named, never silently skipped.**
+    // Its two siblings above -- `refused` and `cutoff` -- both report
+    // themselves, and this one did not, so a model read "visited N entries",
+    // found no callers and concluded there were none. In a repository of
+    // large sources that hid most of them.
+    let mut unscanned: Vec<String> = vec![];
     for p in files {
-        let Ok(t) = read(&p, SCAN_CAP) else { continue };
+        let Ok(t) = read(&p, SCAN_CAP) else {
+            unscanned.push(relative(profile, &p));
+            continue;
+        };
         let l: Vec<&str> = t.lines().collect();
         let Some(i) = l.iter().position(|x| {
             has_ident(x, symbol) && (p != target || !def_line(x, symbol, Lang::of(&p)))
@@ -1419,6 +1464,21 @@ fn references(profile: &Profile, target: &Path, symbol: &str) -> (Vec<SourceExce
             "reference traversal stopped at the {VISIT_CAP}-entry cap"
         ))
     }
+    if !unscanned.is_empty() {
+        let shown = unscanned.len().min(UNSCANNED_SHOWN);
+        let named = unscanned[..shown].join(", ");
+        let rest = unscanned.len() - shown;
+        notes.push(match rest {
+            0 => format!(
+                "{} file(s) were not searched for callers, over the {SCAN_CAP} byte scan cap or unreadable: {named}",
+                unscanned.len()
+            ),
+            rest => format!(
+                "{} file(s) were not searched for callers, over the {SCAN_CAP} byte scan cap or unreadable: {named} and {rest} more",
+                unscanned.len()
+            ),
+        })
+    }
     if hits.len() > 12 {
         notes.push(format!(
             "{} lower-ranked references omitted",
@@ -1447,6 +1507,23 @@ fn make(
 }
 fn slice(l: &[&str], r: (usize, usize)) -> String {
     l[r.0..r.1].join("\n")
+}
+/// How many of `body`'s lines fit `cap` bytes, counting the newlines between
+/// them exactly as [`slice`] joins them, so the kept text is never larger
+/// than the number this answered.
+fn bounded_body_lines(body: &str, cap: usize) -> usize {
+    let mut bytes = 0;
+    body.lines()
+        .take_while(|line| {
+            let extra = line.len() + usize::from(bytes > 0);
+            if bytes + extra > cap {
+                false
+            } else {
+                bytes += extra;
+                true
+            }
+        })
+        .count()
 }
 fn bounded_prefix(lines: &[&str], line_cap: usize, byte_cap: usize) -> usize {
     let mut bytes = 0;

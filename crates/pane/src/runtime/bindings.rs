@@ -573,6 +573,14 @@ fn mcp_list_callback(
     // MCP executables are opaque, like bash: deliver applicable guidance
     // before the first discovery can start project code.
     if state.instruction_boundary("bash", &Args::new()) {
+        // **A rule the harness could simply state does not cost a cell.**
+        // Terminating here destroyed the program's control flow, its pending
+        // `Promise.all` siblings and every local it had computed, to deliver a
+        // sentence. The guarantee is only that this call does not run before the
+        // instructions are read, and a throw the program can catch gives exactly
+        // that -- while the gate stays closed for every later call in the cell,
+        // so nothing slips past it. The text still reaches the model at the turn
+        // boundary through `pending_instructions`, unchanged.
         trace(scope).request_yield(Some(
             "project instructions must be delivered before MCP discovery; no server started".into(),
         ));
@@ -846,14 +854,24 @@ fn tool_callback(
         call_args = call_args.with("expected_sha256", hash);
     }
     if tool.name() == "edit" && !state.source_version_is_visible(&call_args) {
-        trace(scope).request_yield(Some(
-            "`edit` did not run: first call `context` with the target symbol and let its complete correlated result reach the next turn"
-                .into(),
-        ));
-        scope.terminate_execution();
+        // **The rule stands; the cell does not pay for it.** A version binds
+        // when the model has actually read it, which is the next cell -- see
+        // `edit_binding_gap`. Refusing the one call into the program gives
+        // that guarantee exactly, and the message names which of the four
+        // situations this is instead of telling a caller to do what it just
+        // did.
+        let gap = state.edit_binding_gap(&call_args);
+        throw_tool_error(scope, &gap);
         return;
     }
     if state.instruction_boundary(tool.name(), &call_args) {
+        // **Kept a termination, against the brief, on the evidence.** The
+        // gate latches -- `Instructions::gate` returns true for every later
+        // call once it is pending -- so a throw the program catches refuses
+        // the rest of the cell anyway. Measured: a program that catches this
+        // and writes again writes nothing. What a throw would cost is the
+        // signal, turning a `Yielded` carrying its reason into a `Threw`
+        // carrying an error, for no work recovered.
         trace(scope).request_yield(Some(format!(
             "project instructions must be delivered before `{}`; the call did not run",
             tool.name()
@@ -999,15 +1017,21 @@ fn tool_callback(
                 ranges: context_ranges(&packed),
                 omissions: packed.omissions.clone(),
             };
-            if delivered {
-                // Certification rides on `complete`, which describes the
-                // TARGET and which narrowing never touches -- only
-                // supporting excerpts are shed, so a delivered context's
-                // target is byte-exact exactly as it was before.
-                state.note_source_context(&evidence, packed.render());
-            } else {
+            // Certification rides on `complete`, which describes the
+            // TARGET and which narrowing never touches -- only supporting
+            // excerpts are shed, so a delivered context's target is
+            // byte-exact exactly as it was before.
+            //
+            // **The queue's own answer decides, never the narrowing's.**
+            // `narrow_to` measures against `remaining_context_budget` and the
+            // queue measures again on the way in. Today the two agree
+            // arithmetically; if they ever drift, the context is dropped, and
+            // reading the answer rather than assuming it is what keeps that
+            // drop loud instead of silent.
+            let queued = delivered && state.note_source_context(&evidence, packed.render());
+            if !queued {
                 evidence.omissions.push(format!(
-                    "not delivered to this turn's feedback: {budget} characters remained and the bare target renders {}; ask for it first in the next cell, or name a narrower symbol",
+                    "not delivered to this turn's feedback: {budget} characters remained and this context renders {}; ask for it first in the next cell, or name a narrower symbol",
                     packed.render().chars().count()
                 ));
             }

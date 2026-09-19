@@ -285,7 +285,7 @@ fn malformed_go_and_java_use_truthful_bounded_fallbacks() {
 }
 
 #[test]
-fn added_language_definition_caps_refuse_oversized_targets() {
+fn added_language_definition_caps_deliver_oversized_targets_short() {
     let f = Fixture::new("language-definition-caps");
     let cases = [
         (
@@ -313,12 +313,27 @@ fn added_language_definition_caps_refuse_oversized_targets() {
             "Target",
         ),
     ];
+    // This used to assert `Err` for each of the three. That refusal was the
+    // defect: it threw into the program, took every sibling call in a
+    // `Promise.all` with it, and -- because `edit` requires a delivered
+    // `context` -- could never be recovered from. Each is now delivered
+    // short, and says so.
     for (path, source, symbol) in cases {
         let target = f.put(path, &source);
-        let error = pack(&f.profile(), &target, Some(symbol)).unwrap_err();
+        let got = pack(&f.profile(), &target, Some(symbol))
+            .unwrap_or_else(|error| panic!("{path} must be delivered, not thrown: {error:?}"));
+        assert!(!got.complete, "{path}: a short target is not complete");
         assert!(
-            error.0.contains("definition exceeds the 24000 byte cap"),
-            "{path}: {error:?}"
+            got.omissions
+                .iter()
+                .any(|note| note.contains("byte cap holds")),
+            "{path} must name what it could not hold: {:?}",
+            got.omissions
+        );
+        assert!(
+            got.target.text.len() <= 24_000,
+            "{path}: {} bytes delivered",
+            got.target.text.len()
         );
     }
 }
@@ -429,12 +444,84 @@ fn denial_and_oversize_are_errors_not_partial_context() {
             .0
             .contains("refused")
     );
-    let huge = f.put("huge.py", &"x".repeat(1_048_577));
+    // The oversize half of this test used to pin a 1 MiB source cap. That
+    // cap was the defect: `exact_edit` writes up to 16 MiB, and because
+    // `edit` requires a delivered `context` first, every file between the
+    // two numbers was writable in principle and unreachable in practice.
+    // What is pinned now is the contract that replaced it.
+    let over_the_old_cap = f.put("wide.py", &"x".repeat(2_000_000));
+    let got = pack(&f.profile(), &over_the_old_cap, None)
+        .expect("a file `edit` can write is one `context` can pack");
     assert!(
-        pack(&f.profile(), &huge, None)
-            .unwrap_err()
-            .0
-            .contains("source cap")
+        !got.complete,
+        "a two-megabyte line is not a complete editing target"
+    );
+}
+
+#[test]
+fn an_oversized_definition_is_delivered_short_and_never_thrown() {
+    let f = Fixture::new("oversized-def");
+    // One definition past the 24,000-byte target cap, in a file past SMALL.
+    let body = (0..1_200)
+        .map(|i| format!("    line_{i} = \"padding padding padding\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let target = f.put("src/big.py", &format!("def target():\n{body}\n"));
+
+    let got = pack(&f.profile(), &target, Some("target"))
+        .expect("a definition past the cap is delivered short, never thrown");
+
+    assert!(
+        !got.complete,
+        "a target delivered short must not read as complete, because certification for an `expected_sha256` edit hangs off exactly this flag"
+    );
+    assert!(
+        !got.target.complete,
+        "the excerpt itself must say so too: {:?}",
+        got.target
+    );
+    let note = got
+        .omissions
+        .iter()
+        .find(|note| note.contains("byte cap holds"))
+        .unwrap_or_else(|| panic!("no truncation omission: {:?}", got.omissions));
+    assert!(
+        note.contains("name an inner symbol"),
+        "the omission must name the remedy: {note}"
+    );
+    assert!(
+        got.target.text.len() <= 24_000,
+        "the delivered body must respect the cap it reported: {}",
+        got.target.text.len()
+    );
+    assert!(
+        got.target.text.starts_with("def target():"),
+        "the head of the definition is what is kept"
+    );
+}
+
+#[test]
+fn a_file_too_large_to_scan_is_named_in_the_omissions() {
+    let f = Fixture::new("scan-cap");
+    let padding = "# padding padding padding padding\n".repeat(600);
+    let target = f.put(
+        "src/mod.py",
+        &format!("def target():\n    return 1\n{padding}"),
+    );
+    // Over the 128 KiB scan cap, and it does call `target`.
+    let filler = "# filler filler filler filler filler\n".repeat(4_000);
+    f.put("src/huge_caller.py", &format!("{filler}target()\n"));
+
+    let got = pack(&f.profile(), &target, Some("target")).unwrap();
+
+    let note = got
+        .omissions
+        .iter()
+        .find(|note| note.contains("not searched for callers"))
+        .unwrap_or_else(|| panic!("a skipped file must be named: {:?}", got.omissions));
+    assert!(
+        note.contains("huge_caller.py"),
+        "the note must name the file, so an empty caller list means no callers rather than no scan: {note}"
     );
 }
 

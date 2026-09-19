@@ -15,7 +15,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// The largest file `edit` will rewrite, and the same number
+/// [`crate::project::source_context::SOURCE_CAP`] packs, because a file this
+/// can write and `context` cannot pack is writable in principle and
+/// unreachable in practice: `edit` needs a delivered context first.
+use crate::project::source_context::SOURCE_CAP as MAX_FILE_BYTES;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
