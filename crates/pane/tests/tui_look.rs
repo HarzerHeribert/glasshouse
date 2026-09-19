@@ -1305,7 +1305,9 @@ fn cell_repair_shows_the_amended_code_and_keeps_the_original_failure() {
         assert!(shown.contains("Amends syntax-failed cell 1"), "{shown}");
         assert!(!shown.contains("\"replace\""), "{shown}");
         if compact {
-            assert!(shown.contains("Cell repaired"));
+            // The state is the header field's own word now, not a sentence
+            // beside a corner glyph.
+            assert!(shown.contains("REPAIRED"), "{shown}");
         } else {
             assert!(shown.contains("return 'ok';"));
         }
@@ -1682,8 +1684,11 @@ fn the_compact_cell_shows_what_it_was_for_and_why_it_stopped() {
         ..Notebook::default()
     };
     let shown = text(&draw(120, 35, &state, &c, &n));
+    // The descriptor is the cell's headline now, and a headline is set in
+    // uppercase (`tui/poster.rs`): the words are the model's, the case is the
+    // screen's.
     assert!(
-        shown.contains("Reading the ssh design to find what I have to change."),
+        shown.contains("READING THE SSH DESIGN TO FIND WHAT I HAVE TO CHANGE."),
         "the descriptor is not on the default screen:\n{shown}"
     );
     assert!(
@@ -1763,4 +1768,157 @@ fn the_posture_row_says_whether_this_session_is_confined() {
         !narrow.contains("unconfined"),
         "a narrow row keeps the context reading instead:\n{narrow}"
     );
+}
+
+/// The fixture the poster tests read: one executed cell with an intent, a
+/// handle table of four bindings and six host calls.
+fn poster_fixture() -> (Conversation, Notebook) {
+    let conversation = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Separate the two halves of full access."),
+            Message::text(
+                Role::Assistant,
+                "```pane\nconst hits = await rg({pattern: 'container_mode'});\n```",
+            ),
+        ],
+    };
+    let notebook = Notebook {
+        cells: vec![CellView {
+            description: Some(
+                "I'm extracting the remaining coupled expressions, before applying the split"
+                    .into(),
+            ),
+            table: Some(
+                "profileCoupling   Grep.Match[]   n=18   inline cost ~1,178 tok · preview 129 tok\n  [0] \"profile.rs:145\"\nstartupCoupling   Grep.Match[]   n=19   inline cost ~900 tok · preview 90 tok\nmanifestCoupling  Grep.Match[]   n=5   inline cost ~200 tok · preview 40 tok\ndocsCoupling      Grep.Match[]   n=5   inline cost ~210 tok · preview 44 tok\n"
+                    .into(),
+            ),
+            execution: Some(
+                "├─ rg profile.rs · returned\n├─ rg manifest.rs · returned\n├─ context grants.md · returned\n└─ rg registry.rs · returned"
+                    .into(),
+            ),
+            call_count: Some(4),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    };
+    (conversation, notebook)
+}
+
+/// **The defect the user actually pointed at.** The readable form of a cell's
+/// bindings already existed and was given to the model and not to the person:
+/// the column drew the cell's raw stdout, which for a real cell was four
+/// kilobytes of one-line JSON. Rows, with the name, the type and the length —
+/// and never a brace.
+#[test]
+fn a_cells_bindings_are_rows_and_never_json() {
+    let (c, n) = poster_fixture();
+    let mut state = state();
+    state.compact = true;
+    let shown = text(&draw(120, 34, &state, &c, &n));
+    for name in [
+        "profileCoupling",
+        "startupCoupling",
+        "manifestCoupling",
+        "docsCoupling",
+    ] {
+        assert!(shown.contains(name), "binding {name} is missing:\n{shown}");
+    }
+    assert!(shown.contains("Grep.Match[]"), "the type is missing:\n{shown}");
+    assert!(
+        shown.contains("   01  ") && shown.contains("   02  "),
+        "the rows are not numbered:\n{shown}"
+    );
+    // The token costs are the model's budget, not the reader's.
+    assert!(
+        !shown.contains("inline cost"),
+        "a row carried the model's budget:\n{shown}"
+    );
+    let cell_block: String = shown
+        .lines()
+        .skip_while(|line| !line.contains("/ CELL"))
+        .take_while(|line| !line.contains("OUTPUT"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !cell_block.contains('{') && !cell_block.contains("\": "),
+        "the cell block still renders JSON:\n{cell_block}"
+    );
+}
+
+/// The intent is the headline, and the header is a filled field — the two
+/// things the user asked for first.
+#[test]
+fn the_intent_is_the_headline_above_a_filled_field() {
+    let (c, n) = poster_fixture();
+    let mut state = state();
+    state.compact = true;
+    let shown = text(&draw(120, 34, &state, &c, &n));
+    assert!(
+        shown.contains("EXTRACTING THE REMAINING COUPLED EXPRESSIONS"),
+        "the intent is not the headline:\n{shown}"
+    );
+    assert!(
+        shown.contains("▸ before applying the split"),
+        "the qualifier is missing:\n{shown}"
+    );
+    assert!(
+        shown.contains("█ 01 / CELL") && shown.contains("EXECUTED"),
+        "the header is not a filled field:\n{shown}"
+    );
+    // Mixed kinds are named rather than totalled away.
+    assert!(
+        shown.contains("rg ×3 · context"),
+        "the call bar lost its kinds:\n{shown}"
+    );
+}
+
+/// `/motion off` loses decoration and nothing else: the same screen, still.
+#[test]
+fn a_motion_off_cell_renders_complete_and_identical() {
+    let (c, n) = poster_fixture();
+    let mut moving = state();
+    moving.compact = true;
+    moving.animation_frame = 3;
+    let mut still = moving.clone();
+    still.reduced_motion = true;
+    let stilled = text(&draw(120, 34, &still, &c, &n));
+    for fragment in [
+        "01 / CELL",
+        "EXECUTED",
+        "EXTRACTING THE REMAINING",
+        "profileCoupling",
+        "   04  ",
+    ] {
+        assert!(
+            stilled.contains(fragment),
+            "motion off lost {fragment}:\n{stilled}"
+        );
+    }
+    assert!(
+        !stilled.contains('░') && !stilled.contains('▒'),
+        "a still frame used a reveal glyph:\n{stilled}"
+    );
+}
+
+/// A filled field has a ground as well as an ink, so every theme has to be
+/// checked rather than only the default.
+#[test]
+fn the_header_field_draws_in_every_theme() {
+    use pane::tui::Theme;
+    let (c, n) = poster_fixture();
+    for theme in Theme::ALL {
+        let mut state = state();
+        state.compact = true;
+        state.theme = theme;
+        let shown = text(&draw(120, 34, &state, &c, &n));
+        assert!(
+            shown.contains("01 / CELL") && shown.contains("EXECUTED"),
+            "{theme:?} lost the header labels:\n{shown}"
+        );
+        assert!(
+            shown.contains('█'),
+            "{theme:?} lost the field itself:\n{shown}"
+        );
+    }
 }

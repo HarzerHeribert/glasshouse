@@ -8,6 +8,7 @@ pub use ask::{Key as AskKey, key as ask_key, render as render_ask};
 mod bands;
 mod composer;
 mod paths;
+mod poster;
 mod regions;
 mod selection;
 pub(crate) use composer::composer_offset;
@@ -1494,6 +1495,7 @@ pub fn notebook_height(
         false,
         98,
         0,
+        Theme::default(),
         &mut Vec::new(),
     )
     .len()
@@ -1568,6 +1570,7 @@ fn conversation_lines(
         } else {
             state.animation_frame
         },
+        state.theme,
         headers,
     );
     if let Some(raw_partial) = state.streaming_text.as_deref() {
@@ -1783,6 +1786,10 @@ fn notebook_lines(
     pretty: bool,
     width: usize,
     tick: usize,
+    // The palette the poster fields draw with. The transcript used the
+    // `ACCENT` constant before a cell header became a filled field; a field
+    // has a ground as well as an ink, and only the theme knows both.
+    theme: Theme,
     // Line index -> the cell that line's header belongs to, filled as the
     // headers are pushed. A caller with no use for it passes a scratch vector.
     headers: &mut Vec<(usize, usize)>,
@@ -1817,6 +1824,10 @@ fn notebook_lines(
             }
             Role::Assistant => {
                 cell += 1;
+                // Set when this message drew a cell field, so the field's
+                // closing rule can be pushed after the regions rather than
+                // between them.
+                let mut footer: Option<usize> = None;
                 let view = notebook.cell(cell);
                 answered = view.is_some_and(|view| view.answered);
                 after_return = view.is_some_and(|view| view.returned.is_some());
@@ -1861,27 +1872,33 @@ fn notebook_lines(
                             if !only_answer {
                                 let failed = view.is_some_and(|v| v.error.is_some());
                                 let evaluated = view.is_some_and(|v| v.execution.is_some());
-                                let label = if repairing && failed {
-                                    "× Cell repair failed"
+                                let state = if failed {
+                                    poster::State::Threw
                                 } else if repairing && evaluated {
-                                    "◆ Cell repaired"
-                                } else if repairing {
-                                    "◇ Preparing cell repair"
-                                } else if failed {
-                                    "× Action failed"
+                                    poster::State::Repaired
                                 } else if evaluated {
-                                    "✓ Cell executed"
+                                    poster::State::Executed
                                 } else {
-                                    "◇ Cell preparing · nothing has run"
+                                    poster::State::Preparing
                                 };
-                                headers.push((
-                                    turn_header(
-                                        &mut lines,
-                                        format!("{label}  · {cell}{}", helper_fold(view)),
-                                        if failed { Color::Red } else { ACCENT },
-                                    ),
-                                    cell,
-                                ));
+                                // The header is a filled field rather than a
+                                // corner and a label: the sidebar beside it
+                                // already speaks in numbered panels, and the
+                                // user's reading of the old column was that
+                                // "the colouring and framing are not human
+                                // readable anyways" (2026-09-19).
+                                if !lines.is_empty() {
+                                    lines.push(Line::from(""));
+                                }
+                                headers.push((lines.len(), cell));
+                                lines.push(poster::field_header(cell, state, width, theme, tick));
+                                let fold = helper_fold(view);
+                                if !fold.is_empty() {
+                                    lines.push(Line::styled(
+                                        format!(" {}", fold.trim()),
+                                        Style::default().fg(MUTED),
+                                    ));
+                                }
                                 // The one line the model wrote about what this
                                 // cell is for, directly under its header and
                                 // above the record of what ran — the order is
@@ -1892,10 +1909,9 @@ fn notebook_lines(
                                     .map(str::trim)
                                     .filter(|description| !description.is_empty())
                                 {
-                                    lines.push(Line::styled(
-                                        description.to_string(),
-                                        Style::default().fg(Color::White),
-                                    ));
+                                    lines.push(Line::from(""));
+                                    lines.extend(poster::intent_block(description, width, theme));
+                                    lines.push(Line::from(""));
                                 }
                                 push_helper_lane(&mut lines, view, tick, width);
                                 let none_ran = view
@@ -1923,17 +1939,17 @@ fn notebook_lines(
                                         if failed || !possible.is_empty() {
                                             push_text_region(&mut lines, "No tools ran.");
                                         }
+                                    } else if let Some(summary) = poster::call_summary(actual) {
+                                        // One filled bar for the whole turn.
+                                        // The per-call tree is detail for the
+                                        // inspector, not for the flow; the
+                                        // kinds and their counts are what a
+                                        // reader acts on and they stay here.
+                                        lines.push(poster::call_bar(
+                                            &summary, None, width, theme, tick,
+                                        ));
                                     } else {
                                         push_text_region(&mut lines, actual);
-                                        let count = view.and_then(|v| v.call_count).unwrap_or(0);
-                                        if count > 1 {
-                                            lines.push(Line::styled(
-                                                format!(
-                                                    "◆ {count} tool calls in one inference turn"
-                                                ),
-                                                Style::default().fg(ACCENT),
-                                            ));
-                                        }
                                     }
                                 }
                                 // The model's own sentence about why it
@@ -1948,12 +1964,11 @@ fn notebook_lines(
                                         Style::default().fg(MUTED),
                                     ));
                                 }
-                                lines.push(Line::styled(
-                                    format!(
-                                        "Ctrl-O · code and results · /cell {cell} or click this header"
-                                    ),
-                                    Style::default().fg(MUTED),
-                                ));
+                                // The footer closes the field, and it closes
+                                // it *after* the regions below rather than
+                                // here: a rule drawn between the bar and the
+                                // bindings would cut the cell in half.
+                                footer = Some(cell);
                             }
                         }
                         Extracted::Invalid(error) => {
@@ -2009,12 +2024,21 @@ fn notebook_lines(
                             ),
                         );
                     }
-                    if let Some(stdout) = view
-                        .and_then(|v| v.stdout.as_deref())
-                        .filter(|s| !s.trim().is_empty() && s.trim() != "undefined")
-                    {
-                        push_folded_region(&mut lines, stdout, 6, true);
-                    }
+                    // **The bindings, as rows, never as braces.** The readable
+                    // form already existed and was given to the model and not
+                    // to the person: `render_table` names every binding with
+                    // its type and length, while this column drew the cell's
+                    // raw stdout -- four kilobytes of one-line JSON was what
+                    // the user was actually looking at (2026-09-19). The
+                    // token costs in the model's copy are dropped: a reader
+                    // is not spending them.
+                    poster::push_bindings(
+                        &mut lines,
+                        view.and_then(|v| v.table.as_deref()),
+                        view.and_then(|v| v.stdout.as_deref()),
+                        width,
+                        theme,
+                    );
                     if let Some(output) = view.and_then(|v| v.output.as_deref()) {
                         turn_header(&mut lines, "OUTPUT".into(), MUTED);
                         lines.extend(markdown::render(&pretty_json(output), width));
@@ -2025,6 +2049,9 @@ fn notebook_lines(
                     if let Some(returned) = view.and_then(|v| v.returned.as_deref()) {
                         turn_header(&mut lines, "PANE".into(), ACCENT);
                         lines.extend(markdown::render(&pretty_json(returned), width));
+                    }
+                    if let Some(cell) = footer {
+                        poster::push_footer(&mut lines, cell, width, theme, tick);
                     }
                     if !after.trim().is_empty() {
                         lines.extend(markdown::render(after.trim(), width));

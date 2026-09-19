@@ -95,7 +95,8 @@ fn inspector_exposes_the_full_recorded_output_and_each_cells_own_outcome() {
     state.inspection = None;
     let chat = screen(&conversation, &notebook, &state);
     assert!(!chat.contains("CELL 2 / 2"));
-    assert!(chat.contains("Action failed"));
+    // The state is the header field's own word now.
+    assert!(chat.contains("FAILED"), "{chat}");
 }
 
 #[test]
@@ -190,7 +191,7 @@ fn native_calls_render_as_notebook_cells_and_results_never_become_user_chat() {
     let mut state = state();
     state.compact = true;
     let shown = screen(&conversation, &notebook, &state);
-    assert!(shown.contains("Cell executed"));
+    assert!(shown.contains("EXECUTED"), "{shown}");
     assert!(shown.contains("ACTUAL_FILE_CONTENT"));
     assert_eq!(shown.matches("the actual answer").count(), 1);
     assert!(!shown.contains("RUNTIME_FEEDBACK_ONLY"));
@@ -277,10 +278,16 @@ fn multiline_shell_source_is_one_recorded_call_not_many_display_lines() {
         compact: true,
         ..state()
     };
+    // The call bar counts recorded calls, so a command whose *output* is
+    // several lines is still one `bash` and never `bash ×3`.
     let shown = screen(&conversation, &notebook, &compact);
-    assert!(!shown.contains("tool calls in one inference turn"));
+    assert!(shown.contains("bash"), "{shown}");
+    assert!(!shown.contains("bash ×"), "{shown}");
+    notebook.cells[0].execution =
+        Some("├─ bash first · returned\n└─ bash second · returned".into());
     notebook.cells[0].call_count = Some(2);
     assert!(
-        screen(&conversation, &notebook, &compact).contains("2 tool calls in one inference turn")
+        screen(&conversation, &notebook, &compact).contains("bash ×2"),
+        "two recorded calls are not counted"
     );
 }

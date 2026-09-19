@@ -49,6 +49,17 @@ impl Band {
     }
 }
 
+/// Whether this row is a cell's poster field.
+///
+/// Matched on the signage rather than on a glyph run: the runs are what a
+/// narrow width sheds first (`poster::field_header`), and a field that lost
+/// them is still the row that opens the band.
+fn is_field(line: &Line<'static>) -> bool {
+    line.spans
+        .iter()
+        .any(|span| span.content.contains("/ CELL "))
+}
+
 /// A rule that fills the row: the label, then the line drawn out to `width`.
 ///
 /// **A divider a reader can see.** Until 2026-09-18 a block opened with its
@@ -81,6 +92,32 @@ pub(super) fn decorate(content: &mut [Line<'static>], state: &ScreenState, width
     let mut kind = Band::Plain;
     for line in content.iter_mut() {
         let mut header = false;
+        // A poster field is already finished: it opens no `╭─` skeleton and
+        // needs no rule drawn into it. It still opens a band, so the rows
+        // beneath it are tinted as the cell's and not as the block before it
+        // — and it is where the live *running* word belongs, because the
+        // field is the only row that says what state the cell is in.
+        if is_field(line) {
+            if state.activity == Activity::Executing {
+                for span in line.spans.iter_mut() {
+                    if span.content.contains(" PREPARING ") {
+                        span.content = span
+                            .content
+                            .replace(
+                                " PREPARING ",
+                                &format!(
+                                    " {} RUNNING ",
+                                    Activity::Executing.indicator(state.animation_frame)
+                                ),
+                            )
+                            .into();
+                    }
+                }
+            }
+            kind = Band::Cell;
+            active = true;
+            continue;
+        }
         if let Some(first) = line.spans.first_mut() {
             if first.content.starts_with("╭─ ") {
                 if state.activity == Activity::Executing
