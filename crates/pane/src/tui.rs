@@ -140,6 +140,14 @@ pub struct ScreenState {
     pub model: Option<String>,
     pub project: Option<String>,
     pub sandbox: Option<String>,
+    /// Whether Pane confines the children this session spawns, as one word
+    /// (`confined`, `unconfined`). Separate from [`ScreenState::sandbox`]
+    /// because the posture row cannot always afford it: `tui_live`'s
+    /// `telemetry_and_motion_are_local_controls_with_real_response_usage`
+    /// pins the context reading as this row's highest-priority right-edge
+    /// signal, and at 60 columns a longer left half takes it away. The
+    /// startup line and `pane doctor` say it in full on every width.
+    pub confinement: Option<String>,
     pub network: Option<String>,
     pub connected: Option<bool>,
     pub input: String,
@@ -1206,11 +1214,29 @@ pub(crate) fn render_screen_with_geometry(
         state.effort.name()
     );
     let identity = format!(" {} · {}", abbreviate(model, 28), abbreviate(project, 24));
-    let posture_head = format!(
-        " sandbox {} · net:{}",
-        abbreviate(sandbox, 16),
-        abbreviate(network, 8)
-    );
+    // The third fact, and the width it needs. `3p/1c YOLO unconfined` is 21
+    // columns against this field's 16, and a wider field takes the context
+    // reading off the right edge at 60 -- the one thing the resize test
+    // says must survive. So it is appended where there is room and read
+    // from the startup line and `pane doctor` everywhere else.
+    let posture_head = if width >= 100 {
+        format!(
+            " sandbox {}{} · net:{}",
+            abbreviate(sandbox, 16),
+            state
+                .confinement
+                .as_deref()
+                .map(|word| format!(" {word}"))
+                .unwrap_or_default(),
+            abbreviate(network, 8)
+        )
+    } else {
+        format!(
+            " sandbox {} · net:{}",
+            abbreviate(sandbox, 16),
+            abbreviate(network, 8)
+        )
+    };
     // **Only the released state is news.** Captured is the default and a
     // permanent "· mouse" would be furniture, the same objection the scroll
     // indicator answers. Released must be visible, or dead clicks read as a

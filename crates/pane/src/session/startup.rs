@@ -56,10 +56,11 @@ pub(super) struct Reach {
 /// What does not move is what `Profile::check` refuses: §4's never-grantable
 /// set is enforced in this process, before any child is spawned, and is
 /// identical on every rung and every platform.
-pub(super) fn reach(args: &SessionArgs) -> Result<Reach, String> {
+pub(super) fn reach(args: &SessionArgs, values: &toml::Value) -> Result<Reach, String> {
+    let stored = full_access_setting(values);
     let reach = Reach {
-        yolo: args.yolo || args.full_access,
-        unconfined: args.dangerously_bypass_os_sandbox || args.full_access,
+        yolo: args.yolo || args.full_access || stored,
+        unconfined: args.dangerously_bypass_os_sandbox || args.full_access || stored,
     };
     if reach.unconfined && !reach.yolo {
         return Err("--dangerously-bypass-os-sandbox requires --yolo so both the admission profile and OS confinement choice are explicit (or pass --full-access, which is both)".into());
@@ -74,6 +75,24 @@ pub(super) fn reach(args: &SessionArgs) -> Result<Reach, String> {
         return Err("--full-access is supported on macOS, Linux and Windows; this platform has no unconfined applier, and a bypass that spawned anyway would be the one unconfined path Pane exists not to have".into());
     }
     Ok(reach)
+}
+
+/// `[permissions] full_access`, the stored spelling of `--full-access`.
+///
+/// **Global scope only, enforced where the file is read** (`settings.rs`
+/// drops it from a project or legacy document and says so). This function is
+/// therefore free to read the assembled value: by the time it gets here, a
+/// project document's copy is already gone.
+///
+/// It is the whole flag rather than its unconfined third, because splitting
+/// it would rebuild in a settings file exactly the three-separate-choices
+/// trap `--full-access` was created to remove: on 2026-09-19 a person set
+/// the rung and the grant, left the confinement, and a session spent twelve
+/// cells hunting a linker it was never going to be allowed to run.
+fn full_access_setting(values: &toml::Value) -> bool {
+    crate::settings_session::value(values, "permissions.full_access")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Which rung a session starts on, and whether it has anybody to ask.
@@ -117,6 +136,12 @@ pub(super) fn ladder(
                 .and_then(toml::Value::as_str)
                 .and_then(Rung::parse)
         })
+        // Below a named rung on purpose. `full_access` is a stored default,
+        // and a stored default loses to any explicit `permissions.mode` --
+        // including a project file's, which is the layering the rest of this
+        // configuration already has. Only the flag-beside-flag case above is
+        // ambiguous enough to refuse.
+        .or_else(|| full_access_setting(values).then_some(Rung::Full))
         .unwrap_or_default();
     let attended = args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
     if rung.needs_a_person() && !attended {

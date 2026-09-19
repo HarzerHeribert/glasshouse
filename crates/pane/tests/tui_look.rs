@@ -1722,3 +1722,45 @@ fn a_cell_whose_model_said_nothing_draws_no_empty_descriptor_row() {
         "an empty descriptor drew a row the absent one did not"
     );
 }
+
+/// **A rung and a grant are two choices; whether Pane confines what it
+/// spawns is the third, and until 2026-09-19 no surface said it.** A person
+/// who had set `permissions.mode = full` and a `Bash` grant read `execute ·
+/// full` as confirmation, and a session spent twelve cells hunting a linker
+/// the seatbelt was never going to let it run. The posture row now carries
+/// the word wherever it fits.
+#[test]
+fn the_posture_row_says_whether_this_session_is_confined() {
+    let mut confined = state();
+    confined.confinement = Some("confined".into());
+    let rendered = text(&draw(
+        120,
+        24,
+        &confined,
+        &conversation(),
+        &Notebook::default(),
+    ));
+    assert!(
+        rendered.contains("sandbox 3p/4c confined"),
+        "the confined state is named, not left to be assumed:\n{rendered}"
+    );
+
+    let mut open = state();
+    open.sandbox = Some("3p/1c YOLO".into());
+    open.confinement = Some("unconfined".into());
+    let rendered = text(&draw(120, 24, &open, &conversation(), &Notebook::default()));
+    assert!(
+        rendered.contains("sandbox 3p/1c YOLO unconfined"),
+        "and so is the unconfined one, beside the admission half:\n{rendered}"
+    );
+
+    // The one thing that outranks it. `tui_live`'s resize test pins the
+    // context reading as this row's right-edge signal, and at 60 columns a
+    // longer left half takes it away -- so the word is dropped there rather
+    // than the reading, and the startup line and `pane doctor` carry it.
+    let narrow = text(&draw(60, 24, &open, &conversation(), &Notebook::default()));
+    assert!(
+        !narrow.contains("unconfined"),
+        "a narrow row keeps the context reading instead:\n{narrow}"
+    );
+}

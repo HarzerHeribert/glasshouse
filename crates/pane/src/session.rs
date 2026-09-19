@@ -525,7 +525,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
         .iter()
         .map(|path| crate::images::load(&args.root, path))
         .collect::<Result<Vec<_>, _>>()?;
-    let startup::Reach { yolo, unconfined } = startup::reach(&args)?;
     // `little-helpers.md`: a malformed roster is a refusal with one sentence,
     // and it is made here because this is the last moment before anything a
     // helper can be called from exists. A guardrail checked after the first
@@ -578,6 +577,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
         .and_then(wire::Effort::parse)
         .unwrap_or_default();
 
+    // After the settings load, because `[permissions] full_access` is one of
+    // the three spellings that set it, and before the profile is compiled,
+    // which is the first thing that reads it.
+    let startup::Reach { yolo, unconfined } = startup::reach(&args, &loaded_settings.values)?;
     let ladder = startup::ladder(&args, &loaded_settings.values)?;
     // An explicit `--model` wins, then the model this project was last left
     // on. There is no compiled-in request-model fallback: starting without a
@@ -731,6 +734,15 @@ fn run(args: SessionArgs) -> Result<(), String> {
                             profile.command_pattern_count(),
                             if yolo { " YOLO" } else { "" }
                         )),
+                        // The third half, which until 2026-09-19 no surface
+                        // carried: a rung and a grant are two choices, and
+                        // whether Pane confines what it spawns is the one
+                        // that decided whether `cargo test` could link.
+                        confinement: Some(
+                            crate::tools::invoke::Confinement::for_session(&profile)
+                                .map_or("no-applier", crate::tools::invoke::Confinement::short)
+                                .to_string(),
+                        ),
                         // The shell never has a network; the field names the
                         // host tools that do (map 2657, design §8).
                         network: Some(config.borrow().web.posture().into()),

@@ -337,6 +337,55 @@ impl Confinement {
             Confinement::InProcess => "in-process (no child; the path was checked)",
         }
     }
+
+    /// One word for a status line, where the sentence [`Confinement::as_str`]
+    /// returns has no room.
+    pub fn short(self) -> &'static str {
+        match self {
+            Confinement::BrokeredNetwork => "brokered",
+            // Which applier is platform-determined and never a surprise;
+            // whether there is one is the whole question, so the status
+            // line answers that and the doctor names the backend.
+            Confinement::Seatbelt | Confinement::Landlock | Confinement::AppContainer => "confined",
+            Confinement::DangerouslyUnconfined => "unconfined",
+            Confinement::InProcess => "in-process",
+        }
+    }
+
+    /// Which confinement a child spawned by this session would enter, asked
+    /// before any child exists. `None` is a platform with no applier, where
+    /// [`confined_spawn`] refuses rather than spawning.
+    ///
+    /// The invariant: **this is
+    /// [`spawn_with_confinement_policy`]'s own decision, asked early.** It
+    /// reads the same `profile.os_sandbox_bypassed()` and falls through to
+    /// the same per-platform arm, so a session cannot announce one
+    /// confinement and spawn into another. It exists because a person who
+    /// sets a rung and a grant has made two of three choices, and until
+    /// 2026-09-19 nothing told them what the third one was -- the model
+    /// found out instead, mid-task, by failing to link.
+    #[must_use]
+    pub fn for_session(profile: &Profile) -> Option<Self> {
+        if profile.os_sandbox_bypassed() {
+            return Some(Confinement::DangerouslyUnconfined);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Some(Confinement::Seatbelt)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Some(Confinement::Landlock)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Some(Confinement::AppContainer)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            None
+        }
+    }
 }
 
 /// What one call returned.

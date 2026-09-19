@@ -102,6 +102,26 @@ pub fn is_runtime(key: &str) -> bool {
         .is_some_and(|table| RUNTIME_TABLES.contains(&table))
 }
 
+/// Keys a project file may not set, whatever it says.
+///
+/// **A project document travels inside a repository.** Every other key layers
+/// global-then-project because the person owns both files; these are the ones
+/// where that assumption fails, because cloning a repository would otherwise
+/// be enough to change them before the person has read a line of it. The
+/// rule is the same boundary Claude Code draws by keeping
+/// `--dangerously-skip-permissions` out of a settings file.
+///
+/// One entry, deliberately: this is a property of a key, not a dimension of
+/// every key, and a list of one is cheaper to read than a field on sixty
+/// specs. It grows if a second key ever earns it.
+const GLOBAL_ONLY: &[&str] = &["permissions.full_access"];
+
+/// Whether `key` may only be set in the global scope ([`GLOBAL_ONLY`]).
+#[must_use]
+pub fn is_global_only(key: &str) -> bool {
+    GLOBAL_ONLY.contains(&key)
+}
+
 static SPECS: &[SettingSpec] = &[
     // -- the three model tiers, the everyday half of `/settings` ----------
     SettingSpec {
@@ -643,6 +663,15 @@ static SPECS: &[SettingSpec] = &[
         label: "Allowed patterns",
         description: "Native permission patterns, compiled by the existing profile compiler. Never widens a running sandbox.",
         kind: Kind::List,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "permissions.full_access",
+        label: "Full access",
+        description: "One setting for all three halves of `--full-access`: the project root and every command line admitted, no question asked, and no OS confinement of Pane's own. Global scope only. Removes questions; never widens the never-grantable set.",
+        kind: Kind::Bool,
         choices: &[],
         basic: false,
         restart: true,

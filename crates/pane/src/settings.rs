@@ -289,6 +289,17 @@ impl Store {
         }
         let mut changes = Vec::with_capacity(edits.len());
         for (key, value) in edits {
+            // Said here rather than only at load, so a person who types the
+            // write is told now instead of discovering later that their file
+            // is being ignored.
+            if scope == Scope::Local && registry::is_global_only(key) {
+                return Err(format!(
+                    "settings: `{key}` is a global setting only. A project file travels inside a \
+                     repository, so a project-scoped `{key}` would let a clone change it before \
+                     you had read a line of the code. Set it in `{}` instead.",
+                    self.path(Scope::Global).display()
+                ));
+            }
             if profile.is_some() && !registry::is_runtime(key) {
                 return Err(format!(
                     "settings: `{key}` is not a runtime setting; a profile overlays only \
@@ -488,6 +499,23 @@ impl Store {
                 origins.remove("agents.model");
             }
             for (key, value) in &parsed.flat {
+                // The enforcing half of the same rule: a hand-written or
+                // cloned project document never reaches `save`, so refusing
+                // the write alone would guard nothing. Ignored rather than
+                // refused -- a repository that cannot disarm a reader should
+                // also not be able to stop them opening it.
+                if label != "global" && registry::is_global_only(key) {
+                    notices.push(format!(
+                        "`{key}` is a global setting only and was ignored in `{}`; set it in `{}`.",
+                        match label {
+                            "legacy" => self.legacy_path(),
+                            _ => self.path(Scope::Local),
+                        }
+                        .display(),
+                        self.path(Scope::Global).display()
+                    ));
+                    continue;
+                }
                 if key == "permissions.deny" {
                     let merged = union_lists(map.get(key), value);
                     let origin = match origins.get(key) {

@@ -149,6 +149,92 @@ fn string(values: &toml::Value, path: &str) -> Option<String> {
 
 // -- layering ------------------------------------------------------------
 
+/// The one key that does not layer, and why. Every other setting is
+/// global-then-project because the person owns both files; a project
+/// document travels inside a repository, so this one is refused where a
+/// person would type it and dropped where a clone would ship it.
+#[test]
+fn full_access_is_refused_in_the_project_scope_and_names_the_file_that_takes_it() {
+    let temp = Temp::new("global-only-write");
+    let store = temp.store();
+    let local = store.read(Scope::Local).unwrap();
+    let error = store
+        .save(
+            Scope::Local,
+            &local,
+            &[edit("permissions.full_access", "true")],
+        )
+        .expect_err("a project-scoped write of a global-only key is refused");
+    assert!(
+        error.contains("global setting only"),
+        "the refusal says what the rule is: {error}"
+    );
+    assert!(
+        error.contains("travels inside a repository"),
+        "and why it exists: {error}"
+    );
+    assert!(
+        error.contains(&store.path(Scope::Global).display().to_string()),
+        "and where the setting does belong: {error}"
+    );
+    assert!(
+        !store.path(Scope::Local).exists(),
+        "a refused write touches no file"
+    );
+    // The same key in the scope that owns it is an ordinary save.
+    let global = store.read(Scope::Global).unwrap();
+    let loaded = store
+        .save(
+            Scope::Global,
+            &global,
+            &[edit("permissions.full_access", "true")],
+        )
+        .expect("the global scope takes it");
+    assert_eq!(full_access(&loaded.values), Some(true));
+}
+
+/// The enforcing half: a hand-written or cloned project document never goes
+/// through `save`, so refusing the write alone would guard nothing. It is
+/// dropped and announced -- not refused -- because a repository that cannot
+/// disarm a reader should also not be able to stop them opening it.
+#[test]
+fn a_project_document_cannot_turn_off_confinement_and_the_load_says_so() {
+    let temp = Temp::new("global-only-load");
+    let store = temp.store();
+    write(
+        &store.path(Scope::Local),
+        "[permissions]\nfull_access = true\n",
+    );
+    let loaded = store.load(None).expect("the project file still loads");
+    assert_eq!(
+        full_access(&loaded.values),
+        None,
+        "a project document's copy never reaches the effective configuration"
+    );
+    assert!(
+        loaded.notices.iter().any(|notice| {
+            notice.contains("permissions.full_access") && notice.contains("ignored")
+        }),
+        "and the person is told it was ignored: {:?}",
+        loaded.notices
+    );
+    // The project file is still usable for everything else it says.
+    write(
+        &store.path(Scope::Local),
+        "[permissions]\nfull_access = true\n\n[ui]\ntheme = \"amber\"\n",
+    );
+    let loaded = store.load(None).expect("loads");
+    assert_eq!(string(&loaded.values, "ui.theme").as_deref(), Some("amber"));
+    assert_eq!(full_access(&loaded.values), None);
+}
+
+fn full_access(values: &toml::Value) -> Option<bool> {
+    values
+        .get("permissions")
+        .and_then(|table| table.get("full_access"))
+        .and_then(toml::Value::as_bool)
+}
+
 #[test]
 fn global_defaults_are_overridden_by_the_project_with_visible_origins() {
     let temp = Temp::new("layering");

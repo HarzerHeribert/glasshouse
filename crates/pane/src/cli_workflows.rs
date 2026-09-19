@@ -137,8 +137,13 @@ pub fn doctor(args: &[String]) -> i32 {
         std::collections::BTreeMap<String, String>,
     )> = None;
     let mut rung: Option<String> = None;
-    match store.as_ref().map_err(|e| e.clone()).and_then(|store|store.load(None)) {
-        Ok(loaded)=>{
+    let mut full_access = false;
+    match store
+        .as_ref()
+        .map_err(|e| e.clone())
+        .and_then(|store| store.load(None))
+    {
+        Ok(loaded) => {
             checks.push(Check {name:"config",status:if loaded.config.model.parent.is_some(){"ok"}else{"warning"},detail:if loaded.config.model.parent.is_some(){"Native/legacy configuration parses; parent model configured".into()}else{"Configuration parses; supply --model or pane config local model.parent to start a task".into()}});
             rung = loaded
                 .values
@@ -146,9 +151,19 @@ pub fn doctor(args: &[String]) -> i32 {
                 .and_then(|table| table.get("mode"))
                 .and_then(toml::Value::as_str)
                 .map(str::to_string);
+            full_access = loaded
+                .values
+                .get("permissions")
+                .and_then(|table| table.get("full_access"))
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
             settings = Some((loaded.config, loaded.origins));
         }
-        Err(_)=>checks.push(Check{name:"config",status:"error",detail:"Configuration is invalid or unreadable; no values exposed".into()}),
+        Err(_) => checks.push(Check {
+            name: "config",
+            status: "error",
+            detail: "Configuration is invalid or unreadable; no values exposed".into(),
+        }),
     }
     let mut project = pane::project::load(&root);
     project.settings = store
@@ -196,7 +211,7 @@ pub fn doctor(args: &[String]) -> i32 {
             },
         });
     }
-    checks.push(sandbox_check());
+    checks.push(sandbox_check(full_access));
     let report = Report {
         schema_version: 1,
         version: env!("CARGO_PKG_VERSION"),
@@ -342,7 +357,28 @@ fn executable(path: &Path) -> bool {
     }
 }
 
-fn sandbox_check() -> Check {
+/// Which confinement a session started on this configuration would apply --
+/// not which backend was compiled in.
+///
+/// The invariant: **this check answers for the configuration in hand.** It
+/// said "Seatbelt backend compiled" until 2026-09-19, which is a fact about
+/// the build and true no matter what the person had configured; someone who
+/// had set the rung and the grant read it as confirmation and spent twelve
+/// cells finding out otherwise.
+fn sandbox_check(bypassed: bool) -> Check {
+    if bypassed {
+        return Check {
+            name: "sandbox",
+            status: "warning",
+            // Precise about what the bit actually does, because
+            // `Profile::container_mode` is the SAME field as
+            // `os_sandbox_bypassed`: turning it on grants reads
+            // filesystem-wide and drops debuggers from the never-grantable
+            // set. A surface that said only "no OS confinement" here would
+            // be the same comforting half-truth this check exists to end.
+            detail: "None for this configuration: `[permissions] full_access` is set, so Pane applies no OS confinement to the children it spawns and this machine is the boundary. It also widens this session's reads past the project root and admits a debugger. Writes keep their roots, and every deny pattern and the rest of the never-grantable set (~/.ssh, ~/.aws, ~/.claude, ~/.codex, ~/.config, registry credentials, sandbox launchers) refuse exactly as they do confined.".into(),
+        };
+    }
     #[cfg(target_os = "linux")]
     {
         let abi = pane::sandbox::linux::landlock_abi();
@@ -350,7 +386,7 @@ fn sandbox_check() -> Check {
             name: "sandbox",
             status: if abi >= 3 { "ok" } else { "error" },
             detail: format!(
-                "Landlock ABI {abi}; at least ABI 3 is required for tool spawning. Network enforcement is reported separately by the session."
+                "Landlock confines every child this configuration spawns; ABI {abi}, and at least ABI 3 is required for tool spawning. Network enforcement is reported separately by the session."
             ),
         }
     }
@@ -359,7 +395,7 @@ fn sandbox_check() -> Check {
         Check {
             name: "sandbox",
             status: "ok",
-            detail: "Seatbelt backend compiled; per-command enforcement occurs at spawn".into(),
+            detail: "Seatbelt confines every child this configuration spawns; per-command enforcement occurs at spawn".into(),
         }
     }
     #[cfg(target_os = "windows")]
@@ -367,7 +403,7 @@ fn sandbox_check() -> Check {
         Check {
             name: "sandbox",
             status: "warning",
-            detail: "AppContainer backend compiled; verify Windows Firewall for network isolation"
+            detail: "An AppContainer confines every child this configuration spawns; verify Windows Firewall for network isolation"
                 .into(),
         }
     }

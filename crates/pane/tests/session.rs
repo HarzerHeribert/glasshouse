@@ -4197,6 +4197,59 @@ fn full_access_is_one_flag_for_all_three_halves_and_says_what_still_holds() {
     );
 }
 
+/// **The same three halves, set once instead of retyped.** `--full-access`
+/// existed and shipped, and was reachable only from argv; a person who wanted
+/// it every day had to remember a flag, and a person who set the rung and the
+/// grant in a file got two halves of three with nothing saying so. The
+/// setting is asserted against the flag's own observable -- the startup lines
+/// `full_access_is_one_flag_for_all_three_halves_and_says_what_still_holds`
+/// pins -- rather than against a parallel assertion that could drift from it.
+#[test]
+fn the_full_access_setting_reaches_a_session_exactly_as_the_flag_does() {
+    let root = scratch_dir("full-access-setting");
+    let global = root.join("global-config");
+    std::fs::create_dir_all(global.join("pane")).unwrap();
+    std::fs::write(
+        global.join("pane/config.toml"),
+        "[permissions]\nfull_access = true\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .arg("--model")
+        .arg("fixture-model")
+        .arg("--gateway")
+        .arg(root.join("no-gateway"))
+        .env("XDG_CONFIG_HOME", &global)
+        .env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"))
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // No flag was passed. All three halves must hold anyway.
+    assert!(said.contains("permissions: full"), "the rung half: {said}");
+    assert!(
+        said.contains("sandbox: --yolo"),
+        "the admission half: {said}"
+    );
+    assert!(
+        said.contains("sandbox: full access"),
+        "the unconfined half: {said}"
+    );
+    assert!(
+        said.contains("never-grantable") && said.contains(".ssh"),
+        "and the same line still says what refuses: {said}"
+    );
+}
+
 /// `--full-access` names the `full` rung, so naming a different one beside
 /// it is refused rather than silently resolved — the same rule
 /// `--ask-approval` already has.

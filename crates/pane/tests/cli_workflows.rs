@@ -182,6 +182,75 @@ fn doctor_settings_check_is_ok_when_every_feature_has_what_it_needs() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// **`pane doctor` answers for the configuration in hand, not for the
+/// build.** It said "Seatbelt backend compiled" until 2026-09-19 -- true on
+/// every machine whatever anyone had configured -- and a person who had set
+/// the rung and the grant read it as confirmation that they had full access.
+#[test]
+fn doctor_names_the_confinement_this_configuration_would_apply() {
+    let root = std::env::temp_dir().join(format!(
+        "pane-doctor-confinement-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let global = root.join("global-config");
+    std::fs::create_dir_all(global.join("pane")).unwrap();
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
+    std::fs::write(
+        root.join(".pane/config.toml"),
+        "[model]\nparent = \"gpt-5.6-sol\"\n",
+    )
+    .unwrap();
+    let detail = |global_text: &str| {
+        std::fs::write(global.join("pane/config.toml"), global_text).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+            .args(["doctor", "--json", "--root"])
+            .arg(&root)
+            .env("XDG_CONFIG_HOME", &global)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "sandbox")
+            .expect("doctor reports a sandbox check")
+            .clone();
+        (
+            check["status"].as_str().unwrap().to_string(),
+            check["detail"].as_str().unwrap().to_string(),
+        )
+    };
+
+    let (status, confined) = detail("");
+    assert_eq!(status, "ok", "{confined}");
+    assert!(
+        confined.contains("confines every child this configuration spawns"),
+        "the confined case answers for the configuration: {confined}"
+    );
+
+    let (status, open) = detail("[permissions]\nfull_access = true\n");
+    assert_eq!(status, "warning", "{open}");
+    assert!(
+        open.contains("no OS confinement"),
+        "the unconfined case says so plainly: {open}"
+    );
+    assert!(
+        open.contains("full_access"),
+        "and names the setting that chose it: {open}"
+    );
+    assert!(
+        open.contains("never-grantable"),
+        "and what still refuses: {open}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn doctor_missing_root_is_a_structured_failure() {
     let root = std::env::temp_dir().join(format!("pane-nonexistent-doctor-{}", std::process::id()));
