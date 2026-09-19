@@ -647,10 +647,22 @@ fn the_tui_renders_no_handle_itself() {
         ("tui/regions.rs", include_str!("../src/tui/regions.rs")),
         ("tui/bands.rs", include_str!("../src/tui/bands.rs")),
         ("tui/ask.rs", include_str!("../src/tui/ask.rs")),
+        ("tui/message.rs", include_str!("../src/tui/message.rs")),
+        ("tui/poster.rs", include_str!("../src/tui/poster.rs")),
+        ("tui/value.rs", include_str!("../src/tui/value.rs")),
+        ("tui/ribbon.rs", include_str!("../src/tui/ribbon.rs")),
+        ("tui/startup.rs", include_str!("../src/tui/startup.rs")),
+        ("tui/telemetry.rs", include_str!("../src/tui/telemetry.rs")),
     ] {
         let cleaned = source
             .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")
-            .replace("crate::runtime::preview::TABLE_TOKEN_CAP", "");
+            .replace("crate::runtime::preview::TABLE_TOKEN_CAP", "")
+            // `serde_json::Value` is not a handle's `Value`, and the rule
+            // below is about handles: a cell's RETURNED json is rendered by
+            // `tui/value.rs`, which is a different thing from the table a
+            // handle is drawn in. Stripped rather than allowed by name, so a
+            // file reaching for the crate's own `Value::` is still caught.
+            .replace("serde_json::Value::", "");
         assert!(
             !cleaned.contains("runtime::preview::"),
             "{name} must not reach into runtime::preview beyond the two token caps:\n{source}"
@@ -660,7 +672,7 @@ fn the_tui_renders_no_handle_itself() {
             "{name} must not call render_preview itself -- render_table is the one renderer"
         );
         assert!(
-            !source.contains("Value::"),
+            !cleaned.contains("Value::"),
             "{name} must not match on a handle's Value itself"
         );
     }
