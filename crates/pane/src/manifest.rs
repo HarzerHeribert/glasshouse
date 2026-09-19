@@ -179,7 +179,13 @@ impl Manifest {
                 );
             }
             CommandPolicy::None => {
-                let _ = writeln!(out, "Commands: none may run");
+                let _ = writeln!(
+                    out,
+                    "Commands: none may run — no `Bash(...)` pattern in permissions.allow admits \
+                     any command line. This is the compiled profile's own answer; no permission \
+                     rung widens it, so say so plainly rather than retrying, and name the grant \
+                     the person would have to add."
+                );
             }
         }
         if !self.never_grantable_commands.is_empty() {
@@ -189,22 +195,31 @@ impl Manifest {
                 self.never_grantable_commands.join(", ")
             );
         }
-        let present: Vec<String> = self
-            .executables
-            .iter()
-            .filter_map(|e| e.path.as_ref().map(|p| format!("{}={p}", e.name)))
-            .collect();
-        let absent: Vec<&str> = self
-            .executables
-            .iter()
-            .filter(|e| e.path.is_none())
-            .map(|e| e.name.as_str())
-            .collect();
-        if !present.is_empty() {
-            let _ = writeln!(out, "Available executables: {}", present.join("; "));
-        }
-        if !absent.is_empty() {
-            let _ = writeln!(out, "Absent executables: {}", absent.join(", "));
+        // **An executable is only ever reachable through a command line**, so
+        // a session admitting none is told of none: a `PATH` lookup is
+        // otherwise read as an invitation one line under the sentence that
+        // refuses it, and a model reading both has to work out for itself
+        // that presence on the host is not permission. Measured 2026-09-19:
+        // it did the reasoning and said so in its answer, which is a turn
+        // spent on a contradiction this module put there.
+        if self.commands != CommandPolicy::None {
+            let present: Vec<String> = self
+                .executables
+                .iter()
+                .filter_map(|e| e.path.as_ref().map(|p| format!("{}={p}", e.name)))
+                .collect();
+            let absent: Vec<&str> = self
+                .executables
+                .iter()
+                .filter(|e| e.path.is_none())
+                .map(|e| e.name.as_str())
+                .collect();
+            if !present.is_empty() {
+                let _ = writeln!(out, "Available executables: {}", present.join("; "));
+            }
+            if !absent.is_empty() {
+                let _ = writeln!(out, "Absent executables: {}", absent.join(", "));
+            }
         }
         let _ = writeln!(
             out,
@@ -283,6 +298,49 @@ mod tests {
         assert!(rendered.contains("Readable roots: (none)"), "{rendered}");
         assert!(rendered.contains("Commands: none may run"), "{rendered}");
         assert!(!rendered.contains("Container mode"), "{rendered}");
+    }
+
+    /// The contradiction a real session put in front of a real model on
+    /// 2026-09-19: a list of programs directly under the sentence saying
+    /// none of them may be invoked.
+    #[test]
+    fn a_session_admitting_no_command_lists_no_executables() {
+        let rendered = Manifest {
+            commands: CommandPolicy::None,
+            ..sample()
+        }
+        .render();
+        assert!(rendered.contains("Commands: none may run"), "{rendered}");
+        assert!(
+            !rendered.contains("Available executables"),
+            "a program list under a sentence refusing every command line reads as an \
+             invitation: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Absent executables"),
+            "absence is only worth saying where presence would have meant something: \
+             {rendered}"
+        );
+        // The rest of the block is untouched by the gate.
+        assert!(rendered.contains("Writable roots: /app"), "{rendered}");
+    }
+
+    /// A refusal a model can act on: it names the grant that is missing, so
+    /// the answer can be *ask the person for a `Bash(...)` grant* rather
+    /// than a silent surrender.
+    #[test]
+    fn the_no_command_line_names_the_missing_grant_and_that_no_rung_lifts_it() {
+        let rendered = Manifest {
+            commands: CommandPolicy::None,
+            ..Manifest::default()
+        }
+        .render();
+        assert!(rendered.contains("`Bash(...)` pattern"), "{rendered}");
+        assert!(rendered.contains("permissions.allow"), "{rendered}");
+        assert!(
+            rendered.contains("no permission rung widens it"),
+            "the rung is the first thing a reader blames, and it is not the cause: {rendered}"
+        );
     }
 
     #[test]

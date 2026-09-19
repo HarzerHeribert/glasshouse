@@ -15,6 +15,7 @@ const DEF_CAP: usize = 24_000;
 const RENDER_CAP: usize = 30_000;
 const SUPPORT_CAP: usize = 18;
 const VISIT_CAP: usize = 2_048;
+const OUTLINE_CAP: usize = 40;
 const SCAN_CAP: u64 = 131_072;
 const SKIP: &[&str] = &[
     ".git",
@@ -38,6 +39,9 @@ pub struct LineRange {
 pub enum ContextRole {
     CompleteFile,
     TargetDefinition,
+    /// The file's declaration lines, given when the requested symbol is not
+    /// in it. Never a slice of the file: each line carries its own number.
+    Outline,
     Import,
     NearbyDefinition,
     Caller,
@@ -113,18 +117,15 @@ pub fn pack(
     if symbol.is_none() && inferred.is_some() {
         omissions.push("target symbol inferred from the file's unique incomplete marker".into());
     }
+    // A body the miss branch builds itself, because an outline is drawn from
+    // the whole file rather than sliced out of one range.
+    let mut drawn: Option<String> = None;
     let (role, range, complete) = if text.len() <= SMALL {
         (ContextRole::CompleteFile, (0, lines.len()), true)
     } else if let Some(name) = selected_symbol {
         if let Some(r) = definition(&lines, name, lang) {
             (ContextRole::TargetDefinition, r, true)
-        } else {
-            let i = lines
-                .iter()
-                .position(|l| has_ident(l, name))
-                .ok_or_else(|| {
-                    ContextError(format!("symbol `{name}` was not found; nothing packed"))
-                })?;
+        } else if let Some(i) = lines.iter().position(|l| has_ident(l, name)) {
             omissions.push(
                 "complete definition boundary unavailable; target is a language-agnostic window"
                     .into(),
@@ -134,6 +135,33 @@ pub fn pack(
                 (i.saturating_sub(20), (i + 21).min(lines.len())),
                 false,
             )
+        } else {
+            // **A name this file does not hold is an answer, not a throw.**
+            // The read succeeded; only the guess was wrong, and a caller that
+            // asked for several things at once loses the ones that worked when
+            // one guess throws. So the miss is reported as what the file does
+            // define, which is what the next guess needs.
+            let (body, found, dropped) = outline(&lines, lang);
+            match found {
+                0 => omissions.push(format!(
+                    "symbol `{name}` is not in this file, and no declaration was recognised in it;                      target is the file's first lines"
+                )),
+                found => omissions.push(format!(
+                    "symbol `{name}` is not in this file; target is its outline of {found}                      declaration(s), each prefixed by its line number"
+                )),
+            }
+            if dropped > 0 {
+                omissions.push(format!(
+                    "{dropped} further declaration(s) omitted at the {OUTLINE_CAP}-name cap"
+                ));
+            }
+            if found == 0 {
+                let n = bounded_prefix(&lines, 120, DEF_CAP);
+                (ContextRole::Outline, (0, n), false)
+            } else {
+                drawn = Some(body);
+                (ContextRole::Outline, (0, lines.len()), false)
+            }
         }
     } else {
         let n = bounded_prefix(&lines, 500, DEF_CAP);
@@ -145,7 +173,7 @@ pub fn pack(
         }
         (ContextRole::CompleteFile, (0, n), n == lines.len())
     };
-    let body = slice(&lines, range);
+    let body = drawn.unwrap_or_else(|| slice(&lines, range));
     if body.len() > DEF_CAP {
         return Err(ContextError(format!(
             "target definition exceeds the {DEF_CAP} byte cap; nothing packed"
@@ -1078,6 +1106,36 @@ fn imports(l: &[&str], p: &str, g: Lang) -> Vec<SourceExcerpt> {
             )
         })
         .collect()
+}
+/// The file's declaration lines, for a reader whose symbol was not in it.
+///
+/// Returns the rendered outline, how many declarations it names, and how
+/// many were dropped at [`OUTLINE_CAP`]. Each line is prefixed with its own
+/// number, because the outline is not a slice and its lines are not
+/// adjacent -- a reader that takes one of these names either calls again
+/// with it or reads around the number.
+fn outline(lines: &[&str], lang: Lang) -> (String, usize, usize) {
+    let mut named: Vec<(usize, &str)> = vec![];
+    let mut dropped = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let Some(found) = name(line, lang) else {
+            continue;
+        };
+        if named.iter().any(|(_, seen)| *seen == found) {
+            continue;
+        }
+        if named.len() == OUTLINE_CAP {
+            dropped += 1;
+            continue;
+        }
+        named.push((i, found));
+    }
+    let body = named
+        .iter()
+        .map(|(i, _)| format!("{}: {}", i + 1, lines[*i].trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (body, named.len(), dropped)
 }
 fn name(l: &str, g: Lang) -> Option<&str> {
     if g == Lang::Go {

@@ -2105,6 +2105,7 @@ fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
         pane::prompt::Reach {
             web: None,
             agents: Some(&roster),
+            helpers: None,
             decisions: false,
         },
     );
@@ -2144,6 +2145,7 @@ fn an_unconfigured_session_is_not_told_about_the_decision_model() {
         pane::prompt::Reach {
             web: None,
             agents: None,
+            helpers: None,
             decisions: false,
         },
     );
@@ -2156,6 +2158,7 @@ fn an_unconfigured_session_is_not_told_about_the_decision_model() {
         pane::prompt::Reach {
             web: None,
             agents: None,
+            helpers: None,
             decisions: true,
         },
     );

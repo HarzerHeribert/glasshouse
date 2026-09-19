@@ -590,6 +590,14 @@ pub struct Reach<'a> {
     /// `None` renders the table's generic `agent` text: no roster is claimed
     /// where the session has not resolved one.
     pub agents: Option<&'a declarations::AgentRoster>,
+    /// Whether `[helpers]` can actually run a helper — `Some(false)` is a
+    /// session with no `[helpers] model`, whose `helper.*` calls are all
+    /// refused and whose declaration says so where it is read.
+    ///
+    /// `None` is a caller that does not know, and renders the table form
+    /// unchanged; it is the default so that no existing caller silently
+    /// starts claiming helpers are missing.
+    pub helpers: Option<bool>,
     /// Whether `[decisions]` names a model, which is the one predicate
     /// `decide` is bound on.
     ///
@@ -607,6 +615,7 @@ impl<'a> Reach<'a> {
         Self {
             web,
             agents: None,
+            helpers: None,
             decisions: false,
         }
     }
@@ -731,6 +740,11 @@ pub fn render_runtime_reaching(globals: HostGlobals, reach: Reach<'_>) -> String
                 || binding.declaration.to_string(),
                 declarations::agent_declaration,
             ),
+            "helper" => reach
+                .helpers
+                .map_or_else(|| binding.declaration.to_string(), |configured| {
+                    declarations::helper_declaration(configured)
+                }),
             _ => binding.declaration.to_string(),
         })
         .collect::<Vec<_>>()

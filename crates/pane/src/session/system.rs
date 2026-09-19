@@ -15,6 +15,7 @@ use super::*;
 pub(super) fn build_system_prompt(
     web: &crate::web::WebConfig,
     agents: &crate::config::AgentsConfig,
+    helpers: &crate::config::HelpersConfig,
     decisions: &crate::config::DecisionsConfig,
     served: &[crate::models::RosterModel],
     profile: &Profile,
@@ -42,6 +43,9 @@ pub(super) fn build_system_prompt(
         prompt::Reach {
             web: web.as_ref(),
             agents: Some(&agents),
+            // The same predicate `system_manifest` writes its `Unavailable:`
+            // line on, so the roster and its refusal cannot disagree.
+            helpers: Some(helpers.model.is_some() && helpers.enabled),
             // The same predicate the runtime binds `decide` on, so an
             // unconfigured session is told of no global it does not have.
             decisions: decisions.model.is_some(),
@@ -62,6 +66,7 @@ pub(super) fn system_prompt_for(session: &Session<'_>) -> String {
     build_system_prompt(
         &session.config().web,
         &session.config().agents,
+        &session.config().helpers,
         &session.config().decisions,
         &session.roster,
         session.profile,

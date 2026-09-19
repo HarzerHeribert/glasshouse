@@ -1557,6 +1557,29 @@ fn run(
                     }
                     _ => {}
                 }
+                // **An Enter with more input already behind it is a
+                // newline, not a send.** A person who presses Enter to send
+                // has nothing queued after it -- they are waiting to see what
+                // happens. A multi-line payload arriving as plain keystrokes
+                // does, because the rest of it is already in the buffer. That
+                // is the only case this rewrite fires in, and it is the case
+                // that was silently costing whole tasks: a four-line prompt
+                // typed into the pty without bracketed-paste markers sent its
+                // first line as the entire task and kept the rest as a draft
+                // nobody was told about (measured 2026-09-19).
+                //
+                // A real paste never reaches here -- `Event::Paste` inserts
+                // it whole -- so this is the unbracketed path alone, and
+                // `ALT` is the modifier the editor already reads as "insert
+                // a newline", so the behaviour is one the composer has.
+                let key = if key.code == KeyCode::Enter
+                    && key.modifiers.is_empty()
+                    && (input.queued() || event::poll(Duration::ZERO)?)
+                {
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+                } else {
+                    key
+                };
                 if editor.key(key) && !editor.text.trim().is_empty() {
                     if matches!(
                         editor.text.split_whitespace().next(),

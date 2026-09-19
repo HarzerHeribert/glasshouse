@@ -657,6 +657,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                 system: build_system_prompt(
                     &config.borrow().web,
                     &config.borrow().agents,
+                    &config.borrow().helpers,
                     &config.borrow().decisions,
                     &roster,
                     &profile,

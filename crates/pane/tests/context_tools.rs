@@ -373,3 +373,58 @@ fn a_full_context_batch_preserves_whole_evidence_and_does_not_certify_overflow()
     assert_eq!(changed.turn().record.calls[0].ended, Ended::Ok);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Measured 2026-09-19: a benchmark run lost whole cells to `context` throwing
+/// on a guessed symbol name, and every sibling call in the same `Promise.all`
+/// died with it. A miss is an answer now, so the batch survives it.
+#[test]
+fn a_guessed_symbol_does_not_take_its_sibling_context_calls_down() {
+    let root = fixture("symbol-miss-batch");
+    let padding = "# padding padding padding padding\n".repeat(600);
+    std::fs::write(
+        root.join("src/good.py"),
+        format!("def kept(value):\n    return value\n{padding}"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/other.py"),
+        format!("def present(value):\n    return value\n{padding}"),
+    )
+    .unwrap();
+    let profile = Profile::compile(&root, None);
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("miss-batch"));
+
+    let cell = runtime.run_cell(
+        "const [good, missed] = await Promise.all([\n\
+           context({path:'src/good.py', symbol:'kept'}),\n\
+           context({path:'src/other.py', symbol:'no_such_name'}),\n\
+         ]);\n\
+         console.log(`good=${good.complete} missed=${missed.complete}`);\n\
+         console.log(`asked=${missed.symbol}`);\n\
+         console.log(`outline-has-present=${missed.text.includes('present')}`);",
+    );
+
+    let turn = cell.turn();
+    assert_eq!(turn.record.calls.len(), 2, "both calls ran: {cell:?}");
+    assert!(
+        turn.record.calls.iter().all(|call| call.ended == Ended::Ok),
+        "neither call throws: {:?}",
+        turn.record.calls
+    );
+    assert!(
+        turn.stdout_tail.contains("good=true missed=false"),
+        "the sibling survived and the miss is honest: {}",
+        turn.stdout_tail
+    );
+    assert!(
+        turn.stdout_tail.contains("asked=no_such_name"),
+        "the miss keeps the name that was asked for: {}",
+        turn.stdout_tail
+    );
+    assert!(
+        turn.stdout_tail.contains("outline-has-present=true"),
+        "the miss names what the file does define: {}",
+        turn.stdout_tail
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

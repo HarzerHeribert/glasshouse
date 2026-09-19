@@ -101,6 +101,87 @@ fn doctor_json_reports_invalid_config_without_exposing_its_contents() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The trap a real session fell into on 2026-09-19: five `[helpers]` keys
+/// set, saved without complaint, reported `ok` by `doctor`, and inert all
+/// session — the only place the truth appeared was inside the system
+/// prompt, which a person never reads.
+#[test]
+fn doctor_warns_about_a_feature_enabled_without_its_prerequisite() {
+    let root = std::env::temp_dir().join(format!(
+        "pane-doctor-inert-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
+    // Exactly the benchmark's configuration: helpers on, no helper model.
+    std::fs::write(
+        root.join(".pane/config.toml"),
+        "[model]\nparent = \"gpt-5.6-sol\"\n\n[helpers]\nenabled = true\npreflight = true\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .args(["doctor", "--json", "--root"])
+        .arg(&root)
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let settings = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "settings")
+        .expect("doctor reports a settings check");
+    assert_eq!(settings["status"], "warning", "{stdout}");
+    let detail = settings["detail"].as_str().unwrap();
+    assert!(detail.contains("[helpers]"), "{detail}");
+    assert!(
+        detail.contains("helpers.model"),
+        "the warning must name the key that fixes it: {detail}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The same check stays quiet when nothing is inert, so it is a signal
+/// rather than a standing complaint.
+#[test]
+fn doctor_settings_check_is_ok_when_every_feature_has_what_it_needs() {
+    let root = std::env::temp_dir().join(format!(
+        "pane-doctor-ok-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".pane")).unwrap();
+    std::fs::write(
+        root.join(".pane/config.toml"),
+        "[model]\nparent = \"gpt-5.6-sol\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .args(["doctor", "--json", "--root"])
+        .arg(&root)
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let settings = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "settings")
+        .expect("doctor reports a settings check");
+    assert_eq!(settings["status"], "ok", "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn doctor_missing_root_is_a_structured_failure() {
     let root = std::env::temp_dir().join(format!("pane-nonexistent-doctor-{}", std::process::id()));

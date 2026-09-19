@@ -1286,8 +1286,9 @@ impl Runtime {
         } {
             Ok(compiled) => compiled,
             Err(error) => {
-                if matches!(error, cell::CellError::Parse { .. }) {
-                    self.syntax_failure = crate::runtime::repair::SyntaxFailure::new(cell, source);
+                if let cell::CellError::Parse { line, column, .. } = &error {
+                    self.syntax_failure =
+                        crate::runtime::repair::SyntaxFailure::new(cell, source, *line, *column);
                 }
                 let value = compile_error_value(&error);
                 return self.finish(

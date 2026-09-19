@@ -97,7 +97,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "context",
         return_type: "{path: string; sha256: string; symbol: string | null; text: string; complete: boolean; ranges: {path: string; start: number; end: number; role: string}[]; omissions: string[]}",
-        summary: "Load the editing surface for one file or symbol. For a large source file, supply the target `symbol`. Its complete target, short display version, and ranked support are automatically printed once; the handle retains full `sha256` for rare disambiguation. Do not print `text` or inspect the same file with `read`.",
+        summary: "Load the editing surface for one file or symbol. For a large source file, supply the target `symbol`. Its complete target, short display version, and ranked support are automatically printed once; the handle retains full `sha256` for rare disambiguation. A `symbol` the file does not hold is not a throw: it comes back with `complete: false` and an outline of the file's own declarations with their line numbers, so name the one you meant on the next call rather than guessing again. Do not print `text` or inspect the same file with `read`.",
     },
     Entry {
         name: "edit",
@@ -272,6 +272,34 @@ pub const HELPER_DECLARATION: &str = match std::str::from_utf8(&HELPER_DECLARATI
     Ok(text) => text,
     Err(_) => panic!("a roster name or summary is not UTF-8"),
 };
+
+/// The `helper` declaration for one session, told the truth about whether
+/// any helper can actually run.
+///
+/// The invariant: **an interface and its availability are stated in the same
+/// place.** `[helpers]` without a `model` leaves every `helper.*` call
+/// refused, and until 2026-09-19 the block declared the full roster with a
+/// worked example and put the denial in a separate `Unavailable:` line
+/// further down, so a model met the promise and the refusal pages apart and
+/// had to reconcile them itself. This is the same shape
+/// [`web_declaration`] already uses for an unconfigured `web.search`.
+///
+/// It appends rather than withholds because the isolate binds `helper`
+/// whatever `[helpers]` says: a bound global the block never mentions is the
+/// same defect pointing the other way. Binding on the configuration — what
+/// `decide` does — is the deeper fix and it belongs in
+/// `runtime/bindings.rs`.
+#[must_use]
+pub fn helper_declaration(configured: bool) -> String {
+    if configured {
+        return HELPER_DECLARATION.to_string();
+    }
+    format!(
+        "{HELPER_DECLARATION}\n// Unavailable in this session: no helper model is configured \
+         (`[helpers] model`), so every `helper.*` call above is refused. Do the work in the \
+         cell instead, and do not spend a call discovering this."
+    )
+}
 
 /// The `web` global's types, the half of its declaration that does not
 /// depend on the session: [`web_declaration`] renders the other half — what

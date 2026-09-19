@@ -1559,7 +1559,8 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
 /// drift those tests exist to catch.
 fn expected_system_block(root: &std::path::Path) -> String {
     let profile = pane::sandbox::profile::Profile::compile(root, None);
-    let manifest = pane::session::system_manifest(&profile, &pane::config::PaneConfig::default());
+    let config = pane::config::PaneConfig::default();
+    let manifest = pane::session::system_manifest(&profile, &config);
     let agents = pane::prompt::declarations::AgentRoster {
         posture: pane::prompt::declarations::AgentsPosture::Auto,
         models: Vec::new(),
@@ -1572,6 +1573,10 @@ fn expected_system_block(root: &std::path::Path) -> String {
         pane::prompt::Reach {
             web: None,
             agents: Some(&agents),
+            // Derived from the same config the binary reads, not spelled a
+            // second time: a default session has helpers enabled with no
+            // model, so its roster carries its own refusal.
+            helpers: Some(config.helpers.model.is_some() && config.helpers.enabled),
             decisions: false,
         },
     )

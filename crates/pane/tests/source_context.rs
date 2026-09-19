@@ -453,6 +453,67 @@ fn traversal_cap_is_reported_in_structured_omissions() {
     );
 }
 
+#[test]
+fn a_symbol_the_file_does_not_hold_is_answered_with_its_outline() {
+    let f = Fixture::new("symbol-miss");
+    let padding = "# padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "def alpha(x):\n    return x\n\ndef omega(y):\n    return y\n\nclass Middle:\n    pass\n{padding}"
+    );
+    let target = f.put("src/mod.py", &source);
+
+    let got = pack(&f.profile(), &target, Some("no_such_symbol"))
+        .expect("a name the file does not hold is an answer, not an error");
+
+    assert!(!got.complete, "nothing was packed for the requested symbol");
+    assert_eq!(
+        got.symbol.as_deref(),
+        Some("no_such_symbol"),
+        "the symbol stays what was asked for, never what was substituted"
+    );
+    assert_eq!(got.target.role, ContextRole::Outline);
+
+    let rendered = got.render();
+    assert!(
+        rendered.contains("`no_such_symbol` is not in this file"),
+        "{rendered}"
+    );
+    for defined in ["alpha", "omega", "Middle"] {
+        assert!(
+            rendered.contains(defined),
+            "outline must name {defined}: {rendered}"
+        );
+    }
+    assert!(
+        got.target.text.lines().all(|line| line
+            .split_once(':')
+            .is_some_and(|(number, _)| number.parse::<usize>().is_ok())),
+        "every outline line carries its own number: {}",
+        got.target.text
+    );
+}
+
+#[test]
+fn an_outline_is_capped_and_says_how_many_it_dropped() {
+    let f = Fixture::new("symbol-miss-cap");
+    let source: String = (0..120)
+        .map(|i| format!("def sym_{i}(x):\n    return {i}\n\n"))
+        .collect::<String>()
+        + &"# padding padding padding padding\n".repeat(600);
+    let target = f.put("src/many.py", &source);
+
+    let got = pack(&f.profile(), &target, Some("absent")).expect("a miss is an answer");
+
+    assert_eq!(got.target.text.lines().count(), 40);
+    assert!(
+        got.omissions
+            .iter()
+            .any(|note| note.contains("80 further declaration(s) omitted at the 40-name cap")),
+        "{:?}",
+        got.omissions
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symlink_escape_is_refused_by_profile() {

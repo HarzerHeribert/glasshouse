@@ -1481,3 +1481,38 @@ fn statusline_compact_shortcut_persists_without_contacting_inference() {
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
+
+#[test]
+fn typed_newlines_compose_one_message_and_a_lone_enter_still_sends_it() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    // No bracketed-paste markers, which is exactly what another program
+    // typing into the pty produces. The separator is `\r`, not `\n`: in raw
+    // mode crossterm reads `\n` as Ctrl+J and only `\r` as Enter, so `\r` is
+    // what a typed newline actually is here -- and what silently submitted
+    // "first line" as the whole task on 2026-09-19, leaving the rest in the
+    // composer with nobody told about it.
+    app.send(b"first line\rsecond line\rthird line");
+    app.contains("third line");
+    let screen = app.screen.screen().contents();
+    assert!(
+        screen.contains("first line") && screen.contains("second line"),
+        "a typed newline submitted part of the payload:\n{screen}"
+    );
+    // The fixture provider accepts exactly one connection, so the request
+    // read below is the first thing this session ever sent -- proof that
+    // neither newline sent anything on its own.
+    app.send(b"\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let sent = serde_json::to_string(&request["messages"]).unwrap();
+    for line in ["first line", "second line", "third line"] {
+        assert!(
+            sent.contains(line),
+            "`{line}` never reached the model, so a lone Enter no longer sends:\n{sent}"
+        );
+    }
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+}
