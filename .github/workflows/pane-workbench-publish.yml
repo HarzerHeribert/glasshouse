@@ -1,0 +1,53 @@
+name: Publish verified native Pane workbench
+
+on:
+  push:
+    branches: [codex/pane-workbench-bootstrap]
+    paths: [.github/workflows/pane-workbench-publish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact locally tested patch and publish a separate review branch
+        shell: bash
+        env:
+          BASE_SHA: 17904082d91a08b3d3da585f606ec62965c4cd25
+          EXPECTED_TREE: 93bacabbf9dc3d9b66436222c80fe9ca1613b208
+          REVIEW_BRANCH: codex/pane-workbench-redesign
+        run: |
+          set -euo pipefail
+          cat .pane-transfer/part-* > /tmp/pane-workbench.patch.xz
+          xz -dc /tmp/pane-workbench.patch.xz > /tmp/pane-workbench.patch
+          echo 'd46705bf81b948e7a988e312ba0a9724131e981c299f49beceb59fc5722256fe  /tmp/pane-workbench.patch' | sha256sum --check
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if [ "$(git rev-parse refs/remotes/origin/main)" != "$BASE_SHA" ]; then
+            echo 'Main advanced; refusing to publish against an unreviewed base.' >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "refs/heads/$REVIEW_BRANCH" >/tmp/pane-remote-ref; then
+            echo 'Review branch already exists; refusing to overwrite it.' >&2
+            exit 1
+          else
+            code=$?
+            test "$code" -eq 2
+          fi
+          git switch -c "$REVIEW_BRANCH" "$BASE_SHA"
+          git apply --check /tmp/pane-workbench.patch
+          git apply --index /tmp/pane-workbench.patch
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'pane: replace native UI with cell-first workbench and explicit delegation' -m 'Fresh native presentation and input path, categorized direct-save settings, visible cell diffs and helper evidence, and enforced explicit subagent model/effort slots. Existing runtime and security owners retained. Targeted native tests passed; broader/platform acceptance and gateway account affinity remain open. See docs/product/evidence/pane-workbench-native.md.'
+          git push origin "HEAD:refs/heads/$REVIEW_BRANCH"
+          {
+            echo '## Published native Pane review branch'
+            echo "Branch: $REVIEW_BRANCH"
+            echo "Commit: $(git rev-parse HEAD)"
+            echo "Verified tree: $(git rev-parse HEAD^{tree})"
+            echo 'Main was not changed. Transport files and bootstrap workflows are not part of the review branch.'
+          } >> "$GITHUB_STEP_SUMMARY"
