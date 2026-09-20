@@ -142,6 +142,8 @@ fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_overr
     let id = SessionId::new("custom-agent-routing");
     let mut effective = pane::config::PaneConfig::load(&fixture.0).unwrap();
     effective.helpers.enabled = false;
+    // Explicitly authorize both fixture assignments; templates are not authority.
+    effective.agents = pane::config::PaneConfig::parse("[agents]\nmode='roster'\n[agents.slots.deep]\nmodel='template-model'\neffort='high'\n[agents.slots.quick]\nmodel='explicit-model'\neffort='low'").unwrap().agents;
     let mut runtime = Runtime::new(&fixture.profile(), &Glasshouse::None, &id)
         .with_config(effective)
         .unwrap();

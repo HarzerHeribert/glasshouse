@@ -2070,18 +2070,14 @@ fn an_unconfigured_session_declares_no_web_global_and_a_configured_one_names_its
     );
 }
 
-/// **The subagent roster: a model can only choose a cheaper model if it is
-/// told which ones exist and what each is worth.** The Runtime block's
-/// `agent` declaration names the models this session's gateway serves,
-/// strongest first, with Artificial Analysis' published indices — and a
-/// session that resolved no roster keeps the table's generic text rather
-/// than claiming an empty one.
+/// Only user-approved favorites are declared, even when the gateway measures more.
 #[test]
 fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
     use pane::models::RosterModel;
     use pane::prompt::declarations::{AgentRoster, AgentsPosture};
     use pane::prompt::render_runtime_reaching;
     use pane::runtime::bindings::HostGlobals;
+    use pane::wire::Effort;
 
     let measured = |id: &str, intelligence: f64, coding: f64| RosterModel {
         id: id.to_string(),
@@ -2089,10 +2085,15 @@ fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
         coding: Some(coding),
     };
     let roster = AgentRoster {
-        posture: AgentsPosture::Auto,
+        posture: AgentsPosture::Roster(vec![
+            ("quick".into(), "gpt-5.6-luna".into(), Effort::Low),
+            ("deep".into(), "gpt-5.6-sol".into(), Effort::High),
+            ("balanced".into(), "house-model".into(), Effort::Medium),
+        ]),
         models: vec![
             measured("gpt-5.6-sol", 47.1, 77.4),
             measured("gpt-5.6-luna", 37.5, 71.4),
+            measured("unapproved-marketplace-model", 99.0, 99.0),
             RosterModel {
                 id: "house-model".into(),
                 intelligence: None,
@@ -2110,24 +2111,30 @@ fn the_agent_declaration_names_the_models_this_session_can_delegate_to() {
         },
     );
     assert!(declared.contains("declare const agent: {"), "{declared}");
+    for expected in [
+        "quick: gpt-5.6-luna, effort low",
+        "deep: gpt-5.6-sol, effort high",
+        "balanced: house-model, effort medium",
+        "37.5",
+        "77.4",
+        "Artificial Analysis",
+        "Empty slots never inherit Main",
+    ] {
+        assert!(
+            declared.contains(expected),
+            "missing {expected}: {declared}"
+        );
+    }
     assert!(
-        declared.contains(
-            "Models this session can name, strongest first: gpt-5.6-sol (intelligence 47.1, \
-             coding 77.4), gpt-5.6-luna (intelligence 37.5, coding 71.4), house-model."
-        ),
-        "the roster names each served model with its figures, unmeasured last:\n{declared}"
+        !declared.contains("unapproved-marketplace-model"),
+        "{declared}"
     );
     assert!(
-        declared.contains("Artificial Analysis"),
-        "the figures say where they come from:\n{declared}"
+        !declared.contains("house-model, effort medium; AA 0"),
+        "{declared}"
     );
-
     let unresolved = render_runtime_reaching(HostGlobals::Every, pane::prompt::Reach::default());
-    assert!(
-        unresolved.contains("declare const agent: {")
-            && !unresolved.contains("Models this session can name"),
-        "a session with no roster claims none:\n{unresolved}"
-    );
+    assert!(unresolved.contains("declare const agent: {") && !unresolved.contains("quick:"));
 }
 
 /// `decide` is bound only for a session whose `[decisions]` names a model, so

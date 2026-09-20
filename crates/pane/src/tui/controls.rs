@@ -224,6 +224,13 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 impl Panel {
+    /// Raw catalogue facts for the native workbench; no legacy picker state.
+    pub(crate) fn catalogue(&self) -> Option<(&[ModelGroup], &BTreeMap<String, f64>)> {
+        self.search
+            .as_ref()
+            .map(|s| (s.source.as_slice(), &s.intelligence))
+    }
+
     pub fn text(title: impl Into<String>, text: impl AsRef<str>) -> Self {
         Self {
             title: title.into(),

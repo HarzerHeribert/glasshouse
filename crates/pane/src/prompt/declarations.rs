@@ -374,7 +374,7 @@ pub fn web_declaration(reach: &WebReach) -> String {
 /// [`agent_declaration`] renders the other half -- which models this
 /// session's gateway serves, and what each one measured.
 pub const AGENT_DECLARATION: &str = "declare const agent: {\n  \
-     run(task: string, options?: {turns?: number; model?: string; effort?: string; profile?: string}): Job;\n\
+     run(task: string, options?: {turns?: number; slot?: string; model?: string; effort?: string; profile?: string}): Job;\n\
      };\n\
      type Job = {id: string; source: string; progress(): {turns: number; calls: string[]; elapsed_ms: number; running: boolean; rollout: string | null; takes_messages: boolean} | null};\n\
      // Start a subagent on one self-contained question. It returns a handle\n\
@@ -392,20 +392,19 @@ pub const AGENT_DECLARATION: &str = "declare const agent: {\n  \
      // elapsed) without waiting: read it when a later cell has reason to check,\n\
      // never in a cell that does nothing else.\n\
      // Optional profile selects .pane/agents/NAME.toml instructions/model/effort.\n\
-     // Explicit model/effort override the template; templates grant no permissions.";
+     // Explicit model/effort override the template only within the configured assignment; templates grant no permissions.";
 
-/// The most models one roster names. A gateway serving a hundred models
-/// would otherwise spend the system block on a list; the strongest twenty
-/// are the choice, and the rest are counted.
-pub const ROSTER_LIMIT: usize = 20;
+/// Four user-owned favorites, never the full gateway marketplace.
+pub const ROSTER_LIMIT: usize = 4;
 
 /// What `[agents]` does with a model this session's cell names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentsPosture {
-    /// A subagent inherits the session's model unless the cell names one.
+    /// Legacy configuration requiring explicit migration.
     Auto,
-    /// This model unless the cell names another.
+    /// Exactly this model; explicit names cannot escape it.
     Pinned(String),
+    Roster(Vec<(String, String, crate::wire::Effort)>),
     /// Every spawn is refused, including one that names a model.
     Off,
 }
@@ -418,8 +417,15 @@ impl AgentsPosture {
             crate::config::AgentsMode::Off => Self::Off,
             crate::config::AgentsMode::Auto => Self::Auto,
             crate::config::AgentsMode::Pinned => {
-                agents.model.clone().map_or(Self::Auto, Self::Pinned)
+                agents.model.clone().map_or(Self::Off, Self::Pinned)
             }
+            crate::config::AgentsMode::Roster => Self::Roster(
+                agents
+                    .slots
+                    .iter()
+                    .map(|(name, s)| (name.clone(), s.model.clone(), s.effort))
+                    .collect(),
+            ),
         }
     }
 }
@@ -434,63 +440,26 @@ pub struct AgentRoster {
     pub models: Vec<crate::models::RosterModel>,
 }
 
-/// The `agent` declaration for one session: the table's text, then who runs
-/// a delegated goal and what the alternatives are worth.
-///
-/// **The roster is what makes a cheaper model choosable.** Without it the
-/// model knows `options.model` exists and not one name it could put there,
-/// so every subagent silently inherits the session's own -- frontier rates
-/// for an errand. With it, the choice is a published number the model can
-/// weigh against the question.
+/// The launch gate's permitted assignments, not the gateway's full marketplace.
 #[must_use]
 pub fn agent_declaration(roster: &AgentRoster) -> String {
     let mut text = AGENT_DECLARATION.to_string();
-    if roster.posture == AgentsPosture::Off {
-        text.push_str(
-            "\n// Subagents are off in this session: `[agents] mode` is `off` in pane.toml, so\n\
-             // agent.run throws. Do the work in this session or say the configuration forbids it.",
-        );
-        return text;
-    }
     match &roster.posture {
-        AgentsPosture::Pinned(model) => text.push_str(&format!(
-            "\n// A subagent runs on {model} unless you name another model."
-        )),
-        _ => text
-            .push_str("\n// A subagent inherits this session's own model unless you name another."),
-    }
-    if roster.models.is_empty() {
-        return text;
-    }
-    let listed: Vec<String> = roster
-        .models
-        .iter()
-        .take(ROSTER_LIMIT)
-        .map(|model| match (model.intelligence, model.coding) {
-            (Some(intelligence), Some(coding)) => {
-                format!(
-                    "{} (intelligence {intelligence:.1}, coding {coding:.1})",
-                    model.id
-                )
+        AgentsPosture::Off => text.push_str("\n// Subagents are off: every agent.run is refused, even with an explicit model. Do the work in this session."),
+        AgentsPosture::Auto => text.push_str("\n// Legacy auto inheritance is disabled. Every agent.run is refused until the user selects a pinned model or favorite roster."),
+        AgentsPosture::Pinned(model) => text.push_str(&format!("\n// Subagents are restricted to {model}. Other models are refused; Main is never inherited.")),
+        AgentsPosture::Roster(slots) => {
+            text.push_str("\n// Choose one configured favorite with agent.run(task, {slot: \"quick\"}). Empty slots never inherit Main.");
+            for (name, model, effort) in slots {
+                text.push_str(&format!("\n// {name}: {model}, effort {}", effort.name()));
+                if let Some(measured) = roster.models.iter().find(|m| m.id == *model) {
+                    if let Some(score) = measured.intelligence.filter(|s| s.is_finite()) { text.push_str(&format!(", AA intelligence {score:.1}")); }
+                    if let Some(score) = measured.coding.filter(|s| s.is_finite()) { text.push_str(&format!(", AA coding {score:.1}")); }
+                }
             }
-            (Some(intelligence), None) => format!("{} (intelligence {intelligence:.1})", model.id),
-            _ => model.id.clone(),
-        })
-        .collect();
-    let more = roster.models.len().saturating_sub(listed.len());
-    let tail = if more > 0 {
-        format!(", and {more} more")
-    } else {
-        String::new()
-    };
-    text.push_str(&format!(
-        "\n// Models this session can name, strongest first: {}{tail}.\n\
-         // The figures are Artificial Analysis' published indices, and a higher index\n\
-         // generally costs more per token: name the cheapest model that can answer the\n\
-         // question, and keep the strongest for work that needs it. A model listed\n\
-         // without figures is available and unmeasured.",
-        listed.join(", ")
-    ));
+            text.push_str("\n// AA means Artificial Analysis. Only these models and efforts are permitted. Missing AA measurements are unknown, not zero; indices do not determine price, entitlement or task suitability. The gateway selects available routes, not the slot.");
+        }
+    }
     text
 }
 
@@ -668,10 +637,7 @@ mod agent_roster_tests {
             AgentsPosture::Off,
             vec![model("gpt-5.6-sol", Some(47.1))],
         ));
-        assert!(
-            declared.contains("Subagents are off in this session"),
-            "{declared}"
-        );
+        assert!(declared.contains("Subagents are off:"), "{declared}");
         assert!(
             !declared.contains("Models this session can name"),
             "a refused capability was offered a menu:\n{declared}"
@@ -679,26 +645,26 @@ mod agent_roster_tests {
     }
 
     #[test]
-    fn a_pinned_session_names_its_pinned_model_and_still_lists_the_alternatives() {
+    fn a_pinned_session_names_only_its_enforced_assignment() {
         let declared = agent_declaration(&roster(
             AgentsPosture::Pinned("gpt-5.6-luna".into()),
             vec![model("gpt-5.6-sol", Some(47.1))],
         ));
         assert!(
-            declared.contains("A subagent runs on gpt-5.6-luna unless you name another model."),
+            declared.contains("Subagents are restricted to gpt-5.6-luna."),
             "{declared}"
         );
         assert!(
-            declared.contains("Models this session can name"),
-            "{declared}"
+            !declared.contains("gpt-5.6-sol"),
+            "an unconfigured model leaked into the assignment: {declared}"
         );
     }
 
     #[test]
-    fn an_auto_session_says_the_subagent_inherits_the_session_model() {
+    fn legacy_auto_cannot_reintroduce_implicit_inheritance() {
         let declared = agent_declaration(&roster(AgentsPosture::Auto, Vec::new()));
         assert!(
-            declared.contains("inherits this session's own model"),
+            !declared.contains("inherits this session's own model"),
             "{declared}"
         );
         assert!(
@@ -708,17 +674,27 @@ mod agent_roster_tests {
     }
 
     #[test]
-    fn a_long_roster_is_cut_at_the_limit_and_counts_the_rest() {
+    fn a_large_catalogue_only_exposes_configured_favorites_and_their_measurements() {
         let models: Vec<RosterModel> = (0..ROSTER_LIMIT + 7)
             .map(|n| model(&format!("m{n:02}"), Some(100.0 - n as f64)))
             .collect();
-        let declared = agent_declaration(&roster(AgentsPosture::Auto, models));
-        assert!(declared.contains(", and 7 more."), "{declared}");
-        assert!(declared.contains("m00 (intelligence 100.0)"), "{declared}");
+        let declared = agent_declaration(&roster(
+            AgentsPosture::Roster(vec![
+                ("quick".into(), "m02".into(), crate::wire::Effort::Low),
+                ("deep".into(), "m25".into(), crate::wire::Effort::High),
+            ]),
+            models,
+        ));
         assert!(
-            !declared.contains(&format!("m{:02} ", ROSTER_LIMIT)),
-            "the {ROSTER_LIMIT}th model was listed past the bound:\n{declared}"
+            declared.contains("quick: m02, effort low, AA intelligence 98.0"),
+            "{declared}"
         );
+        assert!(declared.contains("deep: m25, effort high"), "{declared}");
+        assert!(
+            !declared.contains("m00"),
+            "unconfigured model leaked: {declared}"
+        );
+        assert!(!declared.contains("generally costs more"));
     }
 
     #[test]
@@ -729,6 +705,7 @@ mod agent_roster_tests {
                 mode: AgentsMode::Off,
                 model: None,
                 deadline: None,
+                ..Default::default()
             }),
             AgentsPosture::Off
         );
@@ -737,12 +714,13 @@ mod agent_roster_tests {
                 mode: AgentsMode::Pinned,
                 model: Some("cheap".into()),
                 deadline: None,
+                ..Default::default()
             }),
             AgentsPosture::Pinned("cheap".into())
         );
         assert_eq!(
             AgentsPosture::from_config(&AgentsConfig::default()),
-            AgentsPosture::Auto
+            AgentsPosture::Off
         );
     }
 }

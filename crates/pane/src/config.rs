@@ -477,53 +477,9 @@ pub struct ModelConfig {
     pub parent: Option<String>,
 }
 
-/// `[agents]` -- what a subagent runs on when the cell does not say.
-///
-/// Without this a delegated goal inherits the **parent's** model, so a session
-/// driven by a frontier model pays frontier rates for every investigation it
-/// hands off, unless the model remembers to name a cheaper one each time.
-/// A model the cell names still wins: this is a default, not a ceiling.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AgentsMode {
-    /// Use a model named by the cell, otherwise inherit the parent.
-    #[default]
-    Auto,
-    /// Refuse every subagent spawn, including one that names a model.
-    Off,
-    /// Use `model` unless the cell explicitly names another model.
-    Pinned,
-}
-
-impl AgentsMode {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "auto" => Ok(Self::Auto),
-            "off" => Ok(Self::Off),
-            "pinned" => Ok(Self::Pinned),
-            other => Err(format!(
-                "pane.toml: `[agents] mode` must be \"auto\", \"off\" or \"pinned\", not `{other}`"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentsConfig {
-    pub mode: AgentsMode,
-    pub model: Option<String>,
-    /// A wall clock for one subagent, and **absent by default**.
-    ///
-    /// The user, 2026-09-17, first ruling out the turn cap — *"Limits are
-    /// dumb for abstract tasks"* — and then ruling out a defaulted clock in
-    /// its place: *"A subagent can run for an hour if it does work which is
-    /// correct. Supervisor should handle it."* So nothing here interrupts a
-    /// subagent by default: it ends when it answers, when its context fills,
-    /// when the provider or the subscription refuses, when it is cancelled,
-    /// or when **this person** set `deadline_minutes` and it expired.
-    /// Governing one that is working badly is the supervisor's job, which
-    /// reads what it is doing, not a counter's, which cannot.
-    pub deadline: Option<std::time::Duration>,
-}
+mod agents;
+use agents::parse_agents;
+pub use agents::{AgentSlot, AgentsConfig, AgentsMode, SLOT_NAMES};
 
 /// One integer key's valid range, spelled once so the refusal sentence and
 /// the check it comes from cannot drift apart.
@@ -767,76 +723,6 @@ fn merge_tables(base: &mut toml::Value, overlay: &toml::Value) {
 ///
 /// A legacy table containing only `model` is interpreted as `pinned`, so an
 /// existing project keeps the behaviour it selected before modes existed.
-fn parse_agents(value: &toml::Value) -> Result<AgentsConfig, String> {
-    let table = table_of(value, "agents")?;
-    for key in table.keys() {
-        if !["mode", "model", "deadline_minutes"].contains(&key.as_str()) {
-            return Err(format!(
-                "pane.toml: unknown key `{key}` in [agents]; only `mode`, `model` and \
-                 `deadline_minutes` are recognised"
-            ));
-        }
-    }
-    let deadline = match table.get("deadline_minutes") {
-        // Absent is no deadline, not a default one.
-        None => None,
-        Some(value) => {
-            let minutes = value.as_integer().ok_or_else(|| {
-                "pane.toml: `[agents] deadline_minutes` must be a whole number of minutes, or 0 \
-                 for no deadline"
-                    .to_string()
-            })?;
-            let minutes = u64::try_from(minutes).map_err(|_| {
-                "pane.toml: `[agents] deadline_minutes` cannot be negative; 0 means no deadline"
-                    .to_string()
-            })?;
-            // Zero is the explicit "no deadline", not a zero-length one: a
-            // subagent that is dead on arrival is nobody's intent.
-            (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
-        }
-    };
-    let model = match table.get("model") {
-        None => None,
-        Some(value) => {
-            let text = value
-                .as_str()
-                .ok_or_else(|| "pane.toml: `[agents] model` must be a string".to_string())?;
-            validate_concrete_model("[agents] model", text)?;
-            Some(text.to_string())
-        }
-    };
-    let mode = match table.get("mode") {
-        None if model.is_some() => AgentsMode::Pinned,
-        None => AgentsMode::Auto,
-        Some(value) => AgentsMode::parse(
-            value
-                .as_str()
-                .ok_or_else(|| "pane.toml: `[agents] mode` must be a string".to_string())?,
-        )?,
-    };
-    match (mode, model.as_ref()) {
-        (AgentsMode::Pinned, None) => {
-            return Err("pane.toml: `[agents] mode = \"pinned\"` requires `model`".to_string());
-        }
-        (AgentsMode::Auto | AgentsMode::Off, Some(_)) => {
-            return Err(format!(
-                "pane.toml: `[agents] mode = \"{}\"` cannot also set `model`",
-                match mode {
-                    AgentsMode::Auto => "auto",
-                    AgentsMode::Off => "off",
-                    AgentsMode::Pinned => unreachable!(),
-                }
-            ));
-        }
-        _ => {}
-    }
-    Ok(AgentsConfig {
-        mode,
-        model,
-        deadline,
-    })
-}
-
 /// `[model] parent` -- one optional key, refused the same way the other two
 /// tiers' model names are, so one validator covers all three.
 fn parse_model(value: &toml::Value) -> Result<ModelConfig, String> {

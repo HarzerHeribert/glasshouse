@@ -1725,3 +1725,59 @@ fn live_a_second_escape_escalates_to_the_call_in_flight_and_still_spares_the_ses
     app.send(b"\x03");
     assert_eq!(app.exited(), 130);
 }
+
+#[test]
+fn workbench_settings_save_directly_and_do_not_consume_the_draft() {
+    let (base, _requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("P A N E");
+    app.send(b"keep this draft");
+    app.send(b"\x1bOQ"); // F2
+    app.contains("SETTINGS");
+    app.send(b"\t");
+    app.contains("Display");
+    app.send(b"\x1b[C"); // theme advances, no Apply step
+    app.contains("Saved · active presentation");
+    let saved = std::fs::read_to_string(app.root.join(".pane/config.toml")).unwrap();
+    assert!(saved.contains("amber"), "{saved}");
+    app.send(b"\x1b");
+    app.contains("keep this draft");
+    app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn workbench_final_answer_survives_the_actual_provider_and_terminal_loop() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("P A N E");
+    app.send(b"Return the fixture answer.\r");
+    requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"/diff\r");
+    app.contains("before");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn workbench_pointer_opens_settings_only_on_release_and_wheel_stays_local() {
+    let (base, _requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("Settings");
+    // Header is one row; at 80 columns Settings starts at column 54 (one-based).
+    let rows: Vec<_> = app.screen.screen().rows(0, 80).collect();
+    let x = rows[0].find("Settings").unwrap() + 1;
+    app.send(format!("\x1b[<0;{x};1M").as_bytes());
+    app.settle(120);
+    assert!(!app.screen.screen().contents().contains("SETTINGS"));
+    app.send(format!("\x1b[<0;{x};1m").as_bytes());
+    app.contains("SETTINGS");
+    app.send(b"\x1b[<65;30;12M");
+    app.settle(120);
+    assert!(app.screen.screen().contents().contains("SETTINGS"));
+    app.send(b"\x1b");
+    app.contains("P A N E");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}

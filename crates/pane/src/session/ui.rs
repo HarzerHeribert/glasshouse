@@ -801,6 +801,7 @@ fn run(
     // gesture was a click or a drag.
     let mut pressed_at: Option<(u16, u16)> = None;
     let mut geometry = tui::ScreenGeometry::default();
+    let mut workbench = crate::workbench::Workbench::default();
     // When the position indicator came up, so it can go down again after
     // `tui::SCROLL_INDICATOR_LINGER` without a timer of its own.
     let mut last_scroll: Option<Instant> = None;
@@ -933,7 +934,10 @@ fn run(
                 Update::Panel(panel) => {
                     state.panel = Some(replace_panel(state.panel.as_ref(), *panel))
                 }
-                Update::Notice(message) => state.note(message),
+                Update::Notice(message) => {
+                    workbench.notice = message.lines().next().unwrap_or("").to_owned();
+                    state.note(message);
+                }
                 Update::SecretPrompt(title) => {
                     state.secret_prompt = Some(tui::SecretPrompt::new(title));
                     // A panel over a modal prompt would take the Enter that
@@ -1003,19 +1007,18 @@ fn run(
             }
             let size = terminal.size()?;
             let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-            let regions = tui::screen_regions(area, &state);
+            let regions = crate::workbench::layout(area, &state);
             viewport_height = usize::from(regions.transcript.height).max(1);
-            let rows = tui::conversation_rows(
+            workbench.absorb_panel(&mut state);
+            let document = crate::workbench::Document::build(
                 &conversation,
-                &super::empty_handles(),
                 &notebook,
                 &state,
-                regions.transcript.width,
+                &workbench,
+                usize::from(regions.transcript.width),
             );
-            if previous_rows > 0 {
-                state.scrollback =
-                    tui::anchor_scrollback(state.scrollback, previous_rows, rows, viewport_height);
-            }
+            let rows = document.rows.len();
+            workbench.anchor_document(&document, &mut state, viewport_height);
             previous_rows = rows;
             if let Some(inspection) = state.inspection.as_mut() {
                 inspection.clamp(
@@ -1026,14 +1029,20 @@ fn run(
                 );
             }
             terminal.draw(|frame| {
-                geometry = tui::render_screen_with_geometry(
+                crate::workbench::render(
                     frame,
                     &conversation,
-                    &served,
-                    &super::empty_handles(),
                     &notebook,
                     &state,
+                    &served,
+                    &mut workbench,
                 );
+                // The new renderer owns its own hit map. Legacy geometry is
+                // retained only for compatibility handlers below.
+                geometry = tui::ScreenGeometry::default();
+                if let Some(prompt) = state.secret_prompt.as_ref() {
+                    crate::workbench::render_secret(frame, prompt, state.theme);
+                }
                 if let Some(request) = approvals.front() {
                     tui::render_approval(
                         frame,
@@ -1057,6 +1066,81 @@ fn run(
         let Some(input_event) = input.read()? else {
             continue;
         };
+        // Security prompts retain priority; no local control can answer them.
+        // All ordinary pointer and local-panel events go to the new reducer.
+        if approvals.is_empty() && asking.is_none() && state.secret_prompt.is_none() {
+            state.input = editor.text.clone();
+            state.cursor = Some(editor.cursor);
+            if matches!(&input_event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown))
+            {
+                last_scroll = Some(Instant::now());
+            }
+            match workbench.event(&input_event, &mut state, &notebook, busy) {
+                crate::workbench::Effect::Insert(command) => {
+                    editor.text = command;
+                    editor.cursor = editor.text.len();
+                    editor.selected = 0;
+                    dirty = true;
+                    continue;
+                }
+                crate::workbench::Effect::OpenPath(path) => {
+                    workbench.notice = if links::show(std::path::Path::new(&path)) {
+                        "Opened file."
+                    } else {
+                        "No application could open this file."
+                    }
+                    .into();
+                    dirty = true;
+                    continue;
+                }
+                crate::workbench::Effect::Pass => {}
+                crate::workbench::Effect::Consumed => {
+                    dirty = true;
+                    continue;
+                }
+                crate::workbench::Effect::Cursor(offset) => {
+                    editor.cursor = editor
+                        .text
+                        .floor_char_boundary(offset.min(editor.text.len()));
+                    dirty = true;
+                    continue;
+                }
+                crate::workbench::Effect::Copy(text) => {
+                    links::copy(&text);
+                    workbench.notice = "Copied selection.".into();
+                    dirty = true;
+                    continue;
+                }
+                crate::workbench::Effect::Command(command) => {
+                    if let Some(link) = command.strip_prefix("/open-link ") {
+                        workbench.notice = if links::open(link) {
+                            "Opened in the browser."
+                        } else {
+                            "No browser available; copy the link."
+                        }
+                        .into();
+                    } else if let Some(text) = command.strip_prefix("/copy ") {
+                        links::copy(text);
+                        workbench.notice = "Copied.".into();
+                    } else if command == "/paste-callback" {
+                        state.secret_prompt = Some(tui::SecretPrompt::new(
+                            "Paste the callback address, then Enter",
+                        ));
+                    } else if let Some(name) = command.strip_prefix("/handlers off ") {
+                        super::lock(&handler_cancellations).push(name.to_string());
+                        workbench.notice = format!("Handler {name}: cancellation requested.");
+                    } else if !busy {
+                        state.panel = None;
+                        busy = true;
+                        let _ = answers.inputs.send(Input::Submit(command));
+                    } else {
+                        workbench.notice = "Finish the current turn before this action.".into();
+                    }
+                    dirty = true;
+                    continue;
+                }
+            }
+        }
         match input_event {
             Event::Resize(_, _) => {
                 dirty = true;
@@ -1708,6 +1792,11 @@ fn run(
                     key
                 };
                 if editor.key(key) && !editor.text.trim().is_empty() {
+                    if workbench.local_command(editor.text.trim(), &mut state, &notebook) {
+                        editor.take();
+                        dirty = true;
+                        continue;
+                    }
                     if matches!(
                         editor.text.split_whitespace().next(),
                         Some("/cell" | "/cells" | "/chat")

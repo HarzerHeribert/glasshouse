@@ -492,7 +492,7 @@ impl Store {
                 .flat
                 .get("agents.mode")
                 .and_then(toml::Value::as_str)
-                .is_some_and(|mode| matches!(mode, "off" | "auto"))
+                .is_some_and(|mode| matches!(mode, "off" | "auto" | "roster"))
                 && !parsed.flat.contains_key("agents.model");
             if clears_model {
                 map.remove("agents.model");
@@ -597,7 +597,7 @@ impl Store {
             let clears_model = overlay
                 .get("agents.mode")
                 .and_then(toml::Value::as_str)
-                .is_some_and(|mode| matches!(mode, "off" | "auto"))
+                .is_some_and(|mode| matches!(mode, "off" | "auto" | "roster"))
                 && !overlay.contains_key("agents.model");
             if clears_model {
                 map.remove("agents.model");
@@ -1237,6 +1237,7 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
                 AgentsMode::Auto => "auto",
                 AgentsMode::Off => "off",
                 AgentsMode::Pinned => "pinned",
+                AgentsMode::Roster => "roster",
             }),
         ),
         ("web.enabled", toml::Value::Boolean(web.enabled)),

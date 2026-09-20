@@ -55,7 +55,7 @@ fn exists(candidate: &str, root: &Path) -> bool {
 ///
 /// A relative spelling resolves against the session's own root, which is what
 /// makes `crates/pane/src/tui.rs` -- the form a model writes -- clickable.
-pub(super) fn resolve(candidate: &str, root: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve(candidate: &str, root: &Path) -> Option<PathBuf> {
     if candidate.contains("://") {
         return None;
     }
@@ -76,7 +76,7 @@ pub(super) fn resolve(candidate: &str, root: &Path) -> Option<PathBuf> {
 ///
 /// Offsets, not bytes: the caller indexes the drawn row's cells, and a row is
 /// one cell per grapheme.
-pub(super) fn found(line: &str, root: &Path) -> Vec<(usize, usize)> {
+pub(crate) fn found(line: &str, root: &Path) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;

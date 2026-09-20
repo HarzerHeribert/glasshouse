@@ -1,5 +1,7 @@
 # Pane settings experience
 
+> Historical presentation contract. The live UI is now governed by [Native workbench](workbench.md). Its direct-save, contrast and interaction rules supersede the old UI behavior below; storage and security guarantees remain.
+
 Decision accepted and implementation verified 2026-09-12.
 
 ## Ownership and scope

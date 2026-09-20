@@ -3602,7 +3602,11 @@ fn a_subagent_may_not_start_a_subagent() {
     let fixture = Fixture::new("agent-depth");
     let glasshouse = Glasshouse::None;
     let session = SessionId::new("agent-depth-session");
-    let mut parent = runtime(&fixture, &glasshouse, &session);
+    let mut parent = runtime(&fixture, &glasshouse, &session).with_agents(
+        pane::config::PaneConfig::parse("[agents]\nmodel='claude-sonnet-5'")
+            .unwrap()
+            .agents,
+    );
 
     // The parent may ask: it gets a handle, and the handle names its source.
     let started = parent
@@ -3635,7 +3639,11 @@ fn a_parent_can_look_in_on_a_running_subagent() {
     let fixture = Fixture::new("agent-progress");
     let glasshouse = Glasshouse::None;
     let session = SessionId::new("agent-progress-session");
-    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let mut runtime = runtime(&fixture, &glasshouse, &session).with_agents(
+        pane::config::PaneConfig::parse("[agents]\nmodel='claude-sonnet-5'")
+            .unwrap()
+            .agents,
+    );
     runtime.set_task_context(400_000, "claude-sonnet-5");
 
     let looked = runtime.run_cell(
@@ -3673,7 +3681,11 @@ fn a_budget_that_cannot_pay_refuses_the_subagent_before_it_starts() {
     let fixture = Fixture::new("agent-budget");
     let glasshouse = Glasshouse::None;
     let session = SessionId::new("agent-budget-session");
-    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let mut runtime = runtime(&fixture, &glasshouse, &session).with_agents(
+        pane::config::PaneConfig::parse("[agents]\nmodel='claude-sonnet-5'")
+            .unwrap()
+            .agents,
+    );
 
     // A budget below one turn's ceiling.
     runtime.set_task_context(10, "claude-sonnet-5");
@@ -3689,25 +3701,20 @@ fn a_budget_that_cannot_pay_refuses_the_subagent_before_it_starts() {
     assert!(returned_string(&started).starts_with("agent/"));
 }
 
-/// A subagent inherits the parent's model unless the cell names one, so a
-/// session that switched model does not silently fan out on the default.
-///
-/// The turn half of this test is gone with the cap it pinned (user ruling,
-/// 2026-09-17): `turns` is a hint a cell may leave unset, and `None` means
-/// the subagent works until it answers or its wall clock runs out.
+/// An explicit assignment is carried into the job without imposing a turn cap.
 #[test]
-fn a_subagent_inherits_the_parents_model() {
+fn a_subagent_job_carries_its_explicit_model() {
     use pane::agent::AgentOptions;
     let asked = AgentOptions {
         turns: None,
-        model: "inherited-model".to_string(),
+        model: "chosen-model".to_string(),
         effort: pane::wire::Effort::default(),
         deadline: None,
     };
-    assert_eq!(asked.model, "inherited-model");
+    assert_eq!(asked.model, "chosen-model");
     assert!(
         asked.turns.is_none(),
-        "a subagent with no turn hint runs until it answers"
+        "an unbounded job runs until it answers"
     );
 }
 

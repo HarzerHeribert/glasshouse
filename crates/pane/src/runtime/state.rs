@@ -574,22 +574,32 @@ impl RuntimeState {
     /// unset is off, exactly as `[supervisor] model` unset is, because a
     /// helper spends money on the user's behalf and the fail-closed direction
     /// is *not configured, not run*.
-    /// Resolves a delegated goal's model, or refuses the spawn when agents
-    /// are off. An explicit cell model overrides a pinned default, but never
-    /// overrides `off`.
+    /// Resolves a delegated goal only inside the explicitly configured assignment.
+    #[cfg(test)]
     pub(crate) fn agent_model(&self, asked: Option<String>) -> Result<String, String> {
-        let agents = self.agents.borrow();
-        match agents.mode {
-            crate::config::AgentsMode::Off => {
-                Err("subagents are off: `[agents] mode` is `off` in pane.toml".to_string())
+        self.agents
+            .borrow()
+            .select(asked.as_deref(), None)
+            .map(|s| s.model)
+    }
+    pub(crate) fn agent_assignment(
+        &self,
+        model: Option<&str>,
+        slot: Option<&str>,
+        requested_effort: crate::wire::Effort,
+        explicit_effort: bool,
+    ) -> Result<(String, crate::wire::Effort), String> {
+        let policy = self.agents.borrow();
+        let selected = policy.select(model, slot)?;
+        let effort = if policy.mode == crate::config::AgentsMode::Roster {
+            if explicit_effort && requested_effort != selected.effort {
+                return Err("effort is fixed by the selected favorite slot".into());
             }
-            crate::config::AgentsMode::Auto => {
-                Ok(asked.unwrap_or_else(|| self.model.borrow().clone()))
-            }
-            crate::config::AgentsMode::Pinned => asked
-                .or_else(|| agents.model.clone())
-                .ok_or_else(|| "subagents are misconfigured: pinned mode requires a model".into()),
-        }
+            selected.effort
+        } else {
+            requested_effort
+        };
+        Ok((selected.model, effort))
     }
 
     /// The wall clock one subagent of this session gets, from `[agents]
@@ -1117,28 +1127,23 @@ mod tests {
         *state.model.borrow_mut() = "parent-model".into();
 
         state.set_agents(crate::config::AgentsConfig::default());
-        assert_eq!(state.agent_model(None).unwrap(), "parent-model");
-        assert_eq!(
-            state.agent_model(Some("cell-model".into())).unwrap(),
-            "cell-model"
-        );
+        assert!(state.agent_model(None).is_err());
+        assert!(state.agent_model(Some("cell-model".into())).is_err());
 
         state.set_agents(crate::config::AgentsConfig {
             mode: crate::config::AgentsMode::Pinned,
             model: Some("pinned-model".into()),
             deadline: None,
+            ..Default::default()
         });
         assert_eq!(state.agent_model(None).unwrap(), "pinned-model");
-        assert_eq!(
-            state.agent_model(Some("cell-model".into())).unwrap(),
-            "cell-model",
-            "an explicit cell model overrides a pinned default"
-        );
+        assert!(state.agent_model(Some("cell-model".into())).is_err());
 
         state.set_agents(crate::config::AgentsConfig {
             mode: crate::config::AgentsMode::Off,
             model: None,
             deadline: None,
+            ..Default::default()
         });
         assert!(state.agent_model(None).is_err());
         assert!(

@@ -2527,6 +2527,7 @@ fn agent_run_callback(
     // subagent that never gets there.
     let turns = read_millis(scope, args.get(1), "turns");
     let asked_model = read_option(scope, args.get(1), "model");
+    let asked_slot = read_option(scope, args.get(1), "slot");
     let asked_profile = read_option(scope, args.get(1), "profile");
     let asked_effort = read_option(scope, args.get(1), "effort");
 
@@ -2572,8 +2573,14 @@ fn agent_run_callback(
     };
     let task = template.map_or(task.clone(), |template| template.task(&task));
     let asked_model = asked_model.or_else(|| template.and_then(|template| template.model.clone()));
-    let model = match state.agent_model(asked_model) {
-        Ok(model) => model,
+    let selected_model = state.agent_assignment(
+        asked_model.as_deref(),
+        asked_slot.as_deref(),
+        effort,
+        asked_effort.is_some(),
+    );
+    let (model, effort) = match selected_model {
+        Ok(assignment) => assignment,
         Err(rule) => {
             throw_denied(
                 scope,

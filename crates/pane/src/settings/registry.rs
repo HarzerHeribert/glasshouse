@@ -70,8 +70,8 @@ const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 /// The working mode a session starts in. `build` is this file's word for the
 /// runtime's `execute`; both are accepted, and `build` is what is written.
-const MODES: &[&str] = &["build", "plan"];
-const AGENT_MODES: &[&str] = &["auto", "off", "pinned"];
+const MODES: &[&str] = &["build", "explore", "plan"];
+const AGENT_MODES: &[&str] = &["auto", "off", "pinned", "roster"];
 
 /// The permission ladder's rungs, in cycle order, spelled once in
 /// `permissions::Rung::NAMES` so the panel and Shift-Tab cannot disagree.
@@ -154,7 +154,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "agents.mode",
         label: "Subagent mode",
-        description: "`auto` inherits the parent, `off` refuses every spawn, `pinned` requires `agents.model`.",
+        description: "Off refuses spawns; pinned locks one explicit model; roster uses configured favorites. Legacy auto is migration-only, never inheritance.",
         kind: Kind::Choice,
         choices: AGENT_MODES,
         basic: true,
@@ -194,6 +194,78 @@ static SPECS: &[SettingSpec] = &[
         kind: Kind::Choice,
         choices: COMPLETION,
         basic: true,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.quick.model",
+        label: "Quick favorite",
+        description: "Explicit favorite model; an empty slot never inherits Main. Provider/account routing remains gateway-owned.",
+        kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.quick.effort",
+        label: "Quick effort",
+        description: "Captured effort for this favorite; a delegated call cannot raise it.",
+        kind: Kind::Choice,
+        choices: HARD_EFFORT,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.balanced.model",
+        label: "Balanced favorite",
+        description: "Explicit favorite model; an empty slot never inherits Main. Provider/account routing remains gateway-owned.",
+        kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.balanced.effort",
+        label: "Balanced effort",
+        description: "Captured effort for this favorite; a delegated call cannot raise it.",
+        kind: Kind::Choice,
+        choices: HARD_EFFORT,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.deep.model",
+        label: "Deep favorite",
+        description: "Explicit favorite model; an empty slot never inherits Main. Provider/account routing remains gateway-owned.",
+        kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.deep.effort",
+        label: "Deep effort",
+        description: "Captured effort for this favorite; a delegated call cannot raise it.",
+        kind: Kind::Choice,
+        choices: HARD_EFFORT,
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.heavy.model",
+        label: "Heavy favorite",
+        description: "Explicit favorite model; an empty slot never inherits Main. Provider/account routing remains gateway-owned.",
+        kind: Kind::Model,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "agents.slots.heavy.effort",
+        label: "Heavy effort",
+        description: "Captured effort for this favorite; a delegated call cannot raise it.",
+        kind: Kind::Choice,
+        choices: HARD_EFFORT,
+        basic: false,
         restart: true,
     },
     // -- presentation, curated and Pane-owned -----------------------------

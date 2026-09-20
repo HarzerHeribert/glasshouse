@@ -1,5 +1,7 @@
 # Pane's legibility: what the person watching can actually work out
 
+> Historical presentation contract. The live UI is now governed by [Native workbench](workbench.md). Its direct-save, contrast and interaction rules supersede the old UI behavior below; storage and security guarantees remain.
+
 The user, 2026-09-17: *"another agent should work on user facing verbosity and
 information so a user can actually understand what's happening. Cells are pretty
 tough to read."* And earlier: *"Claude code is verbal about what it is doing. A

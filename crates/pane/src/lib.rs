@@ -47,3 +47,5 @@ pub mod web;
 pub mod wire;
 
 pub mod verification;
+
+pub mod workbench;

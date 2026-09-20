@@ -75,7 +75,7 @@ impl Selection {
 ///
 /// Trailing blanks are dropped per row: a row is padded to the width of the
 /// screen, and copying that padding would paste a wall of spaces.
-pub(super) fn draw(buffer: &mut Buffer, area: Rect, selection: Selection) -> String {
+pub(crate) fn draw(buffer: &mut Buffer, area: Rect, selection: Selection) -> String {
     let mut out = String::new();
     let ((_, top), (_, bottom)) = selection.ordered();
     for row in top..=bottom {

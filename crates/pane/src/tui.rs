@@ -10,12 +10,14 @@ mod message;
 use message::*;
 mod composer;
 mod paths;
+pub(crate) use paths::{found as found_paths, resolve as resolve_path};
 mod poster;
 mod regions;
 mod selection;
 pub(crate) use composer::composer_offset;
 use composer::{composer_cursor, wrapped_input};
 pub use selection::Selection;
+pub(crate) use selection::draw as draw_selection;
 mod hit;
 pub(crate) use hit::{Hit, ScreenGeometry, StatusField};
 
@@ -634,6 +636,18 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
         })
         .chain(
             [
+                (
+                    "/diff".to_string(),
+                    "inspect the last cell before/after diff",
+                ),
+                (
+                    "/activity".to_string(),
+                    "inspect local notices without sending to the model",
+                ),
+                (
+                    "/subagents".to_string(),
+                    "configure explicit favorite slots · on|off|SLOT MODEL [EFFORT]",
+                ),
                 (
                     "/handlers".to_string(),
                     "inspect standing handlers · /handlers off <name>",

@@ -1,6 +1,7 @@
 //! Human-invoked session inspection and configuration. No model dispatch.
 use super::*;
 use crate::config::AgentsMode;
+mod subagents;
 #[cfg(test)]
 use crate::config::PaneConfig;
 use crate::spend::Tier;
@@ -56,16 +57,48 @@ struct Account {
 }
 
 pub(super) fn models(session: &Session<'_>) {
-    let catalogue = session
+    let mut catalogue = session
         .gateway
         .run(&["entitlements", "--json", "--refresh"], None)
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
-    // Read once, when the panel opens, from whatever `glasshouse analysis
-    // --refresh` last cached. No network request on a keystroke.
+    let keys = api_keys(session);
+    if let Some(catalogue) = &mut catalogue {
+        for account in &mut catalogue.accounts {
+            let missing_key = keys.iter().any(|key| {
+                account.provider.as_deref() == Some(key.provider.as_str()) && key.source.is_none()
+            });
+            if account.authenticated == Some(false)
+                || (account.authenticated.is_none() && missing_key)
+            {
+                account.selectable = Some(false);
+                account.unavailable_reason = Some(
+                    if account.authenticated == Some(false) {
+                        "Connect this subscription in /login first."
+                    } else {
+                        "No credential for this provider; configure it in /login first."
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    // The gateway owns measurements too; standalone Pane needs no Glasshouse process.
+    let mut scores: std::collections::BTreeMap<String, f64> =
+        crate::models::published(session.gateway)
+            .into_iter()
+            .filter_map(|(id, facts)| {
+                facts
+                    .intelligence
+                    .filter(|n| n.is_finite())
+                    .map(|n| (id, n))
+            })
+            .collect();
+    if scores.is_empty() {
+        scores = crate::glasshouse::intelligence(session.glasshouse);
+    }
     show(
         session,
-        model_panel(catalogue, tier_models(session))
-            .with_intelligence(crate::glasshouse::intelligence(session.glasshouse)),
+        model_panel(catalogue, tier_models(session)).with_intelligence(scores),
     );
 }
 
@@ -87,6 +120,7 @@ fn tier_models(session: &Session<'_>) -> TierModels {
             AgentsMode::Auto => None,
             AgentsMode::Off => Some("off".to_string()),
             AgentsMode::Pinned => config.agents.model.clone(),
+            AgentsMode::Roster => Some("favorite roster".into()),
         },
     }
 }
@@ -106,6 +140,9 @@ pub(super) fn assign_model(
     tier: Tier,
     value: &str,
 ) -> Result<String, String> {
+    if tier == Tier::Subagents && matches!(value, "auto" | "inherit") {
+        return Err("Implicit inheritance is disabled. Pick a concrete subagent model or configure favorite slots.".into());
+    }
     let (section, key, key_removed) = match tier {
         Tier::Parent => ("model", "parent", false),
         Tier::Helpers => {
@@ -116,11 +153,7 @@ pub(super) fn assign_model(
             }
             ("helpers", "model", value == "off")
         }
-        Tier::Subagents => (
-            "agents",
-            "model",
-            matches!(value, "auto" | "inherit" | "off"),
-        ),
+        Tier::Subagents => ("agents", "model", value == "off"),
     };
     let store = crate::settings::Store::new(&session.project.root)?;
     let snapshot = store.read(crate::settings::Scope::Local)?;
@@ -137,7 +170,6 @@ pub(super) fn assign_model(
     }
     if tier == Tier::Subagents {
         let mode = match value {
-            "auto" | "inherit" => "auto",
             "off" => "off",
             _ => "pinned",
         };
@@ -149,12 +181,21 @@ pub(super) fn assign_model(
         &edits,
         session.selected_profile.as_deref(),
     )?;
-    *session.config.borrow_mut() = loaded.config;
+    // A live model choice must not activate unrelated preferences saved for restart.
+    let mut live = session.config.borrow_mut();
+    match tier {
+        Tier::Parent => live.model.parent = loaded.config.model.parent,
+        Tier::Helpers => {
+            live.helpers.model = loaded.config.helpers.model;
+            live.helpers.enabled = loaded.config.helpers.enabled;
+        }
+        Tier::Subagents => {
+            live.agents.model = loaded.config.agents.model;
+            live.agents.mode = loaded.config.agents.mode;
+        }
+    }
     Ok(match (tier, value) {
         (Tier::Helpers, "off") => "helpers off; no helper will run".to_string(),
-        (Tier::Subagents, "auto" | "inherit") => {
-            "subagents use auto mode and inherit the parent's model by default".to_string()
-        }
         (Tier::Subagents, "off") => "subagents off; no subagent will run".to_string(),
         (tier, _) => format!("{} model set to {value}", tier.singular()),
     })
@@ -236,6 +277,11 @@ fn api_keys(session: &Session<'_>) -> Vec<crate::gateway::CredentialRow> {
 /// them has a credential -- so every turn would come back 503 until a key is
 /// entered.
 pub(super) fn announce_missing_credential(session: &Session<'_>, started_the_gateway: bool) {
+    if session.config().agents.mode == AgentsMode::Auto {
+        session_println!(
+            "Subagents: legacy auto inheritance is disabled. Select a concrete model or configure favorite slots; Main will not be reused implicitly."
+        );
+    }
     const NOTICE: &str = "No provider credential is stored yet. Use /login to enter an API key \
                           or connect an account.";
     if !started_the_gateway || !crate::gateway::nothing_resolves(session.gateway) {
@@ -634,7 +680,11 @@ fn model_panel(catalogue: Option<Catalogue>, tiers: TierModels) -> Panel {
                         account: account.account,
                         scope: account.scope,
                         models: account.models,
-                        selectable: account.selectable,
+                        selectable: if account.authenticated == Some(false) {
+                            Some(false)
+                        } else {
+                            account.selectable
+                        },
                         unavailable_reason,
                         connect,
                     }
@@ -656,6 +706,10 @@ pub(super) fn command(
     transcript: &Transcript,
 ) -> bool {
     match name {
+        "subagents" => match subagents::assign(session, argument.unwrap_or_default()) {
+            Ok(message) => session_println!("{message}"),
+            Err(error) => session_println!("ERROR: {error}"),
+        },
         "handlers" => {
             if argument.is_some() {
                 session_println!("No active task; handlers are released when its task ends.");
@@ -1325,11 +1379,11 @@ mod tests {
             assign_model(session, Tier::Helpers, "off").unwrap();
             assert_eq!(tier_models(session).helper, None);
             assert_eq!(PaneConfig::load(&root).unwrap().helpers.model, None);
-            assign_model(session, Tier::Subagents, "inherit").unwrap();
-            assert_eq!(tier_models(session).subagent, None);
+            assert!(assign_model(session, Tier::Subagents, "inherit").is_err());
+            assert_eq!(tier_models(session).subagent.as_deref(), Some("off"));
             assert_eq!(
                 PaneConfig::load(&root).unwrap().agents.mode,
-                AgentsMode::Auto
+                AgentsMode::Off
             );
 
             // A value the config refuses fails with the config's own sentence
@@ -1377,21 +1431,49 @@ mod tests {
             assert!(!session.config().helpers.enabled);
             assign_model(session, Tier::Subagents, "off").unwrap();
             assert_eq!(session.config().agents.mode, crate::config::AgentsMode::Off);
-            assign_model(session, Tier::Subagents, "auto").unwrap();
-            assert_eq!(
-                session.config().agents.mode,
-                crate::config::AgentsMode::Auto
-            );
+            assert!(assign_model(session, Tier::Subagents, "auto").is_err());
+            assert_eq!(session.config().agents.mode, crate::config::AgentsMode::Off);
             assign_model(session, Tier::Parent, "review-parent").unwrap();
             assert_eq!(
                 session.config().model.parent.as_deref(),
                 Some("review-parent")
             );
             assert_eq!(PaneConfig::load(&root).unwrap(), base);
+            let reloaded = PaneConfig::load_profile(&root, Some("review")).unwrap();
+            let mut live = session.config().clone();
+            // Supervisor fallback is resolved at startup, not silently changed
+            // by a different tier's live model choice.
+            assert_eq!(live.supervisor.model.as_deref(), Some("review-helper"));
+            assert_eq!(reloaded.supervisor.model.as_deref(), Some("base-helper"));
+            live.supervisor = reloaded.supervisor.clone();
+            assert_eq!(reloaded, live);
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_assignment_does_not_activate_unrelated_restart_preferences() {
+        let root = std::env::temp_dir().join(format!("pane-pending-live-{}", std::process::id()));
+        fs::create_dir_all(root.join(".pane")).unwrap();
+        let file = root.join(".pane/config.toml");
+        fs::write(&file, "[limits]\ncells=17\n").unwrap();
+        with_session(&root, |session| {
+            fs::write(&file, "[limits]\ncells=42\n[helpers]\npreflight=true\n").unwrap();
+            assign_model(session, Tier::Helpers, "explicit-helper").unwrap();
+            assert_eq!(session.config().limits.cells, Some(17));
+            assert!(!session.config().helpers.preflight);
             assert_eq!(
-                PaneConfig::load_profile(&root, Some("review")).unwrap(),
-                *session.config()
+                session.config().helpers.model.as_deref(),
+                Some("explicit-helper")
             );
+            subagents::assign(session, "quick explicit-agent low").unwrap();
+            assert_eq!(session.config().limits.cells, Some(17));
+            assert!(!session.config().helpers.preflight);
+            assert_eq!(
+                session.config().agents.slots["quick"].model,
+                "explicit-agent"
+            );
+            assert_eq!(PaneConfig::load(&root).unwrap().limits.cells, Some(42));
         });
         fs::remove_dir_all(root).unwrap();
     }

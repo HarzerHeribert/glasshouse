@@ -5651,3 +5651,15 @@ network, no `~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex`, `~/.config`, no
 registry credential inside the toolchain, no sandbox launcher. The startup
 line says both halves in one sentence, because a line that only shouts teaches
 a person to stop reading it.
+
+
+## Native Pane workbench replacement — user ruling, 2026-09-20
+
+Replace the live presentation and interaction design rather than layering another
+reskin onto old decisions. The current contract is `pane/workbench.md`. Retain the
+execution kernel, safety boundaries and native settings store, but retire staged
+model/settings baskets, flat everyday settings and local controls dumped into the
+model conversation. Helpers and observed diffs belong to their actual cells.
+Subagents require explicit assignments; legacy automatic inheritance is refused.
+Earlier presentation entries are historical, not instructions to restore the old
+renderer. Provider/account pinning is not available until enforced by the gateway.
