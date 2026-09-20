@@ -1,0 +1,42 @@
+name: Pane workbench isolated build inputs
+
+on:
+  push:
+    branches: [codex/pane-workbench-bootstrap]
+    paths: [.github/workflows/pane-workbench-bootstrap.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: |
+          mkdir -p /tmp/pane-inputs
+          git archive --format=tar.gz --output=/tmp/pane-inputs/source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pane-workbench-source
+          path: /tmp/pane-inputs/source.tar.gz
+          retention-days: 2
+      - name: Prepare repository-pinned compiler and locked dependency sources
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          cargo +1.98.0 vendor --locked /tmp/pane-vendor > /tmp/pane-inputs/vendor-config.toml
+          tar -C /tmp -czf /tmp/pane-inputs/vendor.tar.gz pane-vendor
+          TOOLCHAIN="$(rustup run 1.98.0 rustc --print sysroot)"
+          tar -C "$TOOLCHAIN" -czf /tmp/pane-inputs/rust-toolchain.tar.gz bin lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pane-workbench-build-inputs
+          path: |
+            /tmp/pane-inputs/vendor.tar.gz
+            /tmp/pane-inputs/vendor-config.toml
+            /tmp/pane-inputs/rust-toolchain.tar.gz
+          retention-days: 2
