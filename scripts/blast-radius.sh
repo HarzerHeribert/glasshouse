@@ -953,6 +953,23 @@ else
 fi
 rm -f "$doc_out"
 
+# Formatting, for the same reason the ratchet is here: this is the gate the
+# work actually runs. `cargo fmt --check` lived in ci-local.sh's lint lane and
+# in integrate.sh, and the 2026-09-17 ruling made in-session work the default
+# path -- which runs neither. Two GitHub lint cells went red on formatting in
+# two days before anyone noticed the step had lost its owner. It costs
+# seconds: fmt parses, it does not build.
+echo
+printf '\033[1m=== formatting ===\033[0m\n'
+if fmt_out=$(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+  cargo fmt --all -- --check 2>&1); then
+  echo "  cargo fmt --all --check: clean"
+else
+  rc=1
+  echo "  --- unformatted (run \`cargo fmt --all\`) ---"
+  printf '%s\n' "$fmt_out" | grep -E '^Diff in ' | head -12
+fi
+
 # Phase 59's size ratchet: a production file over the ceiling may only shrink.
 # It is here rather than only in ci-local.sh because this is the gate every
 # worker runs; a package that grows main.rs learns it before it reports.

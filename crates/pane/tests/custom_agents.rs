@@ -125,7 +125,9 @@ fn invalid_profile_throws_before_a_background_agent_is_created() {
 
 #[test]
 fn named_agent_routes_snapshot_instructions_model_and_effort_with_explicit_override() {
-    let _env = ENV_LOCK.write().unwrap_or_else(|poison| poison.into_inner());
+    let _env = ENV_LOCK
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner());
     let fixture = Fixture::new();
     std::fs::create_dir_all(fixture.0.join(".glasshouse")).unwrap();
     std::fs::write(

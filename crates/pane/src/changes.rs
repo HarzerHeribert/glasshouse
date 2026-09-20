@@ -1340,6 +1340,42 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// **The same directory reached by another spelling is the same
+    /// directory.** git answers `rev-parse --show-toplevel` in the path it
+    /// resolved, and a session's root is the path it was given. When the two
+    /// spellings differ, `dirty` used to drop every entry and report
+    /// `Some(vec![])` -- "nothing changed", for a tree that had just been
+    /// edited, with nothing in the answer to say so.
+    ///
+    /// Measured on the sweep of 2026-09-19: both git-backed tests failed on
+    /// `windows-latest` with `left: []`, deterministically, the rerun-alone
+    /// included. The runner's `TEMP` is an 8.3 short name and git prints the
+    /// long one. A symlink is the same mismatch on a host that has them.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_spelled_another_way_still_sees_what_git_sees() {
+        let Some((root, _)) = repository("git-spelling") else {
+            return;
+        };
+        let link = root.with_extension("link");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let profile =
+            Profile::compile(&link, Some(r#"{"permissions":{"allow":["Read","Write"]}}"#));
+
+        let before = Snapshot::capture(&profile);
+        fs::write(link.join("tracked.txt"), "edited through the other name\n").unwrap();
+        let after = Snapshot::capture(&profile);
+        assert_eq!(
+            before.changed_paths(&after),
+            vec![(PathBuf::from("tracked.txt"), ChangeKind::Modified)],
+            "a root spelled another way reported no changes at all"
+        );
+
+        let _ = fs::remove_file(&link);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_created_file_and_a_deleted_one_are_told_apart_by_what_git_knows() {
         let Some((root, profile)) = repository("git-kinds") else {

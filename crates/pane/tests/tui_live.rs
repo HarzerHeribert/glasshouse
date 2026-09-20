@@ -738,7 +738,9 @@ fn bare_pane_opens_the_live_composer_in_its_current_project() {
     assert_eq!(rollouts.len(), 1, "one session, one rollout: {written:?}");
     let stem = rollouts[0].trim_end_matches(".jsonl");
     assert!(
-        written.iter().any(|name| name == &format!("{stem}.events.jsonl")),
+        written
+            .iter()
+            .any(|name| name == &format!("{stem}.events.jsonl")),
         "the event stream shares the rollout's stem: {written:?}"
     );
     assert!(!app.screen.screen().alternate_screen());
@@ -1642,9 +1644,10 @@ fn live_a_message_sent_while_working_is_queued_and_becomes_the_next_task() {
         said(&second).contains("steer me instead"),
         "the queued message never became a task: {second}"
     );
-    app.wait("the queue empties when its message becomes the task", |screen| {
-        !screen.contents().contains("QUEUED")
-    });
+    app.wait(
+        "the queue empties when its message becomes the task",
+        |screen| !screen.contents().contains("QUEUED"),
+    );
 
     app.send(b"\x03");
     thread::sleep(Duration::from_millis(100));

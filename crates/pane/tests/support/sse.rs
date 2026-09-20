@@ -35,7 +35,10 @@ pub fn response_for(request: &Value, whole: &str) -> (&'static str, String) {
     for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                let text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 blocks_sse.push(serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}));
                 blocks_sse.push(serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}}));
             }

@@ -51,7 +51,11 @@ pub(super) fn ignored_directories(search_root: &Path) -> Vec<String> {
         // A trailing `/` is git's own spelling of "this is a directory", and
         // it is the only one that says so without guessing.
         .filter(|rule| rule.ends_with('/'))
-        .map(|rule| rule.trim_end_matches('/').trim_start_matches('/').to_string())
+        .map(|rule| {
+            rule.trim_end_matches('/')
+                .trim_start_matches('/')
+                .to_string()
+        })
         .filter(|name| {
             !name.is_empty()
                 && !name.contains('/')

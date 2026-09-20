@@ -219,4 +219,3 @@ pub(super) fn message_text(message: &Message) -> String {
         text
     }
 }
-

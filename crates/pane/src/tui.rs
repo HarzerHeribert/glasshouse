@@ -518,8 +518,8 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
     // place -- directly over the composer, where someone who just typed is
     // already looking -- but it is not a notice: it outlives keystrokes.
     let notice_rows = if state.notice.is_some() { 2 } else { 0 };
-    let queued_rows = (state.queued.len().min(QUEUE_ROWS) as u16)
-        + u16::from(state.queued.len() > QUEUE_ROWS);
+    let queued_rows =
+        (state.queued.len().min(QUEUE_ROWS) as u16) + u16::from(state.queued.len() > QUEUE_ROWS);
     let notice_h = if notice_rows + queued_rows > 0 {
         (1 + notice_rows + queued_rows).min((completions.y - area.y).saturating_sub(4))
     } else {

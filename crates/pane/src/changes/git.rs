@@ -62,6 +62,20 @@ fn toplevel(root: &Path) -> Option<PathBuf> {
 /// `--no-renames` keeps the status letters to the four this module reads.
 pub(super) fn dirty(root: &Path) -> Option<Vec<Entry>> {
     let top = toplevel(root)?;
+    // **Both sides resolved before they are compared, because git answers in
+    // its own spelling of the same directory.** `rev-parse --show-toplevel`
+    // prints the path git resolved; `root` is the path the session was given.
+    // On Windows those routinely differ without naming different places -- a
+    // `TEMP` reached as `C:\Users\RUNNER~1\...` against git's
+    // `C:/Users/runneradmin/...` is the shape the sweep failed on -- and a
+    // symlinked project root does the same on any host. When they differ,
+    // every `strip_prefix` below misses, every entry is dropped, and `dirty`
+    // answers `Some(vec![])`: not "I could not tell" but "nothing changed",
+    // for a tree that had just been edited. A wrong answer with no way to
+    // notice it is worse than the walk this function exists to avoid.
+    let resolved = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (top, root) = (resolved(&top), resolved(root));
+    let root = root.as_path();
     let out = run(
         root,
         &[

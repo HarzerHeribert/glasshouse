@@ -591,7 +591,10 @@ pub(super) fn notice(
     if !queue.is_empty() {
         let split = (queue.len() as u16 + 1).min(area.height);
         let (top, rest) = (
-            ratatui::layout::Rect { height: split, ..area },
+            ratatui::layout::Rect {
+                height: split,
+                ..area
+            },
             ratatui::layout::Rect {
                 y: area.y + split,
                 height: area.height - split,

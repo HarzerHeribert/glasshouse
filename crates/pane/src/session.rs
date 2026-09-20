@@ -1782,10 +1782,16 @@ fn run_task_inner(
         // stops leaves the next one reading a transcript whose last cell
         // had no answer, and a model reading that guesses -- usually that
         // its work was wrong. It was not; it was interrupted.
-        let said = "The person stopped this turn. Work already done stands;                     do not redo it. Wait for what they say next.";
+        let said = "The person stopped this turn. Work already done stands; do not redo it. \
+                    Wait for what they say next.";
         write_turn(session.interrupt, rollout, Role::User, said)
             .map_err(|e| format!("could not record the stop: {e}"))?;
-        render(transcript, &ServedBy::default(), session, tui::Activity::Complete);
+        render(
+            transcript,
+            &ServedBy::default(),
+            session,
+            tui::Activity::Complete,
+        );
     }
     if incomplete {
         let reason = terminal_failure.unwrap_or_else(|| {
