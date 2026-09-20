@@ -67,7 +67,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "grep",
         return_type: "Grep.Match[]",
-        summary: "Search the project for a regular expression.",
+        summary: "Search the project for a regular expression. Ripgrep serves it where ripgrep is installed, so ignored files are skipped; name a directory as `path` to search one anyway.",
     },
     Entry {
         name: "rg",

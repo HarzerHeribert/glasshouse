@@ -34,6 +34,9 @@
 //! at compile time; there is no argument, no path and no branch through
 //! which assistant text selects or becomes a program.
 
+/// What a broad search covers: the generated trees it steps over, and the
+/// output filter for the one that cannot be stepped over by name.
+mod broad;
 mod process;
 /// `read` and `grep` performed inside this process. Used where the registry
 /// declares both in-process — Windows — and compiled under `test` on every
@@ -41,6 +44,10 @@ mod process;
 #[cfg(any(windows, test))]
 mod search;
 
+use broad::{
+    contains_component, explicitly_roots_component, filter_grep_artifacts, ignored_directories,
+    is_broad_search, is_pane_artifact, ripgrep_is_installed,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
@@ -869,24 +876,58 @@ fn checked_call(
     }
     let broad_search = resolved_path(&checked, "path")
         .is_some_and(|path| is_broad_search(ctx.profile.root(), path));
+    let requested = tool.name();
+    let skipped = if requested == "grep" && broad_search {
+        resolved_path(&checked, "path")
+            .map(ignored_directories)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     // Branching here and not inside `spawn_confined` is what makes
     // `Argv::InProcess`'s claim structural: an in-process tool never reaches
     // a `Command`, an `exec_grant` or a sandbox applier, because the only
     // call site of all three is the other arm.
+    // **`grep` is ripgrep when ripgrep is installed.** The two tools answer
+    // the same question from the same two arguments, and one of them answers
+    // it seven thousand times faster: measured on 2026-09-20 against a 9.2 GB
+    // checkout, `grep -r` took 143 s and `rg` took 20 ms. Worse than the time,
+    // `grep` is BRE and `rg` is not, so the same pattern meant two different
+    // things depending on which name the model happened to write -- and the
+    // model writes `grep`, because that is the name it knows.
+    //
+    // The visible difference is that ignored files stop matching, which is
+    // what `rg`'s own summary has promised all along and what a person
+    // searching a checkout means. Aiming `path` at a directory searches it
+    // whatever an ignore file says, exactly as `.git` and `.pane` already
+    // work. Where ripgrep is absent, `grep` runs as before, with `-E` and
+    // the search root's own directory rules.
+    let tool = if requested == "grep" && ripgrep_is_installed() {
+        registry::GREP_BY_RIPGREP
+    } else {
+        tool
+    };
     let mut result = if tool.argv() == Argv::InProcess {
         perform_in_process(ctx.profile, &stop, tool, &checked)?
     } else {
         let mut argv = build_argv(tool, &checked)?;
-        if tool.name() == "grep" && broad_search {
+        // Keyed on the argv shape, not on the name: once ripgrep is serving
+        // the call the tool is still called `grep` and these are not its
+        // flags -- passing them made every search exit on an unknown option
+        // and answer with nothing, which the search tests caught at once.
+        if tool.argv() == Argv::GrepIn && broad_search {
             // Git internals are an entire generated tree and grep can avoid
             // traversing them. The rollout is one exact path rather than a
             // basename-wide exclusion, so it is removed from output below.
             // The in-process `grep` prunes the same directories itself.
             argv.insert(1, "--exclude-dir=.git".into());
+            for name in &skipped {
+                argv.insert(1, format!("--exclude-dir={name}").into());
+            }
         }
         spawn_confined(ctx.profile, &stop, tool, &argv, waiting)?
     };
-    if tool.name() == "grep" && broad_search {
+    if requested == "grep" && broad_search {
         result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
     }
     if tool.name() == "read" && result.exit_code == Some(0) {
@@ -1221,78 +1262,6 @@ fn glob_paths(
         .collect())
 }
 
-/// Whether a search rooted at `search_root` is a broad one — not deliberately
-/// aimed inside `.pane` or `.git` — and so omits the generated trees: `.git`
-/// is pruned from the walk and the rollout is filtered from the output.
-fn is_broad_search(project: &Path, search_root: &Path) -> bool {
-    !explicitly_roots_component(project, search_root, ".pane")
-        && !explicitly_roots_component(project, search_root, ".git")
-}
-
-/// Whether a caller deliberately rooted search inside a generated hidden
-/// tree. Direct targeting is an opt-in; a project-root search remains broad.
-fn explicitly_roots_component(project: &Path, search_root: &Path, wanted: &str) -> bool {
-    search_root
-        .strip_prefix(project)
-        .ok()
-        .is_some_and(|relative| contains_component(relative, wanted))
-}
-
-fn contains_component(path: &Path, wanted: &str) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == wanted)
-}
-
-/// Generated paths omitted from broad discovery. `.pane` itself is not
-/// excluded: user configuration there remains searchable.
-fn is_search_artifact(relative: &Path) -> bool {
-    contains_component(relative, ".git") || is_pane_artifact(relative)
-}
-
-fn is_pane_artifact(relative: &Path) -> bool {
-    let components: Vec<_> = relative
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect();
-    components
-        .windows(2)
-        .any(|pair| pair == [".pane", "rollout.jsonl"])
-}
-
-/// The filename prefix from one `grep -r -n` result. This mirrors the
-/// runtime match parser: a colon belongs to the path unless the following
-/// non-empty field is an ASCII line number.
-fn grep_match_path(line: &str) -> Option<&str> {
-    let mut start = 0usize;
-    while let Some(offset) = line[start..].find(':') {
-        let colon = start + offset;
-        let rest = &line[colon + 1..];
-        if let Some(next) = rest.find(':') {
-            let digits = &rest[..next];
-            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Some(&line[..colon]);
-            }
-        }
-        start = colon + 1;
-        if start >= line.len() {
-            break;
-        }
-    }
-    None
-}
-
-fn filter_grep_artifacts(project: &Path, output: &str) -> String {
-    output
-        .lines()
-        .filter(|line| {
-            grep_match_path(line)
-                .and_then(|path| Path::new(path).strip_prefix(project).ok())
-                .is_none_or(|relative| !is_search_artifact(relative))
-        })
-        .map(|line| format!("{line}\n"))
-        .collect()
-}
-
 fn glob_components(pattern: &[&str], path: &[String]) -> bool {
     let mut matched = vec![vec![false; path.len() + 1]; pattern.len() + 1];
     matched[0][0] = true;
@@ -1552,6 +1521,18 @@ fn build_argv(
             let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
             argv.push("-r".into());
             argv.push("-n".into());
+            // **`-E`, because the declaration says "a regular expression" and
+            // a model writes one.** Without it `grep` is BRE, where `|` is a
+            // literal pipe, `+` is a literal plus and `(a|b)` is a literal
+            // parenthesis -- so `grep({pattern: "a|b"})` searched for the
+            // three-character string `a|b` and found nothing, while `rg`
+            // beside it in the same roster read the same pattern as
+            // alternation. Measured on 2026-09-20: one session spent 128 s
+            // and then 132 s walking a 9 GB tree for a literal
+            // sixty-character string with five pipes in it, found nothing,
+            // and tried a third way. A search that is silently answering a
+            // different question is worse than a slow one.
+            argv.push("-E".into());
             argv.push("-e".into());
             argv.push(pattern.into());
             argv.push("--".into());
@@ -1563,10 +1544,19 @@ fn build_argv(
         // `rg` puts the pattern behind `-e` and the path behind `--`; `fd`
         // and `jq` have no option form for theirs, so `--` is what holds.
         // Drop one and `fd --help` and `jq --version` are flags.
-        Argv::SearchIn => {
+        Argv::SearchIn | Argv::SearchInAll => {
             let pattern = text(checked, "pattern").ok_or_else(|| missing("pattern"))?;
             let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
             argv.push("--no-config".into());
+            if tool.argv() == Argv::SearchInAll {
+                // `grep` has always read a project's own dot-files -- its
+                // config, its `.env`, its `.settings` -- and a faster binary
+                // underneath must not quietly take that away. `.git` is
+                // excluded here rather than filtered from the output, which
+                // is the same decision the spawned `grep` makes one arm up.
+                argv.push("--hidden".into());
+                argv.push("--glob=!.git/".into());
+            }
             argv.push("--line-number".into());
             argv.push("--no-heading".into());
             argv.push("--color=never".into());
@@ -2415,6 +2405,32 @@ fn truncate(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The fallback's dialect, checked structurally because on a machine
+    /// with ripgrep it never runs.** `checked_call` hands a `grep` call to
+    /// ripgrep wherever ripgrep is installed, so every behavioural search
+    /// test on such a machine passes whether or not this flag is here --
+    /// measured: the mutation that removed it SURVIVED the whole search
+    /// suite. What it guards is the other machine, where `grep` is BRE and
+    /// `|` is a literal pipe, and the declaration promises a regular
+    /// expression on both.
+    #[test]
+    fn the_spawned_grep_is_given_the_extended_dialect_the_declaration_promises() {
+        let tool = crate::tools::registry::lookup("grep").expect("grep is in the roster");
+        let checked = vec![
+            ("pattern", Checked::Pattern("a|b".into())),
+            ("path", Checked::Path(std::path::PathBuf::from("."))),
+        ];
+        let argv = build_argv(tool, &checked).expect("argv");
+        assert!(
+            argv.iter().any(|flag| flag == "-E"),
+            "the spawned grep would read `a|b` as a literal pipe: {argv:?}"
+        );
+        // The pattern stays behind `-e`, where a value spelled like an
+        // option is that option's value before it is anything else.
+        let at = argv.iter().position(|flag| flag == "-e").expect("-e");
+        assert_eq!(argv[at + 1], "a|b");
+    }
 
     /// The command the shell fixture runs to print `bypass-ok` exactly:
     /// `printf` on the POSIX shell, `echo` on `cmd.exe`, whose trailing CRLF

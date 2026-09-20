@@ -175,6 +175,11 @@ pub enum Argv {
     ReadPath,
     /// `<exe> -r -n -e <pattern> -- <path>`.
     GrepIn,
+    /// [`Argv::SearchIn`] for a `grep` call ripgrep is serving: the same
+    /// fixed flags plus the two that keep `grep`'s own contract, which
+    /// ripgrep's defaults do not -- a normal hidden file stays searchable,
+    /// and git internals stay out of the walk rather than out of the output.
+    SearchInAll,
     /// `<exe> --no-config --line-number --no-heading --color=never -e
     /// <pattern> -- <path>`.
     ///
@@ -397,6 +402,24 @@ const GREP: Tool = Tool::declare_in_process(
 /// behind `-e` and the path behind `--`. `-e` is the load-bearing half here:
 /// a pattern spelled `--pre` is that option's value before it is anything
 /// else.
+/// The `grep` call, served by ripgrep: `grep`'s name and arguments, `rg`'s
+/// binary and speed, and the two flags that keep `grep`'s own contract.
+///
+/// It is not in [`ALL`] and has no name of its own: a model asks for `grep`
+/// and `checked_call` substitutes this when ripgrep is installed, so the
+/// arguments were already checked against `GREP` and nothing new is
+/// reachable by name.
+pub(crate) const GREP_BY_RIPGREP: &Tool = &Tool::declare(
+    "grep",
+    "rg",
+    &[
+        Arg::required("pattern", ArgKind::Pattern),
+        Arg::rooted("path"),
+    ],
+    Argv::SearchInAll,
+    Purity::Pure,
+);
+
 const RIPGREP: Tool = Tool::declare(
     "rg",
     "rg",

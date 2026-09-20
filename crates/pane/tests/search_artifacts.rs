@@ -189,3 +189,142 @@ fn literal_glob_and_option_shaped_grep_patterns_remain_data() {
     let option = fixture.grep("-rf", None);
     assert!(option.contains("literal[1].txt"), "{option}");
 }
+
+/// **`grep` and `rg` must read a pattern the same way.** The declaration
+/// offers `grep` as "a regular expression", and a model writes one --
+/// alternation, `+`, a group. `grep` without `-E` is BRE, where every one of
+/// those is a literal character, so the call answers a different question
+/// than the one asked and answers it with silence. Measured on 2026-09-20: a
+/// real session spent 128 s and then 132 s searching a 9 GB tree for a
+/// sixty-character literal with five pipes in it.
+#[test]
+fn grep_reads_alternation_as_alternation_and_not_as_a_literal_pipe() {
+    let fixture = Fixture::new();
+    let matched = fixture.grep("needle source|nothing at all", None);
+    assert!(
+        matched.contains(&native(&fixture.root, "src/lib.rs")),
+        "alternation was searched for as a literal string: {matched:?}"
+    );
+}
+
+/// The other extended forms a model reaches for, in one call each, because
+/// `-E` is one flag and its absence is invisible in every one of them.
+#[test]
+fn grep_reads_the_extended_forms_a_model_writes() {
+    let fixture = Fixture::new();
+    for pattern in ["need+le", "(needle) source", "needle sourc?e"] {
+        let matched = fixture.grep(pattern, None);
+        assert!(
+            matched.contains(&native(&fixture.root, "src/lib.rs")),
+            "`{pattern}` was read as a literal: {matched:?}"
+        );
+    }
+}
+
+/// **A broad `grep` does not read what the project says it generates.**
+/// `grep` has no notion of an ignore file, so a checkout holding a model
+/// download and two virtual environments was read whole: 9.2 GB, measured at
+/// 143 seconds, twice in one session, while `rg` beside it in the same
+/// roster had skipped those directories all along.
+///
+/// The names come from the project's own `.gitignore` and from nowhere else,
+/// including one a level down -- which is where the tree that mattered
+/// declared itself.
+#[test]
+fn a_broad_grep_skips_what_the_project_says_it_generates() {
+    let fixture = Fixture::with_prefix("pane-search-ignored");
+    for (relative, contents) in [
+        (".gitignore", "generated/\n"),
+        ("generated/big.txt", "needle generated\n"),
+        ("sub/.gitignore", "models/\n.venv-vlm/\n*.so\nnotes.txt\n"),
+        ("sub/models/weights.txt", "needle weights\n"),
+        ("sub/.venv-vlm/pkg.py", "needle vendored\n"),
+        ("sub/real.py", "needle real source\n"),
+        ("sub/notes.txt", "needle notes\n"),
+    ] {
+        let path = fixture.root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    let matched = fixture.grep("needle", None);
+    assert!(
+        matched.contains(&native(&fixture.root, "sub/real.py")),
+        "real source was lost: {matched}"
+    );
+    assert!(
+        matched.contains(&native(&fixture.root, "src/lib.rs")),
+        "the fixture's own source was lost: {matched}"
+    );
+    for skipped in ["weights.txt", "pkg.py", "big.txt"] {
+        assert!(
+            !matched.contains(skipped),
+            "{skipped} was read although the project calls it generated: {matched}"
+        );
+    }
+}
+
+/// The rules are read as git reads them, not as an approximation of git.
+///
+/// Where ripgrep serves the call this is free and exact -- a rule from
+/// `sub/.gitignore` binds under `sub/` and a file-shaped rule excludes that
+/// file. Where ripgrep is absent, `--exclude-dir` can express neither, and
+/// `ignored_directories` takes only the rules that transfer without changing
+/// meaning: so the fallback finds *more* than this, never less, and a search
+/// that is merely slower is not a search that is wrong.
+#[test]
+fn an_ignored_file_is_skipped_where_git_says_it_is() {
+    let fixture = Fixture::with_prefix("pane-search-file-rule");
+    for (relative, contents) in [
+        ("sub/.gitignore", "notes.txt\n"),
+        ("sub/notes.txt", "needle notes\n"),
+        ("sub/real.py", "needle real source\n"),
+    ] {
+        let path = fixture.root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let matched = fixture.grep("needle", None);
+    assert!(
+        matched.contains(&native(&fixture.root, "sub/real.py")),
+        "real source was lost: {matched}"
+    );
+    if which_ripgrep() {
+        assert!(
+            !matched.contains("notes.txt"),
+            "a file git ignores was read anyway: {matched}"
+        );
+    }
+}
+
+fn which_ripgrep() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(if cfg!(windows) { "rg.exe" } else { "rg" });
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// A search deliberately aimed inside a generated tree still reads it: the
+/// opt-in `.git` and `.pane` already have.
+#[test]
+fn naming_a_generated_directory_searches_it() {
+    let fixture = Fixture::with_prefix("pane-search-opt-in");
+    for (relative, contents) in [
+        (".gitignore", "models/\n"),
+        ("models/weights.txt", "needle weights\n"),
+    ] {
+        let path = fixture.root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let inside = fixture.root.join("models");
+    let matched = fixture.grep("needle", Some(&inside));
+    assert!(
+        matched.contains("weights.txt"),
+        "a directly named directory was skipped anyway: {matched}"
+    );
+}
