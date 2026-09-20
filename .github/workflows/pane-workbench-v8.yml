@@ -1,0 +1,22 @@
+name: Pane offline V8 input
+on:
+  push:
+    branches: [codex/pane-workbench-bootstrap]
+    paths: [.github/workflows/pane-workbench-v8.yml]
+permissions:
+  contents: read
+jobs:
+  artifact:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch exact upstream release asset
+        run: |
+          mkdir -p /tmp/v8
+          curl --fail --location --retry 2 https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz -o /tmp/v8/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
+          sha256sum /tmp/v8/*.gz > /tmp/v8/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pane-v8-linux
+          path: /tmp/v8
+          retention-days: 2
