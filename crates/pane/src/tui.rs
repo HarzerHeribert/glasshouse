@@ -162,6 +162,18 @@ pub struct ScreenState {
     /// A keystroke hint the next keystroke replaces; everything a person may
     /// want to read again is a [`HistoryNote`] instead.
     pub notice: Option<String>,
+    /// Messages submitted while a task was running, in the order they were
+    /// sent, waiting for the turn to end.
+    ///
+    /// **A keystroke must not clear this, which is why it is not a
+    /// [`notice`](ScreenState::notice).** Someone who queues a message and
+    /// keeps typing has to be able to see what they already handed over;
+    /// the whole point of the queue is that they stopped watching.
+    pub queued: Vec<String>,
+    /// A stop was asked for and the turn has not ended yet -- the state in
+    /// which a second Escape means *cancel the call in flight* rather than
+    /// *stop after this cell*.
+    pub stopping: bool,
     /// Notices kept in the conversation, in arrival order.
     pub history: Vec<HistoryNote>,
     /// Messages in the conversation this state last drew, where a new note goes.
@@ -452,6 +464,11 @@ impl Activity {
     }
 }
 
+/// Queued messages listed one per row before the rest collapse to a count.
+/// Three is what fits over the composer at the heights this screen is drawn
+/// at without pushing the transcript out of view.
+pub const QUEUE_ROWS: usize = 3;
+
 /// Disjoint hard bounds shared by the renderer and its structural tests.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenRegions {
@@ -497,8 +514,14 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
         .min(7)
         .min((input.y - area.y).saturating_sub(5));
     let completions = Rect::new(area.x, input.y - completion_h, area.width, completion_h);
-    let notice_h = if state.notice.is_some() {
-        3.min((completions.y - area.y).saturating_sub(4))
+    // The queue shares the notice's row because it belongs in the same
+    // place -- directly over the composer, where someone who just typed is
+    // already looking -- but it is not a notice: it outlives keystrokes.
+    let notice_rows = if state.notice.is_some() { 2 } else { 0 };
+    let queued_rows = (state.queued.len().min(QUEUE_ROWS) as u16)
+        + u16::from(state.queued.len() > QUEUE_ROWS);
+    let notice_h = if notice_rows + queued_rows > 0 {
+        (1 + notice_rows + queued_rows).min((completions.y - area.y).saturating_sub(4))
     } else {
         0
     };

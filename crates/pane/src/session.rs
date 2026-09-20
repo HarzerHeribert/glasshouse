@@ -321,12 +321,21 @@ impl Interrupter {
 /// It is a thread because there is nowhere else to poll from: a task spends
 /// its whole life inside `send_turn` or inside `run_cell`, and neither
 /// returns to the loop while the call a Ctrl-C is meant to stop is running.
-fn watch(state: &Interrupter) -> ! {
+fn watch(state: &Interrupter, steer: Option<Arc<ui::Steer>>) -> ! {
     let mut first: Option<Instant> = None;
     loop {
         std::thread::sleep(INTERRUPT_POLL);
         if TERMINATE.swap(false, Ordering::SeqCst) {
             state.end_after_signal(143, "termination requested; ending the session");
+        }
+        // The second Escape reaches the token here, because this thread is
+        // the one that owns it -- but it stays out of the double-interrupt
+        // window above. Escape is the lever that must never end the
+        // session: a person pressing it twice is asking for their call
+        // back, not for their session to go away.
+        if steer.as_ref().is_some_and(|steer| steer.take_cancel()) {
+            state.raise();
+            continue;
         }
         if !INTERRUPT.swap(false, Ordering::SeqCst) {
             continue;
@@ -712,8 +721,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // cancels the call in flight rather than killing the process mid-line.
     let interrupt = Arc::new(Interrupter::new(session_id.clone()));
     install_interrupt_handler();
-    let watched = Arc::clone(&interrupt);
-    std::thread::spawn(move || watch(&watched));
 
     let interactive =
         if args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -759,6 +766,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
         } else {
             None
         };
+
+    // **Spawned after the terminal exists, because it reads the terminal's
+    // Escape lever as well as the signal handler's flag.** The handler is
+    // installed above and its flag is an atomic, so a Ctrl-C struck in the
+    // moment between the two is not lost -- it is read by the first poll.
+    let watched = Arc::clone(&interrupt);
+    let levers = interactive.as_ref().map(ui::LiveUi::steer_handle);
+    std::thread::spawn(move || watch(&watched, levers));
 
     // `full` asks nothing, so it needs no gate at all and pays nothing for
     // one. Every other rung installs the gate and decides per call whether
@@ -1276,6 +1291,7 @@ fn run_task_inner(
     let mut final_turn = false;
     let mut terminal_failure = None;
     let mut incomplete;
+    let mut stopped_by_request = false;
     // The supervisor nudges and no longer ends: three consecutive model
     // opinions used to end a task, and the criteria it matches on describe
     // exactly what a careful re-read looks like (`ending.rs` carries the
@@ -1302,6 +1318,18 @@ fn run_task_inner(
     output::decisions(task_state.decisions_telemetry(&session.config().decisions));
 
     loop {
+        // **The cell boundary, which is where a requested stop is honoured.**
+        // Every iteration of this loop is one model turn, so reading the
+        // lever here is exactly "the call in flight finished, and no further
+        // turn is sent". Nothing is thrown away: the cells that ran are in
+        // the notebook and the rollout, and the task ends the way a finished
+        // one does rather than as a failure, because a person choosing to
+        // stop is not an error.
+        if session.ui.is_some_and(|ui| ui.steer().take_stop()) {
+            incomplete = false;
+            stopped_by_request = true;
+            break;
+        }
         let since = SystemTime::now();
         let requested_model = session.model.borrow().clone();
         let estimate =
@@ -1749,6 +1777,16 @@ fn run_task_inner(
     // thread is joined, so nothing this task started is still running when
     // the isolate that could have read its result is gone.
     bg::shutdown(session.id);
+    if stopped_by_request {
+        // Said to the model as well as to the person. A turn that simply
+        // stops leaves the next one reading a transcript whose last cell
+        // had no answer, and a model reading that guesses -- usually that
+        // its work was wrong. It was not; it was interrupted.
+        let said = "The person stopped this turn. Work already done stands;                     do not redo it. Wait for what they say next.";
+        write_turn(session.interrupt, rollout, Role::User, said)
+            .map_err(|e| format!("could not record the stop: {e}"))?;
+        render(transcript, &ServedBy::default(), session, tui::Activity::Complete);
+    }
     if incomplete {
         let reason = terminal_failure.unwrap_or_else(|| {
             "The task stopped without confirmed completion; requested work may be unfinished."

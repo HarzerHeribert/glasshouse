@@ -1530,3 +1530,195 @@ fn typed_newlines_compose_one_message_and_a_lone_enter_still_sends_it() {
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
 }
+
+/// A cell that finishes the task, and one that does not -- the second is
+/// what a test needs to prove that a turn stopped rather than simply ran
+/// out of work to do.
+const ANSWERING: &str = "```pane\nanswer(\"done\");\n```";
+const UNFINISHED: &str = "```pane\n1 + 1;\n```";
+
+/// Answers every request in turn and holds the first until it is released,
+/// so a test can type into a session that is provably still working.
+///
+/// `held_provider` accepts one connection and returns; a queue is only a
+/// queue if something comes after it, so this one keeps serving.
+fn serving_provider(
+    program: &'static str,
+) -> (String, mpsc::Receiver<serde_json::Value>, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (request_sender, requests) = mpsc::channel();
+    let (release, held) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut first = true;
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            request_sender.send(request.clone()).unwrap();
+            if first {
+                first = false;
+                if held.recv().is_err() {
+                    return;
+                }
+            }
+            let (content_type, body) = if request["stream"] == true {
+                let events = [
+                    serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":12}}}),
+                    serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":program}}),
+                    serde_json::json!({"type":"message_delta","usage":{"output_tokens":8}}),
+                    serde_json::json!({"type":"message_stop"}),
+                ];
+                (
+                    "text/event-stream",
+                    events
+                        .iter()
+                        .map(|event| format!("data: {event}\n\n"))
+                        .collect::<String>(),
+                )
+            } else {
+                (
+                    "application/json",
+                    serde_json::json!({"role":"assistant","content":[{"type":"text","text":program}]})
+                        .to_string(),
+                )
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, requests, release)
+}
+
+/// Everything a request's conversation said, flattened, so a test can ask
+/// whether a message reached the model without knowing the block shape.
+fn said(request: &serde_json::Value) -> String {
+    request["messages"].to_string()
+}
+
+#[test]
+fn live_a_message_sent_while_working_is_queued_and_becomes_the_next_task() {
+    let (base, requests, release) = serving_provider(ANSWERING);
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"first task\r");
+    let first = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(said(&first).contains("first task"), "{first}");
+
+    // The session is provably inside the held request, so this Enter lands
+    // while a task is running -- the case that used to answer with a notice
+    // and keep the text as a draft nobody was told about again.
+    app.send(b"steer me instead\r");
+    app.wait("the queued message is shown over the composer", |screen| {
+        let text = screen.contents();
+        text.contains("QUEUED") && text.contains("steer me instead")
+    });
+
+    let _ = release.send(());
+    let second = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(
+        said(&second).contains("steer me instead"),
+        "the queued message never became a task: {second}"
+    );
+    app.wait("the queue empties when its message becomes the task", |screen| {
+        !screen.contents().contains("QUEUED")
+    });
+
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+}
+
+#[test]
+fn live_escape_ends_the_turn_at_the_cell_boundary_with_no_further_model_turn() {
+    // A cell that answers nothing, so the task would keep taking turns for
+    // as long as it is allowed to: what ends this turn is the Escape, and
+    // a test that let the task finish on its own would prove nothing.
+    let (base, requests, release) = serving_provider(UNFINISHED);
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"a task to stop\r");
+    let _ = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    app.send(b"\x1b");
+    app.wait("the first Escape asks for the gentle stop", |screen| {
+        screen.contents().contains("Stopping after this cell")
+    });
+
+    // Released, so the held turn completes normally and its cell runs. The
+    // stop is read at the boundary after it, which is the whole contract:
+    // nothing in flight is destroyed and nothing further is sent.
+    let _ = release.send(());
+    assert!(
+        requests.recv_timeout(Duration::from_secs(6)).is_err(),
+        "a turn was sent after the person stopped the task"
+    );
+    app.wait("the cell that was in flight kept its result", |screen| {
+        screen.contents().contains('2')
+    });
+    assert!(
+        app.child.try_wait().unwrap().is_none(),
+        "stopping a turn ended the session"
+    );
+
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+}
+
+#[test]
+fn live_a_second_escape_escalates_to_the_call_in_flight_and_still_spares_the_session() {
+    let (base, requests, release) = serving_provider(UNFINISHED);
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"a task to interrupt\r");
+    let _ = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    app.send(b"\x1b");
+    app.wait("the gentle rung", |screen| {
+        screen.contents().contains("Stopping after this cell")
+    });
+    app.send(b"\x1b");
+    app.wait("the abrupt rung", |screen| {
+        screen.contents().contains("Cancelling the call in flight")
+    });
+
+    // **Two Escapes are not two Ctrl-Cs.** Ctrl-C twice ends the session on
+    // purpose; Escape twice must leave it standing, or the gentle rung is a
+    // trap rather than the first step of a ladder.
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        app.child.try_wait().unwrap().is_none(),
+        "a second Escape ended the session"
+    );
+    drop(release);
+
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+}

@@ -179,11 +179,58 @@ pub(super) enum Update {
     Panel(Box<tui::Panel>),
     Notice(String),
     Stop,
+    /// The session loop has taken the oldest queued message and is running
+    /// it; it is a task now and no longer waiting.
+    Dequeued,
 }
 enum Input {
     Submit(String),
     Exit,
     Failed(String),
+}
+
+/// The person's two levers over a task already running, shared with the
+/// session loop because that loop is inside a call and cannot read a
+/// channel.
+///
+/// **They are separate levers, and the order matters.** The first Escape
+/// raises `stop`, which the task loop reads at a cell boundary: the call in
+/// flight finishes, its results are kept, and no further model turn is sent.
+/// The second Escape raises `cancel`, which is [`Interrupter::raise`] by
+/// another name -- the call in flight is cancelled where it stands. Asking
+/// for the gentle one first is what makes the abrupt one safe to offer at
+/// all: nothing is destroyed until someone has said so twice.
+///
+/// [`Interrupter::raise`]: super::Interrupter::raise
+#[derive(Default)]
+pub(super) struct Steer {
+    stop: AtomicBool,
+    cancel: AtomicBool,
+}
+
+impl Steer {
+    /// The first Escape. Idempotent: pressing it twice before the boundary
+    /// is read asks for the same thing.
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// The second Escape.
+    fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Read once by the task loop at a cell boundary, and lowered by the
+    /// read: a stop ends the turn it was asked during and never the next
+    /// one.
+    pub(super) fn take_stop(&self) -> bool {
+        self.stop.swap(false, Ordering::SeqCst)
+    }
+
+    /// Read by the interrupt watcher, which owns the cancellation token.
+    pub(super) fn take_cancel(&self) -> bool {
+        self.cancel.swap(false, Ordering::SeqCst)
+    }
 }
 
 /// The two channels the terminal thread answers on. A masked prompt's reply
@@ -195,6 +242,7 @@ struct Answers<'a> {
 
 pub(super) struct LiveUi {
     handler_cancellations: Arc<Mutex<Vec<String>>>,
+    steer: Arc<Steer>,
     updates: mpsc::Sender<Update>,
     inputs: mpsc::Receiver<Input>,
     /// Answers to [`Update::SecretPrompt`], on their own channel: a secret
@@ -254,6 +302,8 @@ impl LiveUi {
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let handler_cancellations = Arc::new(Mutex::new(Vec::new()));
         let commands = handler_cancellations.clone();
+        let steer = Arc::new(Steer::default());
+        let levers = steer.clone();
         let thread = thread::spawn(move || {
             let result = run(
                 state,
@@ -266,6 +316,7 @@ impl LiveUi {
                 },
                 ready_sender,
                 commands,
+                levers,
             );
             if let Err(error) = result {
                 let _ = input_sender.send(Input::Failed(error.to_string()));
@@ -277,6 +328,7 @@ impl LiveUi {
         OUTPUT.with(|slot| *slot.borrow_mut() = Some(updates.clone()));
         Ok(Self {
             handler_cancellations,
+            steer,
             updates,
             inputs,
             secrets,
@@ -302,9 +354,24 @@ impl LiveUi {
     pub(super) fn handler_cancellations(&self) -> Vec<String> {
         std::mem::take(&mut *super::lock(&self.handler_cancellations))
     }
+    pub(super) fn steer(&self) -> &Steer {
+        &self.steer
+    }
+    /// A handle for the interrupt watcher, which outlives no borrow of this.
+    pub(super) fn steer_handle(&self) -> Arc<Steer> {
+        Arc::clone(&self.steer)
+    }
     pub(super) fn next(&self) -> Result<Option<String>, String> {
         match self.inputs.recv() {
-            Ok(Input::Submit(text)) => Ok(Some(text)),
+            Ok(Input::Submit(text)) => {
+                // **The queue empties when this loop takes from it, not when
+                // the screen guesses that it has.** Inferring it from the
+                // working-to-idle edge missed a task that started in the
+                // same breath the last one ended, and left a message
+                // standing in the queue while it was already the task.
+                let _ = self.updates.send(Update::Dequeued);
+                Ok(Some(text))
+            }
             Ok(Input::Exit) => Ok(None),
             Ok(Input::Failed(error)) => Err(error),
             Err(_) => Err("terminal input closed".into()),
@@ -691,6 +758,7 @@ fn run(
     answers: Answers<'_>,
     ready: mpsc::SyncSender<Result<(), String>>,
     handler_cancellations: Arc<Mutex<Vec<String>>>,
+    steer: Arc<Steer>,
 ) -> io::Result<()> {
     let setup = (|| {
         let _guard = super::lock(&DRAWING);
@@ -716,6 +784,10 @@ fn run(
     let mut editor = Editor::default();
     let mut served = ServedBy::default();
     let mut busy = false;
+    // Whether the previous pass through the loop was working, so the two
+    // edges -- a task starting and a task ending -- can be told from the
+    // many passes that are neither.
+    let mut was_busy = false;
     let started = Instant::now();
     state.activity = Activity::Starting;
     let mut dirty = true;
@@ -869,9 +941,21 @@ fn run(
                     state.panel = None;
                     state.inspection = None;
                 }
+                Update::Dequeued => {
+                    if !state.queued.is_empty() {
+                        state.queued.remove(0);
+                    }
+                }
                 Update::Stop => return Ok(()),
             }
         }
+        // A stop that was asked for has been answered by the task ending;
+        // the next Escape starts the ladder again from its gentle rung.
+        if !busy && was_busy && state.stopping {
+            state.stopping = false;
+            dirty = true;
+        }
+        was_busy = busy;
         if state.activity == Activity::Starting && started.elapsed() >= Duration::from_millis(350) {
             state.activity = Activity::Idle;
             dirty = true;
@@ -1491,6 +1575,43 @@ fn run(
                     state.notice = Some(rung_change(&state.permissions));
                     continue;
                 }
+                // **Escape, and only while a task runs.** Every panel,
+                // modal and inspection above this point takes its own
+                // Escape and `continue`s, so reaching here means the
+                // composer is what the keyboard is pointed at -- and an
+                // Escape into an idle composer has never meant anything, so
+                // nothing is taken away by giving it a meaning here.
+                //
+                // The first press stops at the next cell boundary and the
+                // second cancels the call in flight; `state.stopping` is
+                // what tells them apart, and the task's end lowers it.
+                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                    if !busy {
+                        if state.queued.pop().is_some() {
+                            state.note(if state.queued.is_empty() {
+                                "Queue cleared.".to_string()
+                            } else {
+                                format!(
+                                    "Took the last queued message back; {} still queued.",
+                                    state.queued.len()
+                                )
+                            });
+                        }
+                        continue;
+                    }
+                    if state.stopping {
+                        steer.request_cancel();
+                        state.note("Cancelling the call in flight.");
+                    } else {
+                        state.stopping = true;
+                        steer.request_stop();
+                        state.note(
+                            "Stopping after this cell · Esc again cancels the call in flight",
+                        );
+                    }
+                    dirty = true;
+                    continue;
+                }
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match key.code {
                         KeyCode::Char('c') => {
@@ -1724,11 +1845,37 @@ fn run(
                         }
                         continue;
                     }
+                    // **Submitting while a task runs queues, it does not
+                    // refuse.** `LiveUi::next` blocks on this same channel
+                    // and the session loop reaches it the moment the task
+                    // ends, so a message sent now is simply the next one --
+                    // no new plumbing, and nothing to re-press. What it used
+                    // to do instead was keep the draft and say so in a
+                    // notice, which asked the person to watch for an ending
+                    // they had already stopped watching for.
+                    //
+                    // A slash command is not queued: those are this
+                    // terminal's own controls and several of them mean
+                    // nothing between tasks, so they keep saying what they
+                    // have always said.
                     if busy {
+                        let text = editor.text.trim().to_string();
+                        if text.starts_with('/') {
+                            state.notice = Some(
+                                "Working. Your draft is kept; Ctrl-C interrupts tools; twice exits."
+                                    .into(),
+                            );
+                            continue;
+                        }
+                        let text = editor.take();
+                        if answers.inputs.send(Input::Submit(text.clone())).is_err() {
+                            return Ok(());
+                        }
+                        state.queued.push(text);
                         state.notice = Some(
-                            "Working. Your draft is kept; Ctrl-C interrupts tools; twice exits."
-                                .into(),
+                            "Queued for when this turn ends · Esc takes the last one back".into(),
                         );
+                        dirty = true;
                         continue;
                     }
                     let text = editor.take();
@@ -1819,6 +1966,32 @@ fn refresh_handler_panel(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stop_is_read_once_so_it_ends_the_turn_it_was_asked_during() {
+        let steer = super::Steer::default();
+        assert!(!steer.take_stop(), "nothing was asked for");
+        steer.request_stop();
+        steer.request_stop();
+        assert!(steer.take_stop(), "the stop never reached the task loop");
+        assert!(
+            !steer.take_stop(),
+            "the stop survived its own turn and would end the next one"
+        );
+    }
+
+    #[test]
+    fn the_two_escapes_are_separate_levers() {
+        let steer = super::Steer::default();
+        steer.request_stop();
+        assert!(
+            !steer.take_cancel(),
+            "the gentle rung cancelled the call in flight"
+        );
+        steer.request_cancel();
+        assert!(steer.take_cancel());
+        assert!(!steer.take_cancel(), "one press cancelled twice");
+    }
+
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 

@@ -584,6 +584,83 @@ pub(super) fn notice(
     area: ratatui::layout::Rect,
     state: &super::ScreenState,
 ) {
+    if area.height == 0 {
+        return;
+    }
+    let queue = queued_lines(state);
+    if !queue.is_empty() {
+        let split = (queue.len() as u16 + 1).min(area.height);
+        let (top, rest) = (
+            ratatui::layout::Rect { height: split, ..area },
+            ratatui::layout::Rect {
+                y: area.y + split,
+                height: area.height - split,
+                ..area
+            },
+        );
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(queue)
+                .block(
+                    ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::TOP)
+                        .title(Span::styled(
+                            " QUEUED ",
+                            Style::default()
+                                .fg(state.theme.dock())
+                                .bg(state.theme.accent())
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                )
+                .style(Style::default().fg(state.theme.accent())),
+            top,
+        );
+        if rest.height > 0 {
+            notice_only(frame, rest, state);
+        }
+        return;
+    }
+    notice_only(frame, area, state);
+}
+
+/// The queue over the composer: what was handed over while the model worked,
+/// oldest first, each on one line and each clipped rather than wrapped --
+/// this row says *that* something is waiting and roughly what, and the
+/// composer under it is where a person looks for the rest.
+fn queued_lines(state: &super::ScreenState) -> Vec<Line<'static>> {
+    if state.queued.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<Line<'static>> = state
+        .queued
+        .iter()
+        .take(crate::tui::QUEUE_ROWS)
+        .map(|message| Line::from(format!("  ⤷ {}", one_line(message))))
+        .collect();
+    if state.queued.len() > crate::tui::QUEUE_ROWS {
+        lines.push(Line::from(format!(
+            "  ⤷ and {} more",
+            state.queued.len() - crate::tui::QUEUE_ROWS
+        )));
+    }
+    lines
+}
+
+/// One line of a message that may be several, so the queue row stays one row
+/// per message however the message was typed.
+fn one_line(message: &str) -> String {
+    let flattened: String = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut taken: String = flattened.chars().take(72).collect();
+    if flattened.chars().count() > 72 {
+        taken.push('…');
+    }
+    taken
+}
+
+fn notice_only(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &super::ScreenState,
+) {
     let Some(notice) = &state.notice else {
         return;
     };
@@ -621,6 +698,35 @@ mod tests {
 
     fn text(line: &Line<'static>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_queued_message_is_one_row_however_it_was_typed() {
+        let mut state = crate::tui::ScreenState::default();
+        state.queued = vec!["lass die venvs\n   weg   beim grep".into()];
+        let lines = queued_lines(&state);
+        assert_eq!(lines.len(), 1, "a multi-line message took several rows");
+        assert_eq!(text(&lines[0]), "  ⤷ lass die venvs weg beim grep");
+    }
+
+    #[test]
+    fn the_queue_names_what_it_cannot_show() {
+        let mut state = crate::tui::ScreenState::default();
+        state.queued = (0..crate::tui::QUEUE_ROWS + 2)
+            .map(|n| format!("message {n}"))
+            .collect();
+        let lines = queued_lines(&state);
+        assert_eq!(lines.len(), crate::tui::QUEUE_ROWS + 1);
+        assert_eq!(
+            text(lines.last().unwrap()),
+            "  ⤷ and 2 more",
+            "queued messages vanished with no count standing for them"
+        );
+    }
+
+    #[test]
+    fn an_empty_queue_takes_no_rows() {
+        assert!(queued_lines(&crate::tui::ScreenState::default()).is_empty());
     }
 
     #[test]
