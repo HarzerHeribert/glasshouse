@@ -41,7 +41,11 @@ pub enum Action {
     Activity,
     Category(usize),
     Setting(usize, Option<String>),
-    Scope,
+    /// Go to a named scope. It used to be a bare toggle shared by both
+    /// tabs, so clicking the tab you were already on moved you off it --
+    /// the one gesture that should have done nothing was the one that
+    /// changed which file a save would land in.
+    Scope(bool),
     Undo,
     ModelRole(usize),
     Slot(Option<String>),
@@ -56,6 +60,14 @@ pub enum Action {
     Rung(String),
     Sources,
     Scores,
+    /// Step the reasoning effort one place along its own ladder, in place.
+    /// The status strip's first control: the setting a person changes most
+    /// often, and the one the session bar has no room for.
+    Effort,
+    /// Open settings already on the category that owns the thing just
+    /// clicked, so a control on the strip is one click from the row that
+    /// changes it rather than four.
+    SettingsAt(usize),
 }
 #[derive(Debug, Clone, Default)]
 pub struct Geometry {

@@ -133,3 +133,91 @@ defect; it is recorded because two attempts to "fix" it in the renderer were
 wrong, and the second one (clearing the terminal whenever the drawn shape
 changed) turned 29 green PTY tests red. Native Ghostty, macOS and Windows
 acceptance runs are still owed, and the GitHub sweep is the platform evidence.
+
+## The application pass — instant updates, plain words, 2026-09-22
+
+The contract: **a setting is in force in the session you are sitting in, every
+control says what it does to your work, and the things you always use are always
+on screen.** `docs/product/pane/workbench-ux.md` is the roadmap and carries the
+ten principles and their sources; this entry is what changed and what watches it.
+
+**The defect it started from.** 66 of the 71 keys in `settings/registry.rs`
+carried `restart: true`, and `workbench/settings.rs::save` applied four of them
+(`ui.*`) to the running session. Everything else printed *"Saved for a new
+session"* — while the same choice typed as `/effort high` two lines lower
+applied instantly, because `session/controls.rs::command` had answered `/effort`,
+`/mode`, `/permissions` and `/model` against the live session all along. The
+panel had no caller for them. `settings::live_command` is that caller, the
+reducer drains it as an `Effect::Command`, and the six keys that can move
+mid-session now do. `permissions.mode` was additionally declared `restart:
+false` and applied by nothing at all.
+
+**What stopped naming mechanisms.** `sandbox 3p/1c YOLO unconfined · net:off` —
+a path-rule count, a command-pattern count, a joke and an internal applier's
+name — is one named boundary with one sentence of consequence, and the counts
+moved to the Access surface underneath it. `Rung::label` and `Rung::sentence`
+give the status bar, the Ask surface, the Shift-Tab notice and the settings row
+one vocabulary; there used to be three. The settings foot named a dotted key and
+a three-valued provenance and now names the layer that won, in words.
+
+**Two safety changes fell out of it.** Shift-Tab was dead — the workbench
+consumed `BackTab` and opened a surface, so `ui.rs`'s live cycler never ran and
+choosing a rung took four keystrokes through a surface (which is what made
+`slash_mode_walks_…` flaky-pass twice). It cycles in place now, and it **steps
+over `full`**: one unconfirmed keystroke from the default rung to the rung that
+never asks again is a serious error to prevent structurally, so that rung keeps
+the two routes that explain themselves first. And a lifted boundary is now
+exempt from the session bar's narrowing rule — the old rule dropped it first, so
+an 80-column window running with full access looked ordinary.
+
+**One regression I introduced and the tests caught inside a minute.** The first
+attempt at removing the panel's `unset` rows put the runtime defaults into the
+*effective configuration*. `a_project_document_cannot_turn_off_confinement…` and
+`native_permissions_render…` both went red: an absent `permissions.full_access`
+and a present `false` are the same to a reader and very different to the loader,
+which drops a project document's copy of that key precisely by noticing it is
+there — and an injected empty `modes.explore.writable` would have replaced the
+built-in writable path rather than inherited it. `settings::shown_default` is
+the display-only answer, and its doc comment carries the trap.
+
+| Command / target | Observed |
+|---|---|
+| `cargo test -p pane` | every target green but the environmental red below |
+| `cargo test -p pane --test tui_live` | 31 passed (was 30; one added) |
+| `cargo test -p pane --test workbench` | 43 passed, 1 ignored (the `screenshot` dev aid) |
+| `cargo test -p pane --test tui_look` | 60 passed |
+| `cargo test -p glasshouse --test pane_launch` | 1 passed |
+| the targeted blast radius over all 15 changed files | every traced target passed |
+| `cargo clippy -p pane --lib --tests` | no finding in a changed file; the baseline is unchanged |
+| `cargo fmt --all --check`, rustdoc, `check-file-sizes.py` | clean |
+
+**Tests that now watch the claims.**
+`a_setting_chosen_on_the_panel_is_in_force_in_this_session` walks a real PTY:
+effort is stepped on the panel and the status strip — which reads the live
+session, never the file — has to agree, and the file has to agree too.
+`a_lifted_boundary_is_never_the_control_a_narrow_terminal_drops` checks 60, 80,
+100 and 140 columns. `saved_permissions_do_not_change_running_authority` now
+states the real invariant it was named for: a *grant* never reaches a running
+session and is absent from `live_command`; a *rung* does, by handing the loop the
+command, never by writing the ladder behind the session's back. The slash menu
+gained a no-duplicates assertion, which immediately found a second one: `/exit`
+had been listed both as a built-in and as a literal. `App::refute` settles before
+asserting an absence, so the trap that made two earlier probes unsound is paid
+for once.
+
+**Discovery defects fixed on the way.** `/login` existed as a variant, was
+answered by the key handler, and was in no list — the same defect `/exit` had.
+`/tool` and `/mouse` likewise. `/config` was listed twice with two different
+descriptions. Bare `/statusline` opened the panel with the status line nowhere in
+sight. `limits.task_tokens` is labelled retired, does nothing, and was still
+offered as a choice.
+
+**The one red.** `runtime_cells::a_grep_line_that_is_not_a_match_has_no_line_number`
+fails identically on `main` in this checkout and is the host's ripgrep on a
+binary hit, not this work.
+
+**Still owed.** Native Ghostty and Windows acceptance; the GitHub sweep is the
+platform evidence. The status strip's helper and subagent facts are set when the
+session starts and are not re-read if the file changes underneath it — correct
+today, because neither key can move mid-session, and a line to revisit if one
+ever can.

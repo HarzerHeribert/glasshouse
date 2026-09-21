@@ -254,6 +254,20 @@ impl App {
             })
         });
     }
+    /// Asserts text is **not** on a settled screen.
+    ///
+    /// It settles first, on purpose: `wait` stops pumping the instant its
+    /// predicate holds, so a screen that was never brought up to date can
+    /// satisfy an absence for entirely the wrong reason. Every absence in
+    /// this file goes through here so that trap is paid for once.
+    fn refute(&mut self, description: &str, needle: &str) {
+        self.settle(120);
+        assert!(
+            !self.screen.screen().contents().contains(needle),
+            "{description}: {needle:?} is on screen:\n{}",
+            self.screen.screen().contents()
+        );
+    }
     /// Apply whatever the session has emitted so far. An assertion about the
     /// *absence* of text needs this: `wait` stops pumping the moment its
     /// predicate holds, so a screen that was never brought up to date can
@@ -793,7 +807,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
-    app.contains("sandbox 0p/0c");
+    app.contains("effort ");
     assert!(app.screen.screen().alternate_screen());
     app.send(b"/theme amber\r");
     app.contains("Theme: amber");
@@ -842,7 +856,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
         app.resize(width);
         app.contains_line("LIVE RESULT INTACT");
         app.wait("composer survives resize", |screen| {
-            screen.contents().contains("next draft") && screen.contents().contains("sandbox 0p/0c")
+            screen.contents().contains("next draft") && screen.contents().contains("effort ")
         });
         if width >= 120 {
             app.contains("telemetry");
@@ -897,24 +911,29 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
-    // Shift-Tab is the ladder's key now, not the request mode's: it moves the
+    // Shift-Tab is the ladder's key, not the request mode's: it moves the
     // rung and leaves the mode where it was. The two axes are independent —
     // `sandbox-grants.md` §10 — and this is the live proof of it.
-    app.contains("auto");
+    //
+    // It moves the rung *in place* now. Opening a surface and walking three
+    // rows to a choice the key could have made is what this test used to
+    // spell out, and it is also what made it flaky-pass on two platforms:
+    // the moves could reach a surface that had not drawn the row they were
+    // moving through. One key, one wait, one named outcome.
+    app.contains("Auto-review");
     app.send(b"\x1b[Z");
-    app.contains("ASK");
-    // One key at a time, each one waited for. Sent as one burst, the three
-    // moves and the Enter can reach a surface that has not drawn the row
-    // they are moving through yet, and the turn lands on the wrong rung --
-    // which is what made this test flaky-pass twice on two platforms.
-    for _ in 0..3 {
-        app.send(b"\x1b[B");
-        app.settle(40);
-    }
-    app.send(b"\r");
-    app.contains("This removes approval prompts");
-    app.send(b"\r");
-    app.contains("permissions full");
+    app.contains("Every call");
+    app.send(b"\x1b[Z");
+    app.contains("Commands");
+    // And the rung that stops asking is not on this key's path: three more
+    // presses come back round to the start without ever passing it.
+    app.send(b"\x1b[Z");
+    app.contains("Auto-review");
+    app.send(b"\x1b[Z");
+    app.refute(
+        "Shift-Tab never reaches the rung that stops asking",
+        "Never asks",
+    );
     app.send(b"/mode explore\r");
     app.contains("Mode: explore");
     app.send(b"/mode plan\r");
@@ -940,6 +959,18 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     });
     app.send(b"/statusline compact\r");
     app.contains("fixture-model");
+    // The rung the key steps over keeps the route that spells it out. It is
+    // last because it opens a panel, and a panel swallows the keyboard.
+    app.send(b"/permissions full\r");
+    app.contains("→ full");
+    // The panel arrives as a runtime update, so it can still be settling
+    // when the line it carries first appears; a key sent into that gap is
+    // read by the composer underneath and not by the panel.
+    app.settle(80);
+    app.send(b"\x1b");
+    app.wait("the permissions panel closes on Escape", |screen| {
+        !screen.contents().contains("Esc · Back")
+    });
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1146,13 +1177,13 @@ fn theme_picker_applies_local_palettes_without_a_request() {
 fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("PANE /");
-    app.contains("sandbox 0p/0c");
+    app.contains("effort ");
     app.send(b"a draft mid-thought");
     app.contains("a draft mid-thought");
     app.send(b"\x06");
     app.wait("header and status gone after Ctrl-F", |screen| {
         let screen = screen.contents();
-        !screen.contains("PANE /") && !screen.contains("sandbox 0p/0c")
+        !screen.contains("PANE /") && !screen.contains("effort ")
     });
     // The composer is not part of the hide-set, and neither is what is in it.
     app.contains("a draft mid-thought");
@@ -1160,7 +1191,7 @@ fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     app.contains("a draft mid-thought still typing");
     app.send(b"\x06");
     app.contains("PANE /");
-    app.contains("sandbox 0p/0c");
+    app.contains("effort ");
     app.contains("a draft mid-thought still typing");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
@@ -1813,12 +1844,48 @@ fn workbench_settings_save_directly_and_do_not_consume_the_draft() {
     app.send(b"\t");
     app.contains("Display");
     app.send(b"\x1b[C"); // theme advances, no Apply step
-    app.contains("Saved · active presentation");
+    app.contains("Theme is now");
     let saved = std::fs::read_to_string(app.root.join(".pane/config.toml")).unwrap();
     assert!(saved.contains("amber"), "{saved}");
     app.send(b"\x1b");
     app.contains("keep this draft");
     app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+/// The headline of the settings rework, proved against a real terminal: a
+/// choice made on the panel is in force in the session that is already
+/// running, not in the next one.
+///
+/// **This is the defect the whole pass started from.** Sixty-six of the
+/// seventy-one keys said `restart` and the panel applied four of them, so
+/// changing your reasoning effort on the settings screen printed *"Saved for
+/// a new session"* while typing `/effort high` two lines lower changed it
+/// immediately. The control commands were always there; the panel had no
+/// caller for them. This walks the screen, not the code: effort is stepped
+/// on the panel, and the status strip -- which reads the live session, never
+/// the file -- is what has to agree.
+#[test]
+fn a_setting_chosen_on_the_panel_is_in_force_in_this_session() {
+    let (base, _requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("effort default");
+    app.send(b"\x1bOQ"); // F2 opens settings on the everyday category
+    app.contains("SETTINGS");
+    // Reasoning effort is the second row; one Down and one Right is the
+    // whole gesture, and there is no Apply.
+    app.send(b"\x1b[B");
+    app.settle(60);
+    app.send(b"\x1b[C");
+    app.contains("Reasoning effort is now");
+    app.send(b"\x1b");
+    // The strip reads the running session. If the choice had only reached
+    // the file, this would still say `default`.
+    app.contains("effort low");
+    // And it reached the file too, so the next session starts there.
+    let saved = std::fs::read_to_string(app.root.join(".pane/config.toml")).unwrap();
+    assert!(saved.contains("low"), "{saved}");
+    app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
 

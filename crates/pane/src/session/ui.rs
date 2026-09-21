@@ -679,10 +679,28 @@ fn open_cell(state: &mut ScreenState, notebook: &Notebook, cell: usize) {
 /// mid-task is asked about the very next call; moving *up* is their own act
 /// and the ladder records it for the rollout.
 fn rung_change(ladder: &crate::permissions::Ladder) -> String {
-    let moved = ladder.cycle();
+    let mut moved = ladder.cycle();
+    // **The key walks the rungs that ask; it cannot walk into the one that
+    // does not.** Shift-Tab is one keystroke with no confirmation step, and
+    // `full` is the rung where nothing is confirmed ever again -- reachable
+    // in one press from `auto`, which is the default. A serious choice is
+    // prevented structurally rather than apologised for afterwards, so this
+    // key steps over it and `full` keeps the two routes that explain
+    // themselves first: the Ask surface, which confirms, and
+    // `/permissions full`, which is typed in full.
+    //
+    // A session *started* on `full` still leaves it here, because stepping
+    // over a rung is not the same as being unable to leave one.
+    if moved.to == crate::permissions::Rung::Full {
+        moved = ladder.cycle();
+    }
+    // The new state, then what it means, then the way back. A notice that
+    // only named the rung left the reader to look up what they had just
+    // chosen -- on the one control that moves while a task is running.
     format!(
-        "permissions {} — Shift-Tab cycles, /permissions <rung> sets one",
-        moved.to.name()
+        "{} · {} Shift-Tab again for the next.",
+        moved.to.label(),
+        moved.to.sentence()
     )
 }
 
@@ -2553,11 +2571,14 @@ mod tests {
         };
         let mode_before = state.mode;
         let mut seen = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             let line = rung_change(&state.permissions);
+            // Where it landed, and what that does -- the rung's own two
+            // sentences, so this notice and the Ask surface cannot drift.
+            let rung = state.permissions.rung();
             assert!(
-                line.starts_with("permissions "),
-                "it says where it landed: {line}"
+                line.starts_with(rung.label()) && line.contains(rung.sentence()),
+                "it says where it landed and what that means: {line}"
             );
             seen.push(state.permissions.rung());
         }
@@ -2566,7 +2587,7 @@ mod tests {
             vec![
                 crate::permissions::Rung::AcceptEdits,
                 crate::permissions::Rung::Auto,
-                crate::permissions::Rung::Full,
+                // Not `Full`: the key steps over the rung that stops asking.
                 crate::permissions::Rung::Manual,
             ],
             "one rung per press, wrapping to where it started"

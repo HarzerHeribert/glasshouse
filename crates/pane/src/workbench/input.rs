@@ -31,8 +31,23 @@ impl Workbench {
     pub fn local_command(&mut self, text: &str, s: &mut ScreenState, n: &Notebook) -> bool {
         let parts: Vec<_> = text.split_whitespace().collect();
         match parts.as_slice() {
-            ["/settings" | "/statusline"] => {
+            ["/settings"] => {
                 self.open_settings(s);
+                true
+            }
+            // A command that names one setting opens where that setting is.
+            // Bare `/statusline` used to land on the everyday category with
+            // the status line nowhere in sight.
+            ["/statusline"] => {
+                self.open_settings(s);
+                if let Some(p) = &mut self.preferences {
+                    p.category = 1;
+                    p.selected = p
+                        .rows()
+                        .iter()
+                        .position(|spec| spec.key == "ui.statusline")
+                        .unwrap_or(0);
+                }
                 true
             }
             ["/config"] => {
@@ -396,7 +411,12 @@ impl Workbench {
                             KeyCode::Enter => {
                                 let (key, value) = (key.clone(), buffer.clone());
                                 match p.save(&key, Some(value), s) {
-                                    Ok(()) => p.editing = None,
+                                    Ok(()) => {
+                                        p.editing = None;
+                                        if let Some(live) = p.take_live() {
+                                            return Effect::Command(live);
+                                        }
+                                    }
                                     Err(e) => p.notice = e,
                                 }
                             }
@@ -492,6 +512,14 @@ impl Workbench {
                     };
                     if let Err(e) = result {
                         p.notice = e;
+                    }
+                    // **The one drain for every keyboard route into a save.**
+                    // Arrow, Enter, Backspace-to-inherit and Ctrl-Z all land
+                    // here, so the control a save owes the running session is
+                    // taken once, in the place they converge, rather than at
+                    // each of the four.
+                    if let Some(live) = p.take_live() {
+                        return Effect::Command(live);
                     }
                     return Effect::Consumed;
                 }
@@ -635,11 +663,17 @@ impl Workbench {
                         let cell = self.selected_cell.unwrap_or(n.cells.len());
                         self.activate(Action::Tab(cell, CellTab::Helpers), s, n, busy)
                     }
-                    KeyCode::BackTab => {
-                        self.close();
-                        self.approvals = true;
-                        Effect::Consumed
-                    }
+                    // **Shift-Tab moves the rung; it does not open a place
+                    // where a rung can be moved.** Opening the surface cost
+                    // three cursor moves and an Enter to reach a choice the
+                    // key could have made by itself, which is four keystrokes
+                    // of ceremony on the single control a person touches most
+                    // -- and it is why the acceptance test for this path was
+                    // the one that kept flaking. Both neighbouring products
+                    // cycle here. The surface is still one click away on the
+                    // control itself, so the visible route and the fast route
+                    // are the same route, found in stages.
+                    KeyCode::BackTab => Effect::Pass,
                     KeyCode::Char('o') if ctrl => self.activate(
                         Action::Cell(self.selected_cell.unwrap_or(n.cells.len())),
                         s,
@@ -693,6 +727,25 @@ impl Workbench {
             }
             Action::Latest => s.scrollback = 0,
             Action::Settings => self.open_settings(s),
+            Action::SettingsAt(category) => {
+                self.open_settings(s);
+                if let Some(p) = &mut self.preferences {
+                    p.category = category.min(super::settings::CATEGORIES.len() - 1);
+                    p.selected = 0;
+                }
+            }
+            // **The whole point of the strip is that it acts where it
+            // stands.** Stepping the effort opens nothing: the word on the
+            // strip is the next word before the finger has left the mouse,
+            // because `/effort` was always a live control and this is it.
+            Action::Effort => {
+                const LADDER: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
+                let here = LADDER
+                    .iter()
+                    .position(|w| *w == s.effort.name())
+                    .unwrap_or(0);
+                return Effect::Command(format!("/effort {}", LADDER[(here + 1) % LADDER.len()]));
+            }
             Action::Models => {
                 if busy {
                     self.notice =
@@ -727,18 +780,27 @@ impl Workbench {
                 s.panel = None;
                 s.selection = None;
             }
-            Action::Scope => {
+            Action::Scope(global) => {
+                let wanted = if global {
+                    crate::settings::Scope::Global
+                } else {
+                    crate::settings::Scope::Local
+                };
                 if let Some(p) = &mut self.preferences
+                    && p.scope != wanted
                     && let Err(e) = p.switch_scope()
                 {
                     p.notice = e;
                 }
             }
             Action::Undo => {
-                if let Some(p) = &mut self.preferences
-                    && let Err(e) = p.undo(s)
-                {
-                    p.notice = e;
+                if let Some(p) = &mut self.preferences {
+                    if let Err(e) = p.undo(s) {
+                        p.notice = e;
+                    }
+                    if let Some(live) = p.take_live() {
+                        return Effect::Command(live);
+                    }
                 }
             }
             Action::Category(c) => {
@@ -756,8 +818,13 @@ impl Workbench {
                         if let Some(value) = value {
                             if spec.key.starts_with("permissions.") || spec.key == "agents.mode" {
                                 p.editing = Some((spec.key.into(), value));
-                            } else if let Err(e) = p.save(spec.key, Some(value), s) {
-                                p.notice = e;
+                            } else {
+                                if let Err(e) = p.save(spec.key, Some(value), s) {
+                                    p.notice = e;
+                                }
+                                if let Some(live) = p.take_live() {
+                                    return Effect::Command(live);
+                                }
                             }
                         } else if spec.kind == crate::settings::Kind::Model {
                             if !busy {
@@ -804,8 +871,12 @@ impl Workbench {
                     if let Err(e) = p.save(&key, None, s) {
                         p.notice = e;
                     }
+                    let live = p.take_live();
                     self.close();
                     self.preferences = Some(p);
+                    if let Some(live) = live {
+                        return Effect::Command(live);
+                    }
                 }
             }
             Action::ChooseModel => {

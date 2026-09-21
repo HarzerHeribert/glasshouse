@@ -736,12 +736,28 @@ fn run(args: SessionArgs) -> Result<(), String> {
                         compact: true,
                         pretty: true,
                         project: Some(startup::project_name(&args.root)),
+                        // The mechanism, for the surface that explains the
+                        // boundary. It is no longer the status line's words:
+                        // `3p/1c` is a path-rule count and a command-pattern
+                        // count, and nothing on a status line could ever have
+                        // said so.
                         sandbox: Some(format!(
-                            "{}p/{}c{}",
+                            "{} path rules · {} command patterns",
                             profile.rule_count(),
                             profile.command_pattern_count(),
-                            if yolo { " YOLO" } else { "" }
                         )),
+                        full_access: yolo,
+                        helpers_on: config.borrow().helpers.enabled
+                            && config.borrow().helpers.model.is_some(),
+                        subagents: Some(
+                            match config.borrow().agents.mode {
+                                crate::config::AgentsMode::Off => "off",
+                                crate::config::AgentsMode::Auto => "inherits",
+                                crate::config::AgentsMode::Pinned => "pinned",
+                                crate::config::AgentsMode::Roster => "favourites",
+                            }
+                            .to_string(),
+                        ),
                         // The third half, which until 2026-09-19 no surface
                         // carried: a rung and a grant are two choices, and
                         // whether Pane confines what it spawns is the one

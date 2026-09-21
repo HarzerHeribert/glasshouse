@@ -74,14 +74,80 @@ fn work_word(s: &ScreenState) -> &'static str {
         crate::tui::Mode::Plan => "Plan",
     }
 }
+/// What this session can reach, in words a person can act on.
+///
+/// **The label a control wears is the whole of its information scent.** What
+/// stood here was `sandbox 3p/1c YOLO unconfined`, which is a path-rule
+/// count, a command-pattern count, a joke, and the name of an internal
+/// applier. Nobody can read that and know whether their home directory is
+/// safe, so nobody clicked it, and the one surface that would have explained
+/// it was the one thing the label gave no reason to open. The mechanism has
+/// not gone anywhere -- it is on the Access surface, under this sentence.
+fn access_word(s: &ScreenState) -> &'static str {
+    if s.full_access {
+        "FULL ACCESS"
+    } else {
+        "This project"
+    }
+}
+/// The one sentence that says what [`access_word`] costs or protects.
+fn access_sentence(s: &ScreenState) -> &'static str {
+    if s.full_access {
+        "Reads and writes anywhere on this machine. Nothing outside this project is protected."
+    } else {
+        "Reads, writes and runs commands inside this project. Anything outside it is refused."
+    }
+}
+/// Whether host tools may leave the machine, as a clause rather than `net:`.
+fn network_word(s: &ScreenState) -> &'static str {
+    match s.network.as_deref() {
+        Some("off") => "no network",
+        Some("unknown") | None => "network unknown",
+        _ => "network on",
+    }
+}
 /// One word for how often this session asks before it acts.
 fn ask_word(s: &ScreenState) -> &'static str {
-    match s.permissions.rung() {
-        crate::permissions::Rung::Manual => "Every call",
-        crate::permissions::Rung::AcceptEdits => "Commands",
-        crate::permissions::Rung::Auto => "Auto-review",
-        crate::permissions::Rung::Full => "Never",
+    s.permissions.rung().label()
+}
+/// **The two controls that can be dangerous carry their weight in the tone,
+/// and in the word.** Colour alone would be a lie on a monochrome terminal
+/// and invisible to anyone who cannot see it, so `FULL ACCESS` is shouted in
+/// capitals and `Never asks` says what it does -- the colour is the second
+/// signal, never the only one.
+fn access_tone(s: &ScreenState) -> Tone {
+    if s.full_access {
+        Tone::Failure
+    } else {
+        Tone::Normal
     }
+}
+fn ask_tone(s: &ScreenState) -> Tone {
+    if s.permissions.rung() == crate::permissions::Rung::Full {
+        Tone::Warning
+    } else {
+        Tone::Normal
+    }
+}
+/// The one line on this screen that teaches, and the only place several of
+/// these keys are advertised at all.
+///
+/// **Teaching happens at the moment of use, never in a tour.** The hint turns
+/// with the session -- one more cell, one more notice -- rather than with the
+/// clock, so it holds still while someone reads it, and so a screenshot and a
+/// test see the same line twice.
+fn hint(n: &Notebook, s: &ScreenState) -> &'static str {
+    const HINTS: [&str; 8] = [
+        "Shift-Tab changes how often Pane asks before it acts",
+        "F2 opens settings · every choice there applies to this session now",
+        "Ctrl-T opens the instruments · Esc closes them",
+        "Click any control in the top bar to change it",
+        "Esc once stops after the current cell · twice cancels the call",
+        "Ctrl-B shows or hides the session card · Ctrl-F hides the chrome",
+        "/diff opens the last cell's changes · F4 does the same",
+        "Type / for commands · @ for a path in this project",
+    ];
+    HINTS[(n.cells.len() + s.history.len()) % HINTS.len()]
 }
 /// Right-aligned controls that give room up in a fixed order, so a narrow
 /// terminal loses the least useful control rather than the leftmost one.
@@ -94,7 +160,7 @@ fn controls(
     g: &mut Geometry,
     a: Rect,
     reserved: usize,
-    items: &[(String, Action)],
+    items: &[(String, Action, Tone)],
     t: Theme,
 ) {
     let room = (a.width as usize).saturating_sub(reserved);
@@ -106,8 +172,19 @@ fn controls(
     };
     // Drop the last-named control first; the list is written most useful
     // first, and the final entry -- settings -- is exempt.
+    //
+    // **A control drawn in a warning tone is exempt too.** A boundary that
+    // can be lifted has to be continuously visible or it is a mode error
+    // waiting to happen, and at 80 columns the old rule dropped exactly
+    // that one: `FULL ACCESS` disappeared and the session looked ordinary.
     while width(&keep) > room && keep.len() > 1 {
-        let drop = keep.len() - 2;
+        // The last ordinary control still standing, never the final entry.
+        let Some(drop) = keep[..keep.len() - 1]
+            .iter()
+            .rposition(|i| matches!(items[*i].2, Tone::Normal | Tone::Muted))
+        else {
+            break;
+        };
         keep.remove(drop);
     }
     if width(&keep) > room {
@@ -115,17 +192,14 @@ fn controls(
     }
     let mut x = a.right() - width(&keep) as u16;
     for i in keep {
-        let (text, action) = &items[i];
+        let (text, action, tone) = &items[i];
         let w = Span::raw(text.as_str()).width() as u16;
-        button(
-            f,
-            g,
-            Rect::new(x, a.y, w, 1),
-            text,
-            action.clone(),
-            false,
-            t,
-        );
+        let r = Rect::new(x, a.y, w, 1).intersection(f.area());
+        row(f, r, text, *tone, t);
+        if r.width > 0 && r.height > 0 {
+            g.hits
+                .push((Rect::new(r.x, r.y, r.width, 1), action.clone()));
+        }
         x += w + 2;
     }
 }
@@ -135,26 +209,41 @@ fn controls(
 /// session may do, how often it asks, and whether it is confined -- and each
 /// of them is the control that changes it.
 fn session_bar(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState) {
-    let project = s.project.as_deref().unwrap_or("workspace");
+    // **A long project name must not cost you the session's controls.** The
+    // name is the one thing on this row that cannot be acted on, and it was
+    // taking its full length out of the budget before the controls were
+    // measured -- so a checkout called `pane-live-95138-15` pushed both the
+    // boundary and the approval rung off an eighty-column screen. It gets a
+    // third of the row and clips.
+    let project = clip(
+        s.project.as_deref().unwrap_or("workspace"),
+        (a.width as usize / 4).max(8),
+    );
     let brand = format!(" ⠿ PANE / {project}");
     row(f, a, &brand, Tone::Accent, s.theme);
-    let model = s.model.as_deref().unwrap_or("choose model");
-    let access = match s.confinement.as_deref() {
-        Some("unconfined") => "Unconfined".to_string(),
-        Some(word) => format!("Access: {word}"),
-        None => "Access: details".to_string(),
-    };
+    // The model name is the widest control and the least often read of the
+    // four, so it clips rather than pushing the others off the row.
+    let model = clip(s.model.as_deref().unwrap_or("choose model"), 18);
+    // **The value alone, with no `Work:` or `Ask:` in front of it.** A label
+    // that repeats what the control obviously is spends columns a narrow
+    // terminal needs, and these four are already distinguishable by their
+    // own words -- nobody reads `Build` and wonders whether it is the model.
     controls(
         f,
         g,
         a,
         Span::raw(brand.as_str()).width() + 2,
         &[
-            (format!("{model} ▾"), Action::Models),
-            (format!("Work: {}", work_word(s)), Action::Work),
-            (format!("Ask: {}", ask_word(s)), Action::Approvals),
-            (access, Action::Access),
-            ("[ Settings ]".to_string(), Action::Settings),
+            (format!("{model} ▾"), Action::Models, Tone::Normal),
+            // **How often it asks outranks which mode it is in.** The old
+            // order gave up the approval rung before the work mode, so at
+            // eighty columns a session kept telling you it was in `Build`
+            // -- which the composer makes obvious -- and stopped telling
+            // you whether it would ask before running anything.
+            (ask_word(s).to_string(), Action::Approvals, ask_tone(s)),
+            (work_word(s).to_string(), Action::Work, Tone::Normal),
+            (access_word(s).to_string(), Action::Access, access_tone(s)),
+            ("[ Settings ]".to_string(), Action::Settings, Tone::Normal),
         ],
         s.theme,
     );
@@ -412,12 +501,11 @@ pub fn render(
         let mut lines: Vec<(String, Tone)> = vec![
             (format!("Work {}", work_word(s)), Tone::Normal),
             (format!("Ask {}", ask_word(s)), Tone::Normal),
-            (
-                s.confinement
-                    .clone()
-                    .unwrap_or_else(|| "confinement unknown".into()),
-                Tone::Muted,
-            ),
+            // One vocabulary. The card used to print the name of an internal
+            // confinement applier here while the bar three rows up said
+            // something else about the same boundary.
+            (access_word(s).to_string(), access_tone(s)),
+            (network_word(s).to_string(), Tone::Muted),
             (String::new(), Tone::Normal),
             ("Model & source".to_string(), Tone::Accent),
             (
@@ -429,6 +517,15 @@ pub fn render(
             (format!("{} recorded", n.cells.len()), Tone::Normal),
             (
                 format!("{:.1}s elapsed", s.pulse.elapsed_ms as f64 / 1000.0),
+                Tone::Muted,
+            ),
+            // The spend, which the status line used to carry and nobody
+            // read there. This card is where someone comes to ask.
+            (
+                n.tokens
+                    .as_ref()
+                    .map(|t| format!("{} tokens", t.used))
+                    .unwrap_or_default(),
                 Tone::Muted,
             ),
             (String::new(), Tone::Normal),
@@ -621,32 +718,18 @@ pub fn render(
     }
     if footer > 0 && a.height >= footer {
         let y = a.bottom() - footer;
-        // What this session is standing on, left to right: its helpers, its
-        // boundaries, and what it has spent. None of it is a control; the
-        // controls are in the session bar, where one row holds them all.
-        let calls: usize = n.cells.iter().map(|c| c.helpers.len()).sum();
-        let helpers = match calls {
-            0 => "◇ no helper calls".to_string(),
-            1 => "◇ 1 helper call".to_string(),
-            n => format!("◇ {n} helper calls"),
-        };
-        let posture = format!(
-            "sandbox {}{} · net:{}",
-            s.sandbox.as_deref().unwrap_or("unknown"),
-            s.confinement
-                .as_deref()
-                .map(|w| format!(" {w}"))
-                .unwrap_or_default(),
-            s.network.as_deref().unwrap_or("unknown"),
-        );
-        let motion = if s.reduced_motion {
-            "still"
-        } else {
-            "calm motion"
-        };
-        // The context reading owns the right edge whenever the notebook has
-        // measured one: how full this session's window is outranks how its
-        // decoration moves, and `telemetry_and_motion_…` pins that order.
+        // **The strip is controls, and the line under it is what just
+        // happened.** What stood here was two rows of read-only facts --
+        // `sandbox 3p/1c YOLO unconfined · net:off` over `Build ·
+        // auto-review · effort default   ◇ 1 helper call   N tokens` -- in
+        // which the only things a person could act on were already in the
+        // session bar two rows further up, and the rest were counters.
+        //
+        // The drawing's own `renderStatus` is a row of buttons, a live
+        // notice and an Undo, and this is that: the three settings a person
+        // reaches for that the session bar has no room for, each one the
+        // control that changes it, over one line that carries whatever the
+        // session last said.
         let context = n.context.map(|tokens| {
             crate::tui::status::context_summary(
                 tokens,
@@ -655,46 +738,81 @@ pub fn render(
                 matches!(s.activity, Activity::Thinking | Activity::Streaming),
             )
         });
-        let right = context.clone().unwrap_or_else(|| motion.to_string());
-        let spent = n
-            .tokens
-            .as_ref()
-            .map(|t| format!("{} tokens this session", t.used))
-            .unwrap_or_default();
-        // **Row one is what confines this session; row two is what it is
-        // doing.** Neither is a control's label — the controls are in the
-        // session bar, which gives them up as the terminal narrows, and
-        // these two lines stay true at every width.
-        let room = a
-            .width
-            .saturating_sub(Span::raw(right.as_str()).width() as u16 + 2);
-        let posture_w = (Span::raw(posture.as_str()).width() as u16 + 1).min(room);
-        let r = Rect::new(a.x, y, posture_w, 1);
-        row(f, r, &format!(" {posture}"), Tone::Muted, s.theme);
-        g.hits.push((r, Action::Access));
+        let right = context.unwrap_or_default();
         let rw = Span::raw(right.as_str()).width() as u16;
-        row(
-            f,
-            Rect::new(a.right().saturating_sub(rw + 1), y, rw, 1),
-            &right,
-            Tone::Muted,
-            s.theme,
-        );
-        if footer > 1 {
-            let text = format!(
-                "{} · {} · effort {}   {helpers}{}",
-                work_word(s),
-                ask_word(s).to_lowercase(),
-                s.effort.name(),
-                if spent.is_empty() {
-                    String::new()
-                } else {
-                    format!("   {spent}")
-                }
+        if rw > 0 {
+            row(
+                f,
+                Rect::new(a.right().saturating_sub(rw + 1), y, rw, 1),
+                &right,
+                Tone::Muted,
+                s.theme,
             );
-            let r = Rect::new(a.x + 1, y + 1, a.width.saturating_sub(1), 1);
+        }
+        let mut x = a.x + 1;
+        for (text, action) in [
+            (format!("effort {}", s.effort.name()), Action::Effort),
+            (
+                format!("◇ helpers {}", if s.helpers_on { "on" } else { "off" }),
+                Action::SettingsAt(2),
+            ),
+            (
+                s.subagents
+                    .as_deref()
+                    .map(|word| format!("subagents {word}"))
+                    .unwrap_or_default(),
+                Action::SettingsAt(4),
+            ),
+        ] {
+            // A fact nobody measured is not a control; an empty label is
+            // how this strip says "no" rather than saying `unknown`.
+            if text.is_empty() {
+                continue;
+            }
+            let w = Span::raw(text.as_str()).width() as u16;
+            if x + w + rw + 3 > a.right() {
+                break;
+            }
+            let r = Rect::new(x, y, w, 1);
             row(f, r, &text, Tone::Muted, s.theme);
-            g.hits.push((r, Action::Work));
+            g.hits.push((r, action));
+            x += w + 3;
+        }
+        if footer > 1 {
+            // **One muted line that teaches, instead of one that counts.**
+            // What was here was `◇ 1 helper call   4210 tokens this
+            // session`, and neither number was ever the answer to a question
+            // anyone had at the moment they read it -- the spend lives on
+            // the session card and in the instruments, where someone goes
+            // when they want it.
+            //
+            // A rotating hint is what both neighbouring products use to keep
+            // teaching after the first minute, and it is the only thing on
+            // this screen that advertises Shift-Tab, F2 or Ctrl-T at all. It
+            // turns with the session rather than with the clock, so it is
+            // stable inside one screenshot and inside one test.
+            let text = hint(n, s).to_string();
+            let tone = Tone::Muted;
+            let motion = if s.reduced_motion {
+                "still"
+            } else {
+                "calm motion"
+            };
+            let mw = motion.len() as u16;
+            row(
+                f,
+                Rect::new(a.x + 1, y + 1, a.width.saturating_sub(mw + 3), 1),
+                &text,
+                tone,
+                s.theme,
+            );
+            row(
+                f,
+                Rect::new(a.right().saturating_sub(mw + 1), y + 1, mw, 1),
+                motion,
+                Tone::Muted,
+                s.theme,
+            );
         }
     }
     if !ui.is_local() && s.panel.is_none() && !s.input.contains(char::is_whitespace) {
@@ -757,7 +875,7 @@ pub fn render(
         let (title, sub) = if ui.preferences.is_some() {
             (
                 "SETTINGS",
-                "a completed choice saves itself; there is no Apply",
+                "every choice applies now and saves itself; there is no Apply",
             )
         } else if ui.models.is_some() {
             ("MODELS", "one Enter commits one selection")
@@ -912,31 +1030,16 @@ pub fn render(
                 );
             }
         } else if ui.approvals {
-            for (i, (word, help, mode)) in [
-                (
-                    "Every call",
-                    "Confirm admitted file and command calls.",
-                    "manual",
-                ),
-                (
-                    "Commands",
-                    "Admitted edits run; commands ask.",
-                    "accept-edits",
-                ),
-                (
-                    "Auto-review",
-                    "Vouched-for commands run; others ask.",
-                    "auto",
-                ),
-                (
-                    "Never",
-                    "No prompts. Existing denials and sandbox still apply.",
-                    "full",
-                ),
+            for (i, rung) in [
+                crate::permissions::Rung::Manual,
+                crate::permissions::Rung::AcceptEdits,
+                crate::permissions::Rung::Auto,
+                crate::permissions::Rung::Full,
             ]
             .into_iter()
             .enumerate()
             {
+                let (word, help, mode) = (rung.label(), rung.sentence(), rung.name());
                 add(
                     f,
                     &mut g,
@@ -957,17 +1060,92 @@ pub fn render(
                 );
             }
         } else if ui.access {
-            let text = format!(
-                "Work: {}\nConfirmations: {}\nSandbox profile: {}\nProcess confinement: {}\nNetwork: {}\n\nNever ask is not full access.\nThese are the session's observed settings, not a grant.\nSaved permissions do not widen a running sandbox.",
-                s.mode.name(),
-                s.permissions.rung().name(),
-                s.sandbox.as_deref().unwrap_or("unknown"),
-                s.confinement.as_deref().unwrap_or("unknown"),
-                s.network.as_deref().unwrap_or("unknown")
+            // **The plain sentence first, the mechanism under it, and a way
+            // to act at the end.** This surface used to be five colon-lines
+            // of internal vocabulary with nothing to press: the one place a
+            // person came to find out whether their home directory was safe
+            // answered with `Sandbox profile: 3p/1c` and no exit but Escape.
+            label(
+                f,
+                inner,
+                inner.y + 2,
+                access_word(s),
+                access_tone(s),
+                s.theme,
             );
-            for (i, l) in text.lines().enumerate() {
-                label(f, inner, inner.y + 3 + i as u16, l, Tone::Normal, s.theme);
+            label(
+                f,
+                inner,
+                inner.y + 3,
+                access_sentence(s),
+                Tone::Normal,
+                s.theme,
+            );
+            label(
+                f,
+                inner,
+                inner.y + 5,
+                &format!("{} · asks {}", network_word(s), ask_word(s).to_lowercase()),
+                Tone::Normal,
+                s.theme,
+            );
+            // Under the rule: what the boundary is actually made of, for
+            // the reader who came here for exactly that.
+            label(
+                f,
+                inner,
+                inner.y + 7,
+                "How it is enforced",
+                Tone::Muted,
+                s.theme,
+            );
+            for (i, l) in [
+                format!(
+                    "Sandbox profile   {}",
+                    s.sandbox.as_deref().unwrap_or("unknown")
+                ),
+                format!(
+                    "Child processes   {}",
+                    s.confinement.as_deref().unwrap_or("unknown")
+                ),
+                format!(
+                    "Host tools        {}",
+                    s.network.as_deref().unwrap_or("unknown")
+                ),
+            ]
+            .iter()
+            .enumerate()
+            {
+                label(f, inner, inner.y + 8 + i as u16, l, Tone::Muted, s.theme);
             }
+            label(
+                f,
+                inner,
+                inner.y + 12,
+                "Asking less often never widens this boundary, and a saved permission never widens the one already running.",
+                Tone::Muted,
+                s.theme,
+            );
+            add(
+                f,
+                &mut g,
+                inner,
+                inner.y + 14,
+                "Change how often it asks",
+                Action::Approvals,
+                true,
+                s.theme,
+            );
+            add(
+                f,
+                &mut g,
+                inner,
+                inner.y + 15,
+                "Open settings",
+                Action::Settings,
+                false,
+                s.theme,
+            );
         } else if ui.activity {
             let lines: Vec<_> = s.history.iter().flat_map(|n| n.text.lines()).collect();
             for (i, l) in lines.iter().skip(ui.local_scroll).enumerate() {
@@ -1055,7 +1233,7 @@ fn draw_settings(
             g,
             Rect::new(x, y, w, 1),
             &text,
-            Action::Scope,
+            Action::Scope(scope == crate::settings::Scope::Global),
             here,
             s.theme,
         );
@@ -1110,10 +1288,17 @@ fn draw_settings(
         );
     }
     let rows = p.rows();
-    let capacity = a.height.saturating_sub(14).max(2) as usize;
+    // **Two lines per row, because the second one is the whole point.** The
+    // consequence used to be printed once, at the foot, for the selected row
+    // only -- so reading what four settings did meant moving the cursor four
+    // times and remembering what the last three had said. Guidance that
+    // disappears forces a person to re-derive it, and a settings panel is
+    // exactly where nobody should be re-deriving anything.
+    let stride = 2u16;
+    let capacity = ((a.height.saturating_sub(14).max(2)) / stride).max(1) as usize;
     let start = p.selected.saturating_sub(capacity.saturating_sub(1));
     for (i, spec) in rows.iter().enumerate().skip(start).take(capacity) {
-        let y = y + 5 + (i - start) as u16;
+        let y = y + 5 + (i - start) as u16 * stride;
         let selected = i == p.selected;
         let text = format!("{} {}", if selected { "›" } else { " " }, spec.label);
         let lw = (a.width / 2).min(31);
@@ -1130,11 +1315,21 @@ fn draw_settings(
         let current = p.effective(spec.key);
         let mut x = a.x + lw;
         if options.is_empty() {
+            // `unset` is what a TOML table says when a key is absent, and it
+            // was reaching the screen as if it were a value someone chose.
+            let shown = if current == "unset" {
+                match spec.kind {
+                    crate::settings::Kind::Model => "choose a model".to_string(),
+                    _ => "not set".to_string(),
+                }
+            } else {
+                current.clone()
+            };
             button(
                 f,
                 g,
                 Rect::new(x, y, a.right().saturating_sub(x), 1),
-                &format!("{current}  ›"),
+                &format!("{shown}  ›"),
                 Action::Setting(i, None),
                 selected,
                 s.theme,
@@ -1161,6 +1356,23 @@ fn draw_settings(
                 }
             }
         }
+        // The consequence, under the row it belongs to, and the one mark
+        // that says a choice will not reach the session already running.
+        let mark = if crate::settings::applies_now(spec.key) {
+            String::new()
+        } else {
+            "  ·  next session".to_string()
+        };
+        row(
+            f,
+            Rect::new(a.x + 3, y + 1, a.width.saturating_sub(3), 1),
+            &clip(
+                &format!("{}{mark}", spec.description),
+                a.width.saturating_sub(4) as usize,
+            ),
+            if selected { Tone::Normal } else { Tone::Muted },
+            s.theme,
+        );
     }
     let bottom = a.bottom().saturating_sub(7);
     row(
@@ -1171,33 +1383,52 @@ fn draw_settings(
         s.theme,
     );
     if let Some(spec) = rows.get(p.selected) {
-        label(f, a, bottom, spec.description, Tone::Normal, s.theme);
+        // **Which layer won, in words.** The foot used to read
+        // `session.effort · Saved: inherited · Effective: default
+        // (built-in)`: a dotted key nobody typed, and a three-valued
+        // provenance in a vocabulary the panel never defines. A person
+        // looking at a value wants one thing from this line -- where it
+        // came from, and whether it is theirs.
+        let effective = p.effective(spec.key);
         label(
             f,
             a,
-            bottom + 1,
-            &format!(
-                "{} · Saved: {} · Effective: {} ({})",
-                spec.key,
-                p.saved(spec.key).unwrap_or_else(|| "inherited".into()),
-                p.effective(spec.key),
-                p.origin(spec.key)
-            ),
-            Tone::Muted,
-            s.theme,
-        );
-        label(
-            f,
-            a,
-            bottom + 2,
-            if spec.key.starts_with("ui.") {
-                "Presentation applies now; profile overrides still win."
+            bottom,
+            &if effective == "unset" {
+                "Nothing has chosen this yet.".to_string()
             } else {
-                "Saved runtime setting applies next session; current session stays unchanged."
+                match p.saved(spec.key) {
+                    Some(_) => format!(
+                        "{effective} — set here, in this {} file",
+                        p.scope.label().to_lowercase()
+                    ),
+                    None => format!(
+                        "{effective} — inherited from {}",
+                        match p.origin(spec.key) {
+                            "built-in" => "Pane's own default",
+                            "global" => "your global settings",
+                            "project" => "this project's settings",
+                            other => other,
+                        }
+                    ),
+                }
             },
             Tone::Normal,
             s.theme,
         );
+        label(
+            f,
+            a,
+            bottom + 1,
+            if crate::settings::applies_now(spec.key) {
+                "In force now, and saved for next time."
+            } else {
+                "Saved. This session keeps what it started with; the next one takes it."
+            },
+            Tone::Muted,
+            s.theme,
+        );
+        label(f, a, bottom + 2, spec.key, Tone::Muted, s.theme);
     }
     if let Some((key, value)) = &p.editing {
         label(

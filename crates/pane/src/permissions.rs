@@ -58,6 +58,38 @@ impl Rung {
     /// Every rung's word, for a settings choice list and a refusal sentence.
     pub const NAMES: [&'static str; 4] = ["manual", "accept-edits", "auto", "full"];
 
+    /// The word a screen shows, which is not the word a file stores.
+    ///
+    /// **`accept-edits` is a key, not a sentence.** The panel, the status
+    /// bar, the Ask surface and the Shift-Tab notice all used to spell this
+    /// choice differently -- `accept-edits` in one place, `Commands` in
+    /// another, `commands` in a third -- so the same session read as three
+    /// settings. One pair of functions now answers all four.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Every call",
+            Self::AcceptEdits => "Commands",
+            Self::Auto => "Auto-review",
+            Self::Full => "Never asks",
+        }
+    }
+
+    /// What choosing this rung does to the person's work, in one sentence.
+    #[must_use]
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Self::Manual => "Confirms every admitted file and command call before it runs.",
+            Self::AcceptEdits => "Admitted edits run. Every command line is confirmed.",
+            Self::Auto => {
+                "Edits run, and a command a reviewer can vouch for runs. Anything else is confirmed."
+            }
+            Self::Full => {
+                "Nothing is confirmed. Existing denials and the sandbox boundary still hold."
+            }
+        }
+    }
+
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
         match word.trim() {

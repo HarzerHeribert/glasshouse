@@ -40,7 +40,10 @@ use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 use crate::config::{AgentsMode, CompletionStyle, PaneConfig};
 use crate::sandbox::profile::Profile;
 
-pub use registry::{Kind, SettingSpec, check_value, permission_rule, spec, specs, validate};
+pub use registry::{
+    Kind, SettingSpec, applies_now, check_value, live_command, permission_rule, shown_default,
+    spec, specs, validate,
+};
 
 const LOCAL_DIR: &str = ".pane";
 const CONFIG_FILE: &str = "config.toml";

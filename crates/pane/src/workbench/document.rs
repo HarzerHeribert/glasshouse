@@ -420,9 +420,11 @@ impl Document {
             d.push(text, Tone::Normal, None, width, usize::MAX - 1);
         }
         if d.rows.len() == card_rows {
+            // One line, then the things to press. A paragraph on an empty
+            // screen is read once and never again; a list of four commands
+            // is read every time someone does not know what to type.
             d.wrapped(
-                "Describe the work. One cell is one program: it reads, edits, runs and \
-                 checks, and every result you see here was observed rather than assumed.",
+                "Describe a task, or try one of these:",
                 Tone::Normal,
                 None,
                 width,
@@ -431,7 +433,10 @@ impl Document {
             );
             d.push("", Tone::Normal, None, width, 0);
             for (key, what) in [
-                ("/settings", "preferences, saved as you choose them"),
+                (
+                    "/settings",
+                    "everything about this session, applied as you choose it",
+                ),
                 ("/models", "which model answers, and at what effort"),
                 ("/diff", "what the last cell actually changed"),
                 ("/help", "every command"),
@@ -499,23 +504,30 @@ impl Document {
             .collect();
         *next += opening;
         let mark = theme::padded_mark(0, true);
-        let project = format!(
-            "{} · {}",
-            s.project.as_deref().unwrap_or("no project"),
-            s.model.as_deref().unwrap_or("no model chosen")
-        );
+        // **The affordance beside the fact.** A card that states what the
+        // session is and says nothing about how to change it makes a reader
+        // go looking; naming the control on the same line is the cheapest
+        // teaching this screen can do, and it is what the neighbouring
+        // product does on its own opening card.
+        let model = match s.model.as_deref() {
+            Some(model) => format!("{model}   /model changes it"),
+            None => "no model chosen   /models picks one".to_string(),
+        };
+        let second = startup
+            .first()
+            .copied()
+            .map(str::to_string)
+            .unwrap_or(model);
         let facts = [
             Some(("P A N E".to_string(), Tone::Accent)),
-            Some(("code · cells · little helpers".to_string(), Tone::Muted)),
-            // The one opening line worth the room: how to come back to this
-            // session. With nothing to say, the session says what it is.
             Some((
-                clip(
-                    startup.first().copied().unwrap_or(&project),
-                    width.saturating_sub(14),
+                format!(
+                    "{}  ·  code · cells · little helpers",
+                    s.project.as_deref().unwrap_or("no project")
                 ),
                 Tone::Muted,
             )),
+            Some((clip(&second, width.saturating_sub(14)), Tone::Muted)),
         ];
         for (glyph, fact) in mark.iter().zip(facts) {
             let (text, tone) = fact.unwrap_or((String::new(), Tone::Muted));

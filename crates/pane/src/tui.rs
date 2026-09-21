@@ -156,6 +156,27 @@ pub struct ScreenState {
     /// startup line and `pane doctor` say it in full on every width.
     pub confinement: Option<String>,
     pub network: Option<String>,
+    /// Whether this session was started with the boundary lifted.
+    ///
+    /// **It is a field rather than a word inside [`ScreenState::sandbox`]
+    /// because the screen has to be able to shout it.** The posture string
+    /// used to carry it as the four letters `YOLO` next to two counts, and a
+    /// mode that can rewrite any file on the machine had exactly the same
+    /// weight on screen as the number of path rules in the profile. A
+    /// capability this size is either continuously visible or it is a mode
+    /// error waiting to happen, so it gets its own field, its own colour and
+    /// its own sentence.
+    pub full_access: bool,
+    /// Whether the little helpers are configured to run, and how work is
+    /// handed to a subagent -- the two facts the status strip offers as
+    /// controls.
+    ///
+    /// They are on the screen's own state rather than read from the config
+    /// at draw time because the renderer may not touch a `RefCell` the
+    /// session thread owns; the session sets them when it starts and
+    /// whenever they change.
+    pub helpers_on: bool,
+    pub subagents: Option<String>,
     pub connected: Option<bool>,
     pub input: String,
     /// UTF-8 byte offset supplied by the live editor; None hides the cursor.
@@ -665,7 +686,6 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "inspect standing handlers · /handlers off <name>",
                 ),
                 ("/help".to_string(), "show available commands"),
-                ("/exit".to_string(), "leave Pane"),
                 ("/sidebar".to_string(), "auto, show or hide telemetry"),
                 ("/theme".to_string(), "choose a palette · eight themes"),
                 (
@@ -690,7 +710,10 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                 ),
                 ("/status".to_string(), "inspect session status"),
                 ("/settings".to_string(), "Global / Project settings"),
-                ("/config".to_string(), "inspect or edit advanced settings"),
+                (
+                    "/config".to_string(),
+                    "advanced settings · limits, thresholds, the web broker",
+                ),
                 ("/statusline".to_string(), "full, compact or hidden status"),
                 (
                     "/fullscreen".to_string(),
@@ -701,9 +724,16 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "inspect or configure next-session grants",
                 ),
                 ("/mode".to_string(), "execute, explore (reads only) or plan"),
+                // Three commands that worked and were in no list, which is
+                // how a command that works comes to look like one Pane does
+                // not have -- the same defect `/exit` was fixed for.
                 (
-                    "/config".to_string(),
-                    "inspect session limits and configuration",
+                    "/tool".to_string(),
+                    "run one tool directly · /tool read path=…",
+                ),
+                (
+                    "/mouse".to_string(),
+                    "release or recapture the mouse · Ctrl-G",
                 ),
             ]
             .into_iter()

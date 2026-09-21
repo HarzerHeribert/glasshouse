@@ -627,14 +627,66 @@ fn invalid_setting_leaves_disk_and_live_state_unchanged() {
     assert_eq!(before, std::fs::read(&p.path).unwrap());
     assert_eq!(s.theme, Theme::Ice);
 }
+/// A lifted boundary is on screen at every width the chrome is drawn at.
+///
+/// **An invisible mode is a mode error waiting to happen.** The session bar
+/// gives controls up as the terminal narrows, and the rule it used to follow
+/// -- drop the second-from-last -- dropped the boundary first, so an
+/// eighty-column window running with full access looked exactly like one
+/// confined to the project. A control drawn in a warning tone is now exempt
+/// from that rule, and the word is shouted as well as coloured, because a
+/// monochrome terminal must carry the same warning.
+#[test]
+fn a_lifted_boundary_is_never_the_control_a_narrow_terminal_drops() {
+    let (c, n, mut s) = fixture();
+    s.project = Some("a-fairly-long-project-name".into());
+    s.model = Some("some-long-model-identifier".into());
+    s.full_access = true;
+    for width in [60u16, 80, 100, 140] {
+        let mut u = Workbench::default();
+        let screen = text(&draw(&c, &n, &s, &mut u, width, 24));
+        assert!(
+            screen.contains("FULL ACCESS"),
+            "at {width} columns:\n{screen}"
+        );
+    }
+    // And the ordinary boundary is free to give way, because it is what the
+    // session does by default and costs nothing to be told again.
+    s.full_access = false;
+    let mut u = Workbench::default();
+    let narrow = text(&draw(&c, &n, &s, &mut u, 60, 24));
+    assert!(!narrow.contains("This project"), "{narrow}");
+}
+
 #[test]
 fn saved_permissions_do_not_change_running_authority() {
     let (_t, mut s, mut p) = prefs();
+    // **A grant is not a rung, and only one of the two may move.**
+    // A denial list is authority: saving it must leave the running session
+    // exactly where it was, and every `permissions` key but the rung is
+    // deliberately absent from `live_command` so nothing can carry one into
+    // a session that is already running.
+    p.save("permissions.deny", Some("Read(secrets/**)".into()), &mut s)
+        .unwrap();
+    assert_eq!(p.take_live(), None, "a grant never reaches a live session");
+    assert!(
+        p.notice.contains("next one"),
+        "and it says so: {}",
+        p.notice
+    );
+    // The rung is how often Pane asks, which `/permissions <rung>` and
+    // Shift-Tab have always moved mid-session. The panel is the third route
+    // to the same control, so it moves it too -- by handing the loop that
+    // same command, never by writing the ladder behind the session's back.
     let before = s.permissions.rung();
     p.save("permissions.mode", Some("manual".into()), &mut s)
         .unwrap();
-    assert_eq!(s.permissions.rung(), before);
-    assert!(p.notice.contains("new session"));
+    assert_eq!(
+        s.permissions.rung(),
+        before,
+        "the panel does not reach into the ladder itself"
+    );
+    assert_eq!(p.take_live().as_deref(), Some("/permissions manual"));
 }
 #[test]
 fn concurrent_file_edits_are_not_overwritten() {
@@ -649,7 +701,7 @@ fn every_native_key_is_searchable_but_normal_categories_are_bounded() {
     let (_t, _, mut p) = prefs();
     for category in 0..5 {
         p.category = category;
-        assert!(p.rows().len() <= 8);
+        assert!(p.rows().len() <= 8, "category {category}");
     }
     for spec in pane::settings::specs() {
         p.query = spec.key.into();
@@ -782,9 +834,11 @@ fn screenshot() {
     let (c, n, mut s) = fixture();
     s.project = Some("prismMLqwen".into());
     s.model = Some("gpt-5.6-sol".into());
-    s.sandbox = Some("3p/1c YOLO".into());
+    s.sandbox = Some("3 path rules · 1 command pattern".into());
     s.confinement = Some("unconfined".into());
     s.network = Some("off".into());
+    s.helpers_on = true;
+    s.subagents = Some("off".into());
     for note in [
         "session tlqdct-yqr — resume it with:  pane --resume tlqdct-yqr",
         "permissions: auto — edits run, a command that only reads runs, anything else is confirmed",
@@ -817,6 +871,16 @@ fn screenshot() {
     u.tabs.insert(1, CellTab::Diff);
     let b = draw(&c, &n, &s, &mut u, 140, 40);
     println!("\n===== DIFF 140x40 =====\n{}", text(&b));
+    let mut u = Workbench::default();
+    u.access = true;
+    let b = draw(&c, &n, &s, &mut u, 140, 40);
+    println!("\n===== ACCESS 140x40 =====\n{}", text(&b));
+    let mut sf = s.clone();
+    sf.full_access = true;
+    sf.network = Some("on".into());
+    let mut u = Workbench::default();
+    let b = draw(&c, &n, &sf, &mut u, 80, 20);
+    println!("\n===== FULL ACCESS 80x20 =====\n{}", text(&b));
     let root = Temp::new();
     let mut s3 = s.clone();
     s3.settings_root = Some(root.0.clone());

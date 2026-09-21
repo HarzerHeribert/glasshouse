@@ -122,66 +122,128 @@ pub fn is_global_only(key: &str) -> bool {
     GLOBAL_ONLY.contains(&key)
 }
 
+/// The session control that puts a saved key into force **in the session that
+/// is already running**, or `None` when nothing can.
+///
+/// **A setting that only takes effect next time is not a setting, it is a
+/// note to your future self.** Every command named here already existed and
+/// already mutated the live session -- `session/controls.rs::command` has
+/// answered `/effort`, `/mode`, `/permissions` and `/model` since long before
+/// this function. What was missing was a caller: the settings panel wrote
+/// TOML and stopped, so a person who changed their reasoning effort on the
+/// panel was told to start a new session, while the same person typing
+/// `/effort high` two lines lower changed it instantly. One of those two was
+/// wrong, and it was not the slash command.
+///
+/// A key absent from this match genuinely cannot move mid-session -- a
+/// helper roster is captured when a cell starts, a web broker is built once
+/// -- and the panel says `next session` on that row rather than in a
+/// sentence attached to every row.
+#[must_use]
+pub fn live_command(key: &str, value: Option<&str>) -> Option<String> {
+    let value = value?;
+    match key {
+        "session.effort" => Some(format!("/effort {value}")),
+        // `build` is this file's spelling and `execute` is the runtime's;
+        // `RequestMode::parse` takes either, so the word travels as written.
+        "session.mode" => Some(format!("/mode {value}")),
+        "permissions.mode" => Some(format!("/permissions {value}")),
+        "model.parent" => Some(format!("/model {value}")),
+        "helpers.model" => Some(format!("/model helper {value}")),
+        "agents.model" => Some(format!("/model subagent {value}")),
+        // `pinned` and `roster` need a model to name, and assigning one is
+        // what turns them on; only the two that stand alone travel here.
+        "agents.mode" if value == "auto" || value == "off" => {
+            Some(format!("/model subagent {value}"))
+        }
+        _ => None,
+    }
+}
+
+/// Every key [`live_command`] can answer for, whatever the value chosen.
+const LIVE: &[&str] = &[
+    "session.effort",
+    "session.mode",
+    "permissions.mode",
+    "model.parent",
+    "helpers.model",
+    "agents.model",
+    "agents.mode",
+];
+
+/// Whether a saved `key` is in force the moment it is written.
+///
+/// Presentation keys are applied to the screen directly; everything else
+/// needs [`live_command`] to reach the running session. This is what the
+/// panel reads to decide whether a row wears a `next session` mark, so it is
+/// deliberately a property of the *key* -- a row whose mark appeared and
+/// disappeared as the cursor moved along its own values would be worse than
+/// no mark at all.
+#[must_use]
+pub fn applies_now(key: &str) -> bool {
+    key.starts_with("ui.") || LIVE.contains(&key)
+}
+
 static SPECS: &[SettingSpec] = &[
     // -- the three model tiers, the everyday half of `/settings` ----------
     SettingSpec {
         key: "model.parent",
         label: "Main model",
-        description: "The model you talk to. One concrete model id; `--model` still wins for one session.",
+        description: "Which model answers you. Takes effect on your next message; a call already in flight keeps the model it started on.",
         kind: Kind::Model,
         choices: &[],
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "session.effort",
         label: "Reasoning effort",
-        description: "Effort for the main model. `default` is the provider's own setting, not a removed override.",
+        description: "How hard the model thinks before answering. Higher is slower and costs more. `default` leaves the provider's own setting alone, which is not the same as clearing an override you saved.",
         kind: Kind::Choice,
         choices: EFFORT,
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "session.mode",
         label: "Working mode",
-        description: "The mode a new session starts in. `build` is the runtime's `execute`.",
+        description: "What this session may do. Build edits files and runs commands; Explore only reads; Plan reads and writes the plan file alone.",
         kind: Kind::Choice,
         choices: MODES,
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "agents.mode",
         label: "Subagent mode",
-        description: "Off refuses spawns; pinned locks one explicit model; roster uses configured favorites. Legacy auto is migration-only, never inheritance.",
+        description: "Whether work can be handed to a subagent. Off refuses every spawn; pinned sends all of it to one model you name; roster picks from your favourites.",
         kind: Kind::Choice,
         choices: AGENT_MODES,
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "agents.model",
         label: "Subagent model",
-        description: "The model a delegated goal runs on. Only valid with `agents.mode = pinned`.",
+        description: "The model a handed-off goal runs on. Naming one here turns subagent mode to pinned.",
         kind: Kind::Model,
         choices: &[],
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "helpers.model",
         label: "Helper model",
-        description: "The little-helper tier. Unset means helpers are off; they are never run unconfigured.",
+        description: "The cheap model that reads long output for you and returns the part that mattered. With none set, helpers never run.",
         kind: Kind::Model,
         choices: &[],
         basic: true,
-        restart: true,
+        restart: false,
     },
     SettingSpec {
         key: "helpers.enabled",
         label: "Helpers",
-        description: "Whether configured helpers run at all.",
+        description: "Whether the little helpers run. Off means you read the whole of every command's output yourself.",
         kind: Kind::Bool,
         choices: &[],
         basic: true,
@@ -272,7 +334,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "permissions.mode",
         label: "Permission rung",
-        description: "How often you are asked: `manual`, `accept-edits`, `auto` or `full`. Shift-Tab cycles it live; it never widens a grant.",
+        description: "How often Pane stops to ask you before acting. It changes nothing about what is allowed -- a rung never widens a grant, and the sandbox still refuses what it refused. Shift-Tab cycles it.",
         kind: Kind::Choice,
         choices: PERMISSION_RUNGS,
         basic: true,
@@ -281,7 +343,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.theme",
         label: "Theme",
-        description: "Accent theme; the terminal background and its transparency are inherited.",
+        description: "The accent colour. Your terminal's own background and transparency are left alone.",
         kind: Kind::Choice,
         choices: THEMES,
         basic: true,
@@ -290,7 +352,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.statusline",
         label: "Status line",
-        description: "Status line layout. `/statusline` accepts `hide` as an alias for `hidden`.",
+        description: "How much the bottom strip carries: everything, the controls only, or nothing.",
         kind: Kind::Choice,
         choices: STATUS_LINES,
         basic: true,
@@ -299,7 +361,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.sidebar",
         label: "Sidebar",
-        description: "Telemetry sidebar: shown when the terminal is wide enough, always, or never.",
+        description: "The session card on the right. Auto shows it only when the terminal is wide enough to spare the columns.",
         kind: Kind::Choice,
         choices: SIDEBAR,
         basic: true,
@@ -308,7 +370,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.reduced_motion",
         label: "Reduced motion",
-        description: "Stills the animated pulse and other motion.",
+        description: "Freezes the working mark and every other animation. Nothing is hidden by it; the same words stay on screen.",
         kind: Kind::Bool,
         choices: &[],
         basic: true,
@@ -489,7 +551,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.completion_no_below",
         label: "Completion no threshold",
-        description: "The completion question's noul at or below which a claimed completion gets a not-satisfied finding.",
+        description: "The completion question's confidence at or below which a claimed completion gets a not-satisfied finding.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -498,7 +560,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.completion_yes_above",
         label: "Completion yes threshold",
-        description: "The completion question's noul at or above which the fresh checker is spared, when nothing else was found.",
+        description: "The completion question's confidence at or above which the fresh checker is spared, when nothing else was found.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -507,7 +569,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.hygiene_no_below",
         label: "Hygiene no threshold",
-        description: "A diff-hygiene `has_tests` noul at or below which the diff is read as missing tests for the behaviour it changes.",
+        description: "A diff-hygiene `has_tests` confidence at or below which the diff is read as missing tests for the behaviour it changes.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -516,7 +578,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.hygiene_yes_above",
         label: "Hygiene yes threshold",
-        description: "A diff-hygiene noul at or above which an out-of-scope, debug-leftover, deleted-test or changed-signature question is decisive.",
+        description: "A diff-hygiene confidence at or above which an out-of-scope, debug-leftover, deleted-test or changed-signature question is decisive.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -525,7 +587,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.judge_yes_above",
         label: "Judge yes threshold",
-        description: "A `judge` acceptance item's noul at or above which the item counts as satisfied without the fresh checker.",
+        description: "A `judge` acceptance item's confidence at or above which the item counts as satisfied without the fresh checker.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -534,7 +596,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.judge_no_below",
         label: "Judge no threshold",
-        description: "A `judge` acceptance item's noul at or below which the item becomes a finding held once.",
+        description: "A `judge` acceptance item's confidence at or below which the item becomes a finding held once.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -543,7 +605,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.drift_no_below",
         label: "Drift no threshold",
-        description: "The drift question's noul at or below which an effectful cell is held once, as not doing what the plan's current step says.",
+        description: "The drift question's confidence at or below which an effectful cell is held once, as not doing what the plan's current step says.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -561,7 +623,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.scout_relevance_below",
         label: "Scout relevance floor",
-        description: "A scout candidate's own relevance noul at or below which it is left out of what the Scout is served.",
+        description: "A scout candidate's own relevance confidence at or below which it is left out of what the Scout is served.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -570,7 +632,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "decisions.helper_no_below",
         label: "Helper judge no threshold",
-        description: "A helper result's own noul at or below which its record carries the one line that it may not answer what was asked.",
+        description: "A helper result's own confidence at or below which its record carries the one line that it may not answer what was asked.",
         kind: Kind::Float,
         choices: &[],
         basic: false,
@@ -1040,4 +1102,52 @@ fn unknown_key(key: &str) -> String {
                 .join(" or ")
         )
     }
+}
+
+/// The value the runtime would use for `key` when nothing has set it — for
+/// the panel to show, and **for nothing else**.
+///
+/// **This is a display concern and it must never become a configured one.**
+/// The first attempt at removing the panel's `unset` rows put these into the
+/// effective configuration instead, and two security tests caught it inside
+/// a minute: an absent `permissions.full_access` and a present `false` are
+/// the same to a reader and very different to the loader, which drops a
+/// project document's copy of that key precisely by noticing it is there.
+/// The same trap sits under `modes.explore.writable`, where an injected
+/// empty list would have replaced the built-in writable path rather than
+/// inherited it.
+///
+/// So: the loader keeps answering "nothing set this", and the panel answers
+/// "and this is what happens when nothing does".
+#[must_use]
+pub fn shown_default(key: &str) -> Option<String> {
+    let helpers = crate::config::HelpersConfig::default();
+    let decisions = crate::config::DecisionsConfig::default();
+    let ask = crate::config::AskConfig::default();
+    Some(match key {
+        "permissions.mode" => crate::permissions::Rung::default().name().to_string(),
+        "permissions.full_access" => "false".into(),
+        "permissions.allow" | "permissions.deny" => "none".into(),
+        "modes.explore.writable" => ".pane/scratch/**".into(),
+        "modes.explore.commands" => "none".into(),
+        "limits.evidence_gate" => crate::config::Limits::default().evidence_gate.to_string(),
+        "helpers.completion_check" => helpers.completion_check.to_string(),
+        "helpers.acceptance_list" => helpers.acceptance_list.to_string(),
+        "helpers.preflight_scope" => "auto".into(),
+        "helpers.reduce_above_tokens" => helpers.reduce_above_tokens.to_string(),
+        "ask.enabled" => ask.enabled.to_string(),
+        "ask.jev" => "off".into(),
+        "ask.decide_above" => ask.decide_above.to_string(),
+        "decisions.scout_above" => decisions.scout_above.to_string(),
+        "decisions.hygiene_no_below" => decisions.hygiene_no_below.to_string(),
+        "decisions.hygiene_yes_above" => decisions.hygiene_yes_above.to_string(),
+        "decisions.judge_yes_above" => decisions.judge_yes_above.to_string(),
+        "decisions.judge_no_below" => decisions.judge_no_below.to_string(),
+        "decisions.drift_no_below" => decisions.drift_no_below.to_string(),
+        "decisions.mode_above" => decisions.mode_above.to_string(),
+        "decisions.scout_relevance_below" => decisions.scout_relevance_below.to_string(),
+        "decisions.helper_no_below" => decisions.helper_no_below.to_string(),
+        "decisions.supervision_above" => decisions.supervision_above.to_string(),
+        _ => return None,
+    })
 }

@@ -301,9 +301,24 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    // The workbench added `/diff`, `/activity` and `/subagents` to the list.
-    assert_eq!(slash_matches("/").len(), 33);
-    for command in ["/diff", "/activity", "/subagents"] {
+    // The workbench added `/diff`, `/activity` and `/subagents`; the
+    // discovery pass added `/tool`, `/login` and `/mouse`, which worked and
+    // were in no list, and removed a second `/config` that had been listed
+    // twice with two different descriptions.
+    assert_eq!(slash_matches("/").len(), 34);
+    let offered = slash_matches("/");
+    let mut unique: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(offered.len(), unique.len(), "no command is offered twice");
+    for command in [
+        "/diff",
+        "/activity",
+        "/subagents",
+        "/tool",
+        "/login",
+        "/mouse",
+    ] {
         assert!(
             slash_matches("/").iter().any(|(name, _)| name == command),
             "{command} is offered"
@@ -332,7 +347,8 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
                 "browse models by agent, provider or intelligence"
             ),
             ("/motion".into(), "on or off · reduce animation"),
-            ("/mode".into(), "execute, explore (reads only) or plan")
+            ("/mode".into(), "execute, explore (reads only) or plan"),
+            ("/mouse".into(), "release or recapture the mouse · Ctrl-G")
         ]
     );
     for input in ["hello", "/model something", "/unknown"] {
