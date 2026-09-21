@@ -31,12 +31,12 @@ mod startup;
 mod value;
 pub use scroll::SCROLL_INDICATOR_LINGER;
 use scroll::render_scrollbar;
-mod status;
+pub(crate) mod status;
 use regions::{
     push_changes, push_error_region, push_folded_region, push_output_region, push_text_region,
 };
 use status::{compact_tokens, context_summary, footer_right_span, footer_row};
-mod telemetry;
+pub(crate) mod telemetry;
 pub(crate) use controls::PanelHit;
 pub use controls::{Assignment, Mode, ModelGroup, Panel, PanelRow, StatusLine, TierModels};
 pub(crate) use lane::helper_in_flight;

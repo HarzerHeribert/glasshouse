@@ -167,6 +167,27 @@ impl App {
             terminal_flags,
         }
     }
+    /// Waits for a file the session was asked to write to appear.
+    ///
+    /// **A screen probe cannot stand in for this any more.** A cell now
+    /// shows its own source, so a path named in the program is on the screen
+    /// long before anything has written it; the file itself is the only
+    /// unambiguous evidence that an approval was answered.
+    fn wait_for_file(&mut self, name: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.root.join(name).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{name} never appeared:\n{}",
+                self.screen.screen().contents()
+            );
+            if let Ok(bytes) = self.output.recv_timeout(Duration::from_millis(25)) {
+                self.answer_cursor_query(&bytes);
+                self.screen.process(&bytes);
+                self.bytes.extend(bytes);
+            }
+        }
+    }
     fn send(&mut self, bytes: &[u8]) {
         self.received_at_send = self.received.load(std::sync::atomic::Ordering::SeqCst);
         self.sent_at = Instant::now();
@@ -213,6 +234,21 @@ impl App {
 
     fn contains(&mut self, needle: &str) {
         self.wait(needle, |screen| screen.contents().contains(needle));
+    }
+    /// Waits for a whole screen line to be exactly this text.
+    ///
+    /// **A cell shows its own source now.** `answer("X")` puts `X` on the
+    /// screen the moment the program is drawn, long before the turn that
+    /// returns it has ended, so a substring probe for a returned answer
+    /// matches the program that will produce it and every test built on it
+    /// races the session. A returned answer stands on a line of its own.
+    fn contains_line(&mut self, needle: &str) {
+        self.wait(&format!("a line reading {needle:?}"), |screen| {
+            screen.contents().lines().any(|line| {
+                // A result line may carry the run's own pass/fail mark.
+                line.trim().trim_start_matches(['✓', '✕', '·', '❯']).trim() == needle
+            })
+        });
     }
     /// Apply whatever the session has emitted so far. An assertion about the
     /// *absence* of text needs this: `wait` stops pumping the moment its
@@ -494,7 +530,8 @@ fn live_approval_once_session_and_deny_gate_actual_writes() {
         assert!(!app.root.join("once.txt").exists());
         app.send(b"o");
     }
-    app.contains("remember.txt");
+    app.wait_for_file("once.txt");
+    app.contains("\"content\": \"remember\"");
     assert_eq!(
         std::fs::read_to_string(app.root.join("once.txt")).unwrap(),
         "once"
@@ -502,14 +539,15 @@ fn live_approval_once_session_and_deny_gate_actual_writes() {
     assert!(!app.root.join("remember.txt").exists());
     app.send(b"s");
     // Canonically equivalent repeated arguments skip a second prompt.
-    app.contains("denied.txt");
+    app.wait_for_file("remember.txt");
     assert_eq!(
         std::fs::read_to_string(app.root.join("remember.txt")).unwrap(),
         "remember"
     );
     assert!(!app.root.join("denied.txt").exists());
+    app.contains("\"content\": \"must not appear\"");
     app.send(b"d");
-    app.contains("APPROVAL FINISHED");
+    app.contains_line("APPROVAL FINISHED");
     assert!(!app.root.join("denied.txt").exists());
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
@@ -778,7 +816,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
              submits here and the composition guard is not measurable"
         );
         requests.recv_timeout(Duration::from_secs(5)).unwrap();
-        app.contains("LIVE RESULT INTACT");
+        app.contains_line("LIVE RESULT INTACT");
     } else {
         assert!(
             screen.contains("first line"),
@@ -794,11 +832,11 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     app.send(b"next draft");
     app.contains("next draft");
     app.contains("complete");
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     assert!(app.screen.screen().contents().contains("next draft"));
     for width in [60, 80, 120, 200] {
         app.resize(width);
-        app.contains("LIVE RESULT INTACT");
+        app.contains_line("LIVE RESULT INTACT");
         app.wait("composer survives resize", |screen| {
             screen.contents().contains("next draft") && screen.contents().contains("sandbox 0p/0c")
         });
@@ -860,6 +898,10 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     // `sandbox-grants.md` §10 — and this is the live proof of it.
     app.contains("auto");
     app.send(b"\x1b[Z");
+    app.contains("ASK");
+    app.send(b"\x1b[B\x1b[B\x1b[B\r");
+    app.contains("This removes approval prompts");
+    app.send(b"\r");
     app.contains("permissions full");
     app.send(b"/mode explore\r");
     app.contains("Mode: explore");
@@ -875,7 +917,7 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     );
     // Plan runs cells under the plan narrowing (map line 2638): a cell that
     // changes nothing runs, and writes are refused by the profile.
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/mode execute\r");
     app.contains("Mode: execute");
     app.send(b"/context\r");
@@ -913,7 +955,7 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     app.send(b"answer this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(request["model"], "a-model");
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -948,25 +990,41 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/model\r");
-    app.contains("308/308");
+    // The default offers what this session can actually route to: the one
+    // account that is pinned elsewhere is counted, not offered (workbench.md,
+    // *Model navigator*). F6 asks for every source, and only then is the
+    // locked row on screen to explain itself.
+    app.contains("307/308");
     app.contains("gemini/exact");
-    app.send(b"\x1b[D");
+    app.send(b"\x1b[17~");
+    app.contains("308/308");
     app.contains("claude/exact");
-    // The strip says LOCK where an open provider shows its count; the row
-    // below still gives the reason in full.
+    // The row says LOCK where a usable one shows its account, and the line
+    // under the list still gives the reason in full.
     app.contains("LOCK");
     app.contains("Pinned to another entitlement");
     app.send(b"\r");
     assert!(requests.try_recv().is_err());
+    // Back to the routes this session can actually use: the locked account
+    // is counted in the catalogue and gone from the list.
+    app.send(b"\x1b[17~");
+    app.contains("307/308");
+    app.settle(120);
+    assert!(!app.screen.screen().contents().contains("claude/exact"));
     // The four providers all fit the one-row strip, so there is nothing
     // offscreen and no `▶` to find. That the carousel *signals* an offscreen
     // tab is driven directly, both directions, by
     // `provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow`;
     // what this live test still owes is that moving along it works.
     app.contains("openrouter");
+    app.contains("‹ Connected accounts ›");
     app.send(b"\x1b[C");
+    app.wait("the provider carousel moved", |screen| {
+        !screen.contents().contains("‹ Connected accounts ›")
+    });
+    app.send(b"\x1b[D");
+    app.contains("‹ Connected accounts ›");
     app.contains("gemini/exact");
-    assert!(!app.screen.screen().contents().contains("claude/exact"));
     // `+` rather than a space: `Space` stages a choice for the active tier
     // now, so it no longer reaches the filter. Three terms still AND, and
     // they have to -- this fixture's `work` and `personal` accounts both
@@ -975,7 +1033,14 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.contains("1/308");
     app.contains("openrouter · work");
     app.contains("vendor/model-303");
-    assert!(!app.screen.screen().contents().contains("personal"));
+    // `contains` stops pumping the moment it is satisfied, so an absence is
+    // only true of a screen that has been brought up to date first.
+    app.settle(120);
+    assert!(
+        !app.screen.screen().contents().contains("personal"),
+        "{}",
+        app.screen.screen().contents()
+    );
     app.send(b"x");
     app.contains("No models match");
     app.send(b"\r");
@@ -983,7 +1048,7 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.send(b"\x7f");
     app.contains("1/308");
     app.send(b"\x15");
-    app.contains("308/308");
+    app.contains("307/308");
     app.send(b"\x1b[200~personal 302\x1b[201~");
     app.contains("vendor/model-302");
     app.contains("1/308");
@@ -994,7 +1059,7 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.send(b"answer this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(request["model"], "vendor/model-302");
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1018,7 +1083,7 @@ fn telemetry_and_motion_are_local_controls_with_real_response_usage() {
     app.contains("cost unreported");
     app.contains("1 deliveries");
     app.send(b"\x14");
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"\x14");
     app.contains("LIVE INSTRUMENTS");
     app.send(b"next draft");
@@ -1037,7 +1102,7 @@ fn telemetry_and_motion_are_local_controls_with_real_response_usage() {
         app.contains("next draft");
     }
     app.send(b"\x1b");
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.contains("next draft");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
@@ -1186,7 +1251,7 @@ fn a_fragmented_click_report_does_not_become_prompt_text() {
         request["messages"][0]["content"][0]["text"],
         "CLICK_INPUT_OK"
     );
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1223,7 +1288,7 @@ fn a_report_whose_halves_are_a_third_of_a_second_apart_is_still_not_typed() {
         request["messages"][0]["content"][0]["text"],
         "SLOW_SPLIT_OK"
     );
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1270,7 +1335,7 @@ fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
         // `filler 09` only because the draft line had passed 80 columns.
         // Unix never showed it because a refused loopback connection there
         // ends before the next key is sent.
-        app.contains(&format!("you: {marker}"));
+        app.contains(&format!("❯ {marker}"));
         app.wait("the turn ends before the next Enter", |screen| {
             !screen.contents().contains("thinking")
         });
@@ -1308,7 +1373,7 @@ fn fragmented_mouse_reports_do_not_become_prompt_text() {
         request["messages"][0]["content"][0]["text"],
         "WHEEL_INPUT_OK"
     );
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1432,7 +1497,7 @@ fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
     // Tab switches scope without saving. The destination shown must switch
     // with the selected tab, so a Global label cannot conceal a Project
     // write (or vice versa).
-    app.send(b"\t");
+    app.send(b"\x1b[17~");
     app.contains(&global.display().to_string());
     app.send(b"\x1b");
     app.wait("settings editor closes", |screen| {
@@ -1454,29 +1519,28 @@ fn bare_statusline_selector_previews_cancels_and_ctrl_s_saves_project_scope() {
     let original = "# retained on cancel\n[ui]\nstatusline = \"full\"\n";
     std::fs::write(&project, original).unwrap();
 
+    // Opening the editor and closing it again writes nothing: viewing is
+    // not an edit, which is the half of the old preview contract that
+    // survives direct save.
     app.send(b"/statusline\r");
-    app.contains("Status line");
-    app.contains("preview:");
+    app.contains("SETTINGS");
+    app.contains("Global");
     app.contains("Project");
-    app.send(b"\x1b[C");
-    app.contains("compact");
     app.send(b"\x1b");
-    app.wait("status-line selector closes", |screen| {
-        !screen.contents().contains("preview:")
+    app.wait("settings editor closes", |screen| {
+        !screen.contents().contains("F6 switches")
     });
     assert_eq!(
         std::fs::read_to_string(&project).unwrap(),
         original,
-        "cancelled preview changed the settings file"
+        "opening and closing the editor changed the settings file"
     );
 
-    app.send(b"/statusline\r");
-    app.contains("preview:");
-    app.send(b"\x1b[C");
-    app.contains("compact");
-    app.send(b"\x13");
-    app.contains("Settings saved");
-    let saved = std::fs::read_to_string(&project).expect("Ctrl-S writes project settings");
+    // A completed choice saves itself. `/statusline compact` is the same
+    // save by its shortest route.
+    app.send(b"/statusline compact\r");
+    app.contains("Status line saved for this project");
+    let saved = std::fs::read_to_string(&project).expect("the shortcut writes project settings");
     assert!(saved.contains("statusline = \"compact\""), "{saved}");
 
     app.send(b"/exit\r");
@@ -1528,7 +1592,7 @@ fn typed_newlines_compose_one_message_and_a_lone_enter_still_sends_it() {
             "`{line}` never reached the model, so a lone Enter no longer sends:\n{sent}"
         );
     }
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1730,7 +1794,7 @@ fn live_a_second_escape_escalates_to_the_call_in_flight_and_still_spares_the_ses
 fn workbench_settings_save_directly_and_do_not_consume_the_draft() {
     let (base, _requests) = provider();
     let mut app = App::start(&base);
-    app.contains("P A N E");
+    app.contains("⠿ PANE");
     app.send(b"keep this draft");
     app.send(b"\x1bOQ"); // F2
     app.contains("SETTINGS");
@@ -1750,10 +1814,10 @@ fn workbench_settings_save_directly_and_do_not_consume_the_draft() {
 fn workbench_final_answer_survives_the_actual_provider_and_terminal_loop() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
-    app.contains("P A N E");
+    app.contains("⠿ PANE");
     app.send(b"Return the fixture answer.\r");
     requests.recv_timeout(Duration::from_secs(10)).unwrap();
-    app.contains("LIVE RESULT INTACT");
+    app.contains_line("LIVE RESULT INTACT");
     app.send(b"/diff\r");
     app.contains("before");
     app.send(b"/exit\r");
@@ -1777,7 +1841,7 @@ fn workbench_pointer_opens_settings_only_on_release_and_wheel_stays_local() {
     app.settle(120);
     assert!(app.screen.screen().contents().contains("SETTINGS"));
     app.send(b"\x1b");
-    app.contains("P A N E");
+    app.contains("⠿ PANE");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }

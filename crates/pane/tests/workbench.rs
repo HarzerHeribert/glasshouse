@@ -205,11 +205,12 @@ fn code_public_explanation_and_results_remain_readable() {
     ] {
         assert!(words(&d).contains(t));
     }
-    assert!(
-        d.rows
-            .iter()
-            .any(|r| r.text.contains("99 / 99") && r.tone == Tone::Normal)
-    );
+    assert!(d.rows.iter().any(|r| {
+        r.text.contains("99 / 99")
+            && r.spans
+                .iter()
+                .any(|(t, tone)| t.contains("99 / 99") && *tone == Tone::Normal)
+    }));
 }
 #[test]
 fn collapsed_cell_keeps_helper_contributions() {
@@ -225,7 +226,23 @@ fn local_notices_are_not_model_conversation() {
     let (c, n, mut s) = fixture();
     s.note("SETTINGS INTERNAL MESSAGE");
     let mut u = Workbench::default();
-    assert!(!text(&draw(&c, &n, &s, &mut u, 100, 40)).contains("SETTINGS INTERNAL"));
+    // A notice is kept where it happened, so it can be scrolled back to --
+    // and it is marked and muted, never drawn as something the model said.
+    let d = doc(&c, &n, &s, &u);
+    let row = d
+        .rows
+        .iter()
+        .find(|r| r.text.contains("SETTINGS INTERNAL"))
+        .expect("the notice is in the local document");
+    assert!(row.text.trim_start().starts_with('·'), "{:?}", row.text);
+    assert!(
+        row.spans
+            .iter()
+            .any(|(t, tone)| t.contains("SETTINGS INTERNAL") && *tone == Tone::Muted),
+        "{:?}",
+        row.spans
+    );
+    assert!(text(&draw(&c, &n, &s, &mut u, 100, 40)).contains("SETTINGS INTERNAL"));
     u.activity = true;
     assert!(text(&draw(&c, &n, &s, &mut u, 100, 40)).contains("SETTINGS INTERNAL"));
 }
@@ -265,16 +282,20 @@ fn diff_has_an_observed_baseline_and_semantic_colors() {
     u.tabs.insert(1, CellTab::Diff);
     let d = doc(&c, &n, &s, &u);
     assert!(words(&d).contains("already applied"));
-    assert!(
-        d.rows
-            .iter()
-            .any(|r| r.text == "+new();" && r.tone == Tone::Success)
-    );
-    assert!(
-        d.rows
-            .iter()
-            .any(|r| r.text == "-old();" && r.tone == Tone::Failure)
-    );
+    // The added and removed lines keep their side's colour, and each one
+    // now carries both line numbers, so the row is read by its parts.
+    assert!(d.rows.iter().any(|r| {
+        r.text.contains("+ new();")
+            && r.spans
+                .iter()
+                .any(|(t, tone)| t.contains("new();") && *tone == Tone::Success)
+    }));
+    assert!(d.rows.iter().any(|r| {
+        r.text.contains("− old();")
+            && r.spans
+                .iter()
+                .any(|(t, tone)| t.contains("old();") && *tone == Tone::Failure)
+    }));
 }
 #[test]
 fn absent_diff_is_not_proof_of_no_changes() {
@@ -664,10 +685,10 @@ fn sidebar_visibility_is_respected_without_opaque_surfaces() {
     s.sidebar = pane::tui::SidebarVisibility::Shown;
     let with = draw(&c, &n, &s, &mut u, 140, 40);
     let shown = u.geometry.transcript.width;
-    assert!(text(&with).contains("CURRENT WORK"));
+    assert!(text(&with).contains("THIS SESSION"));
     s.sidebar = pane::tui::SidebarVisibility::Hidden;
     let without = draw(&c, &n, &s, &mut u, 140, 40);
-    assert!(!text(&without).contains("CURRENT WORK"));
+    assert!(!text(&without).contains("THIS SESSION"));
     assert!(u.geometry.transcript.width > shown);
 }
 
@@ -751,4 +772,84 @@ fn settings_favorite_removal_and_undo_are_atomic() {
         pane::config::AgentsMode::Roster
     );
     assert_eq!(p.loaded.config.agents.slots["quick"].model, "small-model");
+}
+
+/// Development aid: prints the rendered workbench so the layout can be read.
+/// `cargo test -p pane --test workbench -- --ignored screenshot --nocapture`
+#[test]
+#[ignore]
+fn screenshot() {
+    let (c, n, s) = fixture();
+    let mut u = Workbench::default();
+    for (name, w, h) in [("WIDE 140x40", 140u16, 40u16), ("NARROW 80x30", 80, 30)] {
+        let b = draw(&c, &n, &s, &mut u, w, h);
+        println!("\n===== {name} =====\n{}", text(&b));
+    }
+    let (mut c2, n2, mut s2) = fixture();
+    s2.activity = Activity::Executing;
+    s2.input = "keep the decorative mark still".into();
+    c2.messages
+        .push(Message::text(Role::User, "and check the tests"));
+    c2.messages.push({
+        let mut m = Message::text(Role::Assistant, "Checking the guard now.");
+        m.content.push(Block::ToolUse{id:"call-2".into(),name:"execute_cell".into(),input:serde_json::json!({"code":"await edit(\"motion.rs\");\nconst t = await checks.run(\"tests\");"})});
+        m
+    });
+    let mut u = Workbench::default();
+    let b = draw(&c2, &n2, &s2, &mut u, 140, 40);
+    println!("\n===== RUNNING 140x40 =====\n{}", text(&b));
+    let mut u = Workbench::default();
+    u.tabs.insert(1, CellTab::Diff);
+    let b = draw(&c, &n, &s, &mut u, 140, 40);
+    println!("\n===== DIFF 140x40 =====\n{}", text(&b));
+    let root = Temp::new();
+    let mut s3 = s.clone();
+    s3.settings_root = Some(root.0.clone());
+    let mut u = Workbench::default();
+    u.open_settings(&s3);
+    let b = draw(&c, &n, &s3, &mut u, 140, 40);
+    println!("\n===== SETTINGS 140x40 =====\n{}", text(&b));
+}
+
+/// `/diff` opens the last recorded cell on its own diff, which is the route
+/// the transcript's "Open diff ↗" and the F4 key also take.
+#[test]
+fn diff_command_opens_the_last_cell_on_its_diff() {
+    let (c, n, mut s) = fixture();
+    let mut u = Workbench::default();
+    assert!(u.local_command("/diff", &mut s, &n));
+    let d = doc(&c, &n, &s, &u);
+    assert!(
+        d.rows.iter().any(|r| r
+            .tabs
+            .iter()
+            .any(|(label, tab)| label.starts_with("Changes") && *tab == CellTab::Diff)
+            && r.action == Some(Action::Tab(1, CellTab::Diff))),
+        "{}",
+        words(&d)
+    );
+}
+
+/// A narrowed search leaves nothing of the wider list behind it: the row a
+/// filter removed must not be legible anywhere on the surface.
+#[test]
+fn a_filtered_navigator_leaves_no_row_of_the_wider_list() {
+    let (c, n, s) = fixture();
+    let mut u = Workbench::default();
+    let mut nav = navigator();
+    nav.query = "fixture-helper".into();
+    u.models = Some(nav);
+    let b = draw(&c, &n, &s, &mut u, 80, 30);
+    let screen = text(&b);
+    assert!(screen.contains("fixture-helper"), "{screen}");
+    // The tab row still names the session's main model; the *list* holds
+    // one row, and the model the query excluded is not among them.
+    let list: String = screen
+        .lines()
+        .filter(|l| l.contains("subscription") && l.contains('·'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(list.contains("fixture-helper"), "{screen}");
+    assert!(!list.contains("fixture-main"), "{screen}");
+    assert!(!screen.contains("unavailable-model"), "{screen}");
 }

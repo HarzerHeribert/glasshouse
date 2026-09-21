@@ -14,6 +14,20 @@ pub enum Effect {
     Cursor(usize),
 }
 impl Workbench {
+    /// Writes one presentation key to the project's own settings, and says
+    /// whether the file actually took it. A session with no project root is
+    /// not an error here -- the choice still applies to the running screen,
+    /// and the notice says which of the two happened.
+    fn persist(&mut self, key: &str, value: &str, s: &mut ScreenState) -> bool {
+        let Ok(mut p) = super::Preferences::open(s) else {
+            return false;
+        };
+        let saved = p.save(key, Some(value.to_string()), s).is_ok();
+        if saved {
+            self.notice = p.notice.clone();
+        }
+        saved
+    }
     pub fn local_command(&mut self, text: &str, s: &mut ScreenState, n: &Notebook) -> bool {
         let parts: Vec<_> = text.split_whitespace().collect();
         match parts.as_slice() {
@@ -67,9 +81,15 @@ impl Workbench {
                 s.telemetry_open = false;
                 true
             }
-            ["/activity" | "/telemetry"] => {
+            ["/activity"] => {
                 self.close();
+                s.telemetry_open = false;
                 self.activity = true;
+                true
+            }
+            ["/telemetry"] => {
+                self.close();
+                s.telemetry_open = true;
                 true
             }
             ["/mode"] => {
@@ -80,6 +100,100 @@ impl Workbench {
             ["/permissions"] => {
                 self.close();
                 self.approvals = true;
+                true
+            }
+            // Presentation is this layer's own business: a palette, a
+            // status line, a sidebar and motion never reach the model, and
+            // each one says what it did where a person can scroll back to it.
+            ["/theme"] => {
+                self.close();
+                s.notice = None;
+                s.panel = Some(crate::tui::Panel {
+                    title: "Themes".into(),
+                    selected: crate::tui::Theme::ALL
+                        .iter()
+                        .position(|t| *t == s.theme)
+                        .unwrap_or(0),
+                    rows: crate::tui::Theme::ALL
+                        .iter()
+                        .map(|t| crate::tui::PanelRow {
+                            text: format!("██  {}", t.name()),
+                            command: Some(format!("/theme {}", t.name())),
+                        })
+                        .collect(),
+                    ..crate::tui::Panel::default()
+                });
+                true
+            }
+            ["/theme", name] => {
+                match crate::tui::Theme::parse(name) {
+                    Some(theme) => {
+                        s.theme = theme;
+                        s.panel = None;
+                        self.persist("ui.theme", theme.name(), s);
+                        s.note(format!(
+                            "Theme: {} · /theme opens the palette",
+                            theme.name()
+                        ));
+                    }
+                    None => s.note("Unknown theme. /theme opens the palette."),
+                }
+                true
+            }
+            ["/motion", word @ ("on" | "off" | "reduce")] => {
+                s.reduced_motion = *word != "on";
+                s.completion_tick = None;
+                self.persist("ui.reduced_motion", &s.reduced_motion.to_string(), s);
+                s.note(if s.reduced_motion {
+                    "Motion reduced. /motion on restores animation."
+                } else {
+                    "Motion on. /motion off reduces animation."
+                });
+                true
+            }
+            ["/motion"] => {
+                s.note("Usage: /motion on | off");
+                true
+            }
+            ["/sidebar", word @ ("auto" | "show" | "hide")] => {
+                s.sidebar = match *word {
+                    "show" => crate::tui::SidebarVisibility::Shown,
+                    "hide" => crate::tui::SidebarVisibility::Hidden,
+                    _ => crate::tui::SidebarVisibility::Auto,
+                };
+                self.persist("ui.sidebar", word, s);
+                // The line names the three words and the key, exactly as it
+                // always has: someone who just used one of them is the
+                // likeliest person to want another.
+                s.note(format!(
+                    "Sidebar: /sidebar auto|show|hide · Ctrl-B toggles · now {word}"
+                ));
+                true
+            }
+            ["/fullscreen"] => {
+                s.fullscreen = !s.fullscreen;
+                s.note(if s.fullscreen {
+                    "Fullscreen. Ctrl-F or /fullscreen restores the chrome."
+                } else {
+                    "Chrome restored."
+                });
+                true
+            }
+            [
+                "/statusline",
+                word @ ("full" | "compact" | "hidden" | "hide"),
+            ] => {
+                let word = if *word == "hide" { "hidden" } else { word };
+                s.status_line = match word {
+                    "compact" => crate::tui::StatusLine::Compact,
+                    "hidden" => crate::tui::StatusLine::Hidden,
+                    _ => crate::tui::StatusLine::Full,
+                };
+                if self.persist("ui.statusline", word, s) {
+                    s.note(format!("Status line saved for this project: {word}"));
+                } else {
+                    s.note(format!("Status line: {word} · this session only"));
+                }
                 true
             }
             _ => false,
@@ -236,6 +350,27 @@ impl Workbench {
                     self.close();
                     return Effect::Pass;
                 }
+                // The instruments are a surface too: Esc leaves them, and
+                // ↑↓ walks the requests they list.
+                if s.telemetry_open && !self.is_local() && s.panel.is_none() {
+                    match k.code {
+                        KeyCode::Esc => {
+                            s.telemetry_open = false;
+                            return Effect::Consumed;
+                        }
+                        KeyCode::Up => {
+                            s.telemetry_selected =
+                                Some(s.telemetry_selected.unwrap_or(0).saturating_add(1));
+                            return Effect::Consumed;
+                        }
+                        KeyCode::Down => {
+                            s.telemetry_selected =
+                                s.telemetry_selected.and_then(|i| i.checked_sub(1));
+                            return Effect::Consumed;
+                        }
+                        _ => {}
+                    }
+                }
                 if k.code == KeyCode::Esc && (self.is_local() || s.panel.is_some()) {
                     if let Some(p) = &mut self.preferences {
                         if p.editing.take().is_some() {
@@ -377,12 +512,14 @@ impl Workbench {
                             m.selected = 0;
                         }
                         KeyCode::Left => {
-                            m.provider = m.provider.saturating_sub(1);
+                            // A carousel wraps: stepping off one end and
+                            // back again has to return where it started.
+                            let n = m.providers().len().max(1);
+                            m.provider = (m.provider + n - 1) % n;
                             m.selected = 0;
                         }
                         KeyCode::Right => {
-                            m.provider =
-                                (m.provider + 1).min(m.providers().len().saturating_sub(1));
+                            m.provider = (m.provider + 1) % m.providers().len().max(1);
                             m.selected = 0;
                         }
                         KeyCode::Char('o') if ctrl => m.measured_order = !m.measured_order,
@@ -482,7 +619,7 @@ impl Workbench {
                 match k.code {
                     KeyCode::Char('t') if ctrl => {
                         self.close();
-                        self.activity = true;
+                        s.telemetry_open = !s.telemetry_open;
                         Effect::Consumed
                     }
                     KeyCode::F(2) => {
@@ -727,7 +864,9 @@ impl Workbench {
                 } else if let Some(r) = crate::permissions::Rung::parse(&rung) {
                     s.permissions.set(r);
                     self.close();
-                    self.notice = format!("Ask: {rung} · sandbox and denials unchanged");
+                    self.notice = format!(
+                        "permissions {rung} — Shift-Tab cycles, /permissions <rung> sets one"
+                    );
                 }
             }
             Action::PanelRow(i) => {

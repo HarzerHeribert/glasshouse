@@ -1,5 +1,5 @@
 //! Converts observed conversation/cell records to a readable, local document.
-use super::{Action, CellTab, Workbench};
+use super::{Action, CellTab, Workbench, theme};
 use crate::contract::{Block, Conversation, Message, Role};
 use crate::prompt::{Extracted, extract_program};
 use crate::tui::{Activity, CellView, Notebook, ScreenState};
@@ -8,16 +8,29 @@ use crate::tui::{Activity, CellView, Notebook, ScreenState};
 pub enum Tone {
     Normal,
     Code,
+    /// Emphasis without hue: a cell's number, a final answer's first line.
+    Strong,
     Accent,
+    /// Little helpers and the evidence they return.
+    Helper,
     Failure,
     Warning,
     Success,
     Muted,
+    /// Rules and separators only.
+    Line,
 }
 #[derive(Debug, Clone)]
 pub struct Row {
+    /// The whole line as it is drawn. Anchoring, selection and copying read
+    /// this, so it stays the concatenation of [`Row::spans`] when those are set.
     pub text: String,
     pub tone: Tone,
+    /// Per-segment colour for one line. Empty means the line is [`Row::tone`].
+    pub spans: Vec<(String, Tone)>,
+    /// A cell's tab strip: the view turns each entry into its own click
+    /// target, which one flat string could not express.
+    pub tabs: Vec<(String, CellTab)>,
     pub action: Option<Action>,
     pub key: (usize, usize),
 }
@@ -34,7 +47,22 @@ impl Document {
         width: usize,
         id: usize,
     ) {
+        self.wrapped(text, tone, action, width, id, 0);
+    }
+    /// Wrap into the width, and hang every produced line under one indent so
+    /// that a cell's body stays visibly inside the cell.
+    pub fn wrapped(
+        &mut self,
+        text: impl Into<String>,
+        tone: Tone,
+        action: Option<Action>,
+        width: usize,
+        id: usize,
+        indent: usize,
+    ) {
         let text = text.into();
+        let width = width.saturating_sub(indent).max(1);
+        let pad = " ".repeat(indent);
         for line in text.split('\n') {
             let mut part = String::new();
             let mut n = 0;
@@ -49,27 +77,58 @@ impl Document {
                 };
                 let w = ratatui::text::Span::raw(s.clone()).width();
                 if n + w > width.max(1) && !part.is_empty() {
-                    self.row(std::mem::take(&mut part), tone, action.clone(), id);
+                    let done = format!("{pad}{}", std::mem::take(&mut part));
+                    self.row(done, tone, action.clone(), id);
                     n = 0;
                 }
                 part.push_str(&s);
                 n += w;
             }
-            self.row(part, tone, action.clone(), id);
+            let done = if part.is_empty() {
+                part
+            } else {
+                format!("{pad}{part}")
+            };
+            self.row(done, tone, action.clone(), id);
         }
     }
     fn row(&mut self, text: String, tone: Tone, action: Option<Action>, id: usize) {
+        self.emit(
+            Row {
+                text,
+                tone,
+                spans: Vec::new(),
+                tabs: Vec::new(),
+                action,
+                key: (0, 0),
+            },
+            id,
+        );
+    }
+    fn emit(&mut self, mut row: Row, id: usize) {
         let ordinal = self
             .rows
             .last()
             .filter(|r| r.key.0 == id)
             .map_or(0, |r| r.key.1 + 1);
-        self.rows.push(Row {
-            text,
-            tone,
-            action,
-            key: (id, ordinal),
-        });
+        row.key = (id, ordinal);
+        self.rows.push(row);
+    }
+    /// One pre-sized line of coloured segments; never wrapped, because its
+    /// padding was computed against the width it was built for.
+    fn line(&mut self, spans: Vec<(String, Tone)>, action: Option<Action>, id: usize) {
+        let text = spans.iter().map(|(t, _)| t.as_str()).collect::<String>();
+        self.emit(
+            Row {
+                text,
+                tone: spans.first().map_or(Tone::Normal, |(_, t)| *t),
+                spans,
+                tabs: Vec::new(),
+                action,
+                key: (0, 0),
+            },
+            id,
+        );
     }
     pub fn build(
         c: &Conversation,
@@ -79,12 +138,14 @@ impl Document {
         width: usize,
     ) -> Self {
         let mut d = Self::default();
+        let mut note = 0usize;
         let mut cell: usize = 0;
         let mut after_return = false;
         let mut feedback = false;
         let mut returned_text: Option<String> = None;
         for (idx, m) in c.messages.iter().enumerate() {
             let id = idx + 1;
+            d.notes(s, &mut note, idx, width);
             if m.historical.is_some() {
                 continue;
             }
@@ -101,7 +162,7 @@ impl Document {
                     continue;
                 }
                 after_return = false;
-                d.push(format!("› {}", prose(m)), Tone::Normal, None, width, id);
+                d.push(format!("❯ {}", prose(m)), Tone::Strong, None, width, id);
                 d.push("", Tone::Normal, None, width, id);
                 continue;
             }
@@ -164,20 +225,42 @@ impl Document {
             } else {
                 Tone::Normal
             };
-            let description = v.and_then(|v| v.description.as_deref()).unwrap_or("");
-            d.push(
-                format!(
-                    "{} {cell:03}  {state}  {description}",
-                    if open { "▾" } else { "▸" }
+            let program_now = v
+                .and_then(|v| v.executed_source.as_deref())
+                .or(src.as_deref())
+                .unwrap_or("");
+            // A cell the model did not name is described by its own size,
+            // which is a fact about it rather than a guess at its intent.
+            let size = format!("{} lines", program_now.lines().count());
+            let description = v
+                .and_then(|v| v.description.as_deref())
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or(&size);
+            let clock = if running {
+                clock(s.pulse.elapsed_ms)
+            } else {
+                String::new()
+            };
+            d.line(
+                justify(
+                    vec![
+                        (format!(" {} ", if open { "▾" } else { "▸" }), tone),
+                        (format!("{cell:03}"), Tone::Strong),
+                        (format!("  {description}"), tone),
+                    ],
+                    vec![
+                        (state.to_string(), tone),
+                        (format!("  {clock} "), Tone::Muted),
+                    ],
+                    width,
                 ),
-                tone,
                 Some(Action::Cell(cell)),
-                width,
                 id,
             );
             if open {
-                d.push("━".repeat(width.saturating_sub(1)), tone, None, width, id);
+                d.rule('━', width, id);
                 let tab = ui.tabs.get(&cell).copied().unwrap_or(CellTab::Code);
+                d.tabstrip(cell, tab, v.and_then(|v| v.changes.as_deref()), width, id);
                 if v.is_some_and(|v| v.origin != crate::abi::Origin::AuthoredCell) {
                     d.push(
                         "Host-lowered tool frame · not model-authored source",
@@ -192,7 +275,7 @@ impl Document {
                     .or(src.as_deref())
                     .unwrap_or("");
                 match tab {
-                    CellTab::Code => d.push(program, Tone::Code, None, width, id),
+                    CellTab::Code => d.wrapped(program, Tone::Code, None, width, id, 2),
                     CellTab::Diff => d.diff(v.and_then(|v| v.changes.as_deref()), width, id),
                     CellTab::Output => {
                         if let Some(v) = v {
@@ -203,8 +286,8 @@ impl Document {
                                 ("Handles", &v.table, Tone::Muted),
                             ] {
                                 if let Some(value) = value {
-                                    d.push(name, Tone::Accent, None, width, id);
-                                    d.push(value, tone, None, width, id);
+                                    d.wrapped(name, Tone::Accent, None, width, id, 2);
+                                    d.wrapped(value, tone, None, width, id, 4);
                                 }
                             }
                         }
@@ -236,61 +319,64 @@ impl Document {
                     }
                     if tab == CellTab::Code {
                         if let Some(output) = &v.output {
-                            d.push(
-                                output.lines().take(4).collect::<Vec<_>>().join("\n"),
-                                Tone::Normal,
-                                None,
-                                width,
-                                id,
-                            );
+                            d.result(output, width, id);
                         }
                         if let Some(execution) = &v.execution {
                             for line in execution
                                 .lines()
                                 .filter(|l| l.contains(" · failed") || l.contains(" · denied"))
                             {
-                                d.push(line, Tone::Failure, None, width, id);
+                                d.line(
+                                    vec![
+                                        ("  ✕ ".to_string(), Tone::Failure),
+                                        (clip(line, width.saturating_sub(6)), Tone::Failure),
+                                    ],
+                                    None,
+                                    id,
+                                );
                             }
                         }
                     }
                 }
-                d.push("─".repeat(width.saturating_sub(1)), tone, None, width, id);
-                for (label, t) in [
-                    ("Cell program", CellTab::Code),
-                    ("Diff · before/after this cell", CellTab::Diff),
-                    ("Output", CellTab::Output),
-                    ("Helpers", CellTab::Helpers),
-                ] {
-                    // One row becomes four clickable spans in the view.
-                    if t == tab {
-                        d.push(
-                            format!("[ {label} ]"),
-                            Tone::Accent,
-                            Some(Action::Tab(cell, t)),
-                            width,
-                            id,
-                        );
-                    }
+                if running {
+                    d.work(s, v, width, id);
                 }
+                d.rule('─', width, id);
             }
             if let Some(v) = v {
+                if open {
+                    d.summary(v, width, id);
+                }
                 d.helpers(cell, v, ui, width, id);
                 if let Some(answer) = v.returned.as_ref() {
                     let answer =
                         crate::prompt::completion_text(answer).unwrap_or_else(|| answer.clone());
                     d.push("", Tone::Normal, None, width, id);
-                    d.push(&answer, Tone::Normal, None, width, id);
+                    // The answer's opening line is the result a person came
+                    // back for; the rest is its body, in ordinary prose.
+                    let mut lines = answer.splitn(2, '\n');
+                    if let Some(first) = lines.next() {
+                        d.push(first, Tone::Strong, None, width, id);
+                    }
+                    if let Some(rest) = lines.next().filter(|r| !r.trim().is_empty()) {
+                        d.push(rest, Tone::Normal, None, width, id);
+                    }
                     returned_text = Some(answer.trim().to_string());
                 }
             }
             d.push("", Tone::Normal, None, width, id);
         }
+        d.notes(s, &mut note, usize::MAX, width);
         if let Some(p) = &n.preflight {
-            d.push(
-                format!("◇ SCOUT · {}", p.asked),
-                Tone::Accent,
+            d.line(
+                vec![
+                    (" ◇ PREFLIGHT · SCOUT  ".to_string(), Tone::Helper),
+                    (
+                        clip(&format!("{} {}", p.verb, p.asked), width.saturating_sub(24)),
+                        Tone::Muted,
+                    ),
+                ],
                 None,
-                width,
                 usize::MAX - 2,
             );
             d.push(
@@ -330,49 +416,297 @@ impl Document {
             d.push(text, Tone::Normal, None, width, usize::MAX - 1);
         }
         if d.rows.is_empty() {
-            d.push(
-                "P A N E   /   CODE · CELLS · LITTLE HELPERS",
-                Tone::Accent,
+            d.line(vec![(String::new(), Tone::Normal)], None, 0);
+            d.line(vec![("  ⠿ PANE".to_string(), Tone::Accent)], None, 0);
+            d.line(
+                vec![("  Code · cells · little helpers".to_string(), Tone::Muted)],
                 None,
-                width,
                 0,
             );
-            d.push("\nDescribe the work. Inspect a cell or its helpers without leaving the conversation.\n\n/settings  Preferences    /models  Models    /help  Commands", Tone::Normal, None, width, 0);
-        }
-        d
-    }
-    fn diff(&mut self, value: Option<&str>, width: usize, id: usize) {
-        self.push(
-            "Observed changes · before → after this cell · already applied",
-            Tone::Normal,
-            None,
-            width,
-            id,
-        );
-        if let Some(diff) = value.filter(|v| !v.is_empty()) {
-            for line in diff.lines() {
-                let tone =
-                    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@")
-                    {
-                        Tone::Accent
-                    } else if line.starts_with('+') {
-                        Tone::Success
-                    } else if line.starts_with('-') {
-                        Tone::Failure
-                    } else {
-                        Tone::Normal
-                    };
-                self.push(line, tone, None, width, id);
-            }
-        } else {
-            self.push(
-                "No textual diff captured. This does not prove no files changed.",
+            d.push("", Tone::Normal, None, width, 0);
+            d.wrapped(
+                "Describe the work. One cell is one program: it reads, edits, runs and \
+                 checks, and every result you see here was observed rather than assumed.",
                 Tone::Normal,
                 None,
                 width,
+                0,
+                2,
+            );
+            d.push("", Tone::Normal, None, width, 0);
+            for (key, what) in [
+                ("/settings", "preferences, saved as you choose them"),
+                ("/models", "which model answers, and at what effort"),
+                ("/diff", "what the last cell actually changed"),
+                ("/help", "every command"),
+            ] {
+                d.line(
+                    vec![
+                        (format!("  {key:<11}"), Tone::Accent),
+                        (what.to_string(), Tone::Muted),
+                    ],
+                    Some(Action::Insert(key.to_string())),
+                    0,
+                );
+            }
+        }
+        d
+    }
+    /// The cell's own result, marked pass or fail from what it actually
+    /// said. Nothing here judges the work -- the mark reports the words the
+    /// run produced, and the words stay on the line beside it.
+    fn result(&mut self, output: &str, width: usize, id: usize) {
+        for line in output.lines().take(4) {
+            let lower = line.to_lowercase();
+            let bad = ["fail", "error", "panic", "✕"]
+                .iter()
+                .any(|w| lower.contains(w));
+            self.line(
+                vec![
+                    (
+                        format!("  {} ", if bad { "✕" } else { "✓" }),
+                        if bad { Tone::Failure } else { Tone::Success },
+                    ),
+                    (clip(line, width.saturating_sub(6)), Tone::Normal),
+                ],
+                None,
                 id,
             );
         }
+    }
+    /// Local notices, drawn where they happened.
+    ///
+    /// **A notice is not a message and never pretends to be one.** It is
+    /// quiet, it is marked, and it stays in the transcript where a person
+    /// can scroll back to it -- the same notes the Activity surface lists.
+    fn notes(&mut self, s: &ScreenState, next: &mut usize, upto: usize, width: usize) {
+        while let Some(note) = s.history.get(*next).filter(|n| n.after <= upto) {
+            *next += 1;
+            let bad = note.text.starts_with("ERROR:");
+            for line in note.text.lines() {
+                self.line(
+                    vec![
+                        (
+                            format!(" {} ", if bad { "✕" } else { "·" }),
+                            if bad { Tone::Failure } else { Tone::Line },
+                        ),
+                        (
+                            clip(line, width.saturating_sub(4)),
+                            if bad { Tone::Failure } else { Tone::Muted },
+                        ),
+                    ],
+                    None,
+                    usize::MAX - 4,
+                );
+            }
+        }
+    }
+    /// A full-width separator in the one colour reserved for separators.
+    fn rule(&mut self, glyph: char, width: usize, id: usize) {
+        self.line(
+            vec![(
+                glyph.to_string().repeat(width.saturating_sub(1)),
+                Tone::Line,
+            )],
+            None,
+            id,
+        );
+    }
+    /// The cell's own navigation: what this cell changed, what it ran, what
+    /// came back, and a route to the full diff. The counts are the observed
+    /// patch's, so an empty capture says so by showing no counts at all.
+    fn tabstrip(
+        &mut self,
+        cell: usize,
+        current: CellTab,
+        changes: Option<&str>,
+        width: usize,
+        id: usize,
+    ) {
+        let (added, removed) = changes.map_or((0, 0), count_changes);
+        let changed = if added + removed > 0 {
+            format!("Changes +{added} −{removed}")
+        } else {
+            "Changes".to_string()
+        };
+        let tabs = vec![
+            (changed, CellTab::Diff),
+            ("Cell program".to_string(), CellTab::Code),
+            ("Full output".to_string(), CellTab::Output),
+            ("Helpers".to_string(), CellTab::Helpers),
+        ];
+        let text = tabs
+            .iter()
+            .map(|(label, _)| format!("  {label}  "))
+            .collect::<String>();
+        let pad = width
+            .saturating_sub(span_width(&text))
+            .saturating_sub(OPEN_DIFF.chars().count() + 1);
+        self.emit(
+            Row {
+                text: format!("{text}{}{OPEN_DIFF}", " ".repeat(pad)),
+                tone: Tone::Normal,
+                spans: vec![
+                    (" ".repeat(pad), Tone::Normal),
+                    (OPEN_DIFF.into(), Tone::Muted),
+                ],
+                tabs,
+                action: Some(Action::Tab(cell, current)),
+                key: (0, 0),
+            },
+            id,
+        );
+    }
+    /// The mockup's working mark: decoration on the left, and beside it what
+    /// is actually happening, what was last observed, and at whose cost.
+    fn work(&mut self, s: &ScreenState, v: Option<&CellView>, width: usize, id: usize) {
+        let still = s.reduced_motion || s.selection.is_some();
+        let helper = v.and_then(|v| v.helpers.last());
+        let waiting = helper.is_some_and(|h| !h.outcome.ok && h.outcome.text.is_empty());
+        let label = match s.activity {
+            Activity::Executing => "Executing this cell",
+            Activity::Waiting => "Waiting on the provider",
+            Activity::Searching => "Searching",
+            Activity::Compacting => "Preparing bounded context",
+            _ if waiting => "Little helper working",
+            _ => "Model is responding",
+        };
+        let detail = if waiting {
+            "Request sent · completion estimate unknown".to_string()
+        } else {
+            format!(
+                "Elapsed {} · nothing is assumed complete",
+                clock(s.pulse.elapsed_ms)
+            )
+        };
+        let cost = helper.map_or_else(
+            || {
+                s.model
+                    .as_deref()
+                    .map_or_else(|| "model unknown".into(), |m| format!("this session · {m}"))
+            },
+            |h| {
+                format!(
+                    "{} · {}",
+                    h.helper,
+                    if h.usage.model.is_empty() {
+                        "captured model unknown"
+                    } else {
+                        h.usage.model.as_str()
+                    }
+                )
+            },
+        );
+        let art = theme::padded_mark(s.animation_frame, still);
+        for (glyph, (text, tone)) in art.into_iter().zip([
+            (format!("◈ {label}"), Tone::Accent),
+            (detail, Tone::Normal),
+            (cost, Tone::Muted),
+        ]) {
+            let text = clip(&text, width.saturating_sub(12));
+            self.line(
+                vec![
+                    (
+                        format!(" {glyph} "),
+                        if still { Tone::Line } else { Tone::Accent },
+                    ),
+                    (text, tone),
+                ],
+                None,
+                id,
+            );
+        }
+    }
+    /// A unified patch with both line numbers, the way the mockup reads it:
+    /// where the line was, where it is now, and which side it belongs to.
+    ///
+    /// The numbers come from the patch's own hunk headers. A patch without
+    /// them still renders -- the gutter is simply blank, which is honest --
+    /// because a captured diff is evidence and must never be dropped for
+    /// failing to parse.
+    fn diff(&mut self, value: Option<&str>, width: usize, id: usize) {
+        self.line(
+            vec![(
+                "  Observed changes · before → after this cell · already applied".to_string(),
+                Tone::Muted,
+            )],
+            None,
+            id,
+        );
+        let Some(diff) = value.filter(|v| !v.is_empty()) else {
+            self.line(
+                vec![(
+                    "  No textual diff captured. This does not prove no files changed.".to_string(),
+                    Tone::Warning,
+                )],
+                None,
+                id,
+            );
+            return;
+        };
+        let (mut old_no, mut new_no) = (0usize, 0usize);
+        for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("+++ ") {
+                self.line(
+                    vec![(format!("  {}", path.trim_start_matches("b/")), Tone::Accent)],
+                    None,
+                    id,
+                );
+                continue;
+            }
+            if line.starts_with("--- ") {
+                continue;
+            }
+            if let Some(header) = line.strip_prefix("@@") {
+                (old_no, new_no) = hunk(header);
+                self.line(vec![(format!("  {line}"), Tone::Line)], None, id);
+                continue;
+            }
+            let (mark, tone, old_cell, new_cell) = match line.chars().next() {
+                Some('+') => {
+                    new_no += 1;
+                    ("+", Tone::Success, String::new(), new_no.to_string())
+                }
+                Some('-') => {
+                    old_no += 1;
+                    ("−", Tone::Failure, old_no.to_string(), String::new())
+                }
+                _ => {
+                    old_no += 1;
+                    new_no += 1;
+                    (" ", Tone::Muted, old_no.to_string(), new_no.to_string())
+                }
+            };
+            let body: String = line.chars().skip(1).collect();
+            self.line(
+                vec![
+                    (format!("  {old_cell:>5} {new_cell:>5} {mark} "), Tone::Line),
+                    (clip(&body, width.saturating_sub(16)), tone),
+                ],
+                None,
+                id,
+            );
+        }
+    }
+    /// One line under an open cell: what its helpers did, what its own result
+    /// said, and how many files it changed. Every claim here is observed.
+    fn summary(&mut self, v: &CellView, width: usize, id: usize) {
+        let mut left = vec![(" ".to_string(), Tone::Normal)];
+        if let Some(e) = &v.error {
+            left.push((format!("✕ {}   ", e.class), Tone::Failure));
+        } else if v.execution.is_some() {
+            left.push(("✓ executed   ".to_string(), Tone::Success));
+        }
+        let files = v
+            .changes
+            .as_deref()
+            .map_or(0, |d| d.lines().filter(|l| l.starts_with("+++ ")).count());
+        let right = match files {
+            0 => vec![("no captured file changes ".to_string(), Tone::Muted)],
+            1 => vec![("1 changed file ↗ ".to_string(), Tone::Muted)],
+            n => vec![(format!("{n} changed files ↗ "), Tone::Muted)],
+        };
+        self.line(justify(left, right, width), None, id);
     }
     fn helpers(&mut self, cell: usize, v: &CellView, ui: &Workbench, width: usize, id: usize) {
         for (i, h) in v.helpers.iter().enumerate() {
@@ -386,8 +720,9 @@ impl Document {
             };
             let result = if waiting {
                 format!(
-                    "{} · {:.1}s · estimate unknown",
+                    "{} {} · {:.1}s · estimate unknown",
                     h.verb,
+                    h.asked,
                     h.outcome.elapsed_ms as f64 / 1000.
                 )
             } else {
@@ -398,16 +733,26 @@ impl Document {
                     .unwrap_or("Returned")
                     .to_string()
             };
-            self.push(
-                format!("◆ {}  {result}", h.helper),
-                tone,
+            let open =
+                ui.helper == Some((cell, i)) || ui.tabs.get(&cell) == Some(&CellTab::Helpers);
+            self.line(
+                vec![
+                    (
+                        format!(" {} ◇ {} ", if open { "▾" } else { "▸" }, h.helper),
+                        if tone == Tone::Normal {
+                            Tone::Helper
+                        } else {
+                            tone
+                        },
+                    ),
+                    (clip(&result, width.saturating_sub(16)), Tone::Muted),
+                ],
                 Some(Action::Helper(cell, i)),
-                width,
                 id,
             );
-            if ui.helper == Some((cell, i)) || ui.tabs.get(&cell) == Some(&CellTab::Helpers) {
+            if open {
                 self.push(
-                    format!("  Asked: {}", h.asked),
+                    format!("    Asked: {}", h.asked),
                     Tone::Normal,
                     None,
                     width,
@@ -446,6 +791,82 @@ impl Document {
             }
         }
     }
+}
+const OPEN_DIFF: &str = "Open diff ↗";
+
+fn span_width(text: &str) -> usize {
+    ratatui::text::Span::raw(text).width()
+}
+/// Cut to a column budget on a character boundary; never mid-escape, because
+/// control characters never reach a row in the first place.
+fn clip(text: &str, width: usize) -> String {
+    if span_width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if span_width(&out) + span_width(&c.to_string()) > width.saturating_sub(1) {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+/// Two groups of spans on one line, the second pushed to the right edge. The
+/// left group loses characters first: a right-edge state word is the one thing
+/// a narrow terminal must not drop.
+fn justify(
+    left: Vec<(String, Tone)>,
+    right: Vec<(String, Tone)>,
+    width: usize,
+) -> Vec<(String, Tone)> {
+    let rw: usize = right.iter().map(|(t, _)| span_width(t)).sum();
+    let budget = width.saturating_sub(rw).saturating_sub(1);
+    let mut out: Vec<(String, Tone)> = Vec::new();
+    let mut used = 0;
+    for (text, tone) in left {
+        let room = budget.saturating_sub(used);
+        if room == 0 {
+            break;
+        }
+        let text = clip(&text, room);
+        used += span_width(&text);
+        out.push((text, tone));
+    }
+    out.push((" ".repeat(budget.saturating_sub(used)), Tone::Normal));
+    out.extend(right);
+    out
+}
+fn clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+/// `@@ -old,n +new,n @@` -- the first line number on each side.
+fn hunk(header: &str) -> (usize, usize) {
+    let mut sides = header.split_whitespace().filter_map(|part| {
+        let digits = part.trim_start_matches(['-', '+']);
+        digits
+            .split(',')
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+    });
+    let old = sides.next().unwrap_or(1);
+    let new = sides.next().unwrap_or(old);
+    (old.saturating_sub(1), new.saturating_sub(1))
+}
+fn count_changes(diff: &str) -> (usize, usize) {
+    diff.lines().fold((0, 0), |(a, r), line| {
+        if line.starts_with("+++") || line.starts_with("---") {
+            (a, r)
+        } else if line.starts_with('+') {
+            (a + 1, r)
+        } else if line.starts_with('-') {
+            (a, r + 1)
+        } else {
+            (a, r)
+        }
+    })
 }
 fn prose(m: &Message) -> String {
     let s = m

@@ -301,7 +301,14 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    assert_eq!(slash_matches("/").len(), 30);
+    // The workbench added `/diff`, `/activity` and `/subagents` to the list.
+    assert_eq!(slash_matches("/").len(), 33);
+    for command in ["/diff", "/activity", "/subagents"] {
+        assert!(
+            slash_matches("/").iter().any(|(name, _)| name == command),
+            "{command} is offered"
+        );
+    }
     assert!(
         slash_matches("/se")
             .iter()

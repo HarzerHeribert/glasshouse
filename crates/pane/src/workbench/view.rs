@@ -1,4 +1,4 @@
-use super::{Action, CellTab, Document, Geometry, Tone, Workbench, settings::CATEGORIES, theme};
+use super::{Action, Document, Geometry, Tone, Workbench, settings::CATEGORIES, theme};
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{Activity, Notebook, ScreenState, StatusLine, Theme};
 use ratatui::{
@@ -64,6 +64,99 @@ fn add(
     }
 }
 
+/// One word for the work mode, as the footer and the session bar both name it.
+fn work_word(s: &ScreenState) -> &'static str {
+    match s.mode {
+        crate::tui::Mode::Execute => "Build",
+        crate::tui::Mode::Explore => "Explore",
+        crate::tui::Mode::Plan => "Plan",
+    }
+}
+/// One word for how often this session asks before it acts.
+fn ask_word(s: &ScreenState) -> &'static str {
+    match s.permissions.rung() {
+        crate::permissions::Rung::Manual => "Every call",
+        crate::permissions::Rung::AcceptEdits => "Commands",
+        crate::permissions::Rung::Auto => "Auto-review",
+        crate::permissions::Rung::Full => "Never",
+    }
+}
+/// Right-aligned controls that give room up in a fixed order, so a narrow
+/// terminal loses the least useful control rather than the leftmost one.
+///
+/// The order is the order a person reaches for them: which model answers,
+/// what the session may do, how often it asks, what confines it. The way
+/// into settings is never dropped, because it is the way to everything else.
+fn controls(
+    f: &mut Frame<'_>,
+    g: &mut Geometry,
+    a: Rect,
+    reserved: usize,
+    items: &[(String, Action)],
+    t: Theme,
+) {
+    let room = (a.width as usize).saturating_sub(reserved);
+    let mut keep: Vec<usize> = (0..items.len()).collect();
+    let width = |keep: &Vec<usize>| -> usize {
+        keep.iter()
+            .map(|i| Span::raw(items[*i].0.as_str()).width() + 2)
+            .sum()
+    };
+    // Drop the last-named control first; the list is written most useful
+    // first, and the final entry -- settings -- is exempt.
+    while width(&keep) > room && keep.len() > 1 {
+        let drop = keep.len() - 2;
+        keep.remove(drop);
+    }
+    if width(&keep) > room {
+        return;
+    }
+    let mut x = a.right() - width(&keep) as u16;
+    for i in keep {
+        let (text, action) = &items[i];
+        let w = Span::raw(text.as_str()).width() as u16;
+        button(
+            f,
+            g,
+            Rect::new(x, a.y, w, 1),
+            text,
+            action.clone(),
+            false,
+            t,
+        );
+        x += w + 2;
+    }
+}
+/// `⠿ PANE / project` and the four session facts, one row, every width.
+///
+/// The facts are the ones a person acts on -- which model answers, what this
+/// session may do, how often it asks, and whether it is confined -- and each
+/// of them is the control that changes it.
+fn session_bar(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState) {
+    let project = s.project.as_deref().unwrap_or("workspace");
+    let brand = format!(" ⠿ PANE / {project}");
+    row(f, a, &brand, Tone::Accent, s.theme);
+    let model = s.model.as_deref().unwrap_or("choose model");
+    let access = match s.confinement.as_deref() {
+        Some("unconfined") => "Unconfined".to_string(),
+        Some(word) => format!("Access: {word}"),
+        None => "Access: details".to_string(),
+    };
+    controls(
+        f,
+        g,
+        a,
+        Span::raw(brand.as_str()).width() + 2,
+        &[
+            (format!("{model} ▾"), Action::Models),
+            (format!("Work: {}", work_word(s)), Action::Work),
+            (format!("Ask: {}", ask_word(s)), Action::Approvals),
+            (access, Action::Access),
+            ("[ Settings ]".to_string(), Action::Settings),
+        ],
+        s.theme,
+    );
+}
 pub struct Layout {
     pub transcript: Rect,
     sidebar: Option<Rect>,
@@ -88,7 +181,8 @@ pub fn layout(a: Rect, s: &ScreenState) -> Layout {
         0
     };
     let textwidth = a.width.saturating_sub(2).max(1);
-    let input_lines = wrap_input(&s.input, textwidth as usize);
+    // Two columns belong to the composer's prompt mark.
+    let input_lines = wrap_input(&s.input, textwidth.saturating_sub(2).max(1) as usize);
     let composer_height = (input_lines.len() as u16)
         .clamp(1, 5)
         .saturating_add(1)
@@ -111,7 +205,7 @@ pub fn layout(a: Rect, s: &ScreenState) -> Layout {
         && match s.sidebar {
             crate::tui::SidebarVisibility::Shown => true,
             crate::tui::SidebarVisibility::Hidden => false,
-            crate::tui::SidebarVisibility::Auto => a.width >= 130,
+            crate::tui::SidebarVisibility::Auto => a.width >= 120,
         } {
         30
     } else {
@@ -177,35 +271,7 @@ pub fn render(
     ui.anchor = d.rows.get(g.start).map(|row| (row.key, row.text.clone()));
     ui.last_scrollback = s.scrollback;
     if header > 0 {
-        row(
-            f,
-            Rect::new(a.x, a.y, a.width, 1),
-            &format!(
-                " P A N E   /   {}",
-                s.project.as_deref().unwrap_or("workspace")
-            ),
-            Tone::Accent,
-            s.theme,
-        );
-        let text = "Settings  Models  Activity";
-        if a.width >= 72 {
-            let x = a.right() - text.len() as u16;
-            for (off, width, label, act) in [
-                (0, 8, "Settings", Action::Settings),
-                (10, 6, "Models", Action::Models),
-                (18, 8, "Activity", Action::Activity),
-            ] {
-                button(
-                    f,
-                    &mut g,
-                    Rect::new(x + off, a.y, width, 1),
-                    label,
-                    act,
-                    false,
-                    s.theme,
-                );
-            }
-        }
+        session_bar(f, &mut g, Rect::new(a.x, a.y, a.width, 1), s);
     }
     for (j, r) in d
         .rows
@@ -220,30 +286,55 @@ pub fn render(
             g.transcript.width,
             1,
         );
-        if let Some(Action::Tab(cell, current)) = r.action {
+        if let (Some(Action::Tab(cell, current)), false) = (&r.action, r.tabs.is_empty()) {
+            let (cell, current) = (*cell, *current);
             let mut x = area.x;
-            for (text, tab) in [
-                ("Code", CellTab::Code),
-                ("Diff", CellTab::Diff),
-                ("Output", CellTab::Output),
-                ("Helpers", CellTab::Helpers),
-            ] {
-                let label = if current == tab {
-                    format!("[ {text} ]")
+            for (label, tab) in &r.tabs {
+                let label = if current == *tab {
+                    format!("[ {label} ]")
                 } else {
-                    format!("  {text}  ")
+                    format!("  {label}  ")
                 };
-                let w = (label.len() as u16).min(area.right().saturating_sub(x));
+                let w =
+                    (Span::raw(label.as_str()).width() as u16).min(area.right().saturating_sub(x));
                 button(
                     f,
                     &mut g,
                     Rect::new(x, area.y, w, 1),
                     &label,
-                    Action::Tab(cell, tab),
-                    current == tab,
+                    Action::Tab(cell, *tab),
+                    current == *tab,
                     s.theme,
                 );
                 x += w;
+            }
+            // Whatever the strip left over -- the route to the whole diff.
+            let rest: String = r.spans.iter().map(|(t, _)| t.as_str()).collect();
+            let w = (Span::raw(rest.as_str()).width() as u16).min(area.right().saturating_sub(x));
+            if w > 0 {
+                button(
+                    f,
+                    &mut g,
+                    Rect::new(x, area.y, w, 1),
+                    &rest,
+                    Action::Command("/diff".into()),
+                    false,
+                    s.theme,
+                );
+            }
+        } else if !r.spans.is_empty() {
+            let mut x = area.x;
+            for (text, tone) in &r.spans {
+                let w =
+                    (Span::raw(text.as_str()).width() as u16).min(area.right().saturating_sub(x));
+                if w == 0 {
+                    break;
+                }
+                row(f, Rect::new(x, area.y, w, 1), text, *tone, s.theme);
+                x += w;
+            }
+            if let Some(act) = &r.action {
+                g.hits.push((area, act.clone()));
             }
         } else {
             row(f, area, &r.text, r.tone, s.theme);
@@ -303,13 +394,39 @@ pub fn render(
         button(f, &mut g, r, text, Action::Latest, true, s.theme);
     }
     if let Some(side) = sidebar {
-        label(f, side, side.y, "CURRENT WORK", Tone::Accent, s.theme);
-        let current = n.cells.last();
-        let mut lines = vec![format!("{} recorded cells", n.cells.len())];
-        if let Some(cell) = current {
-            for helper in cell.helpers.iter().rev().take(3) {
-                lines.push(format!(
-                    "{} · {}",
+        // The mockup's standing card: what this session is, not what it did.
+        // Everything here is also reachable from a control, so hiding the
+        // sidebar never hides a fact.
+        label(f, side, side.y, "THIS SESSION", Tone::Accent, s.theme);
+        let mut lines: Vec<(String, Tone)> = vec![
+            (format!("Work {}", work_word(s)), Tone::Normal),
+            (format!("Ask {}", ask_word(s)), Tone::Normal),
+            (
+                s.confinement
+                    .clone()
+                    .unwrap_or_else(|| "confinement unknown".into()),
+                Tone::Muted,
+            ),
+            (String::new(), Tone::Normal),
+            ("Model & source".to_string(), Tone::Accent),
+            (
+                s.model.as_deref().unwrap_or("choose model").to_string(),
+                Tone::Normal,
+            ),
+            (String::new(), Tone::Normal),
+            ("Cells".to_string(), Tone::Accent),
+            (format!("{} recorded", n.cells.len()), Tone::Normal),
+            (
+                format!("{:.1}s elapsed", s.pulse.elapsed_ms as f64 / 1000.0),
+                Tone::Muted,
+            ),
+            (String::new(), Tone::Normal),
+            ("Little helpers".to_string(), Tone::Helper),
+        ];
+        for helper in n.cells.last().map(|c| c.helpers.as_slice()).unwrap_or(&[]) {
+            lines.push((
+                format!(
+                    "◇ {} · {}",
                     helper.helper,
                     if helper.outcome.ok {
                         "returned"
@@ -318,25 +435,31 @@ pub fn render(
                     } else {
                         "failed"
                     }
-                ));
-            }
+                ),
+                Tone::Muted,
+            ));
         }
-        lines.push(format!(
-            "{:.1}s · elapsed",
-            s.pulse.elapsed_ms as f64 / 1000.0
-        ));
-        lines.push("F5: inspect helper evidence".into());
-        for (i, text) in lines.iter().enumerate() {
-            label(f, side, side.y + 2 + i as u16, text, Tone::Normal, s.theme);
+        for (i, (text, tone)) in lines.iter().enumerate() {
+            label(f, side, side.y + 2 + i as u16, text, *tone, s.theme);
         }
+        // The sidebar's own routes: the notices it summarises, and the
+        // instruments behind the numbers it shows.
         add(
             f,
             &mut g,
             side,
-            side.y + 10,
+            side.bottom().saturating_sub(2),
             "Activity / local notices",
             Action::Activity,
             false,
+            s.theme,
+        );
+        label(
+            f,
+            side,
+            side.bottom().saturating_sub(1),
+            "Ctrl-T telemetry",
+            Tone::Muted,
             s.theme,
         );
     }
@@ -345,7 +468,7 @@ pub fn render(
         row(
             f,
             Rect::new(a.x, y, a.width, 1),
-            &format!(" Queued › {}", q.lines().next().unwrap_or("")),
+            &format!(" QUEUED › {}", q.lines().next().unwrap_or("")),
             Tone::Normal,
             s.theme,
         );
@@ -358,17 +481,21 @@ pub fn render(
         );
         let still =
             s.reduced_motion || s.selection.is_some() || s.pulse.elapsed_ms > 60_000 || !running;
+        // The live edge, in the words the rest of the session already uses:
+        // a person watching this line is asking *is it alive and on what*,
+        // and the answer is the activity's own name, never a claim about
+        // progress toward an end nobody can see.
         let activity = match s.activity {
-            Activity::Compacting => "Preparing bounded context",
-            Activity::Executing => "Executing cell",
-            Activity::Thinking => "Model is responding",
-            Activity::Searching => "Searching",
-            Activity::Failed => "Action failed — inspect the cell",
-            Activity::Complete => "Turn complete",
-            Activity::Streaming => "Receiving response",
-            Activity::Waiting => "Waiting on a response · estimate unknown",
-            Activity::Starting => "Starting session",
-            _ => "Ready",
+            Activity::Compacting => "compacting · preparing bounded context",
+            Activity::Executing => "executing cell",
+            Activity::Thinking => "thinking",
+            Activity::Searching => "searching",
+            Activity::Failed => "action failed — inspect the cell",
+            Activity::Complete => "complete",
+            Activity::Streaming => "receiving response",
+            Activity::Waiting => "waiting on a response · estimate unknown",
+            Activity::Starting => "starting session",
+            _ => "ready",
         };
         let bar = format!(
             " {} ━━ {}{}",
@@ -385,10 +512,16 @@ pub fn render(
         );
         y += 1;
     }
+    // `❯` marks where typing lands, exactly as it marks what was already
+    // said in the transcript; the editor starts two columns in.
+    let prompt = u16::from(a.width > 6) * 3;
+    if prompt > 0 && y < a.bottom() {
+        row(f, Rect::new(a.x, y, 3, 1), " ❯ ", Tone::Accent, s.theme);
+    }
     g.composer = Rect::new(
-        a.x + u16::from(a.width > 1),
+        a.x + prompt.max(u16::from(a.width > 1)),
         y,
-        textwidth,
+        textwidth.saturating_sub(prompt.saturating_sub(1)),
         composer_height
             .saturating_sub(1)
             .min(a.bottom().saturating_sub(y)),
@@ -396,7 +529,7 @@ pub fn render(
     let visible = g.composer.height as usize;
     let cursor = s.cursor.unwrap_or(s.input.len()).min(s.input.len());
     let before = &s.input[..s.input.floor_char_boundary(cursor)];
-    let cursor_lines = wrap_input(before, textwidth as usize);
+    let cursor_lines = wrap_input(before, textwidth.saturating_sub(2).max(1) as usize);
     let cursor_row = cursor_lines.len().saturating_sub(1);
     let skip = cursor_row.saturating_sub(visible.saturating_sub(1));
     for (i, l) in input_lines.iter().skip(skip).take(visible).enumerate() {
@@ -412,7 +545,7 @@ pub fn render(
         row(
             f,
             g.composer,
-            "Describe the next step…  / commands",
+            "Describe the next step — a message or / for commands",
             Tone::Muted,
             s.theme,
         );
@@ -434,35 +567,110 @@ pub fn render(
     }
     if footer > 0 && a.height >= footer {
         let y = a.bottom() - footer;
-        let work = match s.mode {
-            crate::tui::Mode::Execute => "Build",
-            crate::tui::Mode::Explore => "Explore",
-            crate::tui::Mode::Plan => "Plan",
+        // What this session is standing on, left to right: its helpers, its
+        // boundaries, and what it has spent. None of it is a control; the
+        // controls are in the session bar, where one row holds them all.
+        let calls: usize = n.cells.iter().map(|c| c.helpers.len()).sum();
+        let helpers = match calls {
+            0 => "◇ no helper calls".to_string(),
+            1 => "◇ 1 helper call".to_string(),
+            n => format!("◇ {n} helper calls"),
         };
-        let ask = match s.permissions.rung() {
-            crate::permissions::Rung::Manual => "Every call",
-            crate::permissions::Rung::AcceptEdits => "Commands",
-            crate::permissions::Rung::Auto => "Auto-review",
-            crate::permissions::Rung::Full => "Never",
+        let posture = format!(
+            "sandbox {}{} · net:{}",
+            s.sandbox.as_deref().unwrap_or("unknown"),
+            s.confinement
+                .as_deref()
+                .map(|w| format!(" {w}"))
+                .unwrap_or_default(),
+            s.network.as_deref().unwrap_or("unknown"),
+        );
+        let motion = if s.reduced_motion {
+            "still"
+        } else {
+            "calm motion"
         };
-        let fields = [
-            (format!("Work: {work}  "), Action::Work),
-            (format!("Ask: {ask}  "), Action::Approvals),
-            ("Access: details  ".to_string(), Action::Access),
+        // The context reading owns the right edge whenever the notebook has
+        // measured one: how full this session's window is outranks how its
+        // decoration moves, and `telemetry_and_motion_…` pins that order.
+        let context = n.context.map(|tokens| {
+            crate::tui::status::context_summary(
+                tokens,
+                if a.width >= 160 { 12 } else { 7 },
+                s.animation_frame,
+                matches!(s.activity, Activity::Thinking | Activity::Streaming),
+            )
+        });
+        let right = context.clone().unwrap_or_else(|| motion.to_string());
+        let spent = n
+            .tokens
+            .as_ref()
+            .map(|t| format!("{} tokens this session", t.used))
+            .unwrap_or_default();
+        // Priority, left to right, and the first to go when the terminal is
+        // narrow is the last of them: the boundaries this session runs under
+        // outrank how many helpers it has called.
+        let fields: Vec<(String, Tone, Option<Action>)> = vec![
+            (format!(" {posture}"), Tone::Muted, Some(Action::Access)),
+            (format!("   effort {}", s.effort.name()), Tone::Muted, None),
+            (
+                format!("   {helpers}"),
+                Tone::Helper,
+                Some(Action::Activity),
+            ),
+            (format!("   {spent}"), Tone::Muted, None),
         ];
+        let room = a
+            .width
+            .saturating_sub(Span::raw(right.as_str()).width() as u16 + 2);
+        let mut keep = fields.len();
+        while keep > 1
+            && fields[..keep]
+                .iter()
+                .map(|(t, _, _)| Span::raw(t.as_str()).width())
+                .sum::<usize>()
+                > room as usize
+        {
+            keep -= 1;
+        }
         let mut x = a.x;
-        for (text, action) in fields {
-            let w = (text.len() as u16).min(a.right().saturating_sub(x));
-            button(
+        for (text, tone, action) in fields.into_iter().take(keep) {
+            let w = (Span::raw(text.as_str()).width() as u16).min(
+                a.right()
+                    .saturating_sub(x)
+                    .saturating_sub(Span::raw(right.as_str()).width() as u16 + 2),
+            );
+            if w == 0 {
+                break;
+            }
+            let r = Rect::new(x, y, w, 1);
+            row(f, r, &text, tone, s.theme);
+            if let Some(action) = action {
+                g.hits.push((r, action));
+            }
+            x += w;
+        }
+        let rw = Span::raw(right.as_str()).width() as u16;
+        row(
+            f,
+            Rect::new(a.right().saturating_sub(rw + 1), y, rw, 1),
+            &right,
+            Tone::Muted,
+            s.theme,
+        );
+        if context.is_some() && footer > 1 && a.width >= 60 {
+            row(
                 f,
-                &mut g,
-                Rect::new(x, y, w, 1),
-                &text,
-                action,
-                false,
+                Rect::new(
+                    a.right().saturating_sub(motion.len() as u16 + 1),
+                    y + 1,
+                    motion.len() as u16,
+                    1,
+                ),
+                motion,
+                Tone::Muted,
                 s.theme,
             );
-            x += w;
         }
         if footer > 1 {
             let text = if !ui.notice.is_empty() {
@@ -472,16 +680,17 @@ pub fn render(
             } else if s.mouse_off {
                 "Mouse released · Ctrl-G captures again".into()
             } else {
-                format!(
-                    "{} · F2 settings · F3 models · F4 diff · Ctrl-O cell · /help",
-                    s.model.as_deref().unwrap_or("model unknown")
-                )
+                "F2 settings · F3 models · F4 diff · F5 helpers · Ctrl-O cell · /help".to_string()
             };
             row(
                 f,
-                Rect::new(a.x, y + 1, a.width, 1),
+                Rect::new(a.x + 1, y + 1, a.width.saturating_sub(1), 1),
                 &text,
-                Tone::Normal,
+                if ui.notice.is_empty() && s.notice.is_none() {
+                    Tone::Muted
+                } else {
+                    Tone::Accent
+                },
                 s.theme,
             );
         }
@@ -513,15 +722,28 @@ pub fn render(
             );
         }
     }
+    if s.telemetry_open && !ui.is_local() && s.panel.is_none() {
+        // The instruments take the transcript's room, never the status line
+        // that carries the context reading they are read against.
+        let area = Rect::new(a.x, a.y + header, a.width, body_height + queue_height);
+        f.render_widget(Clear, area);
+        f.buffer_mut()
+            .set_style(area, theme::style(Tone::Normal, s.theme));
+        g.hits.clear();
+        g.local = Some(area);
+        crate::tui::telemetry::expanded(f, area, c, _served, n, s);
+    }
     if ui.is_local() || s.panel.is_some() {
         let area = if a.width >= 100 && a.height >= 25 {
             Rect::new(a.x + 2, a.y + 1, a.width - 4, a.height - 2)
         } else {
             a
         };
-        f.render_widget(Clear, area);
+        // A local surface is modal: the conversation behind it is not
+        // half-visible around its edges, which would read as damage.
+        f.render_widget(Clear, a);
         f.buffer_mut()
-            .set_style(area, theme::style(Tone::Normal, s.theme));
+            .set_style(a, theme::style(Tone::Normal, s.theme));
         g.hits.clear();
         g.local = Some(area);
         let inner = Rect::new(
@@ -530,45 +752,119 @@ pub fn render(
             area.width.saturating_sub(2),
             area.height,
         );
-        let title = if ui.preferences.is_some() {
-            "SETTINGS"
+        let (title, sub) = if ui.preferences.is_some() {
+            (
+                "SETTINGS",
+                "a completed choice saves itself; there is no Apply",
+            )
         } else if ui.models.is_some() {
-            "MODELS"
+            ("MODELS", "one Enter commits one selection")
         } else if ui.work {
-            "WORK / request intent"
+            ("WORK", "what this session may do")
         } else if ui.approvals {
-            "ASK / confirmation policy"
+            ("ASK", "how often it stops to ask")
         } else if ui.access {
-            "ACCESS / effective boundaries"
+            ("ACCESS", "the boundaries it is actually running under")
         } else if ui.activity {
-            "ACTIVITY / local notices"
+            ("ACTIVITY", "local notices, newest last")
         } else if ui.confirm.is_some() {
-            "CONFIRM"
+            ("CONFIRM", "this one is not undone by Esc")
         } else {
-            s.panel
-                .as_ref()
-                .map(|p| p.title.as_str())
-                .unwrap_or("DETAILS")
+            (
+                s.panel
+                    .as_ref()
+                    .map(|p| p.title.as_str())
+                    .unwrap_or("DETAILS"),
+                "",
+            )
         };
-        label(
+        // One head for every surface: what it is, what it does, and the way
+        // out -- in the same three places each time.
+        row(
             f,
-            inner,
-            inner.y,
-            &format!("PANE / {title}"),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+            &format!("{title}  "),
             Tone::Accent,
             s.theme,
         );
+        if inner.width as usize > title.len() + sub.len() + 16 {
+            row(
+                f,
+                Rect::new(
+                    inner.x + title.len() as u16 + 2,
+                    inner.y,
+                    inner.width.saturating_sub(title.len() as u16 + 2),
+                    1,
+                ),
+                sub,
+                Tone::Muted,
+                s.theme,
+            );
+        }
         if inner.width > 12 {
             button(
                 f,
                 &mut g,
-                Rect::new(inner.right() - 11, inner.y, 11, 1),
-                "Esc · Close",
+                Rect::new(inner.right() - 10, inner.y, 10, 1),
+                "Esc · Back",
                 Action::Close,
                 false,
                 s.theme,
             );
         }
+        row(
+            f,
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            &"─".repeat(inner.width as usize),
+            Tone::Line,
+            s.theme,
+        );
+        // And one foot: what just happened, and what leaving will do.
+        if inner.height > 3 {
+            let y = inner.bottom() - 1;
+            row(
+                f,
+                Rect::new(inner.x, y - 1, inner.width, 1),
+                &"─".repeat(inner.width as usize),
+                Tone::Line,
+                s.theme,
+            );
+            let notice = if !ui.notice.is_empty() {
+                ui.notice.clone()
+            } else {
+                s.notice.clone().unwrap_or_default()
+            };
+            row(
+                f,
+                Rect::new(inner.x, y, inner.width, 1),
+                &notice,
+                Tone::Accent,
+                s.theme,
+            );
+            let hint = if ui.models.is_some() {
+                "Esc back · the assignment stays unchanged"
+            } else {
+                "Esc closes · saved choices stay"
+            };
+            row(
+                f,
+                Rect::new(
+                    inner.right().saturating_sub(hint.len() as u16 + 1),
+                    y,
+                    hint.len() as u16,
+                    1,
+                ),
+                hint,
+                Tone::Muted,
+                s.theme,
+            );
+        }
+        let inner = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(2),
+        );
         if let Some(p) = &ui.preferences {
             draw_settings(f, &mut g, inner, p, s);
         } else if let Some(m) = &ui.models {
@@ -738,13 +1034,36 @@ fn draw_settings(
     s: &ScreenState,
 ) {
     let y = a.y + 2;
-    button(
+    // Both destinations are named, and the selected one is marked: a Global
+    // label must never be able to conceal a Project write.
+    let mut x = a.x;
+    for scope in [
+        crate::settings::Scope::Global,
+        crate::settings::Scope::Local,
+    ] {
+        let here = p.scope == scope;
+        let text = if here {
+            format!("[▸{} ]  ", scope.label())
+        } else {
+            format!("[ {} ]  ", scope.label())
+        };
+        let w = (text.len() as u16).min(a.right().saturating_sub(x));
+        button(
+            f,
+            g,
+            Rect::new(x, y, w, 1),
+            &text,
+            Action::Scope,
+            here,
+            s.theme,
+        );
+        x += w;
+    }
+    row(
         f,
-        g,
-        Rect::new(a.x, y, a.width.min(30), 1),
-        &format!("Scope: {}  [F6]", p.scope.label()),
-        Action::Scope,
-        true,
+        Rect::new(x, y, a.right().saturating_sub(x).min(12), 1),
+        "F6 switches",
+        Tone::Muted,
         s.theme,
     );
     if a.width > 32 {
@@ -789,10 +1108,10 @@ fn draw_settings(
         );
     }
     let rows = p.rows();
-    let capacity = a.height.saturating_sub(15).max(2) as usize / 2;
+    let capacity = a.height.saturating_sub(14).max(2) as usize;
     let start = p.selected.saturating_sub(capacity.saturating_sub(1));
     for (i, spec) in rows.iter().enumerate().skip(start).take(capacity) {
-        let y = y + 5 + ((i - start) * 2) as u16;
+        let y = y + 5 + (i - start) as u16;
         let selected = i == p.selected;
         let text = format!("{} {}", if selected { "›" } else { " " }, spec.label);
         let lw = (a.width / 2).min(31);
@@ -842,6 +1161,13 @@ fn draw_settings(
         }
     }
     let bottom = a.bottom().saturating_sub(7);
+    row(
+        f,
+        Rect::new(a.x, bottom.saturating_sub(1), a.width, 1),
+        &"─".repeat(a.width as usize),
+        Tone::Line,
+        s.theme,
+    );
     if let Some(spec) = rows.get(p.selected) {
         label(f, a, bottom, spec.description, Tone::Normal, s.theme);
         label(
@@ -855,7 +1181,7 @@ fn draw_settings(
                 p.effective(spec.key),
                 p.origin(spec.key)
             ),
-            Tone::Normal,
+            Tone::Muted,
             s.theme,
         );
         label(
@@ -916,9 +1242,9 @@ fn draw_models(
 ) {
     let roles = [
         ("Main", m.current.parent.as_str()),
-        ("Helpers", m.current.helper.as_deref().unwrap_or("off")),
+        ("Helper", m.current.helper.as_deref().unwrap_or("off")),
         (
-            "Subagents",
+            "Subagent",
             m.current
                 .subagent
                 .as_deref()
@@ -928,13 +1254,18 @@ fn draw_models(
     let width = a.width / 3;
     for (i, (name, value)) in roles.into_iter().enumerate() {
         let r = Rect::new(a.x + i as u16 * width, a.y + 2, width, 1);
+        let name = if i == m.role {
+            format!("[▸{name} ]")
+        } else {
+            format!("[ {name} ]")
+        };
         if m.target_key.is_none() {
-            button(f, g, r, name, Action::ModelRole(i), i == m.role, s.theme);
+            button(f, g, r, &name, Action::ModelRole(i), i == m.role, s.theme);
         } else {
             row(
                 f,
                 r,
-                name,
+                &name,
                 if i == m.role {
                     Tone::Accent
                 } else {
@@ -956,7 +1287,9 @@ fn draw_models(
         a,
         a.y + 5,
         &format!(
-            "Search: {}",
+            "{}/{}  Search: {}",
+            m.candidates().len(),
+            m.catalogue_len(),
             if m.query.is_empty() {
                 "type model, provider or account"
             } else {
@@ -1061,7 +1394,41 @@ fn draw_models(
         0
     };
     let rows = m.candidates();
-    let capacity = a.height.saturating_sub(17 + extra).max(1) as usize;
+    // The selected row's account in full, and -- when it is locked -- why it
+    // cannot be chosen, in the catalogue's own words rather than a glyph.
+    if let Some(c) = rows.get(m.selected) {
+        label(
+            f,
+            a,
+            a.bottom().saturating_sub(2),
+            &format!(
+                "{}{}",
+                c.route,
+                c.reason
+                    .as_deref()
+                    .filter(|_| !c.available)
+                    .map(|r| format!(" · {r}"))
+                    .unwrap_or_default()
+            ),
+            if c.available {
+                Tone::Muted
+            } else {
+                Tone::Warning
+            },
+            s.theme,
+        );
+    }
+    if rows.is_empty() {
+        label(
+            f,
+            a,
+            a.y + 10 + extra,
+            "No models match this search. Backspace removes a term; Ctrl-U clears it.",
+            Tone::Warning,
+            s.theme,
+        );
+    }
+    let capacity = a.height.saturating_sub(18 + extra).max(1) as usize;
     let start = m.selected.saturating_sub(capacity.saturating_sub(1));
     for (i, c) in rows.iter().enumerate().skip(start).take(capacity) {
         let score = c.score.map(|v| format!(" · AA {v:.1}")).unwrap_or_default();
@@ -1070,12 +1437,16 @@ fn draw_models(
             g,
             a,
             a.y + 10 + extra + (i - start) as u16,
+            // The lock comes before the route: a narrow terminal may cut the
+            // account off the end, and *cannot be chosen* must never be what
+            // it cuts. The reason follows the row, in full, below.
             &format!(
-                "{} {}{}{}",
+                "{} {:<34}{}{}{}",
                 if m.selected == i { "›" } else { " " },
                 c.model,
+                if c.available { "" } else { "LOCK · " },
+                c.route,
                 score,
-                if c.available { "" } else { " · unavailable" }
             ),
             Action::Model(i),
             m.selected == i,

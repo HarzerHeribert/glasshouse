@@ -492,7 +492,7 @@ fn execution(conversation: &Conversation, notebook: &Notebook, cell: usize) -> V
     lines
 }
 
-pub(super) fn expanded(
+pub(crate) fn expanded(
     frame: &mut Frame,
     area: Rect,
     conversation: &Conversation,

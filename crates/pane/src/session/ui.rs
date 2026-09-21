@@ -1129,6 +1129,10 @@ fn run(
                     } else if let Some(name) = command.strip_prefix("/handlers off ") {
                         super::lock(&handler_cancellations).push(name.to_string());
                         workbench.notice = format!("Handler {name}: cancellation requested.");
+                    } else if workbench.local_command(command.trim(), &mut state, &notebook) {
+                        // A control that acts on this screen is answered by
+                        // this screen. Sending it to the model would spend a
+                        // request to be told the command is unknown.
                     } else if !busy {
                         state.panel = None;
                         busy = true;

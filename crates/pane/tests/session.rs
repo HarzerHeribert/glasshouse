@@ -1562,8 +1562,9 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
 
 /// The system block the binary builds for a session in `root` that reached no
 /// gateway: `render_system_reaching`'s bytes, with the session's own subagent
-/// roster — empty of models, because nothing served any, and `Auto` because
-/// that is what `[agents]` defaults to.
+/// roster — empty of models, because nothing served any, and `Off` because
+/// that is what `[agents]` defaults to now: delegation is never inherited,
+/// it is chosen (`docs/product/pane/workbench.md`, *Delegation policy*).
 ///
 /// One spelling for both byte-equality tests, and it renders through the same
 /// function the binary does: a second hand-built string here would be the
@@ -1573,7 +1574,7 @@ fn expected_system_block(root: &std::path::Path) -> String {
     let config = pane::config::PaneConfig::default();
     let manifest = pane::session::system_manifest(&profile, &config);
     let agents = pane::prompt::declarations::AgentRoster {
-        posture: pane::prompt::declarations::AgentsPosture::Auto,
+        posture: pane::prompt::declarations::AgentsPosture::Off,
         models: Vec::new(),
     };
     pane::prompt::render_system_reaching(
@@ -4455,7 +4456,9 @@ fn model_picker_names_the_active_slug_without_calling_the_provider() {
     );
     // And the two tiers a person would otherwise never learn they had.
     assert!(
-        stdout.contains("helper off") && stdout.contains("subagent auto"),
+        // Delegation is off until it is chosen, so that is what the tier
+        // line says now (`workbench.md`, *Delegation policy*).
+        stdout.contains("helper off") && stdout.contains("subagent off"),
         "`/model` named only the parent tier: {stdout}"
     );
     assert!(

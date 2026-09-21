@@ -52,7 +52,7 @@ pub(super) fn compact_tokens(value: u64) -> String {
 
 /// A truthful, fixed-width occupancy trace. Motion changes only the marker at
 /// the measured boundary; it never changes how many cells appear filled.
-pub(super) fn context_summary(
+pub(crate) fn context_summary(
     tokens: ContextTokens,
     width: usize,
     tick: usize,

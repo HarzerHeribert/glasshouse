@@ -82,12 +82,21 @@ impl Navigator {
         }
         out
     }
+    /// Every model this role could reach before the query narrowed it: the
+    /// denominator a person reads a filter against.
+    pub fn catalogue_len(&self) -> usize {
+        self.groups.iter().map(|g| g.models.len()).sum()
+    }
     pub fn candidates(&self) -> Vec<Candidate> {
         let providers = self.providers();
+        // `+` joins terms as well as a space does: Space stages a choice for
+        // the active tier, so it never reaches this filter, and a person
+        // narrowing by provider *and* account needs some separator that does.
         let terms: Vec<_> = self
             .query
             .to_lowercase()
-            .split_whitespace()
+            .split(|c: char| c.is_whitespace() || c == '+')
+            .filter(|t| !t.is_empty())
             .map(str::to_owned)
             .collect();
         let mut out = Vec::new();
@@ -110,7 +119,7 @@ impl Navigator {
                     .filter(|n| n.is_finite());
                 out.push(Candidate {
                     model: id.clone(),
-                    route: format!("{} / {} / {}", g.provider, g.account, g.scope),
+                    route: format!("{} · {} · {}", g.provider, g.account, g.scope),
                     score,
                     available: g.selectable != Some(false),
                     reason: g.unavailable_reason.clone(),
