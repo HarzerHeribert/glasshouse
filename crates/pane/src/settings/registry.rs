@@ -139,6 +139,12 @@ pub fn is_global_only(key: &str) -> bool {
 /// helper roster is captured when a cell starts, a web broker is built once
 /// -- and the panel says `next session` on that row rather than in a
 /// sentence attached to every row.
+///
+/// **The three model keys are here for agreement, not because the panel
+/// reaches them this way.** A model row opens the navigator, and the
+/// navigator already hands the loop the same `/model …` line this would; the
+/// arms exist so [`applies_now`] and the thing that actually happens cannot
+/// give a row two different answers.
 #[must_use]
 pub fn live_command(key: &str, value: Option<&str>) -> Option<String> {
     let value = value?;
@@ -161,6 +167,9 @@ pub fn live_command(key: &str, value: Option<&str>) -> Option<String> {
 }
 
 /// Every key [`live_command`] can answer for, whatever the value chosen.
+/// `agents.mode` is on this list for its two standing values. `pinned` and
+/// `roster` are reached by naming a model, and naming one emits the command
+/// that puts it in force, so the row is honest either way.
 const LIVE: &[&str] = &[
     "session.effort",
     "session.mode",
