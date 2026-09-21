@@ -265,3 +265,33 @@ The lesson is the one this file already carries twice: **a probe appended to a
 long test inherits none of that test's waiting.** The new `App::refute` is the
 other half of it — it settles before asserting an absence, so the trap that
 made two earlier probes unsound is paid for once, in one place.
+
+### The sweep that settled it — run 35663971828 (`0dca0005`)
+
+**14 of 17 cells green**: `lint`, `audit`, and all twelve `test` cells across
+five OS/arch targets, the declared compiler, MSRV, beta and nightly. The three
+`pane` cells are red, and each red is attributed:
+
+| Cell | Still red | Attribution |
+|---|---|---|
+| `pane (ubuntu-latest)` | 1 | `a_broad_grep_skips_what_the_project_says_it_generates` — red alone, and red in `main`'s baseline before this work |
+| `pane (macos-latest)` | 1 | the same one. Two flaky-passes beside it (`approval_resumes_remaining_compute_budget…`, `live_a_second_escape…`), both load-sensitive and neither touched here |
+| `pane (windows-latest)` | 45 | baseline 43. **The set was diffed, not counted** |
+
+That diff is the only honest way to read the Windows cell, because its
+`tui_live` target is wholly red there and a count moves whenever a flaky test
+changes sides. Against the last baseline run (`3458c3cd`, job 106511610710) the
+new reds are exactly two names:
+
+    a_setting_chosen_on_the_panel_is_in_force_in_this_session
+    the_rung_that_stops_asking_is_reachable_by_typing_it_in_full
+
+— the two PTY tests this work adds, landing inside a target where every other
+test on that cell was already red. Nothing that was green on Windows went red.
+`slash_mode_walks_into_a_plan_mode…`, the one red that *was* mine two runs
+earlier, is green.
+
+Locally, `cargo test -p pane` is green on macOS but for the same environmental
+grep case; `ruler_run`'s two names went red once under a full-suite run beside
+a release build and a CI watcher, and are 46/46 twice when run alone — load, and
+in a subsystem this work does not touch.
