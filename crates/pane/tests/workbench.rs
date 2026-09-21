@@ -972,3 +972,37 @@ fn a_filtered_navigator_leaves_no_row_of_the_wider_list() {
     assert!(!list.contains("fixture-main"), "{screen}");
     assert!(!screen.contains("unavailable-model"), "{screen}");
 }
+
+/// A keystroke on the settings panel is inside the perceptual "instant" limit.
+///
+/// **"Instant updates" is a number, not a feeling: 100 ms.** Below it a person
+/// reads the change as caused by their own keypress; above it they read it as
+/// the program responding. Every arrow press on a Choice row re-opens the
+/// store, re-reads the target file for optimistic concurrency, re-validates
+/// the whole effective configuration through the same parser a session start
+/// uses, writes atomically, and reloads global-then-project -- which is the
+/// right thing to do and is worth knowing the cost of.
+///
+/// The budget here is deliberately loose against the 100 ms limit, because a
+/// loaded CI runner is not a person's laptop and this must never become a
+/// flaky test. It is a ceiling that catches an order-of-magnitude regression,
+/// not a benchmark.
+#[test]
+fn a_settings_keystroke_stays_inside_the_instant_budget() {
+    let (_t, mut s, mut p) = prefs();
+    p.category = 0;
+    p.selected = 1; // Reasoning effort
+    // One warm pass first: the first save pays for creating the file.
+    p.cycle(true, &mut s).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..5 {
+        p.cycle(true, &mut s).unwrap();
+    }
+    let each = started.elapsed() / 5;
+    println!("one settings keystroke: {each:?}");
+    assert!(
+        each < std::time::Duration::from_millis(50),
+        "a keystroke that writes and revalidates took {each:?}, \
+         which a person reads as the program answering rather than as their own press"
+    );
+}
