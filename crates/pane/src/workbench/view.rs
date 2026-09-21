@@ -738,11 +738,12 @@ pub fn render(
         // which the only things a person could act on were already in the
         // session bar two rows further up, and the rest were counters.
         //
-        // The drawing's own `renderStatus` is a row of buttons, a live
-        // notice and an Undo, and this is that: the three settings a person
-        // reaches for that the session bar has no room for, each one the
-        // control that changes it, over one line that carries whatever the
-        // session last said.
+        // The drawing's own `renderStatus` is a row of buttons rather than a
+        // row of readings, and this is that half of it: the three settings a
+        // person reaches for that the session bar has no room for, each one
+        // the control that changes it. (Its notice and its Undo are not
+        // here -- a notice already rides the ribbon one row up, where the
+        // eye is, and Undo belongs to the surface that can undo something.)
         let context = n.context.map(|tokens| {
             crate::tui::status::context_summary(
                 tokens,
@@ -804,8 +805,6 @@ pub fn render(
             // this screen that advertises Shift-Tab, F2 or Ctrl-T at all. It
             // turns with the session rather than with the clock, so it is
             // stable inside one screenshot and inside one test.
-            let text = hint(n, s).to_string();
-            let tone = Tone::Muted;
             let motion = if s.reduced_motion {
                 "still"
             } else {
@@ -815,8 +814,8 @@ pub fn render(
             row(
                 f,
                 Rect::new(a.x + 1, y + 1, a.width.saturating_sub(mw + 3), 1),
-                &text,
-                tone,
+                hint(n, s),
+                Tone::Muted,
                 s.theme,
             );
             row(
