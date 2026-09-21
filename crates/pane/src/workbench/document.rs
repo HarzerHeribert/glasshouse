@@ -139,6 +139,10 @@ impl Document {
     ) -> Self {
         let mut d = Self::default();
         let mut note = 0usize;
+        d.card(c, s, &mut note, width);
+        // What the card drew is the session's own header, not conversation:
+        // an empty conversation is still empty underneath it.
+        let card_rows = d.rows.len();
         let mut cell: usize = 0;
         let mut after_return = false;
         let mut feedback = false;
@@ -415,15 +419,7 @@ impl Document {
             let text = crate::prompt::completion_text(text).unwrap_or_else(|| text.clone());
             d.push(text, Tone::Normal, None, width, usize::MAX - 1);
         }
-        if d.rows.is_empty() {
-            d.line(vec![(String::new(), Tone::Normal)], None, 0);
-            d.line(vec![("  ⠿ PANE".to_string(), Tone::Accent)], None, 0);
-            d.line(
-                vec![("  Code · cells · little helpers".to_string(), Tone::Muted)],
-                None,
-                0,
-            );
-            d.push("", Tone::Normal, None, width, 0);
+        if d.rows.len() == card_rows {
             d.wrapped(
                 "Describe the work. One cell is one program: it reads, edits, runs and \
                  checks, and every result you see here was observed rather than assumed.",
@@ -473,6 +469,74 @@ impl Document {
                 id,
             );
         }
+    }
+    /// What a session says about itself before anyone has said anything to
+    /// it: the mark, and the two facts that are not already on the status
+    /// line, each on exactly one line.
+    ///
+    /// **A startup note is a card, not a paragraph.** These arrive before the
+    /// first message — a resume id, the rung, three sentences about the
+    /// sandbox — and drawn as prose they are the first and largest thing in
+    /// the conversation, saying what the status line already says. So they
+    /// are clipped to one line each, capped, and the rest is one keystroke
+    /// away. Everything after the conversation starts is a notice where it
+    /// happened (see [`Document::notes`]).
+    fn card(&mut self, c: &Conversation, s: &ScreenState, next: &mut usize, width: usize) {
+        // Before the first keystroke there is nothing to have caused a
+        // notice, so an opening set that has not been frozen yet is the
+        // whole of it -- and a conversation that already has messages (a
+        // resumed session) never had an opening to collect.
+        let opening = s.startup_notes.unwrap_or(if c.messages.is_empty() {
+            s.history.iter().take_while(|n| n.after == 0).count()
+        } else {
+            0
+        });
+        let startup: Vec<&str> = s
+            .history
+            .iter()
+            .take(opening)
+            .flat_map(|n| n.text.lines().next())
+            .collect();
+        *next += opening;
+        let mark = theme::padded_mark(0, true);
+        let project = format!(
+            "{} · {}",
+            s.project.as_deref().unwrap_or("no project"),
+            s.model.as_deref().unwrap_or("no model chosen")
+        );
+        let facts = [
+            Some(("P A N E".to_string(), Tone::Accent)),
+            Some(("code · cells · little helpers".to_string(), Tone::Muted)),
+            // The one opening line worth the room: how to come back to this
+            // session. With nothing to say, the session says what it is.
+            Some((
+                clip(
+                    startup.first().copied().unwrap_or(&project),
+                    width.saturating_sub(14),
+                ),
+                Tone::Muted,
+            )),
+        ];
+        for (glyph, fact) in mark.iter().zip(facts) {
+            let (text, tone) = fact.unwrap_or((String::new(), Tone::Muted));
+            self.line(
+                vec![(format!(" {glyph}  "), Tone::Accent), (text, tone)],
+                None,
+                0,
+            );
+        }
+        if startup.len() > 1 {
+            self.line(
+                vec![(
+                    format!("         +{} more · /activity", startup.len() - 1),
+                    Tone::Line,
+                )],
+                Some(Action::Activity),
+                0,
+            );
+        }
+        self.rule('─', width, 0);
+        self.push("", Tone::Normal, None, width, 0);
     }
     /// Local notices, drawn where they happened.
     ///
@@ -799,7 +863,7 @@ fn span_width(text: &str) -> usize {
 }
 /// Cut to a column budget on a character boundary; never mid-escape, because
 /// control characters never reach a row in the first place.
-fn clip(text: &str, width: usize) -> String {
+pub(super) fn clip(text: &str, width: usize) -> String {
     if span_width(text) <= width {
         return text.to_string();
     }

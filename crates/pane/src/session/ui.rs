@@ -1066,6 +1066,12 @@ fn run(
         let Some(input_event) = input.read()? else {
             continue;
         };
+        // The first thing the person does ends the opening: whatever the
+        // session had already said about itself is its card, and anything
+        // it says from here is a notice about what they just did.
+        if state.startup_notes.is_none() {
+            state.startup_notes = Some(state.history.iter().take_while(|n| n.after == 0).count());
+        }
         // Security prompts retain priority; no local control can answer them.
         // All ordinary pointer and local-panel events go to the new reducer.
         if approvals.is_empty() && asking.is_none() && state.secret_prompt.is_none() {

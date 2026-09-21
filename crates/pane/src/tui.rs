@@ -245,6 +245,18 @@ pub struct ScreenState {
     pub telemetry_selected: Option<usize>,
     pub reduced_motion: bool,
     pub pulse: Pulse,
+    /// How many of the notes in [`ScreenState::history`] are the session's
+    /// own opening, and therefore belong to the card at the top rather than
+    /// to the conversation.
+    ///
+    /// **It is frozen by the first keystroke, not computed per frame.** The
+    /// notes a session emits before anyone has touched it -- its resume id,
+    /// its rung, three sentences about the sandbox -- are a header; a notice
+    /// the person then *causes*, at a conversation that is still empty, is a
+    /// reply to them and has to be visible where they are looking. Both sets
+    /// carry `after == 0`, so only the moment they were produced tells them
+    /// apart. `None` means nothing has frozen it yet.
+    pub startup_notes: Option<usize>,
     /// The completion gate's recap of the task just accepted, when
     /// `[helpers] completion = "recap"` asked for one.
     ///

@@ -175,7 +175,11 @@ impl App {
     /// unambiguous evidence that an approval was answered.
     fn wait_for_file(&mut self, name: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !self.root.join(name).exists() {
+        // Non-empty, not merely present: a write that has created the file
+        // and not yet flushed its bytes is not the evidence being waited on.
+        while std::fs::read(self.root.join(name)).is_ok_and(|b| b.is_empty())
+            || !self.root.join(name).exists()
+        {
             assert!(
                 Instant::now() < deadline,
                 "{name} never appeared:\n{}",

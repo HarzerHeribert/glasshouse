@@ -779,7 +779,22 @@ fn settings_favorite_removal_and_undo_are_atomic() {
 #[test]
 #[ignore]
 fn screenshot() {
-    let (c, n, s) = fixture();
+    let (c, n, mut s) = fixture();
+    s.project = Some("prismMLqwen".into());
+    s.model = Some("gpt-5.6-sol".into());
+    s.sandbox = Some("3p/1c YOLO".into());
+    s.confinement = Some("unconfined".into());
+    s.network = Some("off".into());
+    for note in [
+        "session tlqdct-yqr — resume it with:  pane --resume tlqdct-yqr",
+        "permissions: auto — edits run, a command that only reads runs, anything else is confirmed",
+        "sandbox: --yolo — the project root and every command line are granted; native permission denials and the never-grantable set still apply",
+        "sandbox: argv admission is a word scan over each part of a command line, not a shell",
+        "sandbox: full access — Pane applies no OS confinement to the children it spawns",
+    ] {
+        s.note(note);
+    }
+    s.startup_notes = Some(5);
     let mut u = Workbench::default();
     for (name, w, h) in [("WIDE 140x40", 140u16, 40u16), ("NARROW 80x30", 80, 30)] {
         let b = draw(&c, &n, &s, &mut u, w, h);

@@ -1,4 +1,6 @@
-use super::{Action, Document, Geometry, Tone, Workbench, settings::CATEGORIES, theme};
+use super::{
+    Action, Document, Geometry, Tone, Workbench, document::clip, settings::CATEGORIES, theme,
+};
 use crate::contract::{Conversation, ServedBy};
 use crate::tui::{Activity, Notebook, ScreenState, StatusLine, Theme};
 use ratatui::{
@@ -170,7 +172,9 @@ pub struct Layout {
 }
 pub fn layout(a: Rect, s: &ScreenState) -> Layout {
     let chrome = !s.fullscreen;
-    let header = u16::from(chrome && a.height > 7);
+    // The bar and the rule under it: `.sessionbar` has a bottom border in
+    // the mockup, and without it the first notice reads as another control.
+    let header = if chrome && a.height > 7 { 2 } else { 0 };
     let footer = if chrome {
         match s.status_line {
             StatusLine::Full => 2,
@@ -272,6 +276,13 @@ pub fn render(
     ui.last_scrollback = s.scrollback;
     if header > 0 {
         session_bar(f, &mut g, Rect::new(a.x, a.y, a.width, 1), s);
+        row(
+            f,
+            Rect::new(a.x, a.y + 1, a.width, 1),
+            &"─".repeat(a.width as usize),
+            Tone::Line,
+            s.theme,
+        );
     }
     for (j, r) in d
         .rows
@@ -498,18 +509,61 @@ pub fn render(
             _ => "ready",
         };
         let bar = format!(
-            " {} ━━ {}{}",
+            " {} {}{} ",
             theme::orbit(s.animation_frame, still),
             activity,
             if s.stopping { " · stop requested" } else { "" }
         );
+        // **This line is also the composer's top edge** (`.composer-wrap` has
+        // one in the mockup). Drawing the rule as the ribbon's own tail costs
+        // no row and leaves the one place that takes typing unmistakable.
+        let mut used = Span::raw(bar.as_str()).width() as u16;
         row(
             f,
             Rect::new(a.x, y, a.width, 1),
             &bar,
-            if running { Tone::Accent } else { Tone::Normal },
+            if running { Tone::Accent } else { Tone::Muted },
             s.theme,
         );
+        // A standing notice rides this line, where the eye already is and
+        // beside the composer it answers -- never in place of the two status
+        // rows, which say what the session *is* rather than what just
+        // happened. It is also a row in the transcript, to scroll back to.
+        let notice = if !ui.notice.is_empty() {
+            Some(ui.notice.clone())
+        } else if let Some(notice) = &s.notice {
+            Some(notice.clone())
+        } else if s.mouse_off {
+            Some("Mouse released · Ctrl-G captures again".to_string())
+        } else {
+            None
+        };
+        if let Some(notice) = &notice
+            && used + 8 < a.width
+        {
+            let text = format!(
+                "── {} ",
+                clip(notice, a.width.saturating_sub(used + 6) as usize)
+            );
+            let w = (Span::raw(text.as_str()).width() as u16).min(a.width - used);
+            row(
+                f,
+                Rect::new(a.x + used, y, w, 1),
+                &text,
+                Tone::Accent,
+                s.theme,
+            );
+            used += w;
+        }
+        if used < a.width {
+            row(
+                f,
+                Rect::new(a.x + used, y, a.width - used, 1),
+                &"─".repeat(a.width.saturating_sub(used) as usize),
+                if running { Tone::Accent } else { Tone::Line },
+                s.theme,
+            );
+        }
         y += 1;
     }
     // `❯` marks where typing lands, exactly as it marks what was already
@@ -607,49 +661,17 @@ pub fn render(
             .as_ref()
             .map(|t| format!("{} tokens this session", t.used))
             .unwrap_or_default();
-        // Priority, left to right, and the first to go when the terminal is
-        // narrow is the last of them: the boundaries this session runs under
-        // outrank how many helpers it has called.
-        let fields: Vec<(String, Tone, Option<Action>)> = vec![
-            (format!(" {posture}"), Tone::Muted, Some(Action::Access)),
-            (format!("   effort {}", s.effort.name()), Tone::Muted, None),
-            (
-                format!("   {helpers}"),
-                Tone::Helper,
-                Some(Action::Activity),
-            ),
-            (format!("   {spent}"), Tone::Muted, None),
-        ];
+        // **Row one is what confines this session; row two is what it is
+        // doing.** Neither is a control's label — the controls are in the
+        // session bar, which gives them up as the terminal narrows, and
+        // these two lines stay true at every width.
         let room = a
             .width
             .saturating_sub(Span::raw(right.as_str()).width() as u16 + 2);
-        let mut keep = fields.len();
-        while keep > 1
-            && fields[..keep]
-                .iter()
-                .map(|(t, _, _)| Span::raw(t.as_str()).width())
-                .sum::<usize>()
-                > room as usize
-        {
-            keep -= 1;
-        }
-        let mut x = a.x;
-        for (text, tone, action) in fields.into_iter().take(keep) {
-            let w = (Span::raw(text.as_str()).width() as u16).min(
-                a.right()
-                    .saturating_sub(x)
-                    .saturating_sub(Span::raw(right.as_str()).width() as u16 + 2),
-            );
-            if w == 0 {
-                break;
-            }
-            let r = Rect::new(x, y, w, 1);
-            row(f, r, &text, tone, s.theme);
-            if let Some(action) = action {
-                g.hits.push((r, action));
-            }
-            x += w;
-        }
+        let posture_w = (Span::raw(posture.as_str()).width() as u16 + 1).min(room);
+        let r = Rect::new(a.x, y, posture_w, 1);
+        row(f, r, &format!(" {posture}"), Tone::Muted, s.theme);
+        g.hits.push((r, Action::Access));
         let rw = Span::raw(right.as_str()).width() as u16;
         row(
             f,
@@ -658,41 +680,21 @@ pub fn render(
             Tone::Muted,
             s.theme,
         );
-        if context.is_some() && footer > 1 && a.width >= 60 {
-            row(
-                f,
-                Rect::new(
-                    a.right().saturating_sub(motion.len() as u16 + 1),
-                    y + 1,
-                    motion.len() as u16,
-                    1,
-                ),
-                motion,
-                Tone::Muted,
-                s.theme,
-            );
-        }
         if footer > 1 {
-            let text = if !ui.notice.is_empty() {
-                ui.notice.clone()
-            } else if let Some(notice) = &s.notice {
-                notice.clone()
-            } else if s.mouse_off {
-                "Mouse released · Ctrl-G captures again".into()
-            } else {
-                "F2 settings · F3 models · F4 diff · F5 helpers · Ctrl-O cell · /help".to_string()
-            };
-            row(
-                f,
-                Rect::new(a.x + 1, y + 1, a.width.saturating_sub(1), 1),
-                &text,
-                if ui.notice.is_empty() && s.notice.is_none() {
-                    Tone::Muted
+            let text = format!(
+                "{} · {} · effort {}   {helpers}{}",
+                work_word(s),
+                ask_word(s).to_lowercase(),
+                s.effort.name(),
+                if spent.is_empty() {
+                    String::new()
                 } else {
-                    Tone::Accent
-                },
-                s.theme,
+                    format!("   {spent}")
+                }
             );
+            let r = Rect::new(a.x + 1, y + 1, a.width.saturating_sub(1), 1);
+            row(f, r, &text, Tone::Muted, s.theme);
+            g.hits.push((r, Action::Work));
         }
     }
     if !ui.is_local() && s.panel.is_none() && !s.input.contains(char::is_whitespace) {
