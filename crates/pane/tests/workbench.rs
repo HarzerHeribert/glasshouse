@@ -658,6 +658,38 @@ fn a_lifted_boundary_is_never_the_control_a_narrow_terminal_drops() {
     assert!(!narrow.contains("This project"), "{narrow}");
 }
 
+/// A picker says which option the session is on, not only where the cursor is.
+///
+/// **A list of choices that does not mark the current one is a quiz.** Both
+/// pickers highlighted the row under the cursor and nothing else, so opening
+/// one to check what the session was doing told you only where the cursor had
+/// stopped. The mark is a glyph and the word `now`, so it survives a
+/// monochrome terminal.
+#[test]
+fn a_picker_marks_the_option_the_session_is_on() {
+    let (c, n, mut s) = fixture();
+    s.mode = pane::tui::Mode::Explore;
+    s.permissions = pane::permissions::Ladder::new(pane::permissions::Rung::Manual);
+    let mut u = Workbench::default();
+    u.work = true;
+    let work = text(&draw(&c, &n, &s, &mut u, 120, 24));
+    assert!(work.contains("▸ Explore  · now"), "{work}");
+    assert!(
+        !work.contains("▸ Build"),
+        "only one is current:
+{work}"
+    );
+    let mut u = Workbench::default();
+    u.approvals = true;
+    let ask = text(&draw(&c, &n, &s, &mut u, 120, 24));
+    assert!(ask.contains("▸ Every call  · now"), "{ask}");
+    assert!(
+        !ask.contains("▸ Auto-review"),
+        "only one is current:
+{ask}"
+    );
+}
+
 #[test]
 fn saved_permissions_do_not_change_running_authority() {
     let (_t, mut s, mut p) = prefs();
@@ -875,6 +907,14 @@ fn screenshot() {
     u.access = true;
     let b = draw(&c, &n, &s, &mut u, 140, 40);
     println!("\n===== ACCESS 140x40 =====\n{}", text(&b));
+    let mut u = Workbench::default();
+    u.approvals = true;
+    let b = draw(&c, &n, &s, &mut u, 140, 30);
+    println!("\n===== ASK 140x30 =====\n{}", text(&b));
+    let mut u = Workbench::default();
+    u.work = true;
+    let b = draw(&c, &n, &s, &mut u, 140, 30);
+    println!("\n===== WORK 140x30 =====\n{}", text(&b));
     let mut sf = s.clone();
     sf.full_access = true;
     sf.network = Some("on".into());

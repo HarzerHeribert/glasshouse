@@ -129,6 +129,19 @@ fn ask_tone(s: &ScreenState) -> Tone {
         Tone::Normal
     }
 }
+/// Marks the option a picker's session is actually on.
+///
+/// **A list of choices that does not say which one you have is a quiz.** Both
+/// pickers highlighted the row under the cursor and nothing else, so opening
+/// one to check the current setting told you only where the cursor had
+/// stopped. The mark is a glyph and a word, never a colour alone.
+fn mark_current(word: &str, current: bool) -> String {
+    if current {
+        format!("▸ {word}  · now")
+    } else {
+        format!("  {word}")
+    }
+}
 /// The one line on this screen that teaches, and the only place several of
 /// these keys are advertised at all.
 ///
@@ -993,17 +1006,17 @@ pub fn render(
             for (i, (word, help, command)) in [
                 (
                     "Build",
-                    "Edit and execute within the session's grants.",
+                    "Edits files and runs commands, inside the session's boundary.",
                     "execute",
                 ),
                 (
                     "Explore",
-                    "Inspect; scratch and configured write exceptions still apply.",
+                    "Reads only. It can still write to its own scratch directory.",
                     "explore",
                 ),
                 (
                     "Plan",
-                    "Inspect and write the designated plan file only.",
+                    "Reads, and writes one file: the plan. Nothing else changes.",
                     "plan",
                 ),
             ]
@@ -1015,7 +1028,7 @@ pub fn render(
                     &mut g,
                     inner,
                     inner.y + 3 + i as u16 * 3,
-                    word,
+                    &mark_current(word, work_word(s) == word),
                     Action::Command(format!("/mode {command}")),
                     i == ui.local_scroll.min(2),
                     s.theme,
@@ -1024,7 +1037,7 @@ pub fn render(
                     f,
                     inner,
                     inner.y + 4 + i as u16 * 3,
-                    help,
+                    &format!("  {help}"),
                     Tone::Normal,
                     s.theme,
                 );
@@ -1040,12 +1053,13 @@ pub fn render(
             .enumerate()
             {
                 let (word, help, mode) = (rung.label(), rung.sentence(), rung.name());
+                let word = mark_current(word, rung == s.permissions.rung());
                 add(
                     f,
                     &mut g,
                     inner,
                     inner.y + 3 + i as u16 * 3,
-                    word,
+                    &word,
                     Action::Rung(mode.into()),
                     i == ui.local_scroll.min(3),
                     s.theme,
@@ -1054,7 +1068,7 @@ pub fn render(
                     f,
                     inner,
                     inner.y + 4 + i as u16 * 3,
-                    help,
+                    &format!("  {help}"),
                     Tone::Normal,
                     s.theme,
                 );
