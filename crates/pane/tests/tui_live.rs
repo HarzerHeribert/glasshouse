@@ -903,7 +903,15 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     app.contains("auto");
     app.send(b"\x1b[Z");
     app.contains("ASK");
-    app.send(b"\x1b[B\x1b[B\x1b[B\r");
+    // One key at a time, each one waited for. Sent as one burst, the three
+    // moves and the Enter can reach a surface that has not drawn the row
+    // they are moving through yet, and the turn lands on the wrong rung --
+    // which is what made this test flaky-pass twice on two platforms.
+    for _ in 0..3 {
+        app.send(b"\x1b[B");
+        app.settle(40);
+    }
+    app.send(b"\r");
     app.contains("This removes approval prompts");
     app.send(b"\r");
     app.contains("permissions full");
