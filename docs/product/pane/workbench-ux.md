@@ -142,3 +142,41 @@ rotating just-in-time hint on the composer's own line — never a tour.
   instruments beyond relabelling. Those were measured against the mockup in the
   previous pass and are not what the complaint is about.
 - It does not add a tour, a skeleton loader, or a second spinner.
+
+## What shipped, against the stages above
+
+All six, in `3af277ff..bb4290ad`. Two deliberate departures from the plan as
+written:
+
+- **The rotating hint sits on the status line's second row, not on the
+  composer's own line.** The composer's line already carries the activity
+  ribbon and a standing notice; a third thing there would have been the
+  crowding this pass is trying to undo.
+- **The status strip has no notice and no Undo**, though the drawing's
+  `renderStatus` has both. A notice already rides the ribbon one row up, where
+  the eye is, and Undo belongs to the surface that can undo something. The
+  strip is the drawing's other half: buttons rather than readings.
+
+Two things found while doing it that were not in the plan and were fixed
+anyway, because both were the same defect the plan is about — a control that
+does not say what it is:
+
+- **A picker did not mark the option the session was on.** Work and Ask
+  highlighted the row under the cursor and nothing else.
+- **Shift-Tab was dead.** The workbench consumed `BackTab` and opened a
+  surface, so the live cycler in `session/ui.rs` never ran. Making it reachable
+  raised a question the plan had not: it would have walked into the rung that
+  never asks again in one unconfirmed keystroke from the default. It steps over
+  that rung now.
+
+Two things deliberately **not** done, and why:
+
+- **Denial with redirection** (`No, and tell Pane what to do differently`),
+  which both neighbours ship as a first-class approval option, along with
+  Codex's scope-graded grants at the moment of the prompt. It is the best
+  remaining idea from the research and it needs a change to the approval
+  protocol — the denial has to carry text back as the tool result — which is
+  not a presentation change and does not belong in a presentation pass.
+- **Deleting the legacy renderer.** `tui.rs` and six submodules, roughly 2,300
+  lines, are dead in the interactive path and alive only for non-TTY output and
+  `#[cfg(test)]`. Real debt, no user-visible benefit, and its own piece of work.
