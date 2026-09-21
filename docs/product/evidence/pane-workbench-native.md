@@ -221,3 +221,47 @@ platform evidence. The status strip's helper and subagent facts are set when the
 session starts and are not re-read if the file changes underneath it — correct
 today, because neither key can move mid-session, and a line to revisit if one
 ever can.
+
+### The follow-ups, and the CI attribution
+
+Four commits after the main one, each its own small thing:
+
+- **A picker marks the option the session is on.** Both pickers highlighted the
+  row under the cursor and nothing else, so opening Work or Ask to check what
+  the session was *doing* told you only where the cursor had stopped. The mark
+  is a glyph and the word `now`, never a colour alone. The Work surface's prose
+  ("within the session's grants", "configured write exceptions still apply")
+  became what each mode does to your files.
+- **The instant budget is measured, not asserted.** Every arrow press on a
+  Choice row re-opens the store, re-reads the target file for optimistic
+  concurrency, re-validates the whole effective configuration through the
+  parser a session start uses, writes atomically and reloads
+  global-then-project. That is correct and had never been timed: **15 ms** on
+  this machine. `a_settings_keystroke_stays_inside_the_instant_budget` puts a
+  deliberately loose 50 ms ceiling on it — a regression catcher, not a
+  benchmark, and loose so a loaded runner cannot make it flaky.
+- **Why the three model arms of `live_command` exist.** A model row opens the
+  navigator, and the navigator already hands the loop the same `/model …` line
+  the map would produce, so those arms never fire. They are there so
+  `applies_now` and what actually happens cannot give one row two answers.
+- **One command's probe got its own session.** See below.
+
+**CI, run 35661907481 (`3af277ff`).** `lint`, `audit` and every `test` cell
+green. Both `pane` cells red:
+
+- `a_broad_grep_skips_what_the_project_says_it_generates` — still red alone on
+  ubuntu **and** macOS, and red in `main`'s baseline before this work. Not this
+  change.
+- `slash_mode_walks_into_a_plan_mode…` — **mine**, macOS only. I had appended a
+  `/permissions full` probe to the end of that test, after a provider turn,
+  three mode changes and two panels, where nothing was waiting for anything in
+  particular; the command was typed into whatever was still settling. It is now
+  `the_rung_that_stops_asking_is_reachable_by_typing_it_in_full`, a short test
+  in a session doing nothing else, and it checks what the long one could not:
+  that the session bar then reads `Never asks`, the same word it uses
+  everywhere else. Ran three times locally, green each time.
+
+The lesson is the one this file already carries twice: **a probe appended to a
+long test inherits none of that test's waiting.** The new `App::refute` is the
+other half of it — it settles before asserting an absence, so the trap that
+made two earlier probes unsound is paid for once, in one place.
