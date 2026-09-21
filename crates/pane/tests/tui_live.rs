@@ -959,18 +959,35 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     });
     app.send(b"/statusline compact\r");
     app.contains("fixture-model");
-    // The rung the key steps over keeps the route that spells it out. It is
-    // last because it opens a panel, and a panel swallows the keyboard.
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+/// The rung Shift-Tab steps over keeps the route that spells it out.
+///
+/// **It is its own test, and a short one, on purpose.** It first rode along
+/// at the end of the mode walk above, after a provider turn, three mode
+/// changes and two panels -- and went red on macOS CI while passing locally,
+/// because by then nothing in that test was waiting for anything in
+/// particular. A probe about one command belongs in a session that is doing
+/// nothing else.
+#[test]
+fn the_rung_that_stops_asking_is_reachable_by_typing_it_in_full() {
+    let (base, _requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("Auto-review");
     app.send(b"/permissions full\r");
     app.contains("→ full");
     // The panel arrives as a runtime update, so it can still be settling
     // when the line it carries first appears; a key sent into that gap is
     // read by the composer underneath and not by the panel.
-    app.settle(80);
+    app.settle(120);
     app.send(b"\x1b");
     app.wait("the permissions panel closes on Escape", |screen| {
         !screen.contents().contains("Esc · Back")
     });
+    // And the session bar says so, in the word it shows everywhere else.
+    app.contains("Never asks");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
