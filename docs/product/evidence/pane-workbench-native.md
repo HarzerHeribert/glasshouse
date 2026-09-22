@@ -295,3 +295,82 @@ Locally, `cargo test -p pane` is green on macOS but for the same environmental
 grep case; `ruler_run`'s two names went red once under a full-suite run beside
 a release build and a CI watcher, and are 46/46 twice when run alone — load, and
 in a subsystem this work does not touch.
+
+## The Windows pass — every red cell attributed, and six of them were defects
+
+**Contract: `pane` is green on all three CI cells, and every red it had is
+either fixed or named.** The previous section closed with two `pane` cells red
+on one environmental case and a Windows cell "wholly red" — read as background
+noise for as long as nobody diffed it. Diffing it found **six product defects
+and three untrue tests**, not a platform that happens not to work.
+
+### The one that mattered: Enter never sent on Windows
+
+`session/ui.rs` rewrites a plain Enter into `Alt`+Enter — a newline rather than
+a send — when more input is already behind it. That rule is right, and it was
+added on 2026-09-19 for a real failure: a multi-line prompt typed into a pty
+without bracketed-paste markers used to send its first line as the whole task
+and keep the rest as a draft nobody was told about.
+
+It asked the wrong question. It asked the *terminal* whether another record was
+waiting, and on Windows crossterm emits a `KeyEventKind::Release` record after
+every press. So the poll taken the instant Enter was read was answered by
+**Enter's own release**, every Enter became a newline, and nothing a Windows
+user typed was ever sent. That is the whole `tui_live` target — twenty-nine
+tests — plus the four `approval_boundary` tests, which never see an approval
+because the message that would cause one is still sitting in the composer.
+
+The screen dump in the CI log says it in one line: the composer reads
+`❯ fail this` and the transcript is empty.
+
+The fix is in `session/ui/terminal_input.rs`, where the Windows console's
+shape was already understood:
+
+- `accept` now drops a key release **outright** rather than only inside an open
+  report run. Nothing downstream reads one — `ui.rs`, `workbench::input` and
+  `settings_ui::key` each discard it on arrival — so what a queued release did
+  was answer questions asked of the queue.
+- `typing_waiting` is the question `ui.rs` meant: it drains what the terminal
+  already holds into the resolved queue, where releases are dropped and report
+  runs reassembled, and reports what survived.
+
+`a_key_release_is_never_delivered` is the killing test, and it runs on every
+host because the resolver is not platform-specific. Mutation: restore the
+narrow `&& matches!(self.hold, Hold::Open { .. } | Hold::Pasting { .. })`
+guard — **KILLED**, `left` holding four events where `right` holds two.
+
+### The rest
+
+| Defect | Where | What was wrong |
+|---|---|---|
+| The permission ladder could not judge a single command | `sandbox/modes.rs` | a blanket `cfg!(windows)` bail-out meant `git status --short` asked for confirmation forever and a person's own `[modes] commands` list was never read. It now screens for the ten characters `cmd.exe` spells differently and hands everything else to the same reader POSIX uses — additively, so Windows is never more permissive |
+| `grep` was a different language on Windows | `tools/invoke/search.rs` | the in-process engine was POSIX **BRE** while the product promises the extended dialect everywhere else (`-E` on the spawned form, `rg` where it is installed), so `a\|b` and `need+le` matched nothing |
+| `grep` read what the project calls generated | `tools/invoke.rs` | `ignored_directories` was computed for a broad search and applied only in the spawned arm; the in-process walk pruned `.git` and nothing else |
+| `doctor` ignored a measurement it already had | `cli_workflows.rs` | the Windows arm returned `warning` unconditionally, while `sandbox::windows::network_isolation()` — which queries the Firewall service — sat unused beside it. A fully confined machine was told to go and check |
+| A sentence's full stop stayed in a clickable path | `tui/paths.rs` | Win32 discards a trailing dot, so `src/tui.rs.` *exists* there and the untrimmed spelling was tried first |
+| The VM runner sent the gate at a dead lease | `scripts/dev/glasshouse-windows-ci` | two leases for `glasshouse-ci`, `tail -n 1` picked the expired one, and the runner said "not reachable, start it in VMware Fusion" about a VM that was up and answering. It now asks each lease in turn |
+
+And three tests that were not true:
+
+- `a_broad_grep_skips_what_the_project_says_it_generates` asserted ripgrep's
+  guarantee of whichever backend served the call. The developer machine has
+  ripgrep and the runners do not, so it only ever passed here — and the
+  fallback's own doc comment two tests below says in as many words that
+  `--exclude-dir` finds *more* than this. It now states the guarantee the
+  backend actually makes and names which one ran.
+- `prompt_write_grants_do_not_include_denied_path_components` compared a sorted
+  list as an ordered one. The producer sorts for determinism and the sentence it
+  feeds is a join; on Windows `\\?\C:\…` sorts after `Write(src/**)` and on
+  POSIX `/…` sorts before it. Membership was the contract.
+- `the_event_stream_announces_a_cell_before_it_runs` interpolated a raw path
+  into a script line, and `cmd.exe` ate the backslashes. Its assertion is now an
+  exact match against a per-platform command rather than a `starts_with`.
+
+### `a_settings_keystroke_stays_inside_the_instant_budget` judged a mean
+
+It averaged five passes against a 50 ms ceiling, on a machine that had measured
+15 ms. Run 35665385746 descheduled one of the five and the test went red. A
+shared runner stealing 200 ms is not a fact about the code, so it now takes the
+**fastest of nine** against a loose 250 ms — a ceiling that still catches the
+regression class it was written for, a blocking call in the save path, because
+that makes every pass slow. Measured after the change: 9.7 ms.
