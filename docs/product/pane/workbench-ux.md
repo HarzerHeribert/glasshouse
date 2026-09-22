@@ -180,3 +180,16 @@ Two things deliberately **not** done, and why:
 - **Deleting the legacy renderer.** `tui.rs` and six submodules, roughly 2,300
   lines, are dead in the interactive path and alive only for non-TTY output and
   `#[cfg(test)]`. Real debt, no user-visible benefit, and its own piece of work.
+
+  **Measured on 2026-09-22, because "dead" was about to be read as
+  "deletable".** It is neither. `session/startup.rs::render_as_lines` is
+  production: it is what `pane` prints when stdout is a pipe, and it draws
+  through `tui::render` into an in-memory backend, so the conversation column
+  and the sidebar reach a redirected run. Both `session/ui.rs` call sites of
+  `render_screen_with_geometry` are inside `#[cfg(test)]` helpers, and of the
+  eleven entry points only three — `render_screen`, `conversation_rows`,
+  `anchor_scrollback` — have no caller outside `tests/`. So deleting this is
+  not a removal, it is **replacing pane's non-TTY output**, and it owes a
+  decision about what a piped run should print before it owes a line of code.
+  Every acceptance test takes that same path, which is what makes the debt
+  cheap to leave and expensive to pay.
