@@ -448,8 +448,10 @@ fn line_ending_miss(before: &str, expected: &str) -> Option<NearMiss> {
     None
 }
 
+/// A named way of reading a line that makes two spellings of it the same.
+type Normaliser = (&'static str, fn(&str) -> &str);
 /// The three differences worth naming, in the order a reader meets them.
-const NORMALISERS: [(&str, fn(&str) -> &str); 3] = [
+const NORMALISERS: [Normaliser; 3] = [
     ("different trailing whitespace", str::trim_end),
     ("different indentation", str::trim_start),
     ("different leading and trailing whitespace", str::trim),

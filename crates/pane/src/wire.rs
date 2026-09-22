@@ -1035,6 +1035,7 @@ pub fn send_narrowed_turn_streaming(
 /// supplied so a test can exercise the reset without spending the real
 /// ones. Private on purpose: the constants above are the only windows
 /// production has.
+#[allow(clippy::too_many_arguments)]
 fn send_errand_within(
     conversation: &Conversation,
     model: &str,

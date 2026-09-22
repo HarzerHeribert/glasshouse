@@ -742,7 +742,7 @@ pub fn render_runtime_reaching(globals: HostGlobals, reach: Reach<'_>) -> String
             ),
             "helper" => reach.helpers.map_or_else(
                 || binding.declaration.to_string(),
-                |configured| declarations::helper_declaration(configured),
+                declarations::helper_declaration,
             ),
             _ => binding.declaration.to_string(),
         })

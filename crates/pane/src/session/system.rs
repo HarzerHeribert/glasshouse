@@ -12,6 +12,7 @@ use super::*;
 /// Map line 2448 fixes what is loaded, not how it is joined; everything from
 /// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
 /// byte, so there is no second spelling of the contract here to drift from it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_system_prompt(
     web: &crate::web::WebConfig,
     agents: &crate::config::AgentsConfig,

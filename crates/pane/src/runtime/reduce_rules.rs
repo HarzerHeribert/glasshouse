@@ -218,7 +218,7 @@ test result: FAILED. 113 passed; 1 failed; 1 ignored; 0 measured
     #[test]
     fn a_line_naming_an_error_is_never_dropped_however_it_is_shaped() {
         // Shaped exactly like a droppable line, but it says error.
-        let text = "   Compiling thing v1.0 error: could not compile\n".repeat(1);
+        let text = "   Compiling thing v1.0 error: could not compile\n".to_string();
         let reduced = apply(&text);
         assert!(!reduced.changed(), "a line naming an error is not progress");
         assert_eq!(reduced.text, text);

@@ -1,3 +1,7 @@
+// Building a `Workbench` or a `ScreenState` from its default and then
+// setting the two fields a case is about is how every test here reads; the
+// struct-literal form the lint prefers hides which field the case turns on.
+#![allow(clippy::field_reassign_with_default)]
 //! Acceptance of the new live renderer, input reducer and native settings store.
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -816,7 +820,7 @@ fn reader_anchor_survives_rows_inserted_above_it() {
     };
     let mut d = Document::default();
     for i in 0..30 {
-        d.push(&format!("row {i}"), Tone::Normal, None, 80, i);
+        d.push(format!("row {i}"), Tone::Normal, None, 80, i);
     }
     u.anchor = Some((d.rows[12].key, d.rows[12].text.clone()));
     u.last_scrollback = 10;

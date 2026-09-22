@@ -1242,6 +1242,24 @@ impl<'a> Visit<'a> for Eraser<'_> {
     }
 }
 
+/// One compile failure as the value a cell throws.
+///
+/// Pure, and about `CellError` rather than about an isolate, so it lives
+/// with the error it renders. Moved out of `isolate.rs` when that file met
+/// the Phase 59 ratchet; every caller is unchanged but for the path.
+pub fn error_value(error: &CellError) -> crate::runtime::preview::ErrorValue {
+    let (line, column) = error
+        .position()
+        .map_or((None, None), |(l, c)| (Some(l), Some(c)));
+    crate::runtime::preview::ErrorValue {
+        class: error.class().to_string(),
+        message: error.message(),
+        line,
+        column,
+        stack: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1656,23 +1674,5 @@ mod tests {
             assert!(message.contains(alternative), "{message}");
             assert_eq!(error.class(), "TypeScriptNotErasable");
         }
-    }
-}
-
-/// One compile failure as the value a cell throws.
-///
-/// Pure, and about `CellError` rather than about an isolate, so it lives
-/// with the error it renders. Moved out of `isolate.rs` when that file met
-/// the Phase 59 ratchet; every caller is unchanged but for the path.
-pub fn error_value(error: &CellError) -> crate::runtime::preview::ErrorValue {
-    let (line, column) = error
-        .position()
-        .map_or((None, None), |(l, c)| (Some(l), Some(c)));
-    crate::runtime::preview::ErrorValue {
-        class: error.class().to_string(),
-        message: error.message(),
-        line,
-        column,
-        stack: Vec::new(),
     }
 }

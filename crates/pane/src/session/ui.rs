@@ -768,6 +768,7 @@ fn select_panel_at(panel: &mut tui::Panel, hit: tui::PanelHit) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     mut state: ScreenState,
     mut conversation: Conversation,

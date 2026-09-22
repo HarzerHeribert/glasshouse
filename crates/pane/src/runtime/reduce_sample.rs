@@ -208,13 +208,13 @@ fn tokens(line: &str) -> Vec<Token<'_>> {
     while index < bytes.len() {
         let rest = &line[index..];
         let c = rest.chars().next().expect("index is a char boundary");
-        if matches!(c, '"' | '\'' | '`') {
-            if let Some(end) = rest[c.len_utf8()..].find(c) {
-                let span = &rest[..c.len_utf8() + end + c.len_utf8()];
-                out.push(Token::Quoted);
-                index += span.len();
-                continue;
-            }
+        if matches!(c, '"' | '\'' | '`')
+            && let Some(end) = rest[c.len_utf8()..].find(c)
+        {
+            let span = &rest[..c.len_utf8() + end + c.len_utf8()];
+            out.push(Token::Quoted);
+            index += span.len();
+            continue;
         }
         if c.is_whitespace() {
             let run: String = rest.chars().take_while(|c| c.is_whitespace()).collect();

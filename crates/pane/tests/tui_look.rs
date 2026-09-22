@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)]
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::helpers::{HelperOutcome, HelperRecord};
 use pane::runtime::handles::HandleTable;

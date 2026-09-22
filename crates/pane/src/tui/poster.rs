@@ -705,8 +705,10 @@ mod tests {
 
     #[test]
     fn a_queued_message_is_one_row_however_it_was_typed() {
-        let mut state = crate::tui::ScreenState::default();
-        state.queued = vec!["lass die venvs\n   weg   beim grep".into()];
+        let state = crate::tui::ScreenState {
+            queued: vec!["lass die venvs\n   weg   beim grep".into()],
+            ..Default::default()
+        };
         let lines = queued_lines(&state);
         assert_eq!(lines.len(), 1, "a multi-line message took several rows");
         assert_eq!(text(&lines[0]), "  ⤷ lass die venvs weg beim grep");
@@ -714,10 +716,12 @@ mod tests {
 
     #[test]
     fn the_queue_names_what_it_cannot_show() {
-        let mut state = crate::tui::ScreenState::default();
-        state.queued = (0..crate::tui::QUEUE_ROWS + 2)
-            .map(|n| format!("message {n}"))
-            .collect();
+        let state = crate::tui::ScreenState {
+            queued: (0..crate::tui::QUEUE_ROWS + 2)
+                .map(|n| format!("message {n}"))
+                .collect(),
+            ..Default::default()
+        };
         let lines = queued_lines(&state);
         assert_eq!(lines.len(), crate::tui::QUEUE_ROWS + 1);
         assert_eq!(
