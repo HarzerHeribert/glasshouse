@@ -374,7 +374,9 @@ const GREP: Tool = Tool::declare(
 /// itself, for [`READ`]'s reason — Git for Windows' `grep.exe` is an MSYS2
 /// image the cage cannot start. `tools::invoke::search` walks the checked
 /// root, asks `Profile::check` about every entry as `glob` does, and prints
-/// `grep -r -n`'s own `path:line:text` lines.
+/// `grep -r -n -E`'s own `path:line:text` lines — the extended dialect,
+/// because a pattern must mean one thing on every host pane runs on, and
+/// `-E` is what [`GREP`] elsewhere and `GREP_BY_RIPGREP` both read.
 #[cfg(windows)]
 const GREP: Tool = Tool::declare_in_process(
     "grep",

@@ -2,7 +2,9 @@
 //!
 //! **The invariant: where the registry declares them in-process, `read`
 //! answers what `cat -- <path>` answers and `grep` what
-//! `grep -r -n -e <pattern> -- <path>` answers, and every file either one
+//! `grep -r -n -E -e <pattern> -- <path>` answers — the extended dialect the
+//! declaration promises and the spawned `grep` is given, so one pattern means
+//! one thing on every host — and every file either one
 //! opens went through `Profile::check` first** — `read`'s path in
 //! `check_arguments`, and each entry of a `grep` walk here, which is the same
 //! per-entry gate `glob_paths` passes, so an in-root `deny` prunes a search
@@ -69,7 +71,7 @@ pub(super) fn read_file(tool: &str, path: &Path) -> ToolResult {
     }
 }
 
-/// `grep -r -n -e <pattern> -- <root>`.
+/// `grep -r -n -E -e <pattern> -- <root>`.
 ///
 /// Exit 0 when something matched — a `path:line:text` line, or only a binary
 /// file's notice on stderr — exit 1 with nothing when nothing did, and exit
@@ -78,15 +80,24 @@ pub(super) fn read_file(tool: &str, path: &Path) -> ToolResult {
 /// end the walk: as `grep -r` does, the matches already found stay on stdout
 /// beside the error, and the exit is 2 — the three exits `call_failure`
 /// already tells apart for the spawned `grep`. Files are visited in name order,
-/// symlinks met during the walk are skipped as `-r` skips them, `.git` is
-/// pruned from a broad search exactly where `checked_call` adds
-/// `--exclude-dir=.git`, and a file the profile refuses is never opened.
+/// symlinks met during the walk are skipped as `-r` skips them, and a file
+/// the profile refuses is never opened.
+///
+/// **A broad search prunes `.git` and every name in `skipped`, exactly where
+/// `checked_call` adds `--exclude-dir=.git` and one `--exclude-dir=` per
+/// name.** `skipped` is `broad::ignored_directories`' answer for this same
+/// root — the project's own `.gitignore` directory rules, and only the ones
+/// that transfer to a basename-wide exclusion without changing meaning — so
+/// an in-process search reads what a spawned one reads and no more. Without
+/// it the walk read the model downloads and virtual environments the project
+/// declares generated, while the spawned form beside it skipped them.
 pub(super) fn grep_tree(
     profile: &Profile,
     stopped: &dyn Fn() -> bool,
     tool: &str,
     root: &Path,
     pattern: &str,
+    skipped: &[String],
 ) -> Result<ToolResult, ToolError> {
     let matcher = match Pattern::compile(pattern) {
         Ok(matcher) => matcher,
@@ -99,7 +110,7 @@ pub(super) fn grep_tree(
             ));
         }
     };
-    let prune_git = is_broad_search(profile.root(), root);
+    let broad = is_broad_search(profile.root(), root);
     let cancelled = || ToolError::Cancelled {
         tool: tool.to_string(),
     };
@@ -148,7 +159,17 @@ pub(super) fn grep_tree(
                 continue;
             }
             let child = entry.path();
-            if prune_git && child.file_name().is_some_and(|name| name == ".git") {
+            if broad && child.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            // A `.gitignore` rule ending in `/` names a directory, and only a
+            // directory: a file of that name is tracked, so it is read.
+            if broad
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && child
+                    .file_name()
+                    .is_some_and(|name| skipped.iter().any(|ignored| *name == **ignored))
+            {
                 continue;
             }
             let Ok(checked) = profile.check(tool, Access::Read, &child) else {
@@ -216,9 +237,14 @@ fn grep_file(
 
 // --- the pattern ---------------------------------------------------------
 
-/// One compiled `grep` pattern: POSIX basic regular expression syntax with
-/// the GNU extensions a model actually writes — `\+`, `\?`, `\|`, `\{m,n\}`,
-/// `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\<`, `\>` — and no back-references.
+/// One compiled `grep` pattern: POSIX **extended** regular expression syntax
+/// — what `grep -E` accepts, which is what the `grep` declaration promises
+/// and what `rg` serves where it is installed — with the GNU extensions a
+/// model actually writes — `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\<`, `\>` —
+/// and no back-references, which ERE does not have.
+///
+/// So `|` alternates, `(` groups, and `+`, `?` and `{m,n}` repeat, each
+/// unescaped; a backslash before any of them is that character itself.
 ///
 /// A construct this does not implement is refused at compile time with the
 /// exit 2 `grep` itself uses for a bad pattern, never matched approximately:
@@ -249,7 +275,7 @@ struct Piece {
     min: u32,
     max: Option<u32>,
     /// Whether a quantifier has already been applied: the first one
-    /// replaces the bounds, a second one (`a**`, `a\{2\}*`) wraps the
+    /// replaces the bounds, a second one (`a**`, `a{2}*`) wraps the
     /// quantified piece in a group and repeats that.
     quantified: bool,
 }
@@ -444,24 +470,24 @@ impl Parser<'_> {
         self.chars.get(self.at + offset).copied()
     }
 
-    /// `branch (\| branch)*`, ending at the end of the pattern or, inside a
-    /// group, at the `\)` that closes it.
+    /// `branch (| branch)*`, ending at the end of the pattern or, inside a
+    /// group, at the `)` that closes it.
     fn alternation(&mut self, in_group: bool) -> Result<Ast, String> {
         let mut alternatives = vec![self.branch()?];
         loop {
-            match (self.peek(0), self.peek(1)) {
-                (Some('\\'), Some('|')) => {
-                    self.at += 2;
+            match self.peek(0) {
+                Some('|') => {
+                    self.at += 1;
                     alternatives.push(self.branch()?);
                 }
-                (Some('\\'), Some(')')) => {
+                Some(')') => {
                     if !in_group {
                         return Err("Unmatched ) or \\)".to_string());
                     }
-                    self.at += 2;
+                    self.at += 1;
                     return Ok(Ast { alternatives });
                 }
-                (None, _) => {
+                None => {
                     if in_group {
                         return Err("Unmatched ( or \\(".to_string());
                     }
@@ -472,32 +498,23 @@ impl Parser<'_> {
         }
     }
 
-    /// One concatenation of pieces, up to a `\|`, a `\)` or the end.
+    /// One concatenation of pieces, up to a `|`, a `)` or the end.
     fn branch(&mut self) -> Result<Vec<Piece>, String> {
         let mut pieces: Vec<Piece> = Vec::new();
         while let Some(c) = self.peek(0) {
             let atom = match c {
+                // In the extended dialect these are the operators themselves,
+                // so a branch ends here and `alternation` reads the character.
+                '|' | ')' => break,
+                '(' => {
+                    self.at += 1;
+                    Atom::Group(self.alternation(true)?)
+                }
                 '\\' => {
                     let Some(next) = self.peek(1) else {
                         return Err("Trailing backslash".to_string());
                     };
                     match next {
-                        '|' | ')' => break,
-                        '(' => {
-                            self.at += 2;
-                            Atom::Group(self.alternation(true)?)
-                        }
-                        '+' | '?' | '{' if !pieces.is_empty() => {
-                            self.quantify(&mut pieces)?;
-                            continue;
-                        }
-                        // With nothing to repeat, `\{` is the character `{`
-                        // to GNU grep, as `*` is `*` — so `\{2\}` is `{2}`,
-                        // its `\}` falling to the literal arm below.
-                        '{' => {
-                            self.at += 2;
-                            Atom::Char('{')
-                        }
                         '1'..='9' => {
                             return Err(
                                 "back-references are not supported by pane's in-process grep"
@@ -536,13 +553,30 @@ impl Parser<'_> {
                             self.at += 2;
                             Atom::WordEnd
                         }
-                        // `\+` and `\?` with nothing before them, and every
-                        // other escaped character, stand for themselves.
+                        // `\|`, `\(`, `\)`, `\+`, `\?`, `\{`, `\}` — every
+                        // operator of the extended dialect, escaped — and
+                        // every other escaped character stand for themselves.
                         literal => {
                             self.at += 2;
                             Atom::Char(literal)
                         }
                     }
+                }
+                '+' | '?' | '{' if !pieces.is_empty() => {
+                    self.quantify(&mut pieces)?;
+                    continue;
+                }
+                // With nothing to repeat, `{` is the character `{` to GNU
+                // grep, as `*` is `*` — so `{2}` is `{2}`, its `}` falling to
+                // the literal arm below.
+                '{' => {
+                    self.at += 1;
+                    Atom::Char('{')
+                }
+                // `+` and `?` with nothing before them, likewise.
+                '+' | '?' => {
+                    self.at += 1;
+                    Atom::Char(c)
                 }
                 '*' if !pieces.is_empty()
                     && !matches!(
@@ -561,15 +595,14 @@ impl Parser<'_> {
                     self.at += 1;
                     Atom::Char('*')
                 }
-                '^' if pieces.is_empty() => {
+                // In the extended dialect an anchor is an anchor wherever it
+                // stands — `a^b` and `a$b` match nothing rather than being
+                // the characters, which is what `\^` and `\$` are for.
+                '^' => {
                     self.at += 1;
                     Atom::LineStart
                 }
-                '$' if matches!(
-                    (self.peek(1), self.peek(2)),
-                    (None, _) | (Some('\\'), Some(')')) | (Some('\\'), Some('|'))
-                ) =>
-                {
+                '$' => {
                     self.at += 1;
                     Atom::LineEnd
                 }
@@ -593,34 +626,31 @@ impl Parser<'_> {
         Ok(pieces)
     }
 
-    /// Applies `*`, `\+`, `\?` or `\{m,n\}` to the last piece.
+    /// Applies `*`, `+`, `?` or `{m,n}` to the last piece.
     fn quantify(&mut self, pieces: &mut [Piece]) -> Result<(), String> {
         let (min, max) = match self.peek(0) {
             Some('*') => {
                 self.at += 1;
                 (0, None)
             }
-            Some('\\') => match self.peek(1) {
-                Some('+') => {
-                    self.at += 2;
-                    (1, None)
-                }
-                Some('?') => {
-                    self.at += 2;
-                    (0, Some(1))
-                }
-                Some('{') => {
-                    self.at += 2;
-                    self.interval()?
-                }
-                _ => return Err("internal: not a quantifier".to_string()),
-            },
+            Some('+') => {
+                self.at += 1;
+                (1, None)
+            }
+            Some('?') => {
+                self.at += 1;
+                (0, Some(1))
+            }
+            Some('{') => {
+                self.at += 1;
+                self.interval()?
+            }
             _ => return Err("internal: not a quantifier".to_string()),
         };
         let last = pieces.last_mut().expect("a quantifier follows a piece");
         if last.quantified {
             // A second quantifier repeats the first one's whole match, as
-            // GNU grep reads it: `a\{2\}*` is `\(a\{2\}\)*`, even runs only.
+            // GNU grep reads it: `a{2}*` is `(a{2})*`, even runs only.
             // Widening the bounds instead matched lines grep does not print.
             let inner = std::mem::replace(
                 last,
@@ -647,8 +677,7 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// The body of `\{m\}`, `\{m,\}` or `\{m,n\}` after the `\{`, through
-    /// the `\}`.
+    /// The body of `{m}`, `{m,}` or `{m,n}` after the `{`, through the `}`.
     fn interval(&mut self) -> Result<(u32, Option<u32>), String> {
         let bad = || "Invalid content of \\{\\}".to_string();
         let number = |parser: &mut Self| -> Option<u32> {
@@ -662,7 +691,7 @@ impl Parser<'_> {
                 .parse()
                 .ok()
         };
-        // GNU grep reads an empty minimum, `\{,n\}`, as `\{0,n\}`.
+        // GNU grep reads an empty minimum, `{,n}`, as `{0,n}`.
         let min = if self.peek(0) == Some(',') {
             0
         } else {
@@ -678,10 +707,10 @@ impl Parser<'_> {
         } else {
             Some(min)
         };
-        if self.peek(0) != Some('\\') || self.peek(1) != Some('}') {
+        if self.peek(0) != Some('}') {
             return Err("Unmatched \\{".to_string());
         }
-        self.at += 2;
+        self.at += 1;
         if max.is_some_and(|max| max < min) {
             return Err(bad());
         }
@@ -799,7 +828,7 @@ fn set_holds(items: &[SetItem], c: char) -> bool {
     })
 }
 
-/// The bound on a compiled program, so `\{32767\}` of a long group is
+/// The bound on a compiled program, so `{32767}` of a long group is
 /// refused as `grep` refuses it rather than allocated.
 const MAX_PROGRAM: usize = 100_000;
 
@@ -960,16 +989,23 @@ mod tests {
     }
 
     #[test]
-    fn anchors_apply_only_where_bre_says_they_do() {
+    fn anchors_apply_everywhere_ere_says_they_do() {
         assert!(found("^fn ", "fn main() {}"));
         assert!(!found("^fn ", "  fn main() {}"));
         assert!(found("}$", "fn main() {}"));
         assert!(!found("}$", "} // trailing"));
-        // A `^` after the start and a `$` before the end are characters.
-        assert!(found("a^b", "a^b"));
-        assert!(found("a$b", "a$b"));
+        // In the extended dialect an anchor is an anchor wherever it stands,
+        // so these match nothing at all; the characters are `\^` and `\$`.
+        assert!(!found("a^b", "a^b"));
+        assert!(!found("a$b", "a$b"));
+        assert!(found(r"a\^b", "a^b"));
+        assert!(found(r"a\$b", "a$b"));
         assert!(found("^$", ""));
         assert!(!found("^$", "x"));
+        // An anchor inside a group and before an alternation is still one.
+        assert!(found("(^fn|^struct) ", "struct X"));
+        assert!(!found("(^fn|^struct) ", " struct X"));
+        assert!(found("(;$|,$)", "let x = 1;"));
     }
 
     #[test]
@@ -989,28 +1025,36 @@ mod tests {
     }
 
     #[test]
-    fn gnu_extensions_groups_alternation_and_intervals() {
-        assert!(found(r"ab\+c", "abbbc"));
-        assert!(!found(r"ab\+c", "ac"));
-        assert!(found(r"ab\?c", "ac"));
-        assert!(found(r"\(ab\)\{2\}", "xabab"));
-        assert!(!found(r"\(ab\)\{2\}", "xab"));
-        assert!(found(r"a\{2,3\}", "aaa"));
-        assert!(!found(r"^a\{2,3\}$", "aaaa"));
-        assert!(found(r"a\{2,\}", "aaaaa"));
-        assert!(found(r"needle\|haystack", "a haystack"));
-        assert!(found(r"^\(fn\|struct\) ", "struct X"));
-        assert!(!found(r"^\(fn\|struct\) ", "enum X"));
-        assert!(found(r"\w\+", "  word"));
-        assert!(!found(r"^\w\+$", "two words"));
+    fn extended_groups_alternation_intervals_and_the_gnu_escapes() {
+        assert!(found("ab+c", "abbbc"));
+        assert!(!found("ab+c", "ac"));
+        assert!(found("ab?c", "ac"));
+        assert!(found("(ab){2}", "xabab"));
+        assert!(!found("(ab){2}", "xab"));
+        assert!(found("a{2,3}", "aaa"));
+        assert!(!found("^a{2,3}$", "aaaa"));
+        assert!(found("a{2,}", "aaaaa"));
+        assert!(found("needle|haystack", "a haystack"));
+        assert!(found("^(fn|struct) ", "struct X"));
+        assert!(!found("^(fn|struct) ", "enum X"));
+        assert!(found(r"\w+", "  word"));
+        assert!(!found(r"^\w+$", "two words"));
         assert!(found(r"\s", "two words"));
         assert!(found(r"\bfoo\b", "a foo b"));
         assert!(!found(r"\bfoo\b", "afoob"));
         assert!(found(r"\<foo\>", "(foo)"));
         assert!(found(r"\Boo", "foo"));
         // An empty group iteration does not loop for ever.
-        assert!(found(r"\(a*\)*b", "aaab"));
-        assert!(found(r"\(a*\)\{2\}b", "b"));
+        assert!(found("(a*)*b", "aaab"));
+        assert!(found("(a*){2}b", "b"));
+        // Escaped, every operator of the dialect is the character itself.
+        assert!(found(r"a\|b", "a|b"));
+        assert!(!found(r"a\|b", "a"));
+        assert!(found(r"\(ab\)", "(ab)"));
+        assert!(!found(r"\(ab\)", "ab"));
+        assert!(found(r"a\+", "a+"));
+        assert!(found(r"a\?", "a?"));
+        assert!(found(r"a\{2\}", "a{2}"));
     }
 
     #[test]
@@ -1024,12 +1068,12 @@ mod tests {
     #[test]
     fn what_this_matcher_refuses_it_refuses_out_loud() {
         for (pattern, expected) in [
-            (r"\(a\)\1", "back-references"),
+            (r"(a)\1", "back-references"),
             (r"[abc", "Unmatched ["),
-            (r"\(ab", "Unmatched ("),
-            (r"ab\)", "Unmatched )"),
-            (r"a\{2", "Unmatched \\{"),
-            (r"a\{3,2\}", "Invalid content"),
+            ("(ab", "Unmatched ("),
+            ("ab)", "Unmatched )"),
+            ("a{2", "Unmatched \\{"),
+            ("a{3,2}", "Invalid content"),
             (r"[[:nosuch:]]", "Invalid character class"),
             (r"[z-a]", "Invalid range end"),
             (r"ab\", "Trailing backslash"),
@@ -1040,7 +1084,7 @@ mod tests {
     }
 
     /// Verify Finding 1: a second quantifier repeats the first one's match.
-    /// `a\{2\}*` is `(aa)*` to GNU grep 3.11 — even runs only — and the
+    /// `a{2}*` is `(aa)*` to GNU grep 3.11 — even runs only — and the
     /// widest-bound reading this replaced also printed the odd ones.
     #[test]
     fn finding_1_a_doubled_quantifier_repeats_the_quantified_piece() {
@@ -1051,40 +1095,36 @@ mod tests {
             ("aaa", false),
             ("aaaaa", false),
         ] {
-            assert_eq!(
-                found(r"^a\{2\}*$", line),
-                expected,
-                "a{{2}}* against {line:?}"
-            );
+            assert_eq!(found("^a{2}*$", line), expected, "a{{2}}* against {line:?}");
         }
         for line in ["", "a", "aaa"] {
-            assert!(found(r"^a**$", line), "a** against {line:?}");
-            assert!(found(r"^\(a\)**$", line), "(a)** against {line:?}");
-            assert!(found(r"^a*\{2\}$", line), "a*{{2}} against {line:?}");
+            assert!(found("^a**$", line), "a** against {line:?}");
+            assert!(found("^(a)**$", line), "(a)** against {line:?}");
+            assert!(found("^a*{2}$", line), "a*{{2}} against {line:?}");
         }
-        assert!(!found(r"^a**$", "ab"));
-        assert!(found(r"^a\{2\}\{3\}$", "aaaaaa"));
-        assert!(!found(r"^a\{2\}\{3\}$", "aaaaa"));
+        assert!(!found("^a**$", "ab"));
+        assert!(found("^a{2}{3}$", "aaaaaa"));
+        assert!(!found("^a{2}{3}$", "aaaaa"));
     }
 
-    /// Verify Finding 2: GNU grep reads `\{,n\}` as `\{0,n\}`.
+    /// Verify Finding 2: GNU grep reads `{,n}` as `{0,n}`.
     #[test]
     fn finding_2_an_open_minimum_interval_is_zero_to_n() {
-        assert!(found(r"^a\{,3\}$", ""));
-        assert!(found(r"^a\{,3\}$", "aaa"));
-        assert!(!found(r"^a\{,3\}$", "aaaa"));
-        assert!(found(r"^a\{,\}$", "aaaaaaa"));
-        assert!(found(r"a\{,2\}b", "xb"));
+        assert!(found("^a{,3}$", ""));
+        assert!(found("^a{,3}$", "aaa"));
+        assert!(!found("^a{,3}$", "aaaa"));
+        assert!(found("^a{,}$", "aaaaaaa"));
+        assert!(found("a{,2}b", "xb"));
     }
 
-    /// Verify Finding 3: with nothing before it, `\{n\}` is the literal
+    /// Verify Finding 3: with nothing before it, `{n}` is the literal
     /// `{n}` to GNU grep, as a leading `*` is `*`.
     #[test]
     fn finding_3_an_interval_with_nothing_before_it_is_literal() {
-        assert!(found(r"\{2\}", "{2}"));
-        assert!(!found(r"\{2\}", "2"));
-        assert!(!found(r"\{2\}x", "{2}"));
-        assert!(found(r"\(\{2\}\)", "x{2}x"));
+        assert!(found("{2}", "{2}"));
+        assert!(!found("{2}", "2"));
+        assert!(!found("{2}x", "{2}"));
+        assert!(found("({2})", "x{2}x"));
     }
 
     /// Verify Finding 4: a tree whose only match is in a binary file is a
@@ -1094,7 +1134,7 @@ mod tests {
         let root = fixture("binary-only");
         let profile = profile(&root);
         let blob = root.join("blob.bin");
-        let result = grep_tree(&profile, &|| false, "grep", &blob, "needle").unwrap();
+        let result = grep_tree(&profile, &|| false, "grep", &blob, "needle", &[]).unwrap();
         assert_eq!(result.stdout, "", "{result:?}");
         assert!(
             result.stderr.contains("blob.bin: binary file matches"),
@@ -1122,7 +1162,7 @@ mod tests {
         std::fs::create_dir_all(&locked).unwrap();
         std::fs::write(locked.join("hidden.rs"), "needle hidden\n").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = grep_tree(&profile, &|| false, "grep", &src, "needle");
+        let result = grep_tree(&profile, &|| false, "grep", &src, "needle", &[]);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = result.expect("an unreadable directory does not end the walk");
         assert!(
@@ -1196,7 +1236,7 @@ mod tests {
     fn grep_prints_located_lines_prunes_git_skips_denied_files_and_reports_binaries() {
         let root = fixture("grep");
         let profile = profile(&root);
-        let result = grep_tree(&profile, &|| false, "grep", &root, "needle").unwrap();
+        let result = grep_tree(&profile, &|| false, "grep", &root, "needle", &[]).unwrap();
         assert_eq!(result.exit_code, Some(0), "{result:?}");
         let lib = root.join("src").join("lib.rs");
         let more = root.join("src").join("deep").join("more.rs");
@@ -1218,15 +1258,23 @@ mod tests {
         assert!(!result.stderr.contains("secrets"), "{}", result.stderr);
 
         // Rooted inside `.git`, the search is not broad and reads it.
-        let git = grep_tree(&profile, &|| false, "grep", &root.join(".git"), "needle").unwrap();
+        let git = grep_tree(
+            &profile,
+            &|| false,
+            "grep",
+            &root.join(".git"),
+            "needle",
+            &[],
+        )
+        .unwrap();
         assert!(git.stdout.contains("git internals"), "{git:?}");
 
         // A single file, and no match.
-        let none = grep_tree(&profile, &|| false, "grep", &lib, "absent").unwrap();
+        let none = grep_tree(&profile, &|| false, "grep", &lib, "absent", &[]).unwrap();
         assert_eq!((none.exit_code, none.stdout.as_str()), (Some(1), ""));
 
         // A pattern grep cannot compile is exit 2 with the reason.
-        let bad = grep_tree(&profile, &|| false, "grep", &lib, "[").unwrap();
+        let bad = grep_tree(&profile, &|| false, "grep", &lib, "[", &[]).unwrap();
         assert_eq!(bad.exit_code, Some(2));
         assert!(
             bad.stderr.starts_with("grep: Unmatched ["),
@@ -1235,8 +1283,50 @@ mod tests {
         );
 
         // The stop predicate ends the walk.
-        let stopped = grep_tree(&profile, &|| true, "grep", &root, "needle");
+        let stopped = grep_tree(&profile, &|| true, "grep", &root, "needle", &[]);
         assert!(matches!(stopped, Err(ToolError::Cancelled { .. })));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The names `checked_call` would have spelled `--exclude-dir=` are the
+    /// names this walk prunes, and a file of that name is still read.
+    #[test]
+    fn a_broad_walk_prunes_the_names_the_spawned_form_excludes() {
+        let root = fixture("ignored");
+        let profile = profile(&root);
+        for (relative, contents) in [
+            ("holder/generated/big.txt", "needle generated\n"),
+            ("other/generated", "needle a file, not the directory\n"),
+        ] {
+            let path = relative
+                .split('/')
+                .fold(root.clone(), |path, part| path.join(part));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let skipped = ["generated".to_string()];
+        let pruned = grep_tree(&profile, &|| false, "grep", &root, "needle", &skipped).unwrap();
+        assert!(!pruned.stdout.contains("big.txt"), "{}", pruned.stdout);
+        assert!(
+            pruned.stdout.contains("a file, not the directory"),
+            "a rule ending in `/` names a directory only: {}",
+            pruned.stdout
+        );
+        assert!(
+            pruned.stdout.contains("needle source"),
+            "real source was lost: {}",
+            pruned.stdout
+        );
+
+        // Without the names, the same walk reads the generated tree -- which
+        // is what it did on Windows while the spawned form skipped it.
+        let whole = grep_tree(&profile, &|| false, "grep", &root, "needle", &[]).unwrap();
+        assert!(whole.stdout.contains("big.txt"), "{}", whole.stdout);
+
+        // A search aimed into the tree reads it, as `.git` already works.
+        let inside = root.join("holder").join("generated");
+        let named = grep_tree(&profile, &|| false, "grep", &inside, "needle", &skipped).unwrap();
+        assert!(named.stdout.contains("big.txt"), "{}", named.stdout);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1246,7 +1336,7 @@ mod tests {
         let root = fixture("symlink");
         std::os::unix::fs::symlink(root.join("src"), root.join("linked")).unwrap();
         let profile = profile(&root);
-        let result = grep_tree(&profile, &|| false, "grep", &root, "needle").unwrap();
+        let result = grep_tree(&profile, &|| false, "grep", &root, "needle", &[]).unwrap();
         assert!(!result.stdout.contains("linked"), "{}", result.stdout);
         let _ = std::fs::remove_dir_all(root);
     }

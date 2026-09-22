@@ -230,6 +230,16 @@ fn grep_reads_the_extended_forms_a_model_writes() {
 /// The names come from the project's own `.gitignore` and from nowhere else,
 /// including one a level down -- which is where the tree that mattered
 /// declared itself.
+///
+/// **What "skipped" means is the guarantee of the backend that serves the
+/// call, and this test names which one that was.** Asserting ripgrep's
+/// guarantee against whatever happens to be installed is how this test came
+/// to pass on a developer machine and fail on every CI runner: the runners
+/// have no ripgrep, the call falls back to POSIX `grep --exclude-dir`, and a
+/// rule in `sub/.gitignore` cannot be expressed as a basename-wide exclusion
+/// without changing its meaning. The fallback therefore finds *more* than
+/// ripgrep does, never less -- so what it owes is the rule that does
+/// transfer, and every real source file still found.
 #[test]
 fn a_broad_grep_skips_what_the_project_says_it_generates() {
     let fixture = Fixture::with_prefix("pane-search-ignored");
@@ -247,20 +257,61 @@ fn a_broad_grep_skips_what_the_project_says_it_generates() {
         std::fs::write(path, contents).unwrap();
     }
 
+    let backend = Backend::serving();
     let matched = fixture.grep("needle", None);
-    assert!(
-        matched.contains(&native(&fixture.root, "sub/real.py")),
-        "real source was lost: {matched}"
-    );
-    assert!(
-        matched.contains(&native(&fixture.root, "src/lib.rs")),
-        "the fixture's own source was lost: {matched}"
-    );
-    for skipped in ["weights.txt", "pkg.py", "big.txt"] {
+    // Whichever backend served it, a search that loses real source is wrong.
+    for kept in ["sub/real.py", "src/lib.rs"] {
         assert!(
-            !matched.contains(skipped),
-            "{skipped} was read although the project calls it generated: {matched}"
+            matched.contains(&native(&fixture.root, kept)),
+            "{backend:?}: {kept} was lost: {matched}"
         );
+    }
+    // The search root's own `generated/` transfers to every backend.
+    assert!(
+        !matched.contains("big.txt"),
+        "{backend:?}: big.txt was read although the project's own \
+         .gitignore calls it generated: {matched}"
+    );
+    // A rule from `sub/.gitignore` binds under `sub/`, which only ripgrep
+    // can express.
+    for nested in ["weights.txt", "pkg.py"] {
+        match backend {
+            Backend::Ripgrep => assert!(
+                !matched.contains(nested),
+                "ripgrep: {nested} was read although sub/.gitignore calls it \
+                 generated: {matched}"
+            ),
+            Backend::PosixGrep | Backend::InProcess => assert!(
+                matched.contains(nested),
+                "{backend:?}: a nested rule cannot be expressed as a \
+                 basename-wide exclusion, so {nested} is expected to be read; \
+                 if it is now skipped this test is what says so: {matched}"
+            ),
+        }
+    }
+}
+
+/// Which backend `grep` actually runs on here, resolved the way `invoke`
+/// resolves it: ripgrep where ripgrep is on `PATH`, otherwise pane's own
+/// in-process walk on Windows -- where the registry declares `grep`
+/// in-process because an AppContainer cannot start an MSYS2 image -- and
+/// otherwise the POSIX `grep` the registry spawns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Ripgrep,
+    InProcess,
+    PosixGrep,
+}
+
+impl Backend {
+    fn serving() -> Self {
+        if which_ripgrep() {
+            Backend::Ripgrep
+        } else if cfg!(windows) {
+            Backend::InProcess
+        } else {
+            Backend::PosixGrep
+        }
     }
 }
 

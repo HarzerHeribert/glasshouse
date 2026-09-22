@@ -908,7 +908,7 @@ fn checked_call(
         tool
     };
     let mut result = if tool.argv() == Argv::InProcess {
-        perform_in_process(ctx.profile, &stop, tool, &checked)?
+        perform_in_process(ctx.profile, &stop, tool, &checked, &skipped)?
     } else {
         let mut argv = build_argv(tool, &checked)?;
         // Keyed on the argv shape, not on the name: once ripgrep is serving
@@ -943,11 +943,18 @@ fn checked_call(
 
 /// Performs a tool Pane does itself. The match is exhaustive on name so a new
 /// in-process declaration cannot silently acquire another tool's behavior.
+///
+/// `skipped` is what the spawned `grep` would have received as
+/// `--exclude-dir=`: the same names, so the in-process walk skips the same
+/// generated trees. It is empty for every call that is not a broad `grep`,
+/// and only the Windows-only `grep` arm reads it.
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn perform_in_process(
     profile: &Profile,
     stopped: &dyn Fn() -> bool,
     tool: &Tool,
     checked: &[(&'static str, Checked)],
+    skipped: &[String],
 ) -> Result<ToolResult, ToolError> {
     if stopped() {
         return Err(ToolError::Cancelled {
@@ -979,7 +986,7 @@ fn perform_in_process(
             else {
                 return Err(refuse("grep needs a checked path and pattern".to_string()));
             };
-            search::grep_tree(profile, stopped, tool.name(), root, pattern)
+            search::grep_tree(profile, stopped, tool.name(), root, pattern, skipped)
         }
         "glob" => {
             let (Some(root), Some(pattern)) =
