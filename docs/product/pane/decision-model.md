@@ -226,6 +226,29 @@ broken. `decisions.field_shapes` carries every answer as `{field, choice,
 confidence, latency_ms, reduced, would_reduce}` so the question can be
 measured against always and never; the default is off until it is.
 
+## 11. The enough question, and the prefetch (2026-09-23)
+
+The per-cell half of enrichment, and the one that never spends a helper
+turn. With `[helpers] prefetch_returns = true` and a decisions model, a
+returned value that names in-project files the program does not hold --
+every path-shaped token the profile admits for reading, that exists under
+the root and is not a `File` in the handle table, first mention first, at
+most three -- gets one `noul`, `enough`, before the value is rendered
+(`session/returned.rs::enrich`, `decide::enough`): does what came back give
+the agent enough to take its next step without first reading those files?
+The state is the request, the active plan step, a glance at each returned
+field (name, size, first four lines) and the candidate paths; the model
+reads none of the files. At or below `0.4` the return is read as not enough
+and Pane fetches the candidates itself, read-only, within what is left of
+the return budget after the return (at least 1,500 tokens of room, at most
+6,000 per file, the first 400 lines), each as a numbered block under `###
+[prefetched] path` headed `[lines 1-K of N · prefetched, not held]` and
+footed with `read({path})` for the rest -- a prefetched file is text the
+model reads, never a handle it holds. A confident enough, no answer in
+2 s, no room, or `mode = shadow` fetches nothing. `decisions.prefetch`
+carries every answer as `{cell, enough, latency_ms, candidates,
+prefetched, would_prefetch}`. Off until measured, like §10.
+
 ## 9. The proposed mode (2639)
 
 `[decisions] mode_above` (default `0.85`, `0.5..=1.0`): at or above it, a

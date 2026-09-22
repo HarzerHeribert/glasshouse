@@ -194,6 +194,10 @@ pub const TERMINAL_WALK_CAP: usize = 1024 * 1024;
 /// squeezed by its neighbours still shows what it is.
 pub const FIELD_FLOOR_TOKENS: usize = 600;
 
+/// The name prefix of a field the session prefetched rather than the program
+/// returned (`session/returned.rs`); its cursor line names `read`.
+pub const PREFETCHED_MARK: &str = "[prefetched]";
+
 /// A compact JSON object no longer than this is rendered on one line as the
 /// program wrote it -- `{"matches":3,"files":2}` reads better than three
 /// headed sections.
@@ -310,6 +314,12 @@ impl ReturnedField {
     fn cursor_line(&self, shown_lines: usize, total_lines: usize, shown_text: &str) -> String {
         let rest = total_lines.saturating_sub(shown_lines);
         match &self.body {
+            // A prefetched file is not held: `read` is the way to the rest.
+            FieldBody::Text(_) if self.name.starts_with(PREFETCHED_MARK) => format!(
+                "[+{} lines not shown · read({{path: {:?}}}) holds the whole file]",
+                preview::thousands(rest as u64),
+                self.name[PREFETCHED_MARK.len()..].trim()
+            ),
             FieldBody::Text(text) if is_excerpt(text) => {
                 // The last numbered line kept is where the next page starts.
                 let last = shown_text

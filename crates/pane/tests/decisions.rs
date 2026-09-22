@@ -74,6 +74,8 @@ fn question_key(body_text: &str) -> String {
         "judge".to_string()
     } else if questions.contains_key("field_shape") {
         "field_shape".to_string()
+    } else if questions.contains_key("enough") {
+        "enough".to_string()
     } else if !questions.is_empty() && questions.keys().all(|key| key.parse::<usize>().is_ok()) {
         // A Scout ranking request (2644): one `noul` per candidate, keyed by
         // the candidate's own index, so its key set is never one of the
@@ -233,6 +235,16 @@ fn providers_full(
                     // answered `log` at 0.90 for every field: the one test
                     // that asks it returns a log.
                     "field_shape" => Decision::Answer(field_shape_answer("log", 0.90)),
+                    // The enough question (`session/returned.rs::enrich`) is
+                    // answered from the request itself: a request that asks
+                    // to read everything is never enough, any other is.
+                    "enough" => {
+                        Decision::Answer(enough_answer(if body_text.contains("read everything") {
+                            0.20
+                        } else {
+                            0.90
+                        }))
+                    }
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
@@ -367,6 +379,20 @@ fn field_shape_answer(choice: &str, confidence: f64) -> Value {
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// The enough question's answer: one noul.
+fn enough_answer(noul: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "enough": {
+                "type": "noul",
+                "noul": noul,
+            }
+        },
+        "usage": {"input_tokens": 30, "output_tokens": 8},
     })
 }
 
@@ -2193,6 +2219,123 @@ fn a_large_returned_log_is_reduced_when_the_decision_model_reads_it_as_one() {
         assert_eq!(shapes[0]["choice"], "log", "{label}: {shapes}");
         assert_eq!(shapes[0]["reduced"], reduced, "{label}: {shapes}");
         assert_eq!(shapes[0]["would_reduce"], !reduced, "{label}: {shapes}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// A return that names in-project files the program does not hold is
+/// enriched with them when the decision model says the return is not
+/// enough (`session/returned.rs::enrich`): each arrives as a numbered block
+/// under `### [prefetched] path`, read-only and within the return budget,
+/// and the ledger says which. When the answer is enough, or in `shadow`
+/// mode, nothing is fetched and the ledger says that instead.
+#[test]
+fn a_return_that_names_files_is_enriched_when_the_decision_model_says_it_is_not_enough() {
+    const LISTING_CELL: &str = "return { listing: [\"README.md\", \"scripts/setup.sh\", \"missing.txt\"].join(\"\\n\"), n: 3 };";
+    for (label, decisions_toml, request, fetched) in [
+        (
+            "prefetch-on",
+            DECISIONS_ON,
+            "read everything and tell me how to start",
+            true,
+        ),
+        ("prefetch-enough", DECISIONS_ON, "list the files", false),
+        (
+            "prefetch-shadow",
+            DECISIONS_SHADOW,
+            "read everything and tell me how to start",
+            false,
+        ),
+    ] {
+        let root = root(label);
+        write_config(
+            &root,
+            &format!(
+                "{decisions_toml}[helpers]\nprefetch_returns = true\nacceptance_list = false\n"
+            ),
+        );
+        std::fs::write(
+            root.join("README.md"),
+            "# Demo\n\nRun scripts/setup.sh first.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(
+            root.join("scripts/setup.sh"),
+            "#!/bin/sh\necho setting up\n",
+        )
+        .unwrap();
+        let (endpoint, messages, decisions, _headers) = providers(
+            vec![cell("c1", LISTING_CELL), cell("c2", "answer(\"done\");")],
+            vec![],
+            vec![],
+        );
+        let result = exec_bounded(&root, &endpoint, request, None).expect("the task finishes");
+        let messages = messages.lock().unwrap();
+        assert_eq!(messages.len(), 2, "{label}: the return buys one more turn");
+        let feedback = &messages[1];
+        assert!(feedback.contains("### listing"), "{label}: {feedback}");
+        if fetched {
+            assert!(
+                feedback.contains("### [prefetched] README.md"),
+                "{label}: {feedback}"
+            );
+            assert!(feedback.contains("1 | # Demo"), "{label}: {feedback}");
+            assert!(
+                feedback.contains("### [prefetched] scripts/setup.sh"),
+                "{label}: {feedback}"
+            );
+            assert!(
+                feedback.contains("2 | echo setting up"),
+                "{label}: {feedback}"
+            );
+            assert!(
+                feedback.contains("prefetched, not held") && feedback.contains("[end of file]"),
+                "{label}: {feedback}"
+            );
+        } else {
+            assert!(
+                !feedback.contains("[prefetched]"),
+                "{label}: nothing fetched: {feedback}"
+            );
+        }
+        assert!(
+            !feedback.contains("[prefetched] missing.txt"),
+            "{label}: {feedback}"
+        );
+        let asked: Vec<String> = decisions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| body.contains("\"enough\""))
+            .cloned()
+            .collect();
+        assert_eq!(
+            asked.len(),
+            1,
+            "{label}: one enough question for the one return"
+        );
+        assert!(
+            asked[0].contains("\"candidates\":[\"README.md\",\"scripts/setup.sh\"]"),
+            "{label}: the state names the candidates that exist: {}",
+            asked[0]
+        );
+        let prefetch = &result["telemetry"]["decisions"]["prefetch"];
+        assert_eq!(prefetch[0]["cell"], 1, "{label}: {prefetch}");
+        assert_eq!(
+            prefetch[0]["prefetched"],
+            if fetched {
+                json!(["README.md", "scripts/setup.sh"])
+            } else {
+                json!([])
+            },
+            "{label}: {prefetch}"
+        );
+        assert_eq!(
+            prefetch[0]["would_prefetch"],
+            label == "prefetch-shadow",
+            "{label}: {prefetch}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

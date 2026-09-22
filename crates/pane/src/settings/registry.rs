@@ -488,6 +488,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "helpers.prefetch_returns",
+        label: "Prefetch what a return names",
+        description: "Ask the decision model whether a returned value is enough to go on, and fetch the in-project files it names when it is not. Needs a decisions model.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "helpers.reduce_above_tokens",
         label: "Reduce above tokens",
         description: "Estimated command-output tokens above which the pushed reducer is worth a cheap request.",
@@ -1174,6 +1183,7 @@ pub fn shown_default(key: &str) -> Option<String> {
         "helpers.preflight_scope" => "auto".into(),
         "helpers.reduce_above_tokens" => helpers.reduce_above_tokens.to_string(),
         "helpers.reduce_returns" => helpers.reduce_returns.to_string(),
+        "helpers.prefetch_returns" => helpers.prefetch_returns.to_string(),
         "ask.enabled" => ask.enabled.to_string(),
         "ask.jev" => "off".into(),
         "ask.decide_above" => ask.decide_above.to_string(),

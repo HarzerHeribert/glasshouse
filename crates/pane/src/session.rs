@@ -58,6 +58,7 @@ macro_rules! session_println {
 
 mod args;
 mod ask;
+mod cell_view;
 mod context;
 mod controls;
 mod ending;
@@ -2222,63 +2223,7 @@ fn act_on(
         repaired_from,
         changes,
         call_count: Some(record.calls.len()),
-        execution: Some(if record.calls.is_empty() {
-            "No tool calls ran in this cell.".into()
-        } else {
-            record
-                .calls
-                .iter()
-                .enumerate()
-                .map(|(i, call)| {
-                    let status = match &call.ended {
-                        crate::runtime::outcome::Ended::Ok if call.tool == "agent.run" => {
-                            "started".to_string()
-                        }
-                        crate::runtime::outcome::Ended::Ok => "returned".to_string(),
-                        crate::runtime::outcome::Ended::Threw { class } => {
-                            format!("failed · {class}")
-                        }
-                        crate::runtime::outcome::Ended::Denied { rule } => {
-                            format!("denied · {rule}")
-                        }
-                    };
-                    // A lifted call shows what the model asked for and what
-                    // pane ran for it, so the screen never implies the model
-                    // reached for a capability it did not name
-                    // (`semantic-command-lifting.md`, *TUI, ledger and
-                    // telemetry*).
-                    let ran = match &call.lifted_from {
-                        Some(written) => format!("{written} ↳ {}", call.tool),
-                        None => call.tool.clone(),
-                    };
-                    format!(
-                        "{} {}{} · {status}",
-                        if i + 1 == record.calls.len() {
-                            "└─"
-                        } else {
-                            "├─"
-                        },
-                        ran,
-                        call.args
-                            .get("path")
-                            .map(|path| format!(
-                                " {}",
-                                std::path::Path::new(path)
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                            ))
-                            .or_else(|| call
-                                .args
-                                .get("command")
-                                .map(|command| format!(" {command}")))
-                            .or_else(|| call.args.get("source").map(|source| format!(" {source}")))
-                            .unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }),
+        execution: Some(cell_view::execution(&record)),
         table: Some(turn.table.clone()),
         stdout: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         ..CellView::default()
@@ -2348,7 +2293,16 @@ fn act_on(
         // its JSON -- never `marshal`'s sample. Every one of them is notebook
         // output for the next turn; none of them is an ending.
         CellOutcome::Returned { terminal, .. } if response.is_none() => {
-            let text = returned::show(session, runtime, task_state, budget, terminal, &mut result);
+            let text = returned::show(
+                session,
+                runtime,
+                task_state,
+                budget,
+                profile,
+                turn,
+                terminal,
+                &mut result,
+            );
             view.output = Some(text);
         }
         CellOutcome::Returned { .. } => {}

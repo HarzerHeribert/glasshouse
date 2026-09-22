@@ -442,7 +442,10 @@ type. A small object renders on one line as the program wrote it. With
 `[helpers] reduce_returns` and a decisions model, a large field the decision
 model reads as a log arrives reduced to its failures under the reducer's
 `[pane:reduction …]` line (`decision-model.md` §10); the whole value stays
-live in the program's bindings.
+live in the program's bindings. With `[helpers] prefetch_returns`, a return
+the decision model reads as not enough is followed by the in-project files
+it names, each a numbered block under `### [prefetched] path` within the
+same budget (`decision-model.md` §11); `read` is the way to hold one.
 
 ## 7. The worked turn, as bytes
 

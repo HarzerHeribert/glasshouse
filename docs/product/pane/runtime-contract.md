@@ -314,7 +314,12 @@ line as the program wrote it (`{"total":1195,"in_tests":290}`); a larger one
 renders one `### field` block per multi-line field and `name: value` for the
 rest. The usage line (`model-contract.md` §6) names the budget, this return's
 cost and any field that was paged, so the model always knows the figure it is
-working within.
+working within. Two opt-in steps sit between the isolate and the rendering
+(`decision-model.md` §10 and §11): the decision model may read a large
+field's shape and send a log to the reducer, and may read a return that
+names unread files as not enough and have Pane fetch them into the same
+budget as `### [prefetched] path` blocks -- text the model reads, never a
+handle it holds.
 
 **Corrected 2026-09-19, after the type rule cost a second session.** The
 ending used to be read off the returned value's type, and it was narrowed

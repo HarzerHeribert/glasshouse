@@ -329,6 +329,11 @@ pub struct HelpersConfig {
     /// (`session/returned.rs`). Needs `[decisions] model`; in `shadow` mode
     /// the answer is recorded and nothing is reduced. Off until measured.
     pub reduce_returns: bool,
+    /// Ask the decision model whether a returned value is enough to go on,
+    /// and fetch the in-project files it names when it is not
+    /// (`session/returned.rs`). Needs `[decisions] model`; in `shadow` mode
+    /// the answer is recorded and nothing is fetched. Off until measured.
+    pub prefetch_returns: bool,
 }
 
 /// `[helpers] preflight_scope` -- which tasks the Scout runs for when
@@ -451,6 +456,7 @@ impl Default for HelpersConfig {
             calls_per_cell: 8,
             reduce_above_tokens: 2048,
             reduce_returns: false,
+            prefetch_returns: false,
         }
     }
 }
@@ -1300,6 +1306,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "acceptance_list",
             "reduce_above_tokens",
             "reduce_returns",
+            "prefetch_returns",
         ]
         .contains(&key.as_str())
         {
@@ -1378,6 +1385,13 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             .ok_or_else(|| "pane.toml: `reduce_returns` must be true or false".to_string())?,
     };
 
+    let prefetch_returns = match table.get("prefetch_returns") {
+        None => defaults.prefetch_returns,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `prefetch_returns` must be true or false".to_string())?,
+    };
+
     Ok(HelpersConfig {
         model,
         effort,
@@ -1390,6 +1404,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         calls_per_cell,
         reduce_above_tokens,
         reduce_returns,
+        prefetch_returns,
     })
 }
 

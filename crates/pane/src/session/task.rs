@@ -343,6 +343,10 @@ pub(super) struct TaskState {
     /// as `{field, choice, confidence, latency_ms, reduced}`, so the question
     /// can be measured against always and never.
     pub(super) field_shapes: Vec<serde_json::Value>,
+    /// Every enough-to-go-on answer this task asked for
+    /// (`session/returned.rs::enrich`), as `{cell, enough, latency_ms,
+    /// candidates, prefetched, would_prefetch}`.
+    pub(super) prefetches: Vec<serde_json::Value>,
     /// The completion question's raw answer, keyed by the exact diff text it
     /// was asked about (2616): `None` when no model is configured, mode is
     /// off, or no request has answered yet. Re-asked whenever the diff at a
@@ -432,6 +436,7 @@ impl TaskState {
             drift_asked: 0,
             drift_failed: 0,
             field_shapes: Vec::new(),
+            prefetches: Vec::new(),
             completion_answer: None,
             completion_decision: None,
             approval_hints: 0,
@@ -515,6 +520,7 @@ impl TaskState {
                 "failed": self.drift_failed,
             },
             "field_shapes": self.field_shapes,
+            "prefetch": self.prefetches,
             "approval_hints": self.approval_hints,
             "approval_hint_failures": self.approval_hint_failures,
             "mode_proposal": {

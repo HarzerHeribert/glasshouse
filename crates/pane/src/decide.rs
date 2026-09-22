@@ -1209,6 +1209,96 @@ pub fn field_shape(model: &str, name: &str, text: &str) -> Result<FieldShape, De
     }
 }
 
+// --- enough to go on? --------------------------------------------------------
+
+const ENOUGH_KEY: &str = "enough";
+/// The most fields, and the most head lines per field, the question's state
+/// carries.
+const ENOUGH_FIELDS: usize = 8;
+const ENOUGH_HEAD_LINES: usize = 4;
+
+/// The question: does this return give the agent enough to take its next
+/// step, or will it first have to read the files the return names?
+#[must_use]
+pub fn enough_question() -> Question {
+    Question::Noul {
+        instructions: "A coding agent's program returned this to read next, while working on \
+             the request and the plan step shown. The return names the files listed as \
+             candidates. Does what it returned give the agent enough to take its next step \
+             without first reading those files? Answer near 1.0 when it has enough; answer \
+             near 0.0 when its next step will be to read what the return names."
+            .to_string(),
+    }
+}
+
+/// One returned field, as the enough question sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldGlance {
+    pub name: String,
+    pub tokens: usize,
+    pub head: String,
+}
+
+/// What the decision model answered about a return: its probability that
+/// the agent has enough, and the request's latency.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Enough {
+    pub noul: f64,
+    pub latency_ms: u64,
+}
+
+/// Asks whether a cell's return is enough to go on -- once per return that
+/// names files the agent has not read, after the cell, before the value is
+/// rendered (`session/returned.rs`).
+///
+/// One `Noul` question, synchronous, bounded by [`DECISION_TIMEOUT`] like
+/// every other call here. The state is the request, the active plan step,
+/// a glance at each field (name, size, first lines) and the candidate paths
+/// the return names; the model reads none of the files.
+pub fn enough(
+    model: &str,
+    request: &str,
+    step: Option<&str>,
+    fields: &[FieldGlance],
+    candidates: &[String],
+) -> Result<Enough, DecideError> {
+    let glance: Vec<Value> = fields
+        .iter()
+        .take(ENOUGH_FIELDS)
+        .map(|field| {
+            let head: Vec<String> = field
+                .head
+                .lines()
+                .take(ENOUGH_HEAD_LINES)
+                .map(|line| self::head(line, FIELD_LINE_BYTES))
+                .collect();
+            serde_json::json!({ "field": field.name, "tokens": field.tokens, "head": head })
+        })
+        .collect();
+    let state = serde_json::json!({
+        "request": head(request, COMMAND_LINE_BYTES),
+        "step": step,
+        "return": glance,
+        "candidates": candidates,
+    });
+    let questions = [(ENOUGH_KEY.to_string(), enough_question())];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{ENOUGH_KEY}`")))?;
+    match decision.answer {
+        Answer::Noul(noul) => Ok(Enough {
+            noul,
+            latency_ms: decision.latency_ms,
+        }),
+        Answer::Choice { .. } => Err(DecideError::Parse(format!(
+            "the `{ENOUGH_KEY}` question was answered as a choice, not a noul"
+        ))),
+    }
+}
+
 /// What the decision model answered about one command line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandJudgement {
