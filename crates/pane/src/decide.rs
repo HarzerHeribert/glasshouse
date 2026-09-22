@@ -1075,6 +1075,140 @@ fn permission_question() -> Question {
     }
 }
 
+// --- the shape of a returned field ---------------------------------------
+
+const FIELD_SHAPE_KEY: &str = "field_shape";
+/// Build, test or command output, where only the failures matter and a
+/// filter written by the reducer keeps them.
+pub const FIELD_LOG: &str = "log";
+/// A listing or a table, where every row is one fact and paging keeps them.
+pub const FIELD_LISTING: &str = "listing";
+/// Source code or an excerpt of a file, read by its line numbers.
+pub const FIELD_SOURCE: &str = "source";
+/// Prose: documentation, a message, an explanation.
+pub const FIELD_PROSE: &str = "prose";
+/// Structured records: JSON, rows of values.
+pub const FIELD_DATA: &str = "data";
+
+/// The most lines of a field's head and tail the question's state carries.
+const FIELD_HEAD_LINES: usize = 8;
+const FIELD_TAIL_LINES: usize = 4;
+/// The most line shapes the state carries, most frequent first.
+const FIELD_SHAPES: usize = 8;
+const FIELD_LINE_BYTES: usize = 200;
+
+/// The question: what kind of text is this returned field? One `Choice`
+/// over the five shapes, with the field's own head, tail and line-shape
+/// histogram as the evidence.
+#[must_use]
+pub fn field_shape_question() -> Question {
+    let mut criteria = BTreeMap::new();
+    criteria.insert(
+        FIELD_LOG.to_string(),
+        "build, test or command output: many lines that look alike, and the ones that \
+         matter report a failure, an error or a result"
+            .to_string(),
+    );
+    criteria.insert(
+        FIELD_LISTING.to_string(),
+        "a listing or a table: file names, paths, rows of a report, where every line is one \
+         fact of its own"
+            .to_string(),
+    );
+    criteria.insert(
+        FIELD_SOURCE.to_string(),
+        "source code, or an excerpt of a file with line numbers".to_string(),
+    );
+    criteria.insert(
+        FIELD_PROSE.to_string(),
+        "prose: documentation, a message, an explanation, a conversation".to_string(),
+    );
+    criteria.insert(
+        FIELD_DATA.to_string(),
+        "structured records: JSON, key-value pairs, rows of values".to_string(),
+    );
+    Question::Choice {
+        instructions: "A coding agent's program returned this field to read next. What kind of \
+             text is it?"
+            .to_string(),
+        criteria,
+    }
+}
+
+/// What the decision model answered about one returned field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldShape {
+    pub choice: String,
+    pub confidence: f64,
+    pub latency_ms: u64,
+}
+
+/// Asks what kind of text the returned field `name` holds -- once per large
+/// field, after the cell, before the value is rendered for the model.
+///
+/// One `Choice` question, synchronous, bounded by [`DECISION_TIMEOUT`] like
+/// every other call here. The field travels as state: its name, size, first
+/// and last lines, and the line-shape histogram `reduce_sample` computes,
+/// which is what tells a log from a listing without reading the whole of
+/// either. The user's reading (2026-09-23): *sometimes reduction is
+/// enrichment, by not flooding context with what nobody needs* -- and this
+/// is the question that decides which.
+pub fn field_shape(model: &str, name: &str, text: &str) -> Result<FieldShape, DecideError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let first: Vec<String> = lines
+        .iter()
+        .take(FIELD_HEAD_LINES)
+        .map(|line| head(line, FIELD_LINE_BYTES))
+        .collect();
+    let last: Vec<String> = if lines.len() > FIELD_HEAD_LINES {
+        lines
+            .iter()
+            .rev()
+            .take(FIELD_TAIL_LINES)
+            .rev()
+            .map(|line| head(line, FIELD_LINE_BYTES))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let shapes = crate::runtime::reduce_sample::shapes_of(text);
+    let histogram: Vec<Value> = shapes
+        .shapes
+        .iter()
+        .take(FIELD_SHAPES)
+        .map(|shape| {
+            serde_json::json!({ "shape": head(&shape.shape, FIELD_LINE_BYTES), "lines": shape.count })
+        })
+        .collect();
+    let state = serde_json::json!({
+        "field": name,
+        "lines": lines.len(),
+        "tokens": crate::runtime::preview::estimate_tokens(text),
+        "head": first,
+        "tail": last,
+        "line_shapes": histogram,
+    });
+    let questions = [(FIELD_SHAPE_KEY.to_string(), field_shape_question())];
+    let answers = decide(model, state, &questions)?;
+    let decision = answers
+        .decisions
+        .into_iter()
+        .next()
+        .ok_or_else(|| DecideError::Parse(format!("no answer for `{FIELD_SHAPE_KEY}`")))?;
+    match decision.answer {
+        Answer::Choice {
+            choice, confidence, ..
+        } => Ok(FieldShape {
+            choice,
+            confidence,
+            latency_ms: decision.latency_ms,
+        }),
+        Answer::Noul(_) => Err(DecideError::Parse(format!(
+            "the `{FIELD_SHAPE_KEY}` question was answered as a noul, not a choice"
+        ))),
+    }
+}
+
 /// What the decision model answered about one command line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandJudgement {

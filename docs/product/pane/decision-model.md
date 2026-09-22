@@ -201,6 +201,31 @@ not asked again). `mode = shadow` runs the cell and counts `would_drift`; a
 failed or slow decision counts `drift_failed` and runs the cell, no second
 timeout. `decisions.drift` carries `{asked, held, would_hold, failed}`.
 
+## 10. The field-shape question (2026-09-23)
+
+The user's reading: *sometimes reduction is enrichment, by not flooding
+context with what nobody needs -- maybe Jev can decide that.* With
+`[helpers] reduce_returns = true` and a decisions model, every field of a
+returned value at or over `[helpers] reduce_above_tokens` (default 2,048
+estimated tokens) gets one `Choice`, `field_shape`, before the value is
+rendered for the model (`session/returned.rs`, `decide::field_shape`):
+`log` (build, test or command output, where only the failures matter),
+`listing`, `source`, `prose` or `data`. The state is the field's name, its
+line and token counts, its first eight and last four lines, and the top
+eight entries of `reduce_sample`'s line-shape histogram -- what tells a log
+from a listing without reading either whole. A `log` at or above `0.6`
+confidence goes to the reducer's ladder as a command result would
+(`runtime/reduce.rs::reduce_asked`: rules first, then this task's filter
+cache, then one cheap request), and the field arrives as the kept lines
+under the reducer's own lossiness line plus one sentence saying the whole
+value is still live in the program's bindings. Every other answer, an
+uncertain `log`, no answer within 2 s, a refused reduction, or `mode =
+shadow` leaves the field exactly as `Terminal::render_within` pages it
+(`runtime-contract.md` §9.2) -- Pane without Jev is dumber here, never
+broken. `decisions.field_shapes` carries every answer as `{field, choice,
+confidence, latency_ms, reduced, would_reduce}` so the question can be
+measured against always and never; the default is off until it is.
+
 ## 9. The proposed mode (2639)
 
 `[decisions] mode_above` (default `0.85`, `0.5..=1.0`): at or above it, a

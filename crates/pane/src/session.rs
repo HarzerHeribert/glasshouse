@@ -64,6 +64,7 @@ mod ending;
 mod mode_proposal;
 mod native;
 mod resume;
+mod returned;
 mod startup;
 mod system;
 mod task;
@@ -2347,10 +2348,8 @@ fn act_on(
         // its JSON -- never `marshal`'s sample. Every one of them is notebook
         // output for the next turn; none of them is an ending.
         CellOutcome::Returned { terminal, .. } if response.is_none() => {
-            let text = budget.render_return(terminal);
-            result.budget.feedback = Some(budget.return_usage());
-            view.output = Some(text.clone());
-            result.output = Some(text);
+            let text = returned::show(session, runtime, task_state, budget, terminal, &mut result);
+            view.output = Some(text);
         }
         CellOutcome::Returned { .. } => {}
         CellOutcome::Threw { error, .. } => {

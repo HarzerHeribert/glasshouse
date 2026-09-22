@@ -324,6 +324,11 @@ pub struct HelpersConfig {
     /// Estimated tokens of a command result above which the pushed reducer
     /// is worth a cheap request. Below it the parent reads the output itself.
     pub reduce_above_tokens: usize,
+    /// Ask the decision model what kind of text a large returned field is,
+    /// and send a log to the reducer before the model reads it
+    /// (`session/returned.rs`). Needs `[decisions] model`; in `shadow` mode
+    /// the answer is recorded and nothing is reduced. Off until measured.
+    pub reduce_returns: bool,
 }
 
 /// `[helpers] preflight_scope` -- which tasks the Scout runs for when
@@ -445,6 +450,7 @@ impl Default for HelpersConfig {
             enabled: true,
             calls_per_cell: 8,
             reduce_above_tokens: 2048,
+            reduce_returns: false,
         }
     }
 }
@@ -1293,6 +1299,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "completion_check",
             "acceptance_list",
             "reduce_above_tokens",
+            "reduce_returns",
         ]
         .contains(&key.as_str())
         {
@@ -1364,6 +1371,13 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         None => defaults.reduce_above_tokens,
     };
 
+    let reduce_returns = match table.get("reduce_returns") {
+        None => defaults.reduce_returns,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `reduce_returns` must be true or false".to_string())?,
+    };
+
     Ok(HelpersConfig {
         model,
         effort,
@@ -1375,6 +1389,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         enabled,
         calls_per_cell,
         reduce_above_tokens,
+        reduce_returns,
     })
 }
 

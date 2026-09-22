@@ -210,6 +210,24 @@ pub(super) fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) ->
     if tokens <= threshold {
         return Reduction::NotAttempted;
     }
+    // Both streams, because a build writes its failures to whichever it
+    // likes and the reduction is of the output, not of one pipe.
+    let mut text = result.stdout.clone();
+    text.push_str(&result.stderr);
+    reduce_text(text, state)
+}
+
+/// The same ladder for a returned field the decision model read as a log
+/// (`session/returned.rs`): the size gate above is the model's answer, so
+/// none is applied here, and the rules rung, the caches and the economics
+/// test stand exactly as they do for a command result.
+pub(super) fn reduce_asked(text: String, state: &Rc<RuntimeState>) -> Reduction {
+    reduce_text(text, state)
+}
+
+/// The ladder from the rules rung down, over text already judged worth it.
+fn reduce_text(text: String, state: &Rc<RuntimeState>) -> Reduction {
+    let threshold = state.reduce_above_tokens();
     let Some(spec) = crate::helpers::HELPERS.iter().find(|spec| {
         spec.call_sites
             .contains(&crate::helpers::CallSite::PostResult)
@@ -219,11 +237,6 @@ pub(super) fn reduce_oversized(result: &ToolResult, state: &Rc<RuntimeState>) ->
     let Ok((model, effort)) = state.helper_route(spec.name) else {
         return Reduction::NotAttempted;
     };
-
-    // Both streams, because a build writes its failures to whichever it
-    // likes and the reduction is of the output, not of one pipe.
-    let mut text = result.stdout.clone();
-    text.push_str(&result.stderr);
 
     // **The deterministic rung, before a model is considered at all.** Most
     // of what trips the threshold -- a thousand passing test lines, a page of

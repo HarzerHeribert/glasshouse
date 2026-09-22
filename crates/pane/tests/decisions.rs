@@ -72,6 +72,8 @@ fn question_key(body_text: &str) -> String {
         "drift".to_string()
     } else if questions.contains_key("judge") {
         "judge".to_string()
+    } else if questions.contains_key("field_shape") {
+        "field_shape".to_string()
     } else if !questions.is_empty() && questions.keys().all(|key| key.parse::<usize>().is_ok()) {
         // A Scout ranking request (2644): one `noul` per candidate, keyed by
         // the candidate's own index, so its key set is never one of the
@@ -227,6 +229,10 @@ fn providers_full(
                     "supervision" => supervision.pop_front().unwrap_or_else(|| {
                         Decision::Answer(supervision_answer("making_progress", 0.94))
                     }),
+                    // The field-shape question (`session/returned.rs`) is
+                    // answered `log` at 0.90 for every field: the one test
+                    // that asks it returns a log.
+                    "field_shape" => Decision::Answer(field_shape_answer("log", 0.90)),
                     other => panic!("unexpected decision question key `{other}`"),
                 };
                 match decision {
@@ -342,6 +348,22 @@ fn decision_answer_with_complexity(
                 "choice": complexity_choice,
                 "probabilities": {"trivial": 0.0, "routine": 0.0, "needs_exploration": 0.0},
                 "confidence": complexity_confidence,
+            }
+        },
+        "usage": {"input_tokens": 40, "output_tokens": 12},
+    })
+}
+
+/// The field-shape question's answer: one choice over the five shapes.
+fn field_shape_answer(choice: &str, confidence: f64) -> Value {
+    json!({
+        "model": "jev-latest",
+        "answers": {
+            "field_shape": {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": {"log": confidence, "listing": 0.0, "source": 0.0, "prose": 0.0, "data": 0.0},
+                "confidence": confidence,
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
@@ -2083,4 +2105,94 @@ fn an_unanswerable_supervision_question_never_nudges() {
         "a look that could not be made says nothing to the model: {messages:?}"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A large returned field the decision model reads as a log goes to the
+/// reducer before the model sees it (`session/returned.rs`): the rules rung
+/// drops the passing lines with no helper request, the failure stays, and
+/// the lossiness line says what went. In `shadow` mode the same answer is
+/// recorded and the field is paged untouched.
+#[test]
+fn a_large_returned_log_is_reduced_when_the_decision_model_reads_it_as_one() {
+    const LOG_CELL: &str = "const lines = [];\nfor (let i = 0; i < 1500; i++) lines.push(`test case_${i} ... ok`);\nlines.push(\"test the_one_that_matters ... FAILED\");\nlines.push(\"test result: FAILED. 1500 passed; 1 failed\");\nreturn { run: lines.join(\"\\n\"), n: 1 };";
+    for (label, decisions_toml, reduced) in [
+        ("reduce-on", DECISIONS_ON, true),
+        ("reduce-shadow", DECISIONS_SHADOW, false),
+    ] {
+        let root = root(label);
+        write_config(
+            &root,
+            // `acceptance_list` off: that helper's own `/v1/messages` request
+            // would otherwise consume the scripted first cell.
+            &format!(
+                "{decisions_toml}[helpers]\nmodel = \"helper-tier\"\nreduce_returns = true\nacceptance_list = false\n"
+            ),
+        );
+        let (endpoint, messages, decisions, _headers) = providers(
+            vec![cell("c1", LOG_CELL), cell("c2", "answer(\"done\");")],
+            vec![],
+            vec![],
+        );
+        let result = exec_bounded(
+            &root,
+            &endpoint,
+            "run the tests and tell me what failed",
+            None,
+        )
+        .expect("the task finishes");
+        let messages = messages.lock().unwrap();
+        assert_eq!(messages.len(), 2, "{label}: the return buys one more turn");
+        let feedback = &messages[1];
+        assert!(feedback.contains("### run"), "{label}: {feedback}");
+        assert!(
+            feedback.contains("test the_one_that_matters ... FAILED"),
+            "{label}: the failure always reaches the model: {feedback}"
+        );
+        if reduced {
+            assert!(
+                feedback.contains("[pane:reduction"),
+                "{label}: the lossiness line says what went: {feedback}"
+            );
+            assert!(
+                !feedback.contains("test case_1400 ... ok"),
+                "{label}: the passing lines went: {feedback}"
+            );
+            assert!(
+                feedback.contains("still live in your bindings"),
+                "{label}: {feedback}"
+            );
+        } else {
+            assert!(
+                !feedback.contains("[pane:reduction"),
+                "{label}: shadow reduces nothing: {feedback}"
+            );
+            assert!(
+                feedback.contains("test case_1400 ... ok") || feedback.contains("lines not shown"),
+                "{label}: the field is shown or paged as it stands: {feedback}"
+            );
+        }
+        let asked: Vec<String> = decisions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| body.contains("\"field_shape\""))
+            .cloned()
+            .collect();
+        assert_eq!(
+            asked.len(),
+            1,
+            "{label}: one shape question for the one large field"
+        );
+        assert!(
+            asked[0].contains("\"field\":\"run\"") && asked[0].contains("line_shapes"),
+            "{label}: the state carries the field and its histogram: {}",
+            asked[0]
+        );
+        let shapes = &result["telemetry"]["decisions"]["field_shapes"];
+        assert_eq!(shapes[0]["field"], "run", "{label}: {shapes}");
+        assert_eq!(shapes[0]["choice"], "log", "{label}: {shapes}");
+        assert_eq!(shapes[0]["reduced"], reduced, "{label}: {shapes}");
+        assert_eq!(shapes[0]["would_reduce"], !reduced, "{label}: {shapes}");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

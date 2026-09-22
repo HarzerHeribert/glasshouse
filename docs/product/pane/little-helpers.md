@@ -25,6 +25,7 @@ This section is the truth about the code; everything below it is the design.
 | The lane, the `/cell` HELPERS section, and the `looked` trajectory | **built** |
 | Preflight · PostResult · CompletionGate producers | **built** |
 | A lane while a helper is still running | **built, held-provider and real-PTY regressions** |
+| The reducer on a returned field the decision model reads as a log (`[helpers] reduce_returns`, `decision-model.md` §10) | **built 2026-09-23, off until measured** |
 
 **Preflight is opt-in.** `[helpers] preflight = false` is the default. A
 configured helper model enables on-demand helpers and post-result reduction;

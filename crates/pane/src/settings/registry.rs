@@ -479,6 +479,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "helpers.reduce_returns",
+        label: "Reduce returned logs",
+        description: "Ask the decision model what kind of text a large returned field is, and send a log to the reducer before the model reads it. Needs a decisions model.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "helpers.reduce_above_tokens",
         label: "Reduce above tokens",
         description: "Estimated command-output tokens above which the pushed reducer is worth a cheap request.",
@@ -1164,6 +1173,7 @@ pub fn shown_default(key: &str) -> Option<String> {
         "helpers.acceptance_list" => helpers.acceptance_list.to_string(),
         "helpers.preflight_scope" => "auto".into(),
         "helpers.reduce_above_tokens" => helpers.reduce_above_tokens.to_string(),
+        "helpers.reduce_returns" => helpers.reduce_returns.to_string(),
         "ask.enabled" => ask.enabled.to_string(),
         "ask.jev" => "off".into(),
         "ask.decide_above" => ask.decide_above.to_string(),

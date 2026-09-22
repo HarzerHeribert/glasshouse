@@ -438,7 +438,11 @@ output cap, between 4,000 and 24,000, or 8,000 when the window is unknown.
 `this return` is what the last return cost, with the fields that were paged
 to fit. A field is paged at a line boundary and ends in one cursor line saying
 how to read on; nothing is cut at a byte count and no field is replaced by its
-type. A small object renders on one line as the program wrote it.
+type. A small object renders on one line as the program wrote it. With
+`[helpers] reduce_returns` and a decisions model, a large field the decision
+model reads as a log arrives reduced to its failures under the reducer's
+`[pane:reduction …]` line (`decision-model.md` §10); the whole value stays
+live in the program's bindings.
 
 ## 7. The worked turn, as bytes
 
