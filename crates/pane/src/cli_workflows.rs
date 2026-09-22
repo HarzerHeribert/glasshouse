@@ -404,12 +404,18 @@ fn sandbox_check(bypassed: bool) -> Check {
         // unconditionally, but the missing `internetClient` capability is
         // enforced by the Windows Filtering Platform through the Windows
         // Firewall service (`MpsSvc`) -- a service, not the access check --
-        // so `crate::sandbox::windows::network_isolation` measures it rather
+        // so `pane::sandbox::windows::network_isolation` measures it rather
         // than assuming it. A fully-confined machine reported "warning"
         // regardless was this check's own complaint restated: shouting about
         // something that is fine has a cost too.
-        use crate::sandbox::windows::NetworkIsolation;
-        let isolation = crate::sandbox::windows::network_isolation();
+        //
+        // **`pane::`, not `crate::`, like the Linux arm above.** This file is
+        // `mod cli_workflows` in `main.rs` and in nothing else, so `crate::`
+        // is the BINARY's root, which declares no `sandbox` -- and no check
+        // on this host compiles it, so the error surfaced on the Windows cell
+        // and nowhere earlier.
+        use pane::sandbox::windows::NetworkIsolation;
+        let isolation = pane::sandbox::windows::network_isolation();
         let status = match isolation {
             NetworkIsolation::EnforcedByFirewall => "ok",
             NetworkIsolation::NotEnforced | NetworkIsolation::Unknown => "warning",
