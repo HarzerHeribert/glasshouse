@@ -1425,3 +1425,45 @@ fn the_bird_holds_still_under_reduced_motion_and_flaps_otherwise() {
     s.animation_frame = 6;
     assert_eq!(a, text(&draw(&c, &n, &s, &mut u, 100, 40)));
 }
+
+/// The answer is shown once. A cell whose only work was `answer(...)` is
+/// folded by default, its program view folds the answer's string literal
+/// to its opening words, and a returned value that is the answer is not
+/// printed again inside the card as a result line.
+#[test]
+fn the_answer_is_shown_once_under_the_card_and_not_again_inside_it() {
+    let (mut c, mut n, s) = fixture();
+    let answer = "The motion guard is fixed.\nNothing else changed.";
+    c.messages[1].content = vec![Block::ToolUse {
+        id: "call-1".into(),
+        name: "execute_cell".into(),
+        input: serde_json::json!({"code": format!("todo.write([]);\nanswer(\"{}\");", answer.replace('\n', "\\n"))}),
+    }];
+    n.cells[0].returned = Some(answer.into());
+    n.cells[0].output = Some(answer.into());
+    n.cells[0].executed_source = None;
+    n.cells[0].call_count = Some(0);
+    n.cells[0].changes = None;
+    n.cells[0].execution = None;
+    n.cells[0].helpers.clear();
+    let d = doc(&c, &n, &s, &Workbench::default());
+    let text = words(&d);
+    assert_eq!(
+        text.matches("The motion guard is fixed.").count(),
+        1,
+        "shown once:\n{text}"
+    );
+    assert!(
+        d.rows.iter().any(|r| matches!(
+            r.kind,
+            pane::workbench::RowKind::CardTop { open: false, .. }
+        )),
+        "an answer-only cell is folded:\n{text}"
+    );
+    // Opened by hand, the program folds the literal rather than repeating it.
+    let mut u = Workbench::default();
+    u.expanded.insert(1);
+    let text = words(&doc(&c, &n, &s, &u));
+    assert!(text.contains("the answer is below"), "{text}");
+    assert_eq!(text.matches("Nothing else changed.").count(), 1, "{text}");
+}

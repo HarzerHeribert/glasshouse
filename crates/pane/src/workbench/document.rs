@@ -295,8 +295,18 @@ impl Document {
                 && v.is_none_or(|v| {
                     v.execution.is_none() && v.error.is_none() && v.returned.is_none()
                 });
+            // A cell whose only work was the answer -- `answer(...)` and
+            // maybe a todo, no call on the world -- is folded by default:
+            // the answer is the block under it, and its card would only
+            // show the same words again inside a string literal.
+            let answer_only = v.is_some_and(|v| {
+                v.returned.is_some()
+                    && v.call_count.unwrap_or(0) == 0
+                    && v.error.is_none()
+                    && v.changes.as_deref().is_none_or(str::is_empty)
+            });
             let open = ui.expanded.contains(&cell)
-                || (cell >= n.cells.len() && !ui.collapsed.contains(&cell))
+                || (cell >= n.cells.len() && !ui.collapsed.contains(&cell) && !answer_only)
                 || v.is_some_and(|v| v.error.is_some());
             let failed = v.is_some_and(|v| v.error.is_some());
             let state = if failed {
@@ -413,7 +423,11 @@ impl Document {
                         if let Some(execution) = &v.execution {
                             d.calls(execution, inner, id);
                         }
-                        if let Some(output) = &v.output {
+                        // The returned value is the answer block under the
+                        // card when it is the answer; it is not printed twice.
+                        if let Some(output) = &v.output
+                            && v.returned.as_deref().map(str::trim) != Some(output.trim())
+                        {
                             d.result(output, inner, id);
                         }
                     }
@@ -679,7 +693,34 @@ impl Document {
     /// call on one of the runtime's own objects -- so the chain of events a
     /// cell will cause is read off it at a glance.
     fn program(&mut self, program: &str, width: usize, id: usize) {
+        // `answer("…")` carries the whole answer as one string literal; the
+        // block under the card shows it, so here the call is folded to its
+        // opening words.
+        let mut folded = false;
         for line in program.split('\n') {
+            if folded {
+                if line.trim_end().ends_with(");") {
+                    folded = false;
+                }
+                continue;
+            }
+            if let Some(start) = line.find("answer(\"") {
+                let head: String = line[start + 8..].chars().take(36).collect();
+                let one_line = line.trim_end().ends_with(");");
+                folded = !one_line;
+                self.spans_wrapped(
+                    vec![
+                        (line[..start].to_string(), Tone::Code),
+                        ("answer".to_string(), Tone::Accent),
+                        (format!("(\"{head}"), Tone::Code),
+                        ("…\")  · the answer is below".to_string(), Tone::Muted),
+                    ],
+                    width,
+                    2,
+                    id,
+                );
+                continue;
+            }
             self.spans_wrapped(highlight_calls(line), width, 2, id);
         }
     }
