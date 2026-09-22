@@ -674,6 +674,14 @@ impl Workbench {
                     // control itself, so the visible route and the fast route
                     // are the same route, found in stages.
                     KeyCode::BackTab => Effect::Pass,
+                    // `?` on an empty composer is the sheet of keys, as it is
+                    // in the neighbouring product; with anything typed it is
+                    // a question mark.
+                    KeyCode::Char('?') if s.input.is_empty() && !ctrl => {
+                        self.close();
+                        self.help = true;
+                        Effect::Consumed
+                    }
                     KeyCode::Char('o') if ctrl => self.activate(
                         Action::Cell(self.selected_cell.unwrap_or(n.cells.len())),
                         s,
@@ -744,7 +752,31 @@ impl Workbench {
                     .iter()
                     .position(|w| *w == s.effort.name())
                     .unwrap_or(0);
+                // What it was is offered back beside the notice the step
+                // produces: reversibility over confirmation.
+                self.undo = Some((
+                    format!("effort {}", s.effort.name()),
+                    format!("/effort {}", s.effort.name()),
+                ));
                 return Effect::Command(format!("/effort {}", LADDER[(here + 1) % LADDER.len()]));
+            }
+            Action::UndoLive => {
+                if let Some((_, command)) = self.undo.take() {
+                    self.notice.clear();
+                    return Effect::Command(command);
+                }
+            }
+            Action::Help => {
+                self.close();
+                self.help = true;
+            }
+            Action::Quip => {
+                self.quips += 1;
+                self.notice = if s.voice.playful() {
+                    super::voice::quip(self.quips).to_string()
+                } else {
+                    "Pane · click any chip to change what it names".to_string()
+                };
             }
             Action::Models => {
                 if busy {

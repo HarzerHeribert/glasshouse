@@ -68,6 +68,7 @@ const THEMES: &[&str] = &[
 ];
 const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];
+const VOICES: &[&str] = &["playful", "plain"];
 /// The working mode a session starts in. `build` is this file's word for the
 /// runtime's `execute`; both are accepted, and `build` is what is written.
 const MODES: &[&str] = &["build", "explore", "plan"];
@@ -373,6 +374,15 @@ static SPECS: &[SettingSpec] = &[
         description: "The session card on the right. Auto shows it only when the terminal is wide enough to spare the columns.",
         kind: Kind::Choice,
         choices: SIDEBAR,
+        basic: true,
+        restart: false,
+    },
+    SettingSpec {
+        key: "ui.voice",
+        label: "Voice",
+        description: "How Pane talks. Playful greets you, remarks and whispers hints; plain says the same facts and nothing else.",
+        kind: Kind::Choice,
+        choices: VOICES,
         basic: true,
         restart: false,
     },

@@ -774,6 +774,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
                     };
                     crate::settings_session::presentation(&mut state, &loaded_settings.values);
                     state.settings_models = startup::served_models(&accounts);
+                    state.local_hour = crate::workbench::voice::local_hour();
+                    if let Some(root) = state.settings_root.clone() {
+                        state.suggestions =
+                            crate::workbench::voice::project_suggestions(&root, state.voice);
+                    }
                     state
                 },
                 transcript.conversation.clone(),

@@ -1000,6 +1000,11 @@ fn run(
             last_tick = Instant::now();
             dirty = true;
         }
+        // A notice that has had its time on the dock's edge is cleared by
+        // the next frame, and nothing else would draw one.
+        if workbench.notice_expired() {
+            dirty = true;
+        }
         if state.scrolling
             && last_scroll.is_some_and(|at| at.elapsed() >= tui::SCROLL_INDICATOR_LINGER)
         {

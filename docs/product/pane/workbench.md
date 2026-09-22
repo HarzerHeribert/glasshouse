@@ -25,8 +25,28 @@ credential input keep precedence over every ordinary UI action.
 
 F2 opens categorized settings; F3 opens the model navigator; F4 opens the selected
 cell's observed before/after diff; F5 opens its helpers. Ctrl-O expands the cell;
-Ctrl-T opens local Activity. Shift-Tab opens **Ask**, not a hidden mixed mode cycle.
-The footer keeps Work, Ask and Access distinct. All controls have keyboard routes.
+Ctrl-T opens local Activity. Shift-Tab steps the **Ask** rung in place. `?` on an
+empty composer opens the sheet of keys. All controls have keyboard routes.
+
+**Four regions, one component, a grammar and a character (2026-09-22, the
+application pass; `workbench-ux.md` carries the argument).** The top bar, the
+conversation, the session card and the composer dock are drawn as regions with
+lines, never with paint. Every control on every surface is a chip, `⟨ label ⟩`,
+filled when it is the current choice of a set and for the frames a press rests
+on it; the bar drops chips by rank as the terminal narrows and never drops a
+warning-toned one. The conversation is turns: the person's under a coloured bar
+labelled `you`, Pane's under its mark; a cell is a card with its state in the
+top edge and how it ended in the bottom edge; helpers hang under the card;
+notices are tagged rows; a finished turn ends in an answer block with a stats
+line and, on the latest turn, chips for what to do next. The composer dock's
+top edge carries the live status, a notice for a few seconds and an undo chip
+for the last dock change; its bottom edge carries the three everyday chips, one
+rotating hint and the context reading. Pane's character is a small braille bird
+with six states read off the session's activity, and `ui.voice = playful | plain`
+chooses between its first-person copy and the plain statement of the same
+facts; structure never changes with the voice. The opening greets by project and
+local hour and offers chips read from the repository (last commit, uncommitted
+changes, a test command), each of which types a message.
 
 Clicks activate on release. A drag selects/copies text instead of opening a cell
 or path. Wheel events go to the open local surface or to the conversation, not

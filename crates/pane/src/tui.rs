@@ -286,6 +286,15 @@ pub struct ScreenState {
     /// failed: a recap must never replace or delay the answer it follows.
     /// The caller clears it when the next task begins.
     pub recap: Option<HelperRecord>,
+    /// Whether Pane speaks with its character or plainly (`ui.voice`).
+    pub voice: Voice,
+    /// The local hour when the session started, for the greeting; `None`
+    /// when the platform could not say, and the greeting then has no time
+    /// of day in it.
+    pub local_hour: Option<u8>,
+    /// What the opening offers to do, read from the project itself: each
+    /// entry is the chip's label and the message it puts in the composer.
+    pub suggestions: Vec<(String, String)>,
 }
 
 /// A modal masked prompt: the one place a session takes a secret from the
@@ -352,6 +361,35 @@ impl SecretPrompt {
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
+/// How Pane talks: with a character, or plainly.
+///
+/// **Structure never changes with the voice.** The turn labels, the cards,
+/// the chips and every fact on screen are the same under both; `Plain`
+/// drops the greeting, the asides and the bird's remarks, nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Voice {
+    #[default]
+    Playful,
+    Plain,
+}
+impl Voice {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "playful" => Some(Self::Playful),
+            "plain" => Some(Self::Plain),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Playful => "playful",
+            Self::Plain => "plain",
+        }
+    }
+    pub fn playful(self) -> bool {
+        self == Self::Playful
+    }
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Theme {
     #[default]

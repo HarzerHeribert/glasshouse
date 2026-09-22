@@ -21,13 +21,14 @@ pub const CATEGORIES: [&str; 6] = [
 /// at all sat under another. Someone opening settings wants the five things
 /// they change; every one of those five is on this list, and everything else
 /// is still exactly one Tab away.
-const EVERYDAY: [&str; 6] = [
+const EVERYDAY: [&str; 7] = [
     "model.parent",
     "session.effort",
     "session.mode",
     "permissions.mode",
     "helpers.enabled",
     "ui.theme",
+    "ui.voice",
 ];
 pub struct Preferences {
     pub scope: Scope,
@@ -196,6 +197,7 @@ impl Preferences {
             "ui.reduced_motion" => s.reduced_motion = resolved.reduced_motion,
             "ui.statusline" => s.status_line = resolved.status_line,
             "ui.sidebar" => s.sidebar = resolved.sidebar,
+            "ui.voice" => s.voice = resolved.voice,
             _ => {}
         }
         // **The saved choice reaches the session that is running, not only
@@ -265,6 +267,7 @@ impl Preferences {
                     "ui.reduced_motion" => s.reduced_motion = resolved.reduced_motion,
                     "ui.statusline" => s.status_line = resolved.status_line,
                     "ui.sidebar" => s.sidebar = resolved.sidebar,
+                    "ui.voice" => s.voice = resolved.voice,
                     _ => {}
                 }
             }

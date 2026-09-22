@@ -48,58 +48,24 @@ pub(super) fn style(tone: Tone, theme: Theme) -> Style {
         Tone::Success => base.fg(GREEN),
         Tone::Muted => base.fg(MUTED),
         Tone::Line => base.fg(LINE),
+        Tone::You => base.fg(YOU).add_modifier(Modifier::BOLD),
     }
 }
-/// A bounded braille orbit; only the active glyph changes, never text geometry.
-pub(super) fn orbit(tick: usize, still: bool) -> &'static str {
-    const FRAMES: [&str; 12] = [
-        "⠈⢆⡀",
-        "⠐⢄⡁",
-        "⠠⢂⠃",
-        "⢀⠡⠆",
-        "⡀⠑⠤",
-        "⡁⠊⠰",
-        "⠃⠔⢠",
-        "⠆⠢⢀",
-        "⠤⠡⡀",
-        "⠰⠊⡁",
-        "⢠⠔⠃",
-        "⢀⠢⠆",
-    ];
-    if still {
-        "⠈⢆⡀"
-    } else {
-        FRAMES[(tick / 2) % FRAMES.len()]
+/// `--you`: the person's own turn, one hue no other role uses.
+const YOU: Color = Color::Rgb(0xc9, 0xb8, 0xff);
+/// The one filled thing on the screen: a chip that is the current choice, or
+/// one a finger is on. Painted in the accent, with dark ink on it, because
+/// every accent is light; mono, whose accent is the terminal's own
+/// foreground, reverses instead.
+pub(super) fn chip_on(theme: Theme) -> Style {
+    match accent(theme) {
+        Color::Reset => Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        accent => Style::default()
+            .fg(Color::Black)
+            .bg(accent)
+            .add_modifier(Modifier::BOLD),
     }
-}
-/// The mockup's three-line working mark: a still bowl, or a turning one.
-///
-/// It is decoration and it is the one thing reduced motion freezes, so the
-/// still frame is a complete shape rather than a paused animation frame.
-pub(super) fn mark(tick: usize, still: bool) -> [&'static str; 3] {
-    const FRAMES: [[&str; 3]; 4] = [
-        ["  ⢀⣀⣀⡀", "⢀⡴⠋  ⠙⢦⡀", "  ⠙⠶⣤⠶⠋"],
-        [" ⢀⡴⠛⠛⢦⡀", " ⡞ ⠐⠒ ⢳", " ⠈⠻⢤⡤⠟"],
-        ["  ⢀⣠⣄⡀", "⢰⠋ ⢠⠄ ⠙⡆", " ⠈⠓⠶⠖⠋"],
-        ["  ⣀⣀⣀⣀", "⡞  ⢀⡀  ⢳", " ⠙⠳⠤⠞⠋"],
-    ];
-    if still {
-        ["  ⢀⣤⡀", " ⠐⢿⣿⡿⠂", "  ⠈⠛⠁"]
-    } else {
-        FRAMES[(tick / 3) % FRAMES.len()]
-    }
-}
-/// The mark's three lines, each padded to the same column count, so the text
-/// beside it starts at one x on every frame.
-pub(super) fn padded_mark(tick: usize, still: bool) -> [String; 3] {
-    let art = mark(tick, still);
-    let wide = art
-        .iter()
-        .map(|line| ratatui::text::Span::raw(*line).width())
-        .max()
-        .unwrap_or(0);
-    art.map(|line| {
-        let pad = wide - ratatui::text::Span::raw(line).width();
-        format!("{line}{}", " ".repeat(pad))
-    })
 }

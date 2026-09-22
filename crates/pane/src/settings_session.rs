@@ -34,6 +34,9 @@ pub(crate) fn presentation(state: &mut tui::ScreenState, values: &toml::Value) {
     state.reduced_motion = value(values, "ui.reduced_motion")
         .and_then(toml::Value::as_bool)
         .unwrap_or(false);
+    state.voice = word("ui.voice")
+        .and_then(tui::Voice::parse)
+        .unwrap_or_default();
 }
 pub(crate) struct Editor {
     pub panel: SettingsPanel,

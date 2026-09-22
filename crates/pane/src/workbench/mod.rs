@@ -2,15 +2,17 @@
 //!
 //! This replaces the live renderer and controls, not the execution kernel.
 //! Local navigation cannot mutate a conversation or grant runtime authority.
+mod chrome;
 mod document;
 mod input;
 mod models;
 mod settings;
 mod theme;
 mod view;
+pub mod voice;
 
 use crate::tui::{Panel, ScreenState};
-pub use document::{Document, Row, Tone};
+pub use document::{Document, Row, RowKind, Tone};
 pub use input::Effect;
 pub use models::Navigator;
 use ratatui::layout::Rect;
@@ -68,6 +70,13 @@ pub enum Action {
     /// clicked, so a control on the strip is one click from the row that
     /// changes it rather than four.
     SettingsAt(usize),
+    /// The one-screen sheet of every key.
+    Help,
+    /// Take back the last live change the dock made, while its notice is
+    /// still up.
+    UndoLive,
+    /// Someone clicked the bird.
+    Quip,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Geometry {
@@ -117,7 +126,20 @@ pub struct Workbench {
     pub anchor: Option<((usize, usize), String)>,
     pub last_scrollback: usize,
     pub jump_cell: Option<usize>,
+    pub help: bool,
+    /// The last live change a dock chip made -- what to call it, and the
+    /// command that takes it back -- offered beside its notice.
+    pub undo: Option<(String, String)>,
+    /// When [`Workbench::notice`] was last set, so it can fade.
+    pub notice_at: Option<std::time::Instant>,
+    pub shown_notice: String,
+    /// How many times the bird has been clicked, so it never repeats itself
+    /// twice running.
+    pub quips: usize,
 }
+/// How long a notice rides the dock's edge before it fades. It is still in
+/// the transcript and on the Activity surface after that.
+pub const NOTICE_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
 impl Workbench {
     pub fn open_settings(&mut self, state: &ScreenState) {
         self.model_preference = None;
@@ -136,6 +158,7 @@ impl Workbench {
         self.access = false;
         self.work = false;
         self.approvals = false;
+        self.help = false;
         self.confirm = None;
         self.local_scroll = 0;
     }
@@ -146,7 +169,36 @@ impl Workbench {
             || self.access
             || self.work
             || self.approvals
+            || self.help
             || self.confirm.is_some()
+    }
+    /// Called once per frame: starts the clock on a notice that just
+    /// appeared, and clears one that has had its time.
+    pub fn age_notice(&mut self) {
+        if self.notice != self.shown_notice {
+            self.shown_notice = self.notice.clone();
+            self.notice_at = if self.notice.is_empty() {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
+        } else if self.notice_expired() {
+            self.notice.clear();
+            self.shown_notice.clear();
+            self.notice_at = None;
+            self.undo = None;
+        }
+    }
+    pub fn notice_visible(&self) -> bool {
+        !self.notice.is_empty() && !self.notice_expired()
+    }
+    /// A notice whose time is up, which the next frame will clear -- the
+    /// loop draws one when this says so, since nothing else would.
+    pub fn notice_expired(&self) -> bool {
+        !self.notice.is_empty()
+            && self
+                .notice_at
+                .is_some_and(|at| at.elapsed() >= NOTICE_LINGER)
     }
     pub fn absorb_panel(&mut self, state: &mut ScreenState) {
         if state.panel.as_ref().is_some_and(|p| p.assignment.is_some()) {

@@ -193,3 +193,44 @@ Two things deliberately **not** done, and why:
   decision about what a piped run should print before it owes a line of code.
   Every acceptance test takes that same path, which is what makes the debt
   cheap to leave and expensive to pay.
+
+## The application pass — 2026-09-22
+
+The user, on the result of the six stages above: *"Pane's frontend is bad — I
+need it upgraded asap, clear sections and clear distinctions. Think of it as a
+SaaS app become chatbot in a TUI with a fun interactive personality."* And on
+the proposal: *"I love it, please make sure to build it. Can we do something
+bird themed as well, I love birds."* The proposal page, with the real screens
+before and after at 140×40, is the artifact linked from the checkpoint of that
+day; what it diagnosed was not taste but texture: six kinds of content in one
+foreground, eight regions with no enclosure, four controls that looked like
+words, a composer indistinguishable from the transcript, and a manual's voice.
+
+Five moves, all shipped in one pass, all inside `workbench/`:
+
+1. **Frames.** `chrome.rs` draws the shapes: a rule with joints, a frame, a
+   chip. The header rule meets the session card's gutter at `┬`, the dock's top
+   edge meets it at `┴`; the dock is `╭ … ╯` with the prompt mark inside.
+2. **A grammar.** `Row::kind` (`document.rs`) says what a row is -- your turn,
+   Pane's turn, card top, card body, card bottom, helper, note, answer -- and
+   the view draws the shape. Copy and selection read the words alone.
+3. **The chip.** One control shape everywhere: the bar, the dock, a cell's tabs,
+   the answer's quick actions, the pickers and the settings rows. The current
+   choice is filled in the accent with dark ink; mono reverses. That filled chip
+   is the one thing the workbench paints, and `tests/workbench.rs` bounds it.
+4. **The bird and the voice.** `voice.rs` holds the six braille states (idle
+   blinks, thinking is a pose, working pecks inside a running cell, done, asking,
+   oops) and every line Pane says, in two voices side by side. `ui.voice` is the
+   pass's one new preference, and it changes words, never structure. Clicking
+   the bird gets a remark; the plain voice gets a pointer instead.
+5. **Feedback.** A pressed chip fills for the frames the finger is down; a notice
+   rides the dock's edge for four seconds with `⟨ undo … ⟩` beside it when a dock
+   chip made the change; `?` opens the key sheet; the opening offers the
+   project's own suggestions as chips that type the message.
+
+Held from the principles: no paint under a region (borders only, transparency
+untouched), reduced motion freezes every decoration, every click keeps its
+keyboard route, no tour. The three-cell motion budget on an idle screen is kept
+by design: the dock's flap is three cells and the bird's blink is two. Still
+deliberately not done: denial with redirection (needs the approval reply to
+carry text), the side-by-side diff, and deleting the legacy renderer.

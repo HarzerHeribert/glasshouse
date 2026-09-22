@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame<'_>, request: &Request, selected: usize, theme: 
     );
     frame.render_widget(Clear, overlay);
     let block = Block::default()
-        .title(" Pane is asking ")
+        .title(" ⠿ pane is asking ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent()));
     let inner = block.inner(overlay);

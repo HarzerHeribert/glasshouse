@@ -1,5 +1,12 @@
 //! Converts observed conversation/cell records to a readable, local document.
-use super::{Action, CellTab, Workbench, theme};
+//!
+//! **A row says what kind of thing it is, and the view draws the shape.**
+//! The conversation has a grammar -- your turn, Pane's turn, a cell's card,
+//! a helper's lane, a local note, the answer -- and each row carries its
+//! [`RowKind`] so the view can draw a gutter, a card edge or a label without
+//! the text itself having to spell it. Selection and copying read
+//! [`Row::text`], which stays the words alone.
+use super::{Action, CellTab, Workbench, voice};
 use crate::contract::{Block, Conversation, Message, Role};
 use crate::prompt::{Extracted, extract_program};
 use crate::tui::{Activity, CellView, Notebook, ScreenState};
@@ -19,6 +26,34 @@ pub enum Tone {
     Muted,
     /// Rules and separators only.
     Line,
+    /// The person's own turn: its gutter and its label.
+    You,
+}
+/// What shape the view gives a row.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RowKind {
+    #[default]
+    Plain,
+    /// A line of the person's turn: a coloured bar on the left.
+    You,
+    /// The label row of one of Pane's turns.
+    Pane,
+    /// A cell card's title row. `open` draws the card's top edge; closed it
+    /// is one line with a `▸`. `right` is the state word at the far end.
+    CardTop {
+        open: bool,
+        right: Vec<(String, Tone)>,
+    },
+    /// A row inside a card: edges on both sides.
+    CardBody,
+    /// A cell card's bottom edge, with a short summary in it.
+    CardBottom,
+    /// A helper's lane under a card.
+    Helper,
+    /// A local notice, where it happened.
+    Note,
+    /// The first line of a finished turn's answer.
+    Answer,
 }
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -31,12 +66,17 @@ pub struct Row {
     /// A cell's tab strip: the view turns each entry into its own click
     /// target, which one flat string could not express.
     pub tabs: Vec<(String, CellTab)>,
+    /// A row of chips: label, what it does, and whether it is the current one.
+    pub chips: Vec<(String, Action, bool)>,
     pub action: Option<Action>,
     pub key: (usize, usize),
+    pub kind: RowKind,
 }
 #[derive(Default)]
 pub struct Document {
     pub rows: Vec<Row>,
+    /// The kind every ordinary row takes while a card is open.
+    container: RowKind,
 }
 impl Document {
     pub fn push(
@@ -93,42 +133,76 @@ impl Document {
         }
     }
     fn row(&mut self, text: String, tone: Tone, action: Option<Action>, id: usize) {
+        let kind = self.container.clone();
         self.emit(
             Row {
                 text,
                 tone,
                 spans: Vec::new(),
                 tabs: Vec::new(),
+                chips: Vec::new(),
                 action,
                 key: (0, 0),
+                kind,
             },
             id,
         );
     }
     fn emit(&mut self, mut row: Row, id: usize) {
-        let ordinal = self
-            .rows
-            .last()
-            .filter(|r| r.key.0 == id)
-            .map_or(0, |r| r.key.1 + 1);
-        row.key = (id, ordinal);
+        let n = self.rows.iter().filter(|r| r.key.0 == id).count();
+        row.key = (id, n);
+        if row.kind == RowKind::Plain {
+            row.kind = self.container.clone();
+        }
         self.rows.push(row);
     }
-    /// One pre-sized line of coloured segments; never wrapped, because its
-    /// padding was computed against the width it was built for.
     fn line(&mut self, spans: Vec<(String, Tone)>, action: Option<Action>, id: usize) {
-        let text = spans.iter().map(|(t, _)| t.as_str()).collect::<String>();
+        self.kinded(spans, action, id, RowKind::Plain);
+    }
+    fn kinded(
+        &mut self,
+        spans: Vec<(String, Tone)>,
+        action: Option<Action>,
+        id: usize,
+        kind: RowKind,
+    ) {
         self.emit(
             Row {
-                text,
+                text: spans.iter().map(|(t, _)| t.as_str()).collect(),
                 tone: spans.first().map_or(Tone::Normal, |(_, t)| *t),
                 spans,
                 tabs: Vec::new(),
+                chips: Vec::new(),
                 action,
                 key: (0, 0),
+                kind,
             },
             id,
         );
+    }
+    /// A row that is nothing but chips.
+    fn chips(&mut self, chips: Vec<(String, Action, bool)>, id: usize) {
+        let text = chips
+            .iter()
+            .map(|(label, _, _)| format!("⟨ {label} ⟩"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        self.emit(
+            Row {
+                text,
+                tone: Tone::Accent,
+                spans: Vec::new(),
+                tabs: Vec::new(),
+                chips,
+                action: None,
+                key: (0, 0),
+                kind: RowKind::Plain,
+            },
+            id,
+        );
+    }
+    fn blank(&mut self, id: usize) {
+        self.row(String::new(), Tone::Normal, None, id);
     }
     pub fn build(
         c: &Conversation,
@@ -143,10 +217,16 @@ impl Document {
         // What the card drew is the session's own header, not conversation:
         // an empty conversation is still empty underneath it.
         let card_rows = d.rows.len();
+        // A card's body sits inside two edges and a three-column indent.
+        let inner = width.saturating_sub(6).max(1);
         let mut cell: usize = 0;
         let mut after_return = false;
         let mut feedback = false;
         let mut returned_text: Option<String> = None;
+        let last_assistant = c
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant && m.historical.is_none());
         for (idx, m) in c.messages.iter().enumerate() {
             let id = idx + 1;
             d.notes(s, &mut note, idx, width);
@@ -166,16 +246,15 @@ impl Document {
                     continue;
                 }
                 after_return = false;
-                d.push(format!("❯ {}", prose(m)), Tone::Strong, None, width, id);
-                d.push("", Tone::Normal, None, width, id);
+                d.turn_you(&prose(m), width, id);
                 continue;
             }
             if after_return {
                 after_return = false;
                 let text = prose(m);
                 if returned_text.as_deref() != Some(text.trim()) {
-                    d.push(text, Tone::Normal, None, width, id);
-                    d.push("", Tone::Normal, None, width, id);
+                    d.wrapped(text, Tone::Normal, None, width, id, 2);
+                    d.blank(id);
                 }
                 continue;
             }
@@ -188,16 +267,18 @@ impl Document {
                 || v.is_some_and(|v| {
                     v.execution.is_some() || v.error.is_some() || v.executed_source.is_some()
                 });
+            d.turn_pane(id);
             if !has_cell {
-                d.push(prose(m), Tone::Normal, None, width, id);
-                d.push("", Tone::Normal, None, width, id);
+                d.wrapped(prose(m), Tone::Normal, None, width, id, 2);
+                d.blank(id);
                 continue;
             }
             feedback = v.is_some_and(|v| v.answered);
             after_return = v.is_some_and(|v| v.returned.is_some());
             let explanation = explanation(m);
             if !explanation.trim().is_empty() {
-                d.push(explanation, Tone::Normal, None, width, id);
+                d.wrapped(explanation, Tone::Normal, None, width, id, 2);
+                d.blank(id);
             }
             let running = cell >= n.cells.len()
                 && !c.messages[idx + 1..]
@@ -213,21 +294,25 @@ impl Document {
             let open = ui.expanded.contains(&cell)
                 || (cell >= n.cells.len() && !ui.collapsed.contains(&cell))
                 || v.is_some_and(|v| v.error.is_some());
-            let state = if v.is_some_and(|v| v.error.is_some()) {
-                "FAILED"
+            let failed = v.is_some_and(|v| v.error.is_some());
+            let state = if failed {
+                vec![("✕ FAILED".to_string(), Tone::Failure)]
             } else if running {
-                "RUNNING"
+                vec![
+                    ("● RUNNING".to_string(), Tone::Accent),
+                    (format!(" {}", clock(s.pulse.elapsed_ms)), Tone::Muted),
+                ]
             } else if v.is_some_and(|v| v.execution.is_some()) {
-                "EXECUTED"
+                vec![("✓ EXECUTED".to_string(), Tone::Success)]
             } else {
-                "RECORDED"
+                vec![("RECORDED".to_string(), Tone::Muted)]
             };
-            let tone = if state == "FAILED" {
+            let tone = if failed {
                 Tone::Failure
             } else if running || ui.selected_cell == Some(cell) {
                 Tone::Accent
             } else {
-                Tone::Normal
+                Tone::Line
             };
             let program_now = v
                 .and_then(|v| v.executed_source.as_deref())
@@ -240,37 +325,33 @@ impl Document {
                 .and_then(|v| v.description.as_deref())
                 .filter(|d| !d.trim().is_empty())
                 .unwrap_or(&size);
-            let clock = if running {
-                clock(s.pulse.elapsed_ms)
-            } else {
-                String::new()
-            };
-            d.line(
-                justify(
-                    vec![
-                        (format!(" {} ", if open { "▾" } else { "▸" }), tone),
-                        (format!("{cell:03}"), Tone::Strong),
-                        (format!("  {description}"), tone),
-                    ],
-                    vec![
-                        (state.to_string(), tone),
-                        (format!("  {clock} "), Tone::Muted),
-                    ],
-                    width,
-                ),
+            d.kinded(
+                vec![
+                    (format!("{cell:03}"), Tone::Strong),
+                    (" · ".to_string(), tone),
+                    (
+                        clip(description, width.saturating_sub(30)),
+                        if open { Tone::Normal } else { Tone::Muted },
+                    ),
+                ],
                 Some(Action::Cell(cell)),
                 id,
+                RowKind::CardTop { open, right: state },
             );
             if open {
-                d.rule('━', width, id);
+                d.container = RowKind::CardBody;
                 let tab = ui.tabs.get(&cell).copied().unwrap_or(CellTab::Code);
-                d.tabstrip(cell, tab, v.and_then(|v| v.changes.as_deref()), width, id);
+                d.tabstrip(cell, tab, v.and_then(|v| v.changes.as_deref()), inner, id);
                 if v.is_some_and(|v| v.origin != crate::abi::Origin::AuthoredCell) {
                     d.push(
-                        "Host-lowered tool frame · not model-authored source",
-                        Tone::Normal,
+                        if s.voice.playful() {
+                            "built-in step (I didn't write this one) · Host-lowered tool frame"
+                        } else {
+                            "Host-lowered tool frame · not model-authored source"
+                        },
+                        Tone::Muted,
                         None,
-                        width,
+                        inner,
                         id,
                     );
                 }
@@ -279,8 +360,8 @@ impl Document {
                     .or(src.as_deref())
                     .unwrap_or("");
                 match tab {
-                    CellTab::Code => d.wrapped(program, Tone::Code, None, width, id, 2),
-                    CellTab::Diff => d.diff(v.and_then(|v| v.changes.as_deref()), width, id),
+                    CellTab::Code => d.wrapped(program, Tone::Code, None, inner, id, 2),
+                    CellTab::Diff => d.diff(v.and_then(|v| v.changes.as_deref()), inner, id),
                     CellTab::Output => {
                         if let Some(v) = v {
                             for (name, value, tone) in [
@@ -290,8 +371,8 @@ impl Document {
                                 ("Handles", &v.table, Tone::Muted),
                             ] {
                                 if let Some(value) = value {
-                                    d.wrapped(name, Tone::Accent, None, width, id, 2);
-                                    d.wrapped(value, tone, None, width, id, 4);
+                                    d.wrapped(name, Tone::Accent, None, inner, id, 2);
+                                    d.wrapped(value, tone, None, inner, id, 4);
                                 }
                             }
                         }
@@ -302,7 +383,7 @@ impl Document {
                                 "No helper calls recorded for this cell.",
                                 Tone::Normal,
                                 None,
-                                width,
+                                inner,
                                 id,
                             );
                         }
@@ -314,16 +395,16 @@ impl Document {
                             format!("✕ {}: {}", e.class, e.message),
                             Tone::Failure,
                             None,
-                            width,
+                            inner,
                             id,
                         );
                     }
                     if let Some(why) = &v.yield_reason {
-                        d.push(format!("↳ {why}"), Tone::Normal, None, width, id);
+                        d.push(format!("↳ {why}"), Tone::Normal, None, inner, id);
                     }
                     if tab == CellTab::Code {
                         if let Some(output) = &v.output {
-                            d.result(output, width, id);
+                            d.result(output, inner, id);
                         }
                         if let Some(execution) = &v.execution {
                             for line in execution
@@ -333,7 +414,7 @@ impl Document {
                                 d.line(
                                     vec![
                                         ("  ✕ ".to_string(), Tone::Failure),
-                                        (clip(line, width.saturating_sub(6)), Tone::Failure),
+                                        (clip(line, inner.saturating_sub(6)), Tone::Failure),
                                     ],
                                     None,
                                     id,
@@ -343,38 +424,33 @@ impl Document {
                     }
                 }
                 if running {
-                    d.work(s, v, width, id);
+                    d.work(s, v, inner, id);
                 }
-                d.rule('─', width, id);
+                d.container = RowKind::Plain;
+                d.kinded(
+                    v.map(Self::summary).unwrap_or_default(),
+                    None,
+                    id,
+                    RowKind::CardBottom,
+                );
             }
             if let Some(v) = v {
-                if open {
-                    d.summary(v, width, id);
-                }
                 d.helpers(cell, v, ui, width, id);
                 if let Some(answer) = v.returned.as_ref() {
                     let answer =
                         crate::prompt::completion_text(answer).unwrap_or_else(|| answer.clone());
-                    d.push("", Tone::Normal, None, width, id);
-                    // The answer's opening line is the result a person came
-                    // back for; the rest is its body, in ordinary prose.
-                    let mut lines = answer.splitn(2, '\n');
-                    if let Some(first) = lines.next() {
-                        d.push(first, Tone::Strong, None, width, id);
-                    }
-                    if let Some(rest) = lines.next().filter(|r| !r.trim().is_empty()) {
-                        d.push(rest, Tone::Normal, None, width, id);
-                    }
+                    d.blank(id);
+                    d.answer(&answer, v, cell, s, last_assistant == Some(idx), width, id);
                     returned_text = Some(answer.trim().to_string());
                 }
             }
-            d.push("", Tone::Normal, None, width, id);
+            d.blank(id);
         }
         d.notes(s, &mut note, usize::MAX, width);
         if let Some(p) = &n.preflight {
-            d.line(
+            d.kinded(
                 vec![
-                    (" ◇ PREFLIGHT · SCOUT  ".to_string(), Tone::Helper),
+                    ("◇ scout  ".to_string(), Tone::Helper),
                     (
                         clip(&format!("{} {}", p.verb, p.asked), width.saturating_sub(24)),
                         Tone::Muted,
@@ -382,8 +458,9 @@ impl Document {
                 ],
                 None,
                 usize::MAX - 2,
+                RowKind::Helper,
             );
-            d.push(
+            d.wrapped(
                 if p.outcome.ok {
                     p.outcome.text.clone()
                 } else if p.outcome.text.is_empty() {
@@ -402,56 +479,149 @@ impl Document {
                 None,
                 width,
                 usize::MAX - 2,
+                5,
             );
         }
         if let Some(fragment) = &s.streaming_tool_input {
-            d.push(
+            d.wrapped(
                 "Receiving cell input · not executed",
                 Tone::Accent,
                 None,
                 width,
                 usize::MAX - 3,
+                2,
             );
             // Fragments are protocol text, never a claimed valid program.
-            d.push(fragment, Tone::Muted, None, width, usize::MAX - 3);
+            d.wrapped(fragment, Tone::Muted, None, width, usize::MAX - 3, 2);
         }
         if let Some(text) = &s.streaming_text {
             let text = crate::prompt::completion_text(text).unwrap_or_else(|| text.clone());
-            d.push(text, Tone::Normal, None, width, usize::MAX - 1);
+            if d.rows.len() == card_rows {
+                d.turn_pane(usize::MAX - 1);
+            }
+            d.wrapped(text, Tone::Normal, None, width, usize::MAX - 1, 2);
         }
         if d.rows.len() == card_rows {
-            // One line, then the things to press. A paragraph on an empty
-            // screen is read once and never again; a list of four commands
-            // is read every time someone does not know what to type.
-            d.wrapped(
-                "Describe a task, or try one of these:",
-                Tone::Normal,
-                None,
-                width,
-                0,
-                2,
-            );
-            d.push("", Tone::Normal, None, width, 0);
-            for (key, what) in [
-                (
-                    "/settings",
-                    "everything about this session, applied as you choose it",
-                ),
-                ("/models", "which model answers, and at what effort"),
-                ("/diff", "what the last cell actually changed"),
-                ("/help", "every command"),
-            ] {
-                d.line(
-                    vec![
-                        (format!("  {key:<11}"), Tone::Accent),
-                        (what.to_string(), Tone::Muted),
-                    ],
-                    Some(Action::Insert(key.to_string())),
-                    0,
-                );
-            }
+            d.opening(s, width);
         }
         d
+    }
+    /// The person's turn: a label, then the words, each under the gutter.
+    fn turn_you(&mut self, text: &str, width: usize, id: usize) {
+        self.kinded(
+            vec![(voice::YOU.to_string(), Tone::You)],
+            None,
+            id,
+            RowKind::You,
+        );
+        let before = self.rows.len();
+        self.wrapped(text, Tone::Strong, None, width.saturating_sub(3), id, 0);
+        for row in &mut self.rows[before..] {
+            row.kind = RowKind::You;
+        }
+        self.blank(id);
+    }
+    /// Pane's turn begins: the mark and the name, once, above whatever it
+    /// says and does.
+    fn turn_pane(&mut self, id: usize) {
+        if self.rows.last().is_some_and(|r| r.kind == RowKind::Pane) {
+            return;
+        }
+        self.kinded(
+            vec![(format!("⠿ {}", voice::PANE), Tone::Accent)],
+            None,
+            id,
+            RowKind::Pane,
+        );
+    }
+    /// A finished turn's answer: the first line as the result a person came
+    /// back for, the rest as prose, a line of what it cost, and -- on the
+    /// latest turn only -- what to do next.
+    #[allow(clippy::too_many_arguments)]
+    fn answer(
+        &mut self,
+        answer: &str,
+        v: &CellView,
+        cell: usize,
+        s: &ScreenState,
+        latest: bool,
+        width: usize,
+        id: usize,
+    ) {
+        let mut lines = answer.splitn(2, '\n');
+        let first = lines.next().unwrap_or("").trim();
+        let first = if first.is_empty() {
+            voice::done_line(s.voice, v.error.is_some()).to_string()
+        } else {
+            first.to_string()
+        };
+        let before = self.rows.len();
+        self.wrapped(
+            format!("{} {first}", if v.error.is_some() { "✕" } else { "✓" }),
+            Tone::Strong,
+            None,
+            width,
+            id,
+            2,
+        );
+        if let Some(row) = self.rows.get_mut(before) {
+            row.kind = RowKind::Answer;
+        }
+        if let Some(rest) = lines.next().filter(|r| !r.trim().is_empty()) {
+            self.wrapped(rest, Tone::Normal, None, width, id, 4);
+        }
+        let files = changed_files(v);
+        let (added, removed) = v.changes.as_deref().map_or((0, 0), count_changes);
+        let mut facts = Vec::new();
+        if files > 0 {
+            facts.push(format!(
+                "{files} {} · +{added} −{removed}",
+                if files == 1 { "file" } else { "files" }
+            ));
+        }
+        if !v.helpers.is_empty() {
+            facts.push(format!(
+                "{} {}",
+                v.helpers.len(),
+                if v.helpers.len() == 1 {
+                    "helper"
+                } else {
+                    "helpers"
+                }
+            ));
+        }
+        if let Some(calls) = v.call_count.filter(|c| *c > 0) {
+            facts.push(format!(
+                "{calls} {}",
+                if calls == 1 { "call" } else { "calls" }
+            ));
+        }
+        if !facts.is_empty() {
+            self.wrapped(facts.join(" · "), Tone::Muted, None, width, id, 4);
+        }
+        if latest {
+            let mut chips = Vec::new();
+            if files > 0 {
+                chips.push((
+                    "show the diff".to_string(),
+                    Action::Command("/diff".into()),
+                    false,
+                ));
+                chips.push((
+                    "commit this".to_string(),
+                    Action::Insert("commit this".into()),
+                    false,
+                ));
+            }
+            chips.push((
+                "full output".to_string(),
+                Action::Tab(cell, CellTab::Output),
+                false,
+            ));
+            if !chips.is_empty() {
+                self.chips(chips, id);
+            }
+        }
     }
     /// The cell's own result, marked pass or fail from what it actually
     /// said. Nothing here judges the work -- the mark reports the words the
@@ -465,10 +635,10 @@ impl Document {
             self.line(
                 vec![
                     (
-                        format!("  {} ", if bad { "✕" } else { "✓" }),
+                        format!("{} ", if bad { "✕" } else { "✓" }),
                         if bad { Tone::Failure } else { Tone::Success },
                     ),
-                    (clip(line, width.saturating_sub(6)), Tone::Normal),
+                    (clip(line, width.saturating_sub(4)), Tone::Normal),
                 ],
                 None,
                 id,
@@ -476,8 +646,8 @@ impl Document {
         }
     }
     /// What a session says about itself before anyone has said anything to
-    /// it: the mark, and the two facts that are not already on the status
-    /// line, each on exactly one line.
+    /// it: the bird, a greeting, and the two facts that are not already on
+    /// the status line, each on exactly one line.
     ///
     /// **A startup note is a card, not a paragraph.** These arrive before the
     /// first message — a resume id, the rung, three sentences about the
@@ -503,12 +673,17 @@ impl Document {
             .flat_map(|n| n.text.lines().next())
             .collect();
         *next += opening;
-        let mark = theme::padded_mark(0, true);
+        let asking = false;
+        let still = s.reduced_motion || s.selection.is_some();
+        let art = voice::face(
+            voice::Face::of(s.activity, asking),
+            s.animation_frame,
+            still,
+        );
         // **The affordance beside the fact.** A card that states what the
         // session is and says nothing about how to change it makes a reader
         // go looking; naming the control on the same line is the cheapest
-        // teaching this screen can do, and it is what the neighbouring
-        // product does on its own opening card.
+        // teaching this screen can do.
         let model = match s.model.as_deref() {
             Some(model) => format!("{model}   /model changes it"),
             None => "no model chosen   /models picks one".to_string(),
@@ -518,37 +693,88 @@ impl Document {
             .copied()
             .map(str::to_string)
             .unwrap_or(model);
+        let project = s.project.as_deref().unwrap_or("no project");
         let facts = [
-            Some(("P A N E".to_string(), Tone::Accent)),
-            Some((
-                format!(
-                    "{}  ·  code · cells · little helpers",
-                    s.project.as_deref().unwrap_or("no project")
-                ),
+            (
+                voice::greeting(s.voice, s.local_hour, project),
+                Tone::Strong,
+            ),
+            (
+                clip(&second, width.saturating_sub(voice::FACE_WIDTH + 4)),
                 Tone::Muted,
-            )),
-            Some((clip(&second, width.saturating_sub(14)), Tone::Muted)),
+            ),
+            (
+                if startup.len() > 1 {
+                    format!("+{} more · /activity", startup.len() - 1)
+                } else if s.voice.playful() {
+                    "code · cells · little helpers · one small bird".to_string()
+                } else {
+                    "code · cells · little helpers".to_string()
+                },
+                Tone::Line,
+            ),
         ];
-        for (glyph, fact) in mark.iter().zip(facts) {
-            let (text, tone) = fact.unwrap_or((String::new(), Tone::Muted));
+        for (i, (glyph, (text, tone))) in art.iter().zip(facts).enumerate() {
             self.line(
                 vec![(format!(" {glyph}  "), Tone::Accent), (text, tone)],
-                None,
+                Some(if i == 2 && startup.len() > 1 {
+                    Action::Activity
+                } else {
+                    Action::Quip
+                }),
                 0,
             );
         }
-        if startup.len() > 1 {
+        self.rule(width, 0);
+        self.blank(0);
+    }
+    /// An empty conversation: one line, then the things to press. A
+    /// paragraph on an empty screen is read once and never again; a row of
+    /// chips is read every time someone does not know what to type.
+    fn opening(&mut self, s: &ScreenState, width: usize) {
+        self.wrapped(voice::invitation(s.voice), Tone::Normal, None, width, 0, 2);
+        self.blank(0);
+        let chips: Vec<(String, Action, bool)> = if s.suggestions.is_empty() {
+            voice::suggestions(s.voice, None, 0, false)
+        } else {
+            s.suggestions.clone()
+        }
+        .into_iter()
+        .map(|(label, message)| (label, Action::Insert(message), false))
+        .collect();
+        self.chips(chips, 0);
+        self.blank(0);
+        for (key, what) in [
+            (
+                "/settings",
+                "everything about this session, applied as you choose it",
+            ),
+            ("/models", "which model answers, and at what effort"),
+            ("/diff", "what the last cell actually changed"),
+            ("/help", "every command"),
+        ] {
             self.line(
-                vec![(
-                    format!("         +{} more · /activity", startup.len() - 1),
-                    Tone::Line,
-                )],
-                Some(Action::Activity),
+                vec![
+                    (format!("  {key:<11}"), Tone::Accent),
+                    (what.to_string(), Tone::Muted),
+                ],
+                Some(Action::Insert(key.to_string())),
                 0,
             );
         }
-        self.rule('─', width, 0);
-        self.push("", Tone::Normal, None, width, 0);
+        self.blank(0);
+        self.wrapped(
+            if s.voice.playful() {
+                "or just type. / for commands · @ for a file in this project"
+            } else {
+                "Type / for commands · @ for a path in this project"
+            },
+            Tone::Muted,
+            None,
+            width,
+            0,
+            2,
+        );
     }
     /// Local notices, drawn where they happened.
     ///
@@ -560,30 +786,32 @@ impl Document {
             *next += 1;
             let bad = note.text.starts_with("ERROR:");
             for line in note.text.lines() {
-                self.line(
+                self.kinded(
                     vec![
                         (
-                            format!(" {} ", if bad { "✕" } else { "·" }),
+                            format!("  {} ", if bad { "✕" } else { "·" }),
                             if bad { Tone::Failure } else { Tone::Line },
                         ),
                         (
-                            clip(line, width.saturating_sub(4)),
+                            if bad { "error " } else { "note " }.to_string(),
+                            if bad { Tone::Failure } else { Tone::Line },
+                        ),
+                        (
+                            clip(line, width.saturating_sub(11)),
                             if bad { Tone::Failure } else { Tone::Muted },
                         ),
                     ],
                     None,
                     usize::MAX - 4,
+                    RowKind::Note,
                 );
             }
         }
     }
     /// A full-width separator in the one colour reserved for separators.
-    fn rule(&mut self, glyph: char, width: usize, id: usize) {
+    fn rule(&mut self, width: usize, id: usize) {
         self.line(
-            vec![(
-                glyph.to_string().repeat(width.saturating_sub(1)),
-                Tone::Line,
-            )],
+            vec![("─".repeat(width.saturating_sub(1)), Tone::Line)],
             None,
             id,
         );
@@ -613,7 +841,7 @@ impl Document {
         ];
         let text = tabs
             .iter()
-            .map(|(label, _)| format!("  {label}  "))
+            .map(|(label, _)| format!("⟨ {label} ⟩ "))
             .collect::<String>();
         let pad = width
             .saturating_sub(span_width(&text))
@@ -627,34 +855,22 @@ impl Document {
                     (OPEN_DIFF.into(), Tone::Muted),
                 ],
                 tabs,
+                chips: Vec::new(),
                 action: Some(Action::Tab(cell, current)),
                 key: (0, 0),
+                kind: RowKind::CardBody,
             },
             id,
         );
     }
-    /// The mockup's working mark: decoration on the left, and beside it what
-    /// is actually happening, what was last observed, and at whose cost.
+    /// The bird at work inside a running cell, and beside it what is
+    /// actually happening, what was last observed, and at whose cost.
     fn work(&mut self, s: &ScreenState, v: Option<&CellView>, width: usize, id: usize) {
         let still = s.reduced_motion || s.selection.is_some();
         let helper = v.and_then(|v| v.helpers.last());
         let waiting = helper.is_some_and(|h| !h.outcome.ok && h.outcome.text.is_empty());
-        let label = match s.activity {
-            Activity::Executing => "Executing this cell",
-            Activity::Waiting => "Waiting on the provider",
-            Activity::Searching => "Searching",
-            Activity::Compacting => "Preparing bounded context",
-            _ if waiting => "Little helper working",
-            _ => "Model is responding",
-        };
-        let detail = if waiting {
-            "Request sent · completion estimate unknown".to_string()
-        } else {
-            format!(
-                "Elapsed {} · nothing is assumed complete",
-                clock(s.pulse.elapsed_ms)
-            )
-        };
+        let (label, detail) =
+            voice::working(s.voice, s.activity, waiting, &clock(s.pulse.elapsed_ms));
         let cost = helper.map_or_else(
             || {
                 s.model
@@ -673,13 +889,13 @@ impl Document {
                 )
             },
         );
-        let art = theme::padded_mark(s.animation_frame, still);
+        let art = voice::face(voice::Face::Working, s.animation_frame, still);
         for (glyph, (text, tone)) in art.into_iter().zip([
             (format!("◈ {label}"), Tone::Accent),
             (detail, Tone::Normal),
             (cost, Tone::Muted),
         ]) {
-            let text = clip(&text, width.saturating_sub(12));
+            let text = clip(&text, width.saturating_sub(voice::FACE_WIDTH + 4));
             self.line(
                 vec![
                     (
@@ -698,12 +914,10 @@ impl Document {
     ///
     /// The numbers come from the patch's own hunk headers. A patch without
     /// them still renders -- the gutter is simply blank, which is honest --
-    /// because a captured diff is evidence and must never be dropped for
-    /// failing to parse.
     fn diff(&mut self, value: Option<&str>, width: usize, id: usize) {
         self.line(
             vec![(
-                "  Observed changes · before → after this cell · already applied".to_string(),
+                "Observed changes · before → after this cell · already applied".to_string(),
                 Tone::Muted,
             )],
             None,
@@ -712,7 +926,7 @@ impl Document {
         let Some(diff) = value.filter(|v| !v.is_empty()) else {
             self.line(
                 vec![(
-                    "  No textual diff captured. This does not prove no files changed.".to_string(),
+                    "No textual diff captured. This does not prove no files changed.".to_string(),
                     Tone::Warning,
                 )],
                 None,
@@ -724,7 +938,7 @@ impl Document {
         for line in diff.lines() {
             if let Some(path) = line.strip_prefix("+++ ") {
                 self.line(
-                    vec![(format!("  {}", path.trim_start_matches("b/")), Tone::Accent)],
+                    vec![(path.trim_start_matches("b/").to_string(), Tone::Accent)],
                     None,
                     id,
                 );
@@ -735,7 +949,7 @@ impl Document {
             }
             if let Some(header) = line.strip_prefix("@@") {
                 (old_no, new_no) = hunk(header);
-                self.line(vec![(format!("  {line}"), Tone::Line)], None, id);
+                self.line(vec![(line.to_string(), Tone::Line)], None, id);
                 continue;
             }
             let (mark, tone, old_cell, new_cell) = match line.chars().next() {
@@ -756,33 +970,34 @@ impl Document {
             let body: String = line.chars().skip(1).collect();
             self.line(
                 vec![
-                    (format!("  {old_cell:>5} {new_cell:>5} {mark} "), Tone::Line),
-                    (clip(&body, width.saturating_sub(16)), tone),
+                    (format!("{old_cell:>5} {new_cell:>5} {mark} "), Tone::Line),
+                    (clip(&body, width.saturating_sub(14)), tone),
                 ],
                 None,
                 id,
             );
         }
     }
-    /// One line under an open cell: what its helpers did, what its own result
-    /// said, and how many files it changed. Every claim here is observed.
-    fn summary(&mut self, v: &CellView, width: usize, id: usize) {
-        let mut left = vec![(" ".to_string(), Tone::Normal)];
+    /// The words in a card's bottom edge: how it ended, and how many files
+    /// it touched. Every claim here is observed.
+    fn summary(v: &CellView) -> Vec<(String, Tone)> {
+        let mut out = Vec::new();
         if let Some(e) = &v.error {
-            left.push((format!("✕ {}   ", e.class), Tone::Failure));
+            out.push((format!("✕ {}", e.class), Tone::Failure));
         } else if v.execution.is_some() {
-            left.push(("✓ executed   ".to_string(), Tone::Success));
+            out.push(("✓ executed".to_string(), Tone::Success));
         }
-        let files = v
-            .changes
-            .as_deref()
-            .map_or(0, |d| d.lines().filter(|l| l.starts_with("+++ ")).count());
-        let right = match files {
-            0 => vec![("no captured file changes ".to_string(), Tone::Muted)],
-            1 => vec![("1 changed file ↗ ".to_string(), Tone::Muted)],
-            n => vec![(format!("{n} changed files ↗ "), Tone::Muted)],
+        let files = changed_files(v);
+        let files = match files {
+            0 => "no captured file changes".to_string(),
+            1 => "1 file changed".to_string(),
+            n => format!("{n} files changed"),
         };
-        self.line(justify(left, right, width), None, id);
+        if !out.is_empty() {
+            out.push((" · ".to_string(), Tone::Line));
+        }
+        out.push((files, Tone::Muted));
+        out
     }
     fn helpers(&mut self, cell: usize, v: &CellView, ui: &Workbench, width: usize, id: usize) {
         for (i, h) in v.helpers.iter().enumerate() {
@@ -811,24 +1026,42 @@ impl Document {
             };
             let open =
                 ui.helper == Some((cell, i)) || ui.tabs.get(&cell) == Some(&CellTab::Helpers);
-            self.line(
-                vec![
-                    (
-                        format!(" {} ◇ {} ", if open { "▾" } else { "▸" }, h.helper),
-                        if tone == Tone::Normal {
-                            Tone::Helper
-                        } else {
-                            tone
-                        },
-                    ),
-                    (clip(&result, width.saturating_sub(16)), Tone::Muted),
-                ],
+            let right = format!(
+                "{} {}",
+                if waiting || h.outcome.elapsed_ms == 0 {
+                    String::new()
+                } else {
+                    format!("{:.1}s", h.outcome.elapsed_ms as f64 / 1000.)
+                },
+                if open { "▾" } else { "▸" }
+            );
+            let left = vec![
+                (
+                    format!("     ◇ {}  ", h.helper),
+                    if tone == Tone::Normal {
+                        Tone::Helper
+                    } else {
+                        tone
+                    },
+                ),
+                (
+                    clip(&result, width.saturating_sub(14 + h.helper.len())),
+                    if tone == Tone::Normal {
+                        Tone::Muted
+                    } else {
+                        tone
+                    },
+                ),
+            ];
+            self.kinded(
+                justify(left, vec![(right, Tone::Muted)], width),
                 Some(Action::Helper(cell, i)),
                 id,
+                RowKind::Helper,
             );
             if open {
                 self.push(
-                    format!("    Asked: {}", h.asked),
+                    format!("       Asked: {}", h.asked),
                     Tone::Normal,
                     None,
                     width,
@@ -837,7 +1070,7 @@ impl Document {
                 if !h.usage.model.is_empty() {
                     let model = &h.usage.model;
                     self.push(
-                        format!("  Captured model: {model}"),
+                        format!("       Captured model: {model}"),
                         Tone::Normal,
                         None,
                         width,
@@ -845,11 +1078,17 @@ impl Document {
                     );
                 }
                 for step in &h.looked {
-                    self.push(format!("  Observed: {step}"), Tone::Normal, None, width, id);
+                    self.push(
+                        format!("       Observed: {step}"),
+                        Tone::Normal,
+                        None,
+                        width,
+                        id,
+                    );
                 }
                 if waiting {
                     self.push(
-                        "  Waiting for a returned value; no completed result yet.",
+                        "       Waiting for a returned value; no completed result yet.",
                         Tone::Normal,
                         None,
                         width,
@@ -857,7 +1096,7 @@ impl Document {
                     );
                 } else {
                     self.push(
-                        format!("  Returned: {}", h.outcome.text),
+                        format!("       Returned: {}", h.outcome.text),
                         tone,
                         None,
                         width,
@@ -868,14 +1107,19 @@ impl Document {
         }
     }
 }
-const OPEN_DIFF: &str = "Open diff ↗";
+const OPEN_DIFF: &str = "open diff ↗";
 
+fn changed_files(v: &CellView) -> usize {
+    v.changes
+        .as_deref()
+        .map_or(0, |d| d.lines().filter(|l| l.starts_with("+++ ")).count())
+}
 fn span_width(text: &str) -> usize {
     ratatui::text::Span::raw(text).width()
 }
 /// Cut to a column budget on a character boundary; never mid-escape, because
 /// control characters never reach a row in the first place.
-pub(super) fn clip(text: &str, width: usize) -> String {
+pub(crate) fn clip(text: &str, width: usize) -> String {
     if span_width(text) <= width {
         return text.to_string();
     }
@@ -892,7 +1136,7 @@ pub(super) fn clip(text: &str, width: usize) -> String {
 /// Two groups of spans on one line, the second pushed to the right edge. The
 /// left group loses characters first: a right-edge state word is the one thing
 /// a narrow terminal must not drop.
-fn justify(
+pub(super) fn justify(
     left: Vec<(String, Tone)>,
     right: Vec<(String, Tone)>,
     width: usize,
@@ -914,7 +1158,7 @@ fn justify(
     out.extend(right);
     out
 }
-fn clock(ms: u64) -> String {
+pub(super) fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
@@ -931,7 +1175,7 @@ fn hunk(header: &str) -> (usize, usize) {
     let new = sides.next().unwrap_or(old);
     (old.saturating_sub(1), new.saturating_sub(1))
 }
-fn count_changes(diff: &str) -> (usize, usize) {
+pub(super) fn count_changes(diff: &str) -> (usize, usize) {
     diff.lines().fold((0, 0), |(a, r), line| {
         if line.starts_with("+++") || line.starts_with("---") {
             (a, r)

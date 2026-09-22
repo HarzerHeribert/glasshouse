@@ -396,6 +396,10 @@ fn tool_stream_is_not_misrepresented_as_executed_source() {
             .any(|r| r.text.contains("{\"code") && r.tone == Tone::Muted)
     );
 }
+/// The terminal owns the background. The one thing the workbench paints is
+/// a chip that is the current choice of a set -- filled in the accent so
+/// "this is what you have now" is read at a glance -- and even that is a
+/// handful of cells, never a surface.
 #[test]
 fn every_theme_and_local_surface_keeps_terminal_background() {
     let (c, n, s) = fixture();
@@ -408,8 +412,35 @@ fn every_theme_and_local_surface_keeps_terminal_background() {
             u.approvals = mode == 2;
             u.models = (mode == 3).then(navigator);
             let b = draw(&c, &n, &s, &mut u, 100, 40);
-            assert!(b.content.iter().all(|cell| cell.bg == Color::Reset));
+            let painted = b
+                .content
+                .iter()
+                .filter(|cell| cell.bg != Color::Reset)
+                .count();
+            assert!(
+                b.content
+                    .iter()
+                    .all(|cell| cell.bg == Color::Reset || cell.bg == theme_accent(theme)),
+                "{theme:?} mode {mode}: a background other than the accent"
+            );
+            assert!(
+                painted <= 40,
+                "{theme:?} mode {mode}: {painted} painted cells"
+            );
         }
+    }
+}
+/// The accent as the chip paints it; mono paints nothing and reverses.
+fn theme_accent(theme: Theme) -> Color {
+    match theme {
+        Theme::Neon => Color::Rgb(0xda, 0xff, 0x50),
+        Theme::Amber => Color::Rgb(0xff, 0xce, 0x72),
+        Theme::Ice => Color::Rgb(0x8b, 0xe3, 0xff),
+        Theme::Mono => Color::Reset,
+        Theme::Violet => Color::Rgb(0xd4, 0xb4, 0xff),
+        Theme::Cobalt => Color::Rgb(0x9e, 0xc9, 0xff),
+        Theme::Mint => Color::Rgb(0x86, 0xf1, 0xd0),
+        Theme::Rose => Color::Rgb(0xff, 0xb3, 0xd4),
     }
 }
 #[test]
@@ -1012,4 +1043,285 @@ fn a_settings_keystroke_stays_inside_the_instant_budget() {
         "a keystroke that writes and revalidates took {best:?} even at its fastest, \
          which a person reads as the program answering rather than as their own press"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The application pass, 2026-09-22: regions you can see, a grammar for the
+// conversation, one component language, and a character.
+
+/// An open cell is a card: its top edge, every body row and its bottom edge
+/// share the same two columns, so the eye finds the cell's extent without
+/// reading it.
+#[test]
+fn an_open_cell_is_a_card_with_both_edges_on_every_row() {
+    let (c, n, s) = fixture();
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    let lines: Vec<&str> = screen.lines().collect();
+    let top = lines
+        .iter()
+        .position(|l| l.contains("╭─ 001"))
+        .expect("the card's top edge names the cell");
+    let bottom = lines
+        .iter()
+        .position(|l| l.contains("╰─ ✓ executed"))
+        .expect("the card's bottom edge says how it ended");
+    assert!(bottom > top + 1, "{screen}");
+    let column = |line: &str, glyph: char| line.chars().position(|c| c == glyph).unwrap();
+    let left = column(lines[top], '╭');
+    let right = column(lines[top], '╮');
+    for line in &lines[top + 1..bottom] {
+        assert_eq!(line.chars().nth(left), Some('│'), "{line}");
+        assert_eq!(line.chars().nth(right), Some('│'), "{line}");
+    }
+    assert!(lines[top].contains("✓ EXECUTED"), "{}", lines[top]);
+}
+
+/// The conversation has turns: yours under a coloured bar with your name on
+/// it, Pane's under its mark. Nothing shares a texture with what it is not.
+#[test]
+fn turns_are_labelled_and_the_persons_words_stand_under_a_bar() {
+    let (c, n, s) = fixture();
+    let d = doc(&c, &n, &s, &Workbench::default());
+    let you = d
+        .rows
+        .iter()
+        .position(|r| r.kind == pane::workbench::RowKind::You && r.text == "you")
+        .expect("the person's turn is labelled");
+    assert_eq!(d.rows[you + 1].kind, pane::workbench::RowKind::You);
+    assert!(d.rows[you + 1].text.contains("Respect reduced motion"));
+    assert!(
+        d.rows
+            .iter()
+            .any(|r| r.kind == pane::workbench::RowKind::Pane && r.text.contains("pane"))
+    );
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("┃ you"), "{screen}");
+    assert!(screen.contains("┃ Respect reduced motion"), "{screen}");
+    assert!(screen.contains("⠿ pane"), "{screen}");
+}
+
+/// Every control in the top bar is a chip, and every chip is a click target
+/// for the thing it names.
+#[test]
+fn the_top_bar_is_chips_and_each_one_hits_its_own_control() {
+    let (c, n, s) = fixture();
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 140, 40));
+    let bar = screen.lines().next().unwrap();
+    for chip in [
+        "⟨ fixture-main ▾ ⟩",
+        "⟨ Auto-review ⟩",
+        "⟨ Build ⟩",
+        "⟨ Settings ⟩",
+        "⟨ ? ⟩",
+    ] {
+        assert!(bar.contains(chip), "{bar}");
+    }
+    for action in [
+        Action::Models,
+        Action::Approvals,
+        Action::Work,
+        Action::Access,
+        Action::Settings,
+        Action::Help,
+    ] {
+        assert!(
+            u.geometry
+                .hits
+                .iter()
+                .any(|(r, a)| *a == action && r.y == 0),
+            "{action:?} is not a target on the bar"
+        );
+    }
+}
+
+/// `?` on an empty composer is the sheet of keys; with anything typed it is
+/// a question mark and reaches the editor.
+#[test]
+fn a_bare_question_mark_opens_the_key_sheet_and_escape_closes_it() {
+    let (c, n, mut s) = fixture();
+    let mut u = Workbench::default();
+    assert_eq!(
+        key(&mut u, &mut s, &n, KeyCode::Char('?')),
+        Effect::Consumed
+    );
+    assert!(u.help);
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("KEYS"), "{screen}");
+    assert!(screen.contains("Shift-Tab"), "{screen}");
+    key(&mut u, &mut s, &n, KeyCode::Esc);
+    assert!(!u.help);
+    s.input = "why?".into();
+    assert_eq!(key(&mut u, &mut s, &n, KeyCode::Char('?')), Effect::Pass);
+    assert!(!u.help);
+}
+
+/// The composer is a dock: its top edge says what the session is doing and
+/// its bottom edge carries the three everyday chips.
+#[test]
+fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
+    let (c, n, s) = fixture();
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    let top = screen
+        .lines()
+        .find(|l| l.starts_with("╭─"))
+        .expect("the dock has a top edge");
+    assert!(top.contains("done ✓"), "{top}");
+    let bottom = screen.lines().last().unwrap();
+    assert!(bottom.starts_with("╰─"), "{bottom}");
+    assert!(bottom.contains("⟨ effort default ⟩"), "{bottom}");
+    assert!(bottom.contains("⟨ ◇ helpers off ⟩"), "{bottom}");
+    assert!(
+        u.geometry.hits.iter().any(|(_, a)| *a == Action::Effort),
+        "the effort chip is a control"
+    );
+    // And what typing lands on is still marked the way the transcript
+    // marks what was said.
+    assert!(screen.contains("│ ❯ "), "{screen}");
+}
+
+/// The plain voice states every fact the playful one does and nothing else:
+/// the same chips, the same card, the same status, without the remarks.
+#[test]
+fn plain_voice_keeps_every_fact_and_drops_the_remarks() {
+    let (c, n, mut s) = fixture();
+    s.sidebar = pane::tui::SidebarVisibility::Shown;
+    let mut u = Workbench::default();
+    let playful = text(&draw(&c, &n, &s, &mut u, 140, 40));
+    s.voice = pane::tui::Voice::Plain;
+    let mut u = Workbench::default();
+    let plain = text(&draw(&c, &n, &s, &mut u, 140, 40));
+    for fact in [
+        "THIS SESSION",
+        "⟨ effort default ⟩",
+        "✓ EXECUTED",
+        "┃ you",
+        "⟨ Settings ⟩",
+    ] {
+        assert!(playful.contains(fact), "playful lacks {fact}");
+        assert!(plain.contains(fact), "plain lacks {fact}");
+    }
+    assert!(playful.contains("Back in the nest"), "{playful}");
+    assert!(!plain.contains("Back in the nest"), "{plain}");
+    assert!(plain.contains("Describe the next step"), "{plain}");
+    // Clicking the bird: a remark in one voice, a plain pointer in the other.
+    click(&mut u, &mut s, &n, Action::Quip);
+    assert!(u.notice.contains("chip"), "{}", u.notice);
+    s.voice = pane::tui::Voice::Playful;
+    click(&mut u, &mut s, &n, Action::Quip);
+    let first = u.notice.clone();
+    click(&mut u, &mut s, &n, Action::Quip);
+    assert!(
+        !first.is_empty() && first != u.notice,
+        "{first} / {}",
+        u.notice
+    );
+}
+
+/// A notice rides the dock's edge for a few seconds with the way to undo
+/// it beside it, then both fade; the transcript keeps the note.
+#[test]
+fn a_notice_fades_from_the_dock_and_takes_its_undo_with_it() {
+    let (c, n, mut s) = fixture();
+    let mut u = Workbench::default();
+    draw(&c, &n, &s, &mut u, 100, 40);
+    click(&mut u, &mut s, &n, Action::Effort);
+    assert!(
+        u.undo.is_some(),
+        "stepping the effort offers the old one back"
+    );
+    u.notice = "effort is now low".into();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("effort is now low"), "{screen}");
+    assert!(
+        u.geometry.hits.iter().any(|(_, a)| *a == Action::UndoLive),
+        "the undo chip is beside the notice"
+    );
+    u.notice_at = Some(std::time::Instant::now() - pane::workbench::NOTICE_LINGER * 2);
+    assert!(u.notice_expired());
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(!screen.contains("effort is now low"), "{screen}");
+    assert!(u.notice.is_empty() && u.undo.is_none());
+    assert!(!u.geometry.hits.iter().any(|(_, a)| *a == Action::UndoLive));
+}
+
+/// An empty conversation offers what the project itself suggests, as chips
+/// that type the message; with nothing known it still offers one thing.
+#[test]
+fn the_opening_offers_the_projects_own_suggestions_as_chips() {
+    let (_, n, mut s) = fixture();
+    let c = Conversation::default();
+    s.suggestions = vec![(
+        "run the tests".into(),
+        "Run the tests and tell me what fails.".into(),
+    )];
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("⟨ run the tests ⟩"), "{screen}");
+    assert!(
+        u.geometry
+            .hits
+            .iter()
+            .any(|(_, a)| *a == Action::Insert("Run the tests and tell me what fails.".into()))
+    );
+    s.suggestions.clear();
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("⟨ show me around ⟩"), "{screen}");
+}
+
+/// A finished turn ends in an answer block: the first line as the result, a
+/// line of what it cost, and -- on the latest turn only -- what to do next.
+#[test]
+fn the_latest_answer_offers_what_to_do_next() {
+    let (c, mut n, s) = fixture();
+    n.cells[0].returned = Some("The motion guard is fixed.\nNothing else changed.".into());
+    let mut u = Workbench::default();
+    let d = doc(&c, &n, &s, &u);
+    let answer = d
+        .rows
+        .iter()
+        .find(|r| r.kind == pane::workbench::RowKind::Answer)
+        .expect("the answer's first line is marked");
+    assert!(
+        answer.text.contains("✓ The motion guard is fixed."),
+        "{}",
+        answer.text
+    );
+    assert!(
+        words(&d).contains("1 file · +1 −1 · 1 helper"),
+        "{}",
+        words(&d)
+    );
+    draw(&c, &n, &s, &mut u, 100, 40);
+    for action in [
+        Action::Command("/diff".into()),
+        Action::Insert("commit this".into()),
+        Action::Tab(1, CellTab::Output),
+    ] {
+        assert!(
+            u.geometry.hits.iter().any(|(_, a)| *a == action),
+            "{action:?} is not offered"
+        );
+    }
+}
+
+/// The bird is decoration: reduced motion holds it still, and the dock's
+/// flap is the only thing that moves on an idle screen.
+#[test]
+fn the_bird_holds_still_under_reduced_motion_and_flaps_otherwise() {
+    let (c, n, mut s) = fixture();
+    s.activity = Activity::Thinking;
+    let mut u = Workbench::default();
+    let a = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    s.animation_frame = 3;
+    let b = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert_ne!(a, b, "the flap moves while the session works");
+    s.reduced_motion = true;
+    let a = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    s.animation_frame = 6;
+    assert_eq!(a, text(&draw(&c, &n, &s, &mut u, 100, 40)));
 }
