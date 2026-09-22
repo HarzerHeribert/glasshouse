@@ -110,7 +110,11 @@ the byte-for-byte text below remains the compatibility contract.
     requested tests. Running off the end, `yieldNow(reason)` or a top-level
     `return` all give results and another turn: returning a value displays it
     as notebook output and finishes nothing. Return whatever you want to look
-    at, as often as you like.
+    at, as often as you like. A returned object is shown field by field as
+    text -- an excerpt as its lines, an array of strings one per line -- within
+    the return budget the usage line names; a field over its share is paged at
+    a line and ends in one cursor line saying how to read on. Return what you
+    need to read next, not everything you hold.
 
     The task ends only where you say it ends.
     `answer(text)` inside a cell ends the task with that text.
@@ -411,6 +415,30 @@ cells used against their cap (default 40). Task token spend is telemetry. It
 has no cap, never changes the prompt and never stops a task. Reaching the cell
 limit still gives the model one final turn whose only permitted action is a
 top-level returned string.
+
+A cell that returned a value adds an `## Output` section before `## stdout`
+and two more usage figures (2026-09-23, `runtime-contract.md` §9.2):
+
+    ## Output
+    ### readme
+    [lines 1-240 of 1,508]
+       1 | //! The contract every supported harness is reached through.
+       …
+     240 | }
+    [+1,268 lines not shown · call .excerpt({start: 241, lines: 1268}) on the same File]
+
+    count: 1508
+
+    ## Usage
+    turn output cap 8,000 · task spent 3,412 · cells 2 · return budget 24,000 · this return 6,120 (paged: readme)
+
+`return budget` is how many estimated tokens a returned value may fill this
+turn — a quarter of the room left in the context window after the turn's
+output cap, between 4,000 and 24,000, or 8,000 when the window is unknown.
+`this return` is what the last return cost, with the fields that were paged
+to fit. A field is paged at a line boundary and ends in one cursor line saying
+how to read on; nothing is cut at a byte count and no field is replaced by its
+type. A small object renders on one line as the program wrote it.
 
 ## 7. The worked turn, as bytes
 

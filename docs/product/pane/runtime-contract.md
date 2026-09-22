@@ -292,6 +292,30 @@ string, number, object, array, collection or host tool object — is notebook
 output: rendered with values, recorded on the cell, supplied as `## Output` in
 feedback and followed by another provider request. Nothing paraphrases it.
 
+**A returned value is paged, never cut — ruled 2026-09-23.** Until then a
+non-string return was walked into JSON and stopped at 2,048 bytes with a
+type-only preview of the rest; session `tls9up-7rz` asked for some 4,000
+lines across fourteen cells and received 12 KB, and three of those cells only
+re-squeezed data it already held. Now the isolate reads the value within a
+memory bound (1 MiB per return, `TERMINAL_WALK_CAP`) and keeps an object's
+**top-level fields apart**, each read as what it is: a string as its text, an
+array of strings as lines, a tool object as its §4 preview, anything else as
+its JSON. The session renders those fields within a **return budget**: a
+quarter of the room left in the window after the turn's own output cap,
+between 4,000 and 24,000 estimated tokens, 8,000 when the window is unknown
+(`prompt::return_budget`). Under the budget every field is whole. Over it,
+fields are water-filled — small ones whole, large ones levelled, none under
+a 600-token floor — and a field over its share is shown to a line boundary
+and followed by **one cursor line** saying what is not shown and how to reach
+it: a `File.excerpt` block names the next `.excerpt({start, lines})`, an
+array of strings its `.slice(n)`, prose or JSON the narrower return to make.
+No field ever degrades to its type name. A small object still renders on one
+line as the program wrote it (`{"total":1195,"in_tests":290}`); a larger one
+renders one `### field` block per multi-line field and `name: value` for the
+rest. The usage line (`model-contract.md` §6) names the budget, this return's
+cost and any field that was paged, so the model always knows the figure it is
+working within.
+
 **Corrected 2026-09-19, after the type rule cost a second session.** The
 ending used to be read off the returned value's type, and it was narrowed
 once already: until 2026-09-07 any non-structured return was terminal, until

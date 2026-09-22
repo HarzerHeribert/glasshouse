@@ -2029,9 +2029,10 @@ fn a_returned_object_is_output_and_the_task_continues() {
         "the values, not their types, reach the screen:\n{stdout}"
     );
 
-    // Over the render cap: `{"b":"` is six bytes and every `€` three, so a
-    // cut at 2,048 falls inside a character and must back off to 2,046.
-    let root = scratch_dir("terminal-json-cut-root");
+    // A return over the old 2 KiB cap arrives whole: 3,000 characters of
+    // `€` beside a number are under any return budget, so the model reads
+    // the value and not a type-only preview of it (ruled 2026-09-23).
+    let root = scratch_dir("terminal-json-whole-root");
     let rollout = root.join("rollout.jsonl");
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply("```pane\nreturn { b: \"€\".repeat(3000), n: 1 };\n```"),
@@ -2040,7 +2041,7 @@ fn a_returned_object_is_output_and_the_task_continues() {
     let output = run_session(
         &root,
         &rollout,
-        "sess-terminal-json-cut",
+        "sess-terminal-json-whole",
         "count them",
         &base_url,
         Some(&absent),
@@ -2054,22 +2055,20 @@ fn a_returned_object_is_output_and_the_task_continues() {
         .nth(1)
         .expect("output section")
         .to_string();
-    let (json, rest) = text
-        .split_once('\n')
-        .expect("a cut result says so on the next line");
+    let first = text.lines().next().expect("the field line");
+    assert!(first.starts_with("b: "), "{text}");
     assert_eq!(
-        json.len(),
-        2046,
-        "cut at 2 KiB on a character boundary: {json:?}"
+        first.chars().filter(|c| *c == '€').count(),
+        3000,
+        "every character reaches the model: {text}"
     );
-    assert!(json.starts_with(r#"{"b":"€"#), "{json}");
-    assert!(json.ends_with('€'), "{json}");
-    assert!(rest.starts_with("…(cut at 2,048 bytes"), "{rest}");
+    assert!(text.contains("\nn: 1\n"), "{text}");
+    assert!(!text.contains("cut at"), "{text}");
+    assert!(!text.contains("string"), "no type-only preview: {text}");
     assert!(
-        rest.contains("\"b\": string"),
-        "the type-only preview follows: {rest}"
+        feedback.contains("· return budget ") && feedback.contains("· this return "),
+        "the usage line names the budget and the cost: {feedback}"
     );
-    assert!(rest.contains("\"n\": number"), "{rest}");
 }
 
 /// **Nothing counts cells any more** (the user, 2026-09-17: "Limits are dumb

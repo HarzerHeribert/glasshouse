@@ -14,7 +14,7 @@ use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::handles::Provenance;
-use crate::runtime::preview::{self, ErrorValue, PREVIEW_TOKEN_CAP, Value};
+use crate::runtime::preview::{self, ErrorValue, Value};
 
 /// Everything a cell hands back whatever way it ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,34 +135,371 @@ pub enum CellOutcome {
 }
 
 /// A top-level return rendered at the isolate boundary. Text is a terminal
-/// response; bounded JSON is notebook output for the next turn.
+/// response; anything else is notebook output for the next turn, kept whole
+/// here and **paged, never cut, when it is rendered** ([`Terminal::render_within`]).
+///
+/// The invariant, ruled 2026-09-23 after session tls9up-7rz spent fourteen
+/// cells re-squeezing data it already held: **a returned value reaches the
+/// model as the value, within a budget the usage line names.** A field over
+/// its share of that budget is shown up to a line boundary and followed by
+/// one cursor line saying how to read on; no field degrades to its type
+/// name, and no return is cut at a byte count. The only bound the isolate
+/// still applies is [`TERMINAL_WALK_CAP`], a memory limit on the walk, and a
+/// field the walk stopped inside says so in the same cursor position.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminal {
     /// A returned string: the response, verbatim.
     Text(String),
-    /// Any other returned value: its JSON with values, `cut` when the text
-    /// is a prefix stopped at [`TERMINAL_JSON_CAP`] bytes on a character
-    /// boundary.
+    /// A returned array, number, boolean, `null`, `Map` or `Set`: its JSON
+    /// with values. `cut` when the walk stopped at [`TERMINAL_WALK_CAP`].
     Json { text: String, cut: bool },
+    /// A returned object: its top-level fields kept apart, in the order the
+    /// program wrote them, so each can be rendered as what it is and paged
+    /// on its own.
+    Fields(Vec<ReturnedField>),
 }
 
-/// How many bytes of notebook JSON the output carries before it is cut.
-pub const TERMINAL_JSON_CAP: usize = 2 * 1024;
+/// One top-level field of a returned object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturnedField {
+    pub name: String,
+    pub body: FieldBody,
+    /// `false` when the walk stopped inside this field at
+    /// [`TERMINAL_WALK_CAP`]; the rendering says so where a cursor line
+    /// would go.
+    pub whole: bool,
+}
+
+/// What a field holds, read for how it is best shown.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldBody {
+    /// A string: shown as its text, block-wise. A `File.excerpt` lands here
+    /// and is paged by its own line numbers.
+    Text(String),
+    /// An array of strings: one per line, unquoted.
+    Lines(Vec<String>),
+    /// Anything else: its JSON, pretty-printed when it is long enough to
+    /// page.
+    Json(String),
+}
+
+/// The memory bound on reading a returned value out of the isolate: bytes of
+/// rendered text per return. It is not a context budget -- that is
+/// [`Terminal::render_within`]'s argument -- and a value under it is never
+/// shortened here.
+pub const TERMINAL_WALK_CAP: usize = 1024 * 1024;
+
+/// The smallest share a field is given when a return is paged, in estimated
+/// tokens: enough for an excerpt's header and a screen of lines, so a field
+/// squeezed by its neighbours still shows what it is.
+pub const FIELD_FLOOR_TOKENS: usize = 600;
+
+/// A compact JSON object no longer than this is rendered on one line as the
+/// program wrote it -- `{"matches":3,"files":2}` reads better than three
+/// headed sections.
+const ONE_LINE_JSON: usize = 240;
+
+/// Compact JSON longer than this is pretty-printed so it has line
+/// boundaries to page on.
+const PRETTY_JSON_ABOVE: usize = 160;
+
+/// What [`Terminal::render_within`] produced, and what it cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendered {
+    /// The `## Output` body.
+    pub text: String,
+    /// Its estimated tokens.
+    pub tokens: usize,
+    /// The fields that were paged, by name, in order.
+    pub paged: Vec<String>,
+}
 
 impl Terminal {
-    /// The response as the person reads it and the rollout keeps it. `whole`
-    /// is the marshalled sample of the same value; when the JSON was cut, its
-    /// type-only preview says what the cut removed.
-    pub fn render(&self, whole: &Value) -> String {
+    /// The value whole: the response as the person reads it and the rollout
+    /// keeps it. No budget applies here; the model's feedback goes through
+    /// [`Self::render_within`].
+    pub fn render(&self) -> String {
+        self.render_within(usize::MAX).text
+    }
+
+    /// The value for the model, within `budget` estimated tokens.
+    ///
+    /// Under the budget every field is whole. Over it, each field gets a
+    /// share by water-filling -- small fields whole, large ones levelled --
+    /// with [`FIELD_FLOOR_TOKENS`] as every field's floor, and a field over
+    /// its share is shown to a line boundary and followed by one cursor
+    /// line naming the rest and how to reach it.
+    pub fn render_within(&self, budget: usize) -> Rendered {
         match self {
-            Terminal::Text(text) | Terminal::Json { text, cut: false } => text.clone(),
-            Terminal::Json { text, cut: true } => format!(
-                "{text}\n…(cut at {} bytes; the whole value, by type:)\n{}",
-                preview::thousands(TERMINAL_JSON_CAP as u64),
-                preview::render_preview(whole, PREVIEW_TOKEN_CAP)
+            Terminal::Text(text) => Rendered {
+                tokens: preview::estimate_tokens(text),
+                text: text.clone(),
+                paged: Vec::new(),
+            },
+            Terminal::Json { text, cut } => {
+                let field = ReturnedField {
+                    name: String::new(),
+                    body: FieldBody::Json(text.clone()),
+                    whole: !cut,
+                };
+                let paged = page_fields(std::slice::from_ref(&field), budget);
+                let (text, tokens) = paged[0].clone();
+                Rendered {
+                    text,
+                    tokens,
+                    paged: Vec::new(),
+                }
+            }
+            Terminal::Fields(fields) => {
+                if let Some(line) = one_line_object(fields) {
+                    return Rendered {
+                        tokens: preview::estimate_tokens(&line),
+                        text: line,
+                        paged: Vec::new(),
+                    };
+                }
+                let paged = page_fields(fields, budget);
+                let mut out = String::new();
+                let mut tokens = 0;
+                let mut names = Vec::new();
+                for (field, (body, cost)) in fields.iter().zip(paged) {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    if body.contains('\n') || field.body_is_block() {
+                        out.push_str(&format!("### {}\n{body}", field.name));
+                    } else {
+                        out.push_str(&format!("{}: {body}", field.name));
+                    }
+                    tokens += cost;
+                    if cost < field.tokens() {
+                        names.push(field.name.clone());
+                    }
+                }
+                Rendered {
+                    text: out,
+                    tokens,
+                    paged: names,
+                }
+            }
+        }
+    }
+}
+
+impl ReturnedField {
+    /// The field's body as text, whole: an excerpt as its block, lines one
+    /// per line, JSON pretty when it is long enough to page.
+    pub fn text(&self) -> String {
+        match &self.body {
+            FieldBody::Text(text) => text.clone(),
+            FieldBody::Lines(lines) => lines.join("\n"),
+            FieldBody::Json(json) => pretty_json(json),
+        }
+    }
+
+    fn tokens(&self) -> usize {
+        preview::estimate_tokens(&self.text())
+    }
+
+    fn body_is_block(&self) -> bool {
+        matches!(&self.body, FieldBody::Lines(lines) if lines.len() > 1)
+    }
+
+    /// The one line that follows a paged field: how many lines are not
+    /// shown and how to reach them, in the shape the field itself suggests.
+    fn cursor_line(&self, shown_lines: usize, total_lines: usize, shown_text: &str) -> String {
+        let rest = total_lines.saturating_sub(shown_lines);
+        match &self.body {
+            FieldBody::Text(text) if is_excerpt(text) => {
+                // The last numbered line kept is where the next page starts.
+                let last = shown_text
+                    .lines()
+                    .rev()
+                    .find_map(excerpt_line_number)
+                    .unwrap_or(0);
+                let end = excerpt_end(text).unwrap_or(last + rest);
+                let remaining = end.saturating_sub(last);
+                format!(
+                    "[+{} lines not shown · call .excerpt({{start: {}, lines: {}}}) on the same File]",
+                    preview::thousands(remaining as u64),
+                    last + 1,
+                    remaining.max(1)
+                )
+            }
+            FieldBody::Text(_) => format!(
+                "[+{} lines not shown · return this field alone, or a slice of it, to read on]",
+                preview::thousands(rest as u64)
+            ),
+            FieldBody::Lines(_) => format!(
+                "[+{} of {} entries not shown · .slice({shown_lines}) shows the rest]",
+                preview::thousands(rest as u64),
+                preview::thousands(total_lines as u64)
+            ),
+            FieldBody::Json(_) => format!(
+                "[+{} lines of JSON not shown · return a narrower value to read on]",
+                preview::thousands(rest as u64)
             ),
         }
     }
+}
+
+/// A small object on one line, as the program wrote it, or `None` when any
+/// field is a block or the line would be long.
+fn one_line_object(fields: &[ReturnedField]) -> Option<String> {
+    let mut out = String::from("{");
+    for (index, field) in fields.iter().enumerate() {
+        if !field.whole {
+            return None;
+        }
+        let value = match &field.body {
+            FieldBody::Text(text) => {
+                if text.contains('\n') {
+                    return None;
+                }
+                serde_json::Value::String(text.clone()).to_string()
+            }
+            FieldBody::Lines(lines) => {
+                if lines.iter().any(|line| line.contains('\n')) {
+                    return None;
+                }
+                serde_json::Value::Array(
+                    lines
+                        .iter()
+                        .map(|line| serde_json::Value::String(line.clone()))
+                        .collect(),
+                )
+                .to_string()
+            }
+            FieldBody::Json(json) => json.clone(),
+        };
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::Value::String(field.name.clone()).to_string());
+        out.push(':');
+        out.push_str(&value);
+        if out.len() > ONE_LINE_JSON {
+            return None;
+        }
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// Compact JSON pretty-printed once it is long enough to need line
+/// boundaries; text that is not JSON (a walk that stopped) stays as it is.
+fn pretty_json(json: &str) -> String {
+    if json.len() <= PRETTY_JSON_ABOVE {
+        return json.to_string();
+    }
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| json.to_string())
+}
+
+fn is_excerpt(text: &str) -> bool {
+    text.starts_with("[lines ")
+}
+
+/// `  12 | text` → 12.
+fn excerpt_line_number(line: &str) -> Option<usize> {
+    let (number, _) = line.split_once(" | ")?;
+    number.trim().parse().ok()
+}
+
+/// `[lines 1-400 of 1200]` → 400.
+fn excerpt_end(text: &str) -> Option<usize> {
+    let header = text.lines().next()?;
+    let range = header.strip_prefix("[lines ")?;
+    let (range, _) = range.split_once(" of ")?;
+    let (_, end) = range.split_once('-')?;
+    end.parse().ok()
+}
+
+/// Each field's rendering and cost within `budget`: whole when the sum fits,
+/// otherwise water-filled with [`FIELD_FLOOR_TOKENS`] as the floor.
+fn page_fields(fields: &[ReturnedField], budget: usize) -> Vec<(String, usize)> {
+    let texts: Vec<String> = fields.iter().map(ReturnedField::text).collect();
+    let sizes: Vec<usize> = texts.iter().map(|t| preview::estimate_tokens(t)).collect();
+    let total: usize = sizes.iter().sum();
+    let shares: Vec<usize> = if total <= budget {
+        sizes.clone()
+    } else {
+        water_fill(&sizes, budget)
+    };
+    fields
+        .iter()
+        .zip(texts)
+        .zip(shares)
+        .map(|((field, text), share)| {
+            let mut out = if share >= preview::estimate_tokens(&text) {
+                text
+            } else {
+                page(field, &text, share)
+            };
+            if !field.whole {
+                out.push_str(&format!(
+                    "\n[the walk of this value stopped at {} bytes · return a narrower view of it]",
+                    preview::thousands(TERMINAL_WALK_CAP as u64)
+                ));
+            }
+            let tokens = preview::estimate_tokens(&out);
+            (out, tokens)
+        })
+        .collect()
+}
+
+/// Shares that sum to about `budget`: fields that fit under the level are
+/// whole, the rest are levelled, and none goes under the floor (or its own
+/// size). Smallest first, so a small field is never squeezed by a large one.
+fn water_fill(sizes: &[usize], budget: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|&i| sizes[i]);
+    let mut shares = vec![0; sizes.len()];
+    let mut remaining = budget;
+    for (rank, &i) in order.iter().enumerate() {
+        let left = sizes.len() - rank;
+        let level = remaining / left;
+        let share = if sizes[i] <= level {
+            sizes[i]
+        } else {
+            level.max(FIELD_FLOOR_TOKENS.min(sizes[i]))
+        };
+        shares[i] = share;
+        remaining = remaining.saturating_sub(share);
+    }
+    shares
+}
+
+/// `text` to a line boundary within `share` tokens, at least one line, then
+/// the field's cursor line.
+fn page(field: &ReturnedField, text: &str, share: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let mut kept = 0;
+    let mut chars = 0;
+    for line in &lines {
+        // Counted as the joined text will be estimated, so the share is met
+        // in the same units the usage line reports.
+        let after = chars + line.chars().count() + 1;
+        if kept > 0 && after.div_ceil(4) > share {
+            break;
+        }
+        chars = after;
+        kept += 1;
+    }
+    // An excerpt's `[next: …]` footer describes the whole block, so it goes
+    // with the lines it was written for; the cursor line replaces it.
+    let shown: Vec<&str> = lines[..kept]
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("[next: call .excerpt("))
+        .collect();
+    let mut out = shown.join("\n");
+    out.push('\n');
+    out.push_str(&field.cursor_line(kept, total, &out));
+    out
 }
 
 impl CellOutcome {
@@ -520,28 +857,194 @@ mod tests {
         );
     }
 
+    fn excerpt(lines: usize) -> String {
+        let mut text = format!("[lines 1-{lines} of {lines}]\n");
+        for n in 1..=lines {
+            text.push_str(&format!(
+                "{n:>4} | line {n} of the file, with enough words to cost tokens\n"
+            ));
+        }
+        text.push_str("[end of file]\n");
+        text
+    }
+
+    fn field(name: &str, body: FieldBody) -> ReturnedField {
+        ReturnedField {
+            name: name.into(),
+            body,
+            whole: true,
+        }
+    }
+
     #[test]
-    fn a_cut_result_says_so_and_describes_the_whole_by_type() {
-        let whole = Value::object(vec![
-            ("matches".to_string(), Value::Number(3.0)),
-            ("files".to_string(), Value::Number(2.0)),
+    fn a_small_object_renders_on_one_line_as_the_program_wrote_it() {
+        let terminal = Terminal::Fields(vec![
+            field("matches", FieldBody::Json("3".into())),
+            field("files", FieldBody::Json("2".into())),
+            field(
+                "names",
+                FieldBody::Lines(vec!["a.rs".into(), "b.rs".into()]),
+            ),
         ]);
-        let intact = Terminal::Json {
-            text: r#"{"matches":3,"files":2}"#.into(),
-            cut: false,
-        };
-        assert_eq!(intact.render(&whole), r#"{"matches":3,"files":2}"#);
-        let cut = Terminal::Json {
-            text: r#"{"matches":3,"fil"#.into(),
+        assert_eq!(
+            terminal.render(),
+            r#"{"matches":3,"files":2,"names":["a.rs","b.rs"]}"#
+        );
+        assert_eq!(Terminal::Text("verbatim".into()).render(), "verbatim");
+    }
+
+    #[test]
+    fn a_return_under_the_budget_arrives_whole_field_by_field() {
+        // Cell 4 of session tls9up-7rz, the shape that was cut to 2 KB: an
+        // excerpt beside a count. At the ceiling it arrives entire.
+        let terminal = Terminal::Fields(vec![
+            field("readme", FieldBody::Text(excerpt(240))),
+            field("count", FieldBody::Json("240".into())),
+        ]);
+        let rendered = terminal.render_within(24_000);
+        assert!(rendered.paged.is_empty(), "{:?}", rendered.paged);
+        assert!(
+            rendered
+                .text
+                .starts_with("### readme\n[lines 1-240 of 240]\n"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains(" 240 | line 240 of the file"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains("[end of file]\n\ncount: 240"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            !rendered.text.contains("string"),
+            "no field degrades to its type name"
+        );
+        assert!(rendered.tokens > 3_000, "{}", rendered.tokens);
+    }
+
+    #[test]
+    fn a_field_over_its_share_is_paged_at_a_line_with_a_cursor() {
+        let terminal = Terminal::Fields(vec![
+            field("readme", FieldBody::Text(excerpt(400))),
+            field("count", FieldBody::Json("400".into())),
+        ]);
+        let rendered = terminal.render_within(1_000);
+        assert_eq!(rendered.paged, vec!["readme".to_string()]);
+        assert!(rendered.tokens <= 1_100, "{}", rendered.tokens);
+        // Whole lines only, then the one cursor line naming the next start.
+        let body = rendered.text.strip_prefix("### readme\n").expect("heading");
+        let last_numbered = body
+            .lines()
+            .filter(|line| line.contains(" | line "))
+            .last()
+            .expect("some lines kept");
+        let last: usize = last_numbered
+            .split(" | ")
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(last > 1 && last < 400, "{last}");
+        assert!(
+            last_numbered.ends_with("cost tokens"),
+            "cut at a line: {last_numbered}"
+        );
+        let cursor = format!(
+            "[+{} lines not shown · call .excerpt({{start: {}, lines: {}}}) on the same File]",
+            400 - last,
+            last + 1,
+            400 - last
+        );
+        assert!(rendered.text.contains(&cursor), "{}", rendered.text);
+        assert!(
+            !rendered.text.contains("[next: call"),
+            "the footer went with its lines"
+        );
+        // The small field beside it is untouched.
+        assert!(rendered.text.ends_with("\ncount: 400"), "{}", rendered.text);
+    }
+
+    #[test]
+    fn every_field_keeps_its_floor_and_its_own_cursor_shape() {
+        let lines: Vec<String> = (0..500).map(|n| format!("entry number {n}")).collect();
+        let json = serde_json::to_string(
+            &(0..300)
+                .map(|n| serde_json::json!({"n": n, "name": format!("item {n}")}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let terminal = Terminal::Fields(vec![
+            field("prose", FieldBody::Text("a\n".repeat(2_000))),
+            field("entries", FieldBody::Lines(lines)),
+            field("data", FieldBody::Json(json)),
+        ]);
+        let rendered = terminal.render_within(1_500);
+        assert_eq!(rendered.paged, vec!["prose", "entries", "data"]);
+        for name in ["prose", "entries", "data"] {
+            let section = rendered
+                .text
+                .split(&format!("### {name}\n"))
+                .nth(1)
+                .unwrap()
+                .split("\n### ")
+                .next()
+                .unwrap();
+            // The floor, less the one line the cut may stop short by: at a
+            // 1,500 budget three fields levelled without a floor would get
+            // 500 each, and this is what says they get 600.
+            assert!(
+                preview::estimate_tokens(section) >= FIELD_FLOOR_TOKENS - 20,
+                "{name} squeezed under its floor: {} tokens",
+                preview::estimate_tokens(section)
+            );
+        }
+        assert!(
+            rendered
+                .text
+                .contains("lines not shown · return this field alone"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains("of 500 entries not shown · .slice("),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains("lines of JSON not shown"),
+            "{}",
+            rendered.text
+        );
+        // Pretty JSON has a line to page on; the first kept line is its bracket.
+        assert!(
+            rendered.text.contains("### data\n[\n  {"),
+            "{}",
+            rendered.text
+        );
+    }
+
+    #[test]
+    fn a_walk_that_stopped_says_so_instead_of_pretending() {
+        let terminal = Terminal::Fields(vec![ReturnedField {
+            name: "big".into(),
+            body: FieldBody::Text("x".repeat(100)),
+            whole: false,
+        }]);
+        let rendered = terminal.render();
+        assert!(
+            rendered.contains("stopped at 1,048,576 bytes"),
+            "{rendered}"
+        );
+        let bare = Terminal::Json {
+            text: "[1,2".into(),
             cut: true,
         };
-        let rendered = cut.render(&whole);
-        assert!(rendered.starts_with(r#"{"matches":3,"fil"#), "{rendered}");
-        assert!(rendered.contains("cut at 2,048 bytes"), "{rendered}");
-        assert!(rendered.contains("\"matches\": number"), "{rendered}");
-        assert_eq!(
-            Terminal::Text("verbatim".into()).render(&Value::Null),
-            "verbatim"
-        );
+        assert!(bare.render().contains("stopped at"), "{}", bare.render());
     }
 }

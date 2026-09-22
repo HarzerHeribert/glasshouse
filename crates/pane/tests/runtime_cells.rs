@@ -2801,7 +2801,7 @@ fn a_map_and_a_set_are_previewed_ranked_and_returned_by_what_they_hold() {
     let CellOutcome::Returned { terminal, .. } = &set else {
         panic!("expected a return, got {set:?}");
     };
-    assert_eq!(terminal.render(returned(&set)), "[1,2,3]", "{set:?}");
+    assert_eq!(terminal.render(), "[1,2,3]", "{set:?}");
 
     let map_session = SessionId::new("collections-map");
     let mut map_runtime = Runtime::new(&fixture.profile(), &glasshouse, &map_session);
@@ -2809,11 +2809,81 @@ fn a_map_and_a_set_are_previewed_ranked_and_returned_by_what_they_hold() {
     let CellOutcome::Returned { terminal, .. } = &map else {
         panic!("expected a return, got {map:?}");
     };
-    assert_eq!(
-        terminal.render(returned(&map)),
-        "{\"a\":1,\"b\":2}",
-        "{map:?}"
+    assert_eq!(terminal.render(), "{\"a\":1,\"b\":2}", "{map:?}");
+}
+
+/// Cell 4 of session tls9up-7rz, through the real isolate: an excerpt, a
+/// count and a few lines returned together arrive as those three things,
+/// whole, within the return budget -- not as 2 KiB of JSON and a type
+/// preview (ruled 2026-09-23).
+#[cfg(unix)]
+#[test]
+fn a_returned_object_keeps_its_fields_apart_and_an_excerpt_arrives_whole() {
+    let fixture = Fixture::new("fields");
+    let body: String = (1..=240)
+        .map(|n| format!("line {n} of the readme, with enough words to be worth reading\n"))
+        .collect();
+    let file = fixture.write(&fixture.root.join("README.md"), &body);
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("fields-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let program = format!(
+        "const doc = await read({{ path: {path:?} }});\n\
+         return {{ readme: doc.excerpt({{ start: 1, lines: 240 }}), count: doc.lineCount, \
+         head: doc.lines.slice(0, 2) }};\n",
+        path = file.to_string_lossy()
     );
+    let outcome = runtime.run_cell(&program);
+    let CellOutcome::Returned { terminal, .. } = &outcome else {
+        panic!("expected a return, got {outcome:?}");
+    };
+    let pane::runtime::outcome::Terminal::Fields(fields) = terminal else {
+        panic!("an object keeps its fields apart: {terminal:?}");
+    };
+    assert_eq!(
+        fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        ["readme", "count", "head"]
+    );
+    assert!(fields.iter().all(|f| f.whole), "{fields:?}");
+    let rendered = terminal.render_within(24_000);
+    assert!(rendered.paged.is_empty(), "{:?}", rendered.paged);
+    assert!(
+        rendered
+            .text
+            .starts_with("### readme\n[lines 1-240 of 240]\n  1 | line 1 of the readme"),
+        "{}",
+        rendered.text
+    );
+    assert!(
+        rendered.text.contains("\n240 | line 240 of the readme"),
+        "{}",
+        rendered.text
+    );
+    assert!(
+        rendered
+            .text
+            .contains("[end of file]\n\ncount: 240\n### head\nline 1 of the readme"),
+        "{}",
+        rendered.text
+    );
+    assert!(
+        rendered.tokens > 3_000 && rendered.tokens < 6_000,
+        "{}",
+        rendered.tokens
+    );
+
+    // Squeezed, the excerpt is paged at a line and the cursor names the
+    // next start; the count beside it is untouched.
+    let paged = terminal.render_within(1_000);
+    assert_eq!(paged.paged, vec!["readme".to_string()]);
+    assert!(
+        paged
+            .text
+            .contains("lines not shown · call .excerpt({start: "),
+        "{}",
+        paged.text
+    );
+    assert!(paged.text.contains("\ncount: 240\n"), "{}", paged.text);
 }
 
 /// The ranking half of the same defect, across a cell boundary: the `Map`
@@ -3495,6 +3565,7 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan,
     };

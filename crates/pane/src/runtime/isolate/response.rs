@@ -16,6 +16,7 @@
 //! [`returned`] moved here from `isolate.rs` on 2026-09-18 with the ladder it
 //! now walks: what §9.2 makes of a returned value is one responsibility.
 
+use super::returned::terminal_json;
 use super::*;
 
 /// The most a response may exceed the cap and still be worth normalising.
@@ -118,7 +119,8 @@ pub(super) fn settle(text: &str, cap: usize) -> Response {
 /// sample — unless it is over the response cap, in which case the cell
 /// yields with the cap as its reason and nothing of the string is rendered
 /// (§9.2: a response is never silently truncated). Any other value becomes
-/// its JSON under [`TERMINAL_JSON_CAP`].
+/// its fields, or its JSON, read within [`TERMINAL_WALK_CAP`] and paged by the
+/// session when it is rendered.
 pub(super) fn returned(
     scope: &mut v8::PinScope,
     state: &Rc<RuntimeState>,
@@ -153,7 +155,7 @@ pub(super) fn returned(
     // The walk first: it reads every property, so a getter that throws or
     // never returns is found here, and `marshal` -- which would read the
     // same getters again -- runs only once every read has answered.
-    let terminal = terminal_json(scope, state, value, TERMINAL_JSON_CAP)?;
+    let terminal = terminal_json(scope, state, value, TERMINAL_WALK_CAP)?;
     Ok(Ending::Returned(marshal::marshal(scope, value), terminal))
 }
 

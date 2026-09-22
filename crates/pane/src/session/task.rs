@@ -17,6 +17,11 @@ pub(super) struct TaskSpend {
     /// The runtime's cumulative reduction ledger as last reported, so each
     /// frame's telemetry carries only what that frame added.
     pub(super) reductions_seen: crate::runtime::observation::ReductionStats,
+    /// How many estimated tokens a returned value may fill this turn, set
+    /// from the context meter before each cell (`context::return_budget`).
+    pub(super) return_budget: u64,
+    /// What the last cell's return took of it, and the fields paged to fit.
+    pub(super) last_return: Option<(u64, Vec<String>)>,
 }
 
 impl TaskSpend {
@@ -29,6 +34,35 @@ impl TaskSpend {
             estimated: false,
             cells_cap,
             reductions_seen: Default::default(),
+            return_budget: prompt::RETURN_BUDGET_UNKNOWN,
+            last_return: None,
+        }
+    }
+
+    /// The turn about to run: its return budget follows the room the meter
+    /// measured, so a cell that returns an excerpt is paged against the
+    /// window it is actually in and never against a number chosen first;
+    /// and a return is this cell's or nobody's, so the last figure is
+    /// cleared rather than carried.
+    pub(super) fn begin_turn(&mut self, return_budget: u64) {
+        self.return_budget = return_budget;
+        self.last_return = None;
+    }
+
+    /// A returned value for the model, within this turn's return budget:
+    /// whole when it fits, paged at a line with a cursor line when it does
+    /// not, and the usage line says which. The screen shows the same text.
+    pub(super) fn render_return(&mut self, terminal: &crate::runtime::outcome::Terminal) -> String {
+        let rendered = terminal.render_within(self.return_budget as usize);
+        self.last_return = Some((rendered.tokens as u64, rendered.paged));
+        rendered.text
+    }
+
+    /// §6's return figures for the usage line.
+    pub(super) fn return_usage(&self) -> prompt::ReturnUsage {
+        prompt::ReturnUsage {
+            budget: self.return_budget,
+            this_return: self.last_return.clone(),
         }
     }
 
@@ -203,6 +237,7 @@ impl TaskSpend {
             task_cap: 0,
             cells_used: self.cells_used,
             cells_cap: self.cells_cap,
+            feedback: Some(self.return_usage()),
         }
     }
 

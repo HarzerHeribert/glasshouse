@@ -92,7 +92,11 @@ pub const PREAMBLE: &str = concat!(
     "requested tests. Running off the end, `yieldNow(reason)` or a top-level\n",
     "`return` all give results and another turn: returning a value displays it\n",
     "as notebook output and finishes nothing. Return whatever you want to look\n",
-    "at, as often as you like.\n",
+    "at, as often as you like. A returned object is shown field by field as\n",
+    "text -- an excerpt as its lines, an array of strings one per line -- within\n",
+    "the return budget the usage line names; a field over its share is paged at\n",
+    "a line and ends in one cursor line saying how to read on. Return what you\n",
+    "need to read next, not everything you hold.\n",
     "\n",
     "The task ends only where you say it ends.\n",
     "`answer(text)` inside a cell ends the task with that text.\n",
@@ -854,6 +858,52 @@ pub struct Budget {
     /// The ceiling this person set, or `None` — the usage line then shows the
     /// count alone, because a denominator nobody chose is a fiction.
     pub cells_cap: Option<u64>,
+    /// The return budget this turn's `## Output` was rendered within, and
+    /// what the return cost, when a session is keeping the figure. `None`
+    /// leaves the usage line as it was.
+    pub feedback: Option<ReturnUsage>,
+}
+
+/// §6's return figures: the budget a returned value is rendered within and
+/// what this cell's return actually took of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnUsage {
+    /// Estimated tokens a returned value may fill this turn.
+    pub budget: u64,
+    /// This cell's rendered return in estimated tokens, and the fields that
+    /// were paged to fit -- `None` when the cell returned nothing.
+    pub this_return: Option<(u64, Vec<String>)>,
+}
+
+/// The return budget when the window is unknown, in estimated tokens.
+pub const RETURN_BUDGET_UNKNOWN: u64 = 8_000;
+/// The least a return may fill however full the window: a floor below which
+/// paging would show a header and nothing else. The window's own overflow
+/// path -- the sweep -- is the hard stop, not this figure.
+pub const RETURN_BUDGET_FLOOR: u64 = 4_000;
+/// The most a return may fill in one turn; above it the next page is a
+/// better read than a longer one.
+pub const RETURN_BUDGET_CEILING: u64 = 24_000;
+/// The share of the room left in the window a return may take.
+pub const RETURN_BUDGET_SHARE: u64 = 4;
+
+/// How much of the window a returned value may fill this turn: a quarter of
+/// the room left after the turn's own output cap, between
+/// [`RETURN_BUDGET_FLOOR`] and [`RETURN_BUDGET_CEILING`], and
+/// [`RETURN_BUDGET_UNKNOWN`] when nobody measured the window.
+///
+/// Ruled 2026-09-23 in place of a byte cap: a return is what the model asked
+/// to read, so the budget follows the room rather than a number chosen
+/// before the task, and the model is told the figure on every usage line.
+#[must_use]
+pub fn return_budget(used: Option<u64>, window: Option<u64>, turn_output_cap: u64) -> u64 {
+    match used.zip(window) {
+        Some((used, window)) => {
+            let room = window.saturating_sub(used).saturating_sub(turn_output_cap);
+            (room / RETURN_BUDGET_SHARE).clamp(RETURN_BUDGET_FLOOR, RETURN_BUDGET_CEILING)
+        }
+        None => RETURN_BUDGET_UNKNOWN,
+    }
 }
 
 /// §6's user message: the yield/throw line, then `## Handles`, `## Error`,
@@ -950,11 +1000,21 @@ fn render_usage_line(budget: &Budget) -> String {
         Some(cap) => format!("{}/{}", thousands(budget.cells_used), thousands(cap)),
         None => thousands(budget.cells_used),
     };
-    format!(
+    let mut line = format!(
         "turn output cap {} · task spent {} · cells {cells}",
         thousands(budget.turn_cap),
         thousands(budget.task_used),
-    )
+    );
+    if let Some(usage) = &budget.feedback {
+        line.push_str(&format!(" · return budget {}", thousands(usage.budget)));
+        if let Some((tokens, paged)) = &usage.this_return {
+            line.push_str(&format!(" · this return {}", thousands(*tokens)));
+            if !paged.is_empty() {
+                line.push_str(&format!(" (paged: {})", paged.join(", ")));
+            }
+        }
+    }
+    line
 }
 
 /// `n` with a comma every three digits from the right — the usage line's

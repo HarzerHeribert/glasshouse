@@ -26,6 +26,7 @@ fn result(cell: u64, table: &str) -> CellResult {
             task_cap: 10,
             cells_used: cell,
             cells_cap: Some(10),
+            feedback: None,
         },
     }
 }

@@ -128,6 +128,7 @@ fn the_worked_turn_renders_byte_for_byte() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -395,6 +396,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_cap: 400_000,
             cells_used: 0,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -420,6 +422,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -448,6 +451,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -483,6 +487,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -504,6 +509,7 @@ fn task_spend_has_no_cap_warning_and_limit_preambles_are_one_sentence() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -609,6 +615,7 @@ fn an_unattributed_throw_omits_the_position_line() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -650,6 +657,7 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -724,6 +732,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
             task_cap: 100_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     };
@@ -766,6 +775,7 @@ fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> Stri
             task_cap: 400_000,
             cells_used: cell,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan,
     })
@@ -828,6 +838,7 @@ fn compaction_never_drops_an_error() {
             task_cap: 400_000,
             cells_used: 1,
             cells_cap: Some(40),
+            feedback: None,
         },
         plan: Vec::new(),
     });
@@ -961,6 +972,7 @@ fn every_descriptor_survives_compaction_when_the_handles_do_not() {
                 task_cap: 400_000,
                 cells_used: cell,
                 cells_cap: Some(40),
+                feedback: None,
             },
             plan: Vec::new(),
         })

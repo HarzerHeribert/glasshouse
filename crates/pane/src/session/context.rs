@@ -69,6 +69,18 @@ pub(super) fn context_cap(
     crate::models::window_source_for(model, configured)
 }
 
+/// How much of the window a returned value may fill on the next cell:
+/// [`prompt::return_budget`] over what the meter knows now. An estimated
+/// figure counts -- it is the same one the meter draws -- and an unknown
+/// window gives the unknown budget.
+pub(super) fn return_budget(notebook: &Notebook, model: &str) -> u64 {
+    let (used, cap) = notebook
+        .context
+        .map(|context| (Some(context.used), context.cap))
+        .unwrap_or((None, None));
+    prompt::return_budget(used, cap, u64::from(wire::max_tokens_for(model)))
+}
+
 // --- the deliberate sweep -----------------------------------------------
 
 /// How many messages the conversation must gain before a second sweep is

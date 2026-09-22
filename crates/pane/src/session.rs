@@ -37,7 +37,8 @@ use crate::runtime::preview;
 use crate::sandbox::modes::{self, ModeOverlay, RequestMode};
 use crate::sandbox::profile::Profile;
 use crate::session::context::{
-    context_cap, estimate_context, record_request, send_task_turn_recovering, sweep_if_due,
+    context_cap, estimate_context, record_request, return_budget, send_task_turn_recovering,
+    sweep_if_due,
 };
 use crate::supervisor::Supervisor;
 use crate::telemetry::RequestMeasurement;
@@ -1496,6 +1497,7 @@ fn run_task_inner(
                 .ui
                 .map(|ui| helper_lane(ui.publisher(), transcript, &served, ordinal)),
         );
+        budget.begin_turn(return_budget(&transcript.notebook, &session.model.borrow()));
         let step = act_on(
             &assistant_message,
             &mut runtime,
@@ -2344,10 +2346,9 @@ fn act_on(
         // §9.2: what is rendered is a string verbatim and any other value as
         // its JSON -- never `marshal`'s sample. Every one of them is notebook
         // output for the next turn; none of them is an ending.
-        CellOutcome::Returned {
-            value, terminal, ..
-        } if response.is_none() => {
-            let text = terminal.render(value);
+        CellOutcome::Returned { terminal, .. } if response.is_none() => {
+            let text = budget.render_return(terminal);
+            result.budget.feedback = Some(budget.return_usage());
             view.output = Some(text.clone());
             result.output = Some(text);
         }

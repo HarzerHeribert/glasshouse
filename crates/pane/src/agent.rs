@@ -1002,9 +1002,13 @@ fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>)
         error,
         yield_reason: turn.yield_reason.clone(),
         output: match outcome {
-            CellOutcome::Returned {
-                value, terminal, ..
-            } => Some(terminal.render(value)),
+            // A subagent's window is not metered here, so its return gets
+            // the unknown budget rather than none.
+            CellOutcome::Returned { terminal, .. } => Some(
+                terminal
+                    .render_within(prompt::RETURN_BUDGET_UNKNOWN as usize)
+                    .text,
+            ),
             _ => None,
         },
         handle_table: turn.table.clone(),
@@ -1015,6 +1019,7 @@ fn result_message(outcome: &CellOutcome, cell: u64, description: Option<String>)
             task_cap: 0,
             cells_used: cell,
             cells_cap: None,
+            feedback: None,
         },
         plan: turn.plan.clone(),
     }
