@@ -134,7 +134,7 @@ pub fn invitation(voice: Voice) -> &'static str {
 /// What the composer says when it is empty.
 pub fn placeholder(voice: Voice) -> &'static str {
     if voice.playful() {
-        "What next? / for commands, @ for a file"
+        "What next? A message or / for commands, @ for a file"
     } else {
         "Describe the next step — a message or / for commands"
     }
@@ -177,7 +177,7 @@ pub fn status(
         }
         .into(),
         Activity::Executing => match cell {
-            Some(n) => format!("running cell {n:03}"),
+            Some(n) => format!("executing cell {n:03}"),
             None => "executing cell".into(),
         },
         Activity::Searching => "searching".into(),
@@ -202,7 +202,7 @@ pub fn status(
             }
         }
         .into(),
-        Activity::Complete => if playful { "done ✓" } else { "complete" }.into(),
+        Activity::Complete => if playful { "complete ✓" } else { "complete" }.into(),
     }
 }
 /// The three lines beside the bird inside a running cell: what is happening,
@@ -217,7 +217,7 @@ pub fn working(
     let label = match activity {
         Activity::Executing => {
             if playful {
-                "running this cell"
+                "executing this cell"
             } else {
                 "Executing this cell"
             }

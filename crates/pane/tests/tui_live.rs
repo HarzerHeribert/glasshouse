@@ -249,8 +249,12 @@ impl App {
     fn contains_line(&mut self, needle: &str) {
         self.wait(&format!("a line reading {needle:?}"), |screen| {
             screen.contents().lines().any(|line| {
-                // A result line may carry the run's own pass/fail mark.
-                line.trim().trim_start_matches(['✓', '✕', '·', '❯']).trim() == needle
+                // A result line may carry the run's own pass/fail mark, and
+                // sit inside a cell card whose edges -- and the session card
+                // beyond them -- are not its words.
+                line.split('│').any(|cell| {
+                    cell.trim().trim_start_matches(['✓', '✕', '·', '❯']).trim() == needle
+                })
             })
         });
     }
@@ -1395,7 +1399,7 @@ fn a_fragmented_wheel_report_still_scrolls_the_transcript() {
         // `filler 09` only because the draft line had passed 80 columns.
         // Unix never showed it because a refused loopback connection there
         // ends before the next key is sent.
-        app.contains(&format!("❯ {marker}"));
+        app.contains(&format!("┃ {marker}"));
         app.wait("the turn ends before the next Enter", |screen| {
             !screen.contents().contains("thinking")
         });
@@ -1931,9 +1935,14 @@ fn workbench_pointer_opens_settings_only_on_release_and_wheel_stays_local() {
     let (base, _requests) = provider();
     let mut app = App::start(&base);
     app.contains("Settings");
-    // Header is one row; at 80 columns Settings starts at column 54 (one-based).
+    // Header is one row; the chip's column is counted in cells, not bytes,
+    // because the glyphs before it are more than one byte each.
     let rows: Vec<_> = app.screen.screen().rows(0, 80).collect();
-    let x = rows[0].find("Settings").unwrap() + 1;
+    let x = rows[0]
+        .char_indices()
+        .position(|(byte, _)| rows[0][byte..].starts_with("Settings"))
+        .unwrap()
+        + 1;
     app.send(format!("\x1b[<0;{x};1M").as_bytes());
     app.settle(120);
     assert!(!app.screen.screen().contents().contains("SETTINGS"));

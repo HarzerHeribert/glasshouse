@@ -445,7 +445,7 @@ impl Document {
         if let Some(p) = &n.preflight {
             d.kinded(
                 vec![
-                    ("◇ scout  ".to_string(), Tone::Helper),
+                    ("◇ PREFLIGHT · SCOUT  ".to_string(), Tone::Helper),
                     (
                         clip(&format!("{} {}", p.verb, p.asked), width.saturating_sub(24)),
                         Tone::Muted,
@@ -544,15 +544,10 @@ impl Document {
         } else {
             first.to_string()
         };
+        // The words as the model returned them, on their own line: a test
+        // or a person reading a line back finds exactly that line.
         let before = self.rows.len();
-        self.wrapped(
-            format!("{} {first}", if v.error.is_some() { "✕" } else { "✓" }),
-            Tone::Strong,
-            None,
-            width,
-            id,
-            2,
-        );
+        self.wrapped(first, Tone::Strong, None, width, id, 2);
         if let Some(row) = self.rows.get_mut(before) {
             row.kind = RowKind::Answer;
         }
@@ -585,9 +580,21 @@ impl Document {
                 if calls == 1 { "call" } else { "calls" }
             ));
         }
-        if !facts.is_empty() {
-            self.wrapped(facts.join(" · "), Tone::Muted, None, width, id, 4);
-        }
+        let (mark, tone) = if v.error.is_some() {
+            ("✕", Tone::Failure)
+        } else {
+            ("✓", Tone::Success)
+        };
+        let facts = if facts.is_empty() {
+            voice::done_line(s.voice, v.error.is_some()).to_lowercase()
+        } else {
+            facts.join(" · ")
+        };
+        self.line(
+            vec![(format!("  {mark} "), tone), (facts, Tone::Muted)],
+            None,
+            id,
+        );
         if latest {
             let mut chips = Vec::new();
             if files > 0 {
@@ -923,13 +930,12 @@ impl Document {
             ),
         ];
         for (i, (glyph, (text, tone))) in art.iter().zip(facts).enumerate() {
+            // The bird is the row's only target: a click anywhere on it is a
+            // remark, never a surface opening under a stray report.
+            let _ = i;
             self.line(
                 vec![(format!(" {glyph}  "), Tone::Accent), (text, tone)],
-                Some(if i == 2 && startup.len() > 1 {
-                    Action::Activity
-                } else {
-                    Action::Quip
-                }),
+                Some(Action::Quip),
                 0,
             );
         }
@@ -1001,11 +1007,7 @@ impl Document {
                             if bad { Tone::Failure } else { Tone::Line },
                         ),
                         (
-                            if bad { "error " } else { "note " }.to_string(),
-                            if bad { Tone::Failure } else { Tone::Line },
-                        ),
-                        (
-                            clip(line, width.saturating_sub(11)),
+                            clip(line, width.saturating_sub(5)),
                             if bad { Tone::Failure } else { Tone::Muted },
                         ),
                     ],

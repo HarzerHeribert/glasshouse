@@ -223,11 +223,11 @@ fn session_bar(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui
         s.project.as_deref().unwrap_or("workspace"),
         (a.width as usize / 4).max(8),
     );
-    let brand = " ⠿ PANE";
+    let brand = " ⠿ PANE /";
     row(f, a, brand, Tone::Accent, s.theme);
     row(
         f,
-        Rect::new(a.x + chrome::width(brand) + 2, a.y, a.width, 1),
+        Rect::new(a.x + chrome::width(brand) + 1, a.y, a.width, 1),
         &project,
         Tone::Strong,
         s.theme,
@@ -239,7 +239,7 @@ fn session_bar(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui
         f,
         g,
         a,
-        chrome::width(brand) + 2 + chrome::width(&project) + 2,
+        chrome::width(brand) + 1 + chrome::width(&project) + 2,
         &[
             (format!("{model} ▾"), Action::Models, Tone::Normal, 2),
             // How often it asks outranks which mode it is in, and both
@@ -978,7 +978,7 @@ fn session_card(
             &[
                 ("activity".into(), Action::Activity, false),
                 (
-                    "instruments".into(),
+                    "telemetry".into(),
                     Action::Command("/telemetry".into()),
                     false,
                 ),

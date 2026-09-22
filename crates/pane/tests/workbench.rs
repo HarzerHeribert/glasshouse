@@ -1273,7 +1273,7 @@ fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
         .lines()
         .find(|l| l.starts_with("╭─"))
         .expect("the dock has a top edge");
-    assert!(top.contains("done ✓"), "{top}");
+    assert!(top.contains("complete ✓"), "{top}");
     let bottom = screen.lines().last().unwrap();
     assert!(bottom.starts_with("╰─"), "{bottom}");
     assert!(bottom.contains("⟨ effort default ⟩"), "{bottom}");
@@ -1390,13 +1390,9 @@ fn the_latest_answer_offers_what_to_do_next() {
         .iter()
         .find(|r| r.kind == pane::workbench::RowKind::Answer)
         .expect("the answer's first line is marked");
+    assert_eq!(answer.text.trim(), "The motion guard is fixed.");
     assert!(
-        answer.text.contains("✓ The motion guard is fixed."),
-        "{}",
-        answer.text
-    );
-    assert!(
-        words(&d).contains("1 file · +1 −1 · 1 helper"),
+        words(&d).contains("✓ 1 file · +1 −1 · 1 helper"),
         "{}",
         words(&d)
     );
