@@ -90,14 +90,24 @@ pub(crate) fn found(line: &str, root: &Path) -> Vec<(usize, usize)> {
             i += 1;
         }
         // A trailing full stop or colon belongs to the sentence, not the
-        // path -- but a path may legitimately end in either, so the untrimmed
-        // spelling is tried first.
+        // path, so the trimmed spelling is the one tried first whenever
+        // trimming removed anything -- and the untrimmed one is still tried,
+        // because a path may legitimately end in either.
+        //
+        // **The order is the fix, and it is not separator-dependent.** Win32
+        // discards the trailing dots and spaces of a path component, so
+        // `src/tui.rs.` and `src\tui.rs.` both stat as the file itself on
+        // Windows; asking about the untrimmed spelling first therefore
+        // underlined the sentence's full stop there and nowhere else
+        // (`a_sentences_full_stop_is_not_part_of_the_path`, the
+        // `pane (windows-latest)` cell). Asking about the trimmed spelling
+        // first gives one answer on every platform.
         let token: String = chars[start..i].iter().collect();
         let trimmed = token.trim_end_matches(['.', ':']);
-        if exists(&token, root) {
-            out.push((start, i));
-        } else if !trimmed.is_empty() && trimmed.len() < token.len() && exists(trimmed, root) {
+        if !trimmed.is_empty() && trimmed.len() < token.len() && exists(trimmed, root) {
             out.push((start, start + trimmed.chars().count()));
+        } else if exists(&token, root) {
+            out.push((start, i));
         }
     }
     out
