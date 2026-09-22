@@ -400,11 +400,26 @@ fn sandbox_check(bypassed: bool) -> Check {
     }
     #[cfg(target_os = "windows")]
     {
+        // The object-manager access check enforces every file grant
+        // unconditionally, but the missing `internetClient` capability is
+        // enforced by the Windows Filtering Platform through the Windows
+        // Firewall service (`MpsSvc`) -- a service, not the access check --
+        // so `crate::sandbox::windows::network_isolation` measures it rather
+        // than assuming it. A fully-confined machine reported "warning"
+        // regardless was this check's own complaint restated: shouting about
+        // something that is fine has a cost too.
+        use crate::sandbox::windows::NetworkIsolation;
+        let isolation = crate::sandbox::windows::network_isolation();
+        let status = match isolation {
+            NetworkIsolation::EnforcedByFirewall => "ok",
+            NetworkIsolation::NotEnforced | NetworkIsolation::Unknown => "warning",
+        };
         Check {
             name: "sandbox",
-            status: "warning",
-            detail: "An AppContainer confines every child this configuration spawns; verify Windows Firewall for network isolation"
-                .into(),
+            status,
+            detail: format!(
+                "An AppContainer confines every child this configuration spawns; network isolation is {isolation}"
+            ),
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
