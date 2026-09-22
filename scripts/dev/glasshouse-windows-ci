@@ -100,29 +100,46 @@ else
     exit 2
   fi
 
-  ci_ip="$({
+  # **Every lease the guest has held, newest first — not just the newest.**
+  # The lease file keeps expired entries, and the guest keeps its DHCP
+  # reservation across reboots only until it does not: on 2026-09-22 the file
+  # held two leases for `glasshouse-ci`, the last one written was dead, and a
+  # `tail -n 1` sent the gate at an address that had timed out while the VM
+  # was up and answering on the other one. "Not reachable, start it in VMware
+  # Fusion" is a very convincing thing for a runner to say about a running VM,
+  # so the address is chosen by asking rather than by position.
+  ci_candidates=("${(@f)$({
     awk -v guest="$ci_guest_name" '
       /^lease [0-9.]+ \{/ { address = $2 }
       $0 ~ "client-hostname \\\"" guest "\\\";" { print address }
-    ' "$ci_lease_file"
-  } | tail -n 1)"
+    ' "$ci_lease_file" | awk '!seen[$0]++'
+  })}")
 
-  if [[ -z "$ci_ip" ]]; then
+  if (( ${#ci_candidates} == 0 )); then
     print -u2 "No VMware DHCP lease found for $ci_guest_name"
     exit 2
   fi
 
-  ci_endpoint="glasshouse@$ci_ip"
   ci_ssh_options=(
     -i "$ci_key"
     -o BatchMode=yes
     -o ConnectTimeout=10
   )
 
-  if ! ssh "${ci_ssh_options[@]}" "$ci_endpoint" "exit 0"; then
-    print -u2 "Windows CI VM is not reachable at $ci_ip. Start it in VMware Fusion and retry."
+  ci_ip=""
+  for ci_candidate in "${(Oa)ci_candidates[@]}"; do
+    if ssh "${ci_ssh_options[@]}" "glasshouse@$ci_candidate" "exit 0" 2>/dev/null; then
+      ci_ip="$ci_candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$ci_ip" ]]; then
+    print -u2 "Windows CI VM answered at none of its leases (${ci_candidates[*]}). Start it in VMware Fusion and retry."
     exit 2
   fi
+
+  ci_endpoint="glasshouse@$ci_ip"
 fi
 
 # ---------------------------------------------------------------------------
