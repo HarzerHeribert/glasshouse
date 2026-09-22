@@ -1204,6 +1204,7 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
         ("ui.sidebar", word("auto")),
         ("ui.reduced_motion", toml::Value::Boolean(false)),
         ("ui.voice", word(crate::tui::Voice::default().name())),
+        ("ui.stream", word(crate::tui::Stream::default().name())),
         ("session.mode", word("build")),
         (
             "session.effort",

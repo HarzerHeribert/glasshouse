@@ -852,11 +852,24 @@ fn checked_call(
             .into());
         }
         let action = crate::approval::Action::new(tool.name(), ctx.profile.root(), trace.clone());
-        if !gate.admit(action, stopped) {
+        if !gate.admit(action.clone(), stopped) {
+            // A person who refused with words gets them delivered where the
+            // model reads every refusal: as the rule. The refusal itself is
+            // the same refusal either way.
+            let rule = match gate.redirect_for(&action) {
+                Some(text) if text.trim().is_empty() => {
+                    "the person declined this exact call and asks you to propose another way to do it: say what you would do instead, then do that".to_string()
+                }
+                Some(text) => format!(
+                    "the person declined this exact call and asks for another way: \"{}\" -- do that instead",
+                    text.trim()
+                ),
+                None => "the host call gate denied or cancelled this exact attempt".to_string(),
+            };
             return Err(PermissionDenied {
                 tool: tool.name().into(),
                 path: String::new(),
-                rule: "the host call gate denied or cancelled this exact attempt".into(),
+                rule,
             }
             .into());
         }

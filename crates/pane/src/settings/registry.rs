@@ -69,6 +69,7 @@ const THEMES: &[&str] = &[
 const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 const VOICES: &[&str] = &["playful", "plain"];
+const STREAMS: &[&str] = &["code", "quiet", "raw"];
 /// The working mode a session starts in. `build` is this file's word for the
 /// runtime's `execute`; both are accepted, and `build` is what is written.
 const MODES: &[&str] = &["build", "explore", "plan"];
@@ -383,6 +384,15 @@ static SPECS: &[SettingSpec] = &[
         description: "How Pane talks. Playful greets you, remarks and whispers hints; plain says the same facts and nothing else.",
         kind: Kind::Choice,
         choices: VOICES,
+        basic: true,
+        restart: false,
+    },
+    SettingSpec {
+        key: "ui.stream",
+        label: "Streaming cell",
+        description: "What you see while the model is still writing a cell: the code as it forms, one quiet line, or the raw protocol text.",
+        kind: Kind::Choice,
+        choices: STREAMS,
         basic: true,
         restart: false,
     },

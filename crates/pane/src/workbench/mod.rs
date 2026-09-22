@@ -77,6 +77,8 @@ pub enum Action {
     UndoLive,
     /// Someone clicked the bird.
     Quip,
+    /// Step what the screen shows of a cell while it is being written.
+    Stream,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Geometry {

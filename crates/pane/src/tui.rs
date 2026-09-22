@@ -4,7 +4,7 @@ mod controls;
 mod history;
 pub use history::HistoryNote;
 mod ask;
-pub use ask::{Key as AskKey, key as ask_key, render as render_ask};
+pub use ask::{Key as AskKey, key as ask_key, render as render_ask, render_redirect};
 mod bands;
 mod message;
 use message::*;
@@ -121,7 +121,7 @@ pub fn render_approval(
         body,
     );
     let choices = if confirmation.complete {
-        "[o] Allow once  [s] Allow this exact call for session  [d/Esc] Deny\n↑/↓ PgUp/PgDn scroll · Expires after 10 min · Sandbox unchanged"
+        "[o] Allow once  [s] Allow this exact call for session  [a] Ask Pane for another way  [d/Esc] Deny\n↑/↓ PgUp/PgDn scroll · Expires after 10 min · Sandbox unchanged"
     } else {
         "[d/Esc] Deny · This action cannot be approved because its complete details exceed the display limit"
     };
@@ -288,6 +288,8 @@ pub struct ScreenState {
     pub recap: Option<HelperRecord>,
     /// Whether Pane speaks with its character or plainly (`ui.voice`).
     pub voice: Voice,
+    /// What is shown of a cell while the model is still writing it.
+    pub stream: Stream,
     /// The local hour when the session started, for the greeting; `None`
     /// when the platform could not say, and the greeting then has no time
     /// of day in it.
@@ -361,6 +363,41 @@ impl SecretPrompt {
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
+/// What the screen shows while the model is still writing a cell
+/// (`ui.stream`): the program as it forms, one quiet line, or the raw
+/// protocol text the provider sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stream {
+    #[default]
+    Code,
+    Quiet,
+    Raw,
+}
+impl Stream {
+    pub const ALL: [Self; 3] = [Self::Code, Self::Quiet, Self::Raw];
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "code" => Some(Self::Code),
+            "quiet" => Some(Self::Quiet),
+            "raw" => Some(Self::Raw),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Quiet => "quiet",
+            Self::Raw => "raw",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Code => Self::Quiet,
+            Self::Quiet => Self::Raw,
+            Self::Raw => Self::Code,
+        }
+    }
+}
 /// How Pane talks: with a character, or plainly.
 ///
 /// **Structure never changes with the voice.** The turn labels, the cards,

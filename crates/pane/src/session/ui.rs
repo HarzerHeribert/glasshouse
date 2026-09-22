@@ -831,6 +831,9 @@ fn run(
     // asked, and the session waits for the answer before the next turn.
     let mut asking: Option<crate::ask::Request> = None;
     let mut ask_selected = 0usize;
+    // `[a]` on an approval: the refused request and what has been typed
+    // for it so far. Esc puts the request back in front of the person.
+    let mut redirect: Option<(crate::approval::Request, String)> = None;
     let mut settings_editor: Option<crate::settings_session::Editor> = None;
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
@@ -1067,7 +1070,9 @@ fn run(
                 if let Some(prompt) = state.secret_prompt.as_ref() {
                     crate::workbench::render_secret(frame, prompt, state.theme);
                 }
-                if let Some(request) = approvals.front() {
+                if let Some((_, text)) = redirect.as_ref() {
+                    tui::render_redirect(frame, text, state.theme);
+                } else if let Some(request) = approvals.front() {
                     tui::render_approval(
                         frame,
                         &request.action().confirmation(),
@@ -1098,7 +1103,11 @@ fn run(
         }
         // Security prompts retain priority; no local control can answer them.
         // All ordinary pointer and local-panel events go to the new reducer.
-        if approvals.is_empty() && asking.is_none() && state.secret_prompt.is_none() {
+        if approvals.is_empty()
+            && asking.is_none()
+            && state.secret_prompt.is_none()
+            && redirect.is_none()
+        {
             state.input = editor.text.clone();
             state.cursor = Some(editor.cursor);
             if matches!(&input_event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown))
@@ -1374,6 +1383,39 @@ fn run(
                 // would be the delay the opening was built not to have. The
                 // key itself falls through and is handled as it always was.
                 state.startup_skipped = true;
+                // The words behind `[a]`: every key is theirs until Enter
+                // sends them or Esc returns to the call.
+                if let Some((_, text)) = redirect.as_mut() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if let Some((request, text)) = redirect.take() {
+                                request.respond(crate::approval::Decision::Redirect(text));
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if let Some((request, _)) = redirect.take() {
+                                approvals.push_front(request);
+                            }
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            super::INTERRUPT.store(true, Ordering::SeqCst);
+                            if let Some((request, _)) = redirect.take() {
+                                request.respond(crate::approval::Decision::Deny);
+                            }
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            text.clear();
+                        }
+                        KeyCode::Backspace => {
+                            text.pop();
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            text.push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if let Some(request) = approvals.front() {
                     let complete = request.action().confirmation().complete;
                     let decision = match key.code {
@@ -1385,6 +1427,16 @@ fn run(
                         }
                         KeyCode::Char('d' | 'D') | KeyCode::Esc => {
                             Some(crate::approval::Decision::Deny)
+                        }
+                        // Refuse, and say what to do instead: the request
+                        // leaves the queue for the prompt that takes the
+                        // words, and comes back to the front on Esc.
+                        KeyCode::Char('a' | 'A') if complete && key.modifiers.is_empty() => {
+                            if let Some(request) = approvals.pop_front() {
+                                redirect = Some((request, String::new()));
+                            }
+                            approval_scroll = 0;
+                            None
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             super::INTERRUPT.store(true, Ordering::SeqCst);

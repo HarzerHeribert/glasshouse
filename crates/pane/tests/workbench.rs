@@ -388,10 +388,42 @@ fn host_lowered_frame_is_labeled_honestly() {
     n.cells[0].origin = pane::abi::Origin::DirectTool;
     assert!(words(&doc(&c, &n, &s, &Workbench::default())).contains("Host-lowered"));
 }
+/// A cell still being written is shown as the program it is becoming, never
+/// as the protocol text that carries it -- and never as something that ran.
 #[test]
 fn tool_stream_is_not_misrepresented_as_executed_source() {
     let (c, n, mut s) = fixture();
-    s.streaming_tool_input = Some("{\"code\":\"const".into());
+    s.streaming_tool_input =
+        Some("{\"code\":\"const guide = await read({path: \\\"AGENTS.md\\\"});\\n  bash({".into());
+    // Default: the decoded program, calls lit, with the not-executed mark.
+    let d = doc(&c, &n, &s, &Workbench::default());
+    let text = words(&d);
+    assert!(
+        text.contains("writing cell 002 · 2 lines so far · not executed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("const guide = await read({path: \"AGENTS.md\"});"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("{\"code"),
+        "the raw protocol text is not shown: {text}"
+    );
+    assert!(
+        d.rows.iter().any(|r| r
+            .spans
+            .iter()
+            .any(|(t, tone)| t == "read" && *tone == Tone::Accent)),
+        "the acting call is lit"
+    );
+    // Quiet: one line, no program.
+    s.stream = pane::tui::Stream::Quiet;
+    let text = words(&doc(&c, &n, &s, &Workbench::default()));
+    assert!(text.contains("writing cell 002 · 2 lines so far"), "{text}");
+    assert!(!text.contains("const guide"), "{text}");
+    // Raw: the protocol text, muted, for someone debugging the protocol.
+    s.stream = pane::tui::Stream::Raw;
     let d = doc(&c, &n, &s, &Workbench::default());
     assert!(words(&d).contains("not executed"));
     assert!(
@@ -399,6 +431,61 @@ fn tool_stream_is_not_misrepresented_as_executed_source() {
             .iter()
             .any(|r| r.text.contains("{\"code") && r.tone == Tone::Muted)
     );
+    // A fragment that carries no program yet falls back to the raw text.
+    s.stream = pane::tui::Stream::Code;
+    s.streaming_tool_input = Some("{\"co".into());
+    assert!(words(&doc(&c, &n, &s, &Workbench::default())).contains("Receiving cell input"));
+}
+
+/// Inside a cell, what happened is read off the record: every call, in
+/// order, with how it ended -- and the program's acting calls are lit.
+#[test]
+fn a_cell_shows_its_chain_of_calls_and_lights_the_acting_functions() {
+    let (c, mut n, s) = fixture();
+    n.cells[0].execution = Some(
+        "├─ read AGENTS.md · returned\n├─ bash cd demo && git status · denied · the host call gate denied this exact attempt\n└─ checks.run tests · failed · TypeError"
+            .into(),
+    );
+    n.cells[0].output = Some("{\"loaded\":\"AGENTS.md\",\"lines\":206}".into());
+    let d = doc(&c, &n, &s, &Workbench::default());
+    let text = words(&d);
+    for step in ["✓ read", "⊘ bash", "✕ checks.run"] {
+        assert!(text.contains(step), "{step} missing from:\n{text}");
+    }
+    assert!(text.contains("the host call gate denied"), "{text}");
+    // The result is JSON, so it is read as JSON: one field to a line.
+    assert!(text.contains("\"loaded\": \"AGENTS.md\""), "{text}");
+    assert!(text.contains("\"lines\": 206"), "{text}");
+    // And `checks.run(` in the program is an acting call.
+    assert!(
+        d.rows.iter().any(|r| r
+            .spans
+            .iter()
+            .any(|(t, tone)| t == "checks.run" && *tone == Tone::Accent)),
+        "{text}"
+    );
+}
+
+/// One turn of Pane's carries its name once, however many cells it has.
+#[test]
+fn one_turn_of_several_cells_carries_the_name_once() {
+    let (mut c, mut n, s) = fixture();
+    c.messages.push(Message::tool_result("call-1", "ok", false));
+    let mut m = Message::text(Role::Assistant, "Then the tests.");
+    m.content.push(Block::ToolUse {
+        id: "call-2".into(),
+        name: "execute_cell".into(),
+        input: serde_json::json!({"code":"await checks.run(\"tests\");"}),
+    });
+    c.messages.push(m);
+    n.cells.push(n.cells[0].clone());
+    let d = doc(&c, &n, &s, &Workbench::default());
+    let labels = d
+        .rows
+        .iter()
+        .filter(|r| r.kind == pane::workbench::RowKind::Pane)
+        .count();
+    assert_eq!(labels, 1, "{}", words(&d));
 }
 /// The terminal owns the background. The one thing the workbench paints is
 /// a chip that is the current choice of a set -- filled in the accent so
@@ -934,6 +1021,19 @@ fn screenshot() {
     let mut u = Workbench::default();
     let b = draw(&c2, &n2, &s2, &mut u, 140, 40);
     println!("\n===== RUNNING 140x40 =====\n{}", text(&b));
+    let (c3, mut n3, mut s3) = fixture();
+    n3.cells[0].execution = Some(
+        "├─ read AGENTS.md · returned\n├─ bash cd demo && git status --short · denied · the person declined this exact call and asks for another way: \"use fd\"\n└─ checks.run tests · returned"
+            .into(),
+    );
+    n3.cells[0].output = Some(
+        "{\"loaded\":\"AGENTS.md\",\"lines\":206,\"summary\":{\"text\":\"# Agent guide\"}}".into(),
+    );
+    s3.activity = Activity::Streaming;
+    s3.streaming_tool_input = Some("{\"code\":\"const [overview, config] = await Promise.all([\\n  read({path: \\\"README.md\\\"}),\\n  bash({command: \\\"git status\\\"}),\\n]);\\nreturn {overview".into());
+    let mut u = Workbench::default();
+    let b = draw(&c3, &n3, &s3, &mut u, 140, 40);
+    println!("\n===== CALLS + STREAMING 140x40 =====\n{}", text(&b));
     let mut u = Workbench::default();
     u.tabs.insert(1, CellTab::Diff);
     let b = draw(&c, &n, &s, &mut u, 140, 40);

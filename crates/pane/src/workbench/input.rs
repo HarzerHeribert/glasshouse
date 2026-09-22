@@ -170,6 +170,16 @@ impl Workbench {
                 s.note("Usage: /motion on | off");
                 true
             }
+            ["/stream", word @ ("code" | "quiet" | "raw")] => {
+                s.stream = crate::tui::Stream::parse(word).unwrap_or_default();
+                self.persist("ui.stream", word, s);
+                s.note(format!("Streaming cell: {word} · /stream code|quiet|raw"));
+                true
+            }
+            ["/stream"] => {
+                s.note("Usage: /stream code | quiet | raw");
+                true
+            }
             ["/sidebar", word @ ("auto" | "show" | "hide")] => {
                 s.sidebar = match *word {
                     "show" => crate::tui::SidebarVisibility::Shown,
@@ -769,6 +779,20 @@ impl Workbench {
             Action::Help => {
                 self.close();
                 self.help = true;
+            }
+            // The dock's fourth chip steps in place, like the effort one.
+            Action::Stream => {
+                s.stream = s.stream.next();
+                let word = s.stream.name();
+                self.persist("ui.stream", word, s);
+                self.notice = format!(
+                    "streaming cell: {word} — {}",
+                    match s.stream {
+                        crate::tui::Stream::Code => "the program as it forms",
+                        crate::tui::Stream::Quiet => "one line while it is written",
+                        crate::tui::Stream::Raw => "the raw protocol text",
+                    }
+                );
             }
             Action::Quip => {
                 self.quips += 1;

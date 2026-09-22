@@ -73,11 +73,17 @@ impl Drop for Waiting {
 }
 
 /// The answer to one exact action, never a pattern or a profile edit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     AllowOnce,
     AllowForSession,
     Deny,
+    /// A refusal that says what to do instead. The call is refused exactly
+    /// as `Deny` refuses it -- remembered, never widened -- and the words
+    /// travel back to the program as the refusal's rule, so the model reads
+    /// them where it reads every other refusal. Empty text asks the model
+    /// to propose another way itself.
+    Redirect(String),
 }
 
 /// The decision model's answer to "does this call fit the request" (F4,
@@ -322,6 +328,9 @@ pub struct Gate {
     /// holds for one task (`with_task`) -- `Gate` itself is session-scoped
     /// and outlives any one task.
     task: Option<String>,
+    /// What the person asked for instead, keyed by the exact action they
+    /// refused; taken once by the refusal that carries it to the program.
+    redirects: Arc<Mutex<std::collections::BTreeMap<Action, String>>>,
 }
 
 impl Gate {
@@ -338,9 +347,20 @@ impl Gate {
                 decisions: None,
                 vouched: Arc::new(crate::permissions::Judged::default()),
                 task: None,
+                redirects: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             },
             receiver,
         )
+    }
+
+    /// The words a person attached to refusing `action`, if they did --
+    /// taken, so a later refusal of the same action says only that it was
+    /// refused.
+    pub fn redirect_for(&self, action: &Action) -> Option<String> {
+        self.redirects
+            .lock()
+            .ok()
+            .and_then(|mut redirects| redirects.remove(action))
     }
 
     /// The rung this gate is judging on, shared with whatever moves it.
@@ -624,6 +644,15 @@ impl Gate {
                             self.judged.remember(action, false);
                             false
                         }
+                        // Refused exactly as a denial is, and the words wait
+                        // for the refusal that reports it (`redirect_for`).
+                        Decision::Redirect(text) => {
+                            if let Ok(mut redirects) = self.redirects.lock() {
+                                redirects.insert(action.clone(), text);
+                            }
+                            self.judged.remember(action, false);
+                            false
+                        }
                     };
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return false,
@@ -687,6 +716,37 @@ mod tests {
         assert_eq!(request.action().tool(), "bash");
         assert!(request.respond(Decision::AllowOnce));
         assert!(asking.join().unwrap());
+    }
+
+    /// A refusal with words is a refusal: not admitted, remembered, and the
+    /// words wait for the one refusal that reports them.
+    #[test]
+    fn a_redirect_refuses_like_a_denial_and_hands_its_words_over_once() {
+        let (gate, requests) = gate_with_a_model(Rung::Auto);
+        gate.vouched
+            .remember("rm -rf /var/tmp/x".to_string(), false);
+        let asked = gate.clone();
+        let asking = std::thread::spawn(move || asked.admit(bash("rm -rf /var/tmp/x"), || false));
+        let request = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the person must be asked");
+        assert!(request.respond(Decision::Redirect("use fd instead".into())));
+        assert!(!asking.join().unwrap(), "refused");
+        assert_eq!(
+            gate.redirect_for(&bash("rm -rf /var/tmp/x")).as_deref(),
+            Some("use fd instead")
+        );
+        assert_eq!(
+            gate.redirect_for(&bash("rm -rf /var/tmp/x")),
+            None,
+            "taken once"
+        );
+        // Asking again cannot turn the no into a yes.
+        assert!(!gate.admit(bash("rm -rf /var/tmp/x"), || false));
+        assert!(
+            requests.try_recv().is_err(),
+            "a remembered refusal asks nobody"
+        );
     }
 
     /// `prejudge` is the `auto` rung's own machinery and nothing else's: the

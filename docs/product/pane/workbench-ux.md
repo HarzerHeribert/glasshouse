@@ -234,3 +234,36 @@ keyboard route, no tour. The three-cell motion budget on an idle screen is kept
 by design: the dock's flap is three cells and the bird's blink is two. Still
 deliberately not done: denial with redirection (needs the approval reply to
 carry text), the side-by-side diff, and deleting the legacy renderer.
+
+### The second look — 2026-09-22, evening
+
+The user, with the pass running in a real session: *"I don't want the denial to
+change anything. I would rather have an option 'ask Pane to do that another
+way' with an option to propose something, or ask Pane to propose something. …
+When a cell is streamed in it's mostly ugly gibberish which nobody needs to
+see. Can you highlight things which actually make it more transparent what is
+happening in cells — like `read`, `edit` and so on, an acting function which
+shows the chain of events happening. … That is the fattest bird I have ever
+seen, kinda cute though; leave it as it is but make it more detailed. Then the
+spinner while thinking over the prompt line is just still."*
+
+- **`[a]` on an approval: ask Pane for another way.** `Decision::Redirect(text)`
+  refuses the call exactly as `Deny` does -- remembered, never widened -- and
+  the words travel back to the program as the refusal's rule
+  (`tools/invoke.rs`), which is where the model reads every refusal. Empty
+  words ask it to propose. Deny is untouched.
+- **A cell being written is shown as the program it is becoming.** The
+  provider's `partial_json` is decoded as far as it has come; `ui.stream =
+  code | quiet | raw` chooses the program with its calls lit, one line, or the
+  raw text; the dock's fourth chip steps it.
+- **Inside a cell, the chain of calls is its own record.** Every call the
+  cell made, in order, with how it ended (`✓ returned`, `⊘ denied` with the
+  rule, `✕ failed` with the class) -- read from the call records, never off
+  the program's text. The program's acting calls (`read`, `edit`, `bash`, a
+  helper, a check, anything awaited) are lit; a JSON result is read as JSON.
+- **The bird is four rows now**, with a crown, an eye, a wing line, tail
+  feathers and legs; still two cells per blink.
+- **The flap keeps beating on a long wait.** The old rule froze every mark
+  after sixty seconds, which is the one moment a person looks at it to ask
+  whether the session is alive.
+- **One turn of several cells carries the name once.**

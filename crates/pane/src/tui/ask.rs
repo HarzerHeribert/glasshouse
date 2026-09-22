@@ -66,6 +66,48 @@ pub fn render(frame: &mut Frame<'_>, request: &Request, selected: usize, theme: 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// The prompt behind `[a]` on an approval: what to do instead. `text` is
+/// what has been typed so far; an empty send asks Pane to propose.
+pub fn render_redirect(frame: &mut Frame<'_>, text: &str, theme: Theme) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    let height = area.height.saturating_sub(2).min(8);
+    let overlay = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, overlay);
+    let block = Block::default()
+        .title(" ⠿ ask pane to do it another way ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent()));
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            "The call is refused either way. What should Pane do instead?",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(theme.accent())),
+            Span::raw(text.to_string()),
+            Span::styled("▏", Style::default().fg(theme.accent())),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter sends · empty asks Pane to propose · Esc goes back to the call",
+            Style::default().fg(theme.hush()),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// One choice row: its digit, its text, and the decision model's share of it
 /// when there is one.
 fn choice_line(

@@ -1023,12 +1023,21 @@ fn dock_top(
             | Activity::Streaming
             | Activity::Waiting
     );
-    let still =
-        s.reduced_motion || s.selection.is_some() || s.pulse.elapsed_ms > 60_000 || !running;
-    let cell = matches!(s.activity, Activity::Executing).then_some(n.cells.len() + 1);
+    // A long wait is exactly when a person looks here to ask whether the
+    // session is alive, so the flap keeps beating; only reduced motion and
+    // a selection in progress hold it.
+    let still = s.reduced_motion || s.selection.is_some() || !running;
+    let cell = matches!(s.activity, Activity::Executing | Activity::Streaming)
+        .then_some(n.cells.len() + 1);
     let status = format!(
         "{}{}",
-        voice::status(s.voice, s.activity, cell, s.model.as_deref()),
+        voice::status(
+            s.voice,
+            s.activity,
+            cell,
+            s.model.as_deref(),
+            s.streaming_tool_input.is_some()
+        ),
         if s.stopping { " · stop requested" } else { "" }
     );
     let lead = format!(
@@ -1149,6 +1158,7 @@ fn dock_bottom(
                     .unwrap_or_default(),
                 Action::SettingsAt(4),
             ),
+            (format!("stream {}", s.stream.name()), Action::Stream),
         ];
         // The chips sit on a cleared stretch of the edge, one space apart,
         // rather than on top of the rule.

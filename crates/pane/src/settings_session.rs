@@ -37,6 +37,9 @@ pub(crate) fn presentation(state: &mut tui::ScreenState, values: &toml::Value) {
     state.voice = word("ui.voice")
         .and_then(tui::Voice::parse)
         .unwrap_or_default();
+    state.stream = word("ui.stream")
+        .and_then(tui::Stream::parse)
+        .unwrap_or_default();
 }
 pub(crate) struct Editor {
     pub panel: SettingsPanel,

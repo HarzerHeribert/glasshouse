@@ -36,20 +36,22 @@ impl Face {
     }
 }
 
-// A small round bird, perched and facing right: 16×12 pixels drawn as three
-// rows of braille. The bitmaps are in `docs/product/pane/bird.py`-style
-// comments beside each state; the strings are what the terminal draws.
-const IDLE: [&str; 3] = ["  ⢠⠒⠍⠉⢢⣀", "⠐⠢⡇    ⢣", "  ⠑⢤⢀⠠⠔⠁"];
-const BLINK: [&str; 3] = ["  ⢠⠲⠩⠉⢢⣀", "⠐⠢⡇    ⢣", "  ⠑⢤⢀⠠⠔⠁"];
-const THINK: [&str; 3] = ["  ⢠⠒⠙⠉⠢⠤", "⠐⠢⡇    ⢣", "  ⠑⢤⢀⠠⠔⠁"];
-const PECK: [&str; 3] = ["  ⢠⠒⢉⠉⠢ ", "⠐⠢⡇    ⢳", "  ⠑⢤⢀⠠⠔⠁"];
-const DONE: [&str; 3] = ["⠢⡀⢠⠒⠍⠉⢢⣀", "⠐⠪⡇    ⢣", "  ⠑⢤⢀⠠⠔⠁"];
-const OOPS: [&str; 3] = ["  ⢨⠓⠍⠉⢨⣀", "⠰⡢⡇    ⢣", "  ⠑⢤⢀⠠⠔⠣"];
+// A songbird perched and facing right: 20×16 pixels drawn as four rows of
+// braille -- crown, eye, beak, a wing line across the body, tail feathers
+// and two legs. Each state is one edit of the same bitmap.
+const IDLE: [&str; 4] = ["    ⡔⠩⠉⠢⣀⣀", "⡠⠒⢤⠎ ⣀⣀⡀⠑⡄", "⠑⢤⠊⡰⠉  ⠈⡢⠃", "  ⠑⠣⡄⡀⡤⠊  "];
+const BLINK: [&str; 4] = ["    ⡔⠍⠍⠢⣀⣀", "⡠⠒⢤⠎ ⣀⣀⡀⠑⡄", "⠑⢤⠊⡰⠉  ⠈⡢⠃", "  ⠑⠣⡄⡀⡤⠊  "];
+const THINK: [&str; 4] = ["    ⡔⠉⠋⠢⠤⠆", "⡠⠒⢤⠎ ⣀⣀⡀⠑⡄", "⠑⢤⠊⡰⠉  ⠈⡢⠃", "  ⠑⠣⡄⡀⡤⠊  "];
+const PECK: [&str; 4] = ["    ⡔⢉⠉⠢  ", "⡠⠒⢤⠎ ⣀⣀⡀⠙⡖", "⠑⢤⠊⡰⠉  ⠈⡢⠃", "  ⠑⠣⡄⡀⡤⠊  "];
+const DONE: [&str; 4] = ["    ⡔⠩⠉⢢⣀⣀", "⡠⠒⢤⠎ ⢀⠔⠁⠑⡄", "⠑⢤⠊⡠⠐⠁  ⡠⠃", "  ⠑⠣⡄⡀⡤⠊  "];
+const OOPS: [&str; 4] = ["   ⠈⡜⠩⠉⠫⣀⣀", "⢤⠒⢤⠎ ⣀⣀⡀⠑⡴", "⠐⢤⠊⡰⠉  ⠈⡢⠗", "  ⠑⠣⡄⡀⡤⠊  "];
 /// A bird in flight, three cells wide, for the composer's edge.
 const FLAP: [&str; 4] = ["⠑⠤⠊", "⠢⠤⠔", "⠤⠤⠤", "⠔⠒⠢"];
 /// Every face is padded to this many columns so the text beside it starts
 /// at one x on every frame.
-pub const FACE_WIDTH: usize = 10;
+pub const FACE_WIDTH: usize = 12;
+/// The bird is this many rows tall.
+pub const FACE_ROWS: usize = 4;
 
 /// The bird's three rows for `face`, at `tick`; `still` holds the resting
 /// frame of that state, which is a complete drawing rather than a paused one.
@@ -59,7 +61,7 @@ pub const FACE_WIDTH: usize = 10;
 /// keeps a live screen inside the three-cell budget `tests/workbench.rs`
 /// holds motion to. Working pecks -- more cells -- and is only ever drawn
 /// inside a running cell, where the old mark turned too.
-pub fn face(face: Face, tick: usize, still: bool) -> [String; 3] {
+pub fn face(face: Face, tick: usize, still: bool) -> [String; FACE_ROWS] {
     let art = match face {
         Face::Idle => {
             if !still && tick % 24 == 23 {
@@ -87,7 +89,7 @@ pub fn face(face: Face, tick: usize, still: bool) -> [String; 3] {
         _ => "",
     };
     let mut rows = art.map(str::to_string);
-    rows[1].push_str(mark);
+    rows[0].push_str(mark);
     rows.map(|row| {
         let w = ratatui::text::Span::raw(row.as_str()).width();
         format!("{row}{}", " ".repeat(FACE_WIDTH.saturating_sub(w)))
@@ -147,9 +149,14 @@ pub fn status(
     activity: Activity,
     cell: Option<usize>,
     model: Option<&str>,
+    writing_cell: bool,
 ) -> String {
     let playful = voice.playful();
     match activity {
+        Activity::Streaming if writing_cell => match cell {
+            Some(n) => format!("writing cell {n:03}"),
+            None => "writing a cell".into(),
+        },
         Activity::Idle => if playful {
             "ready when you are"
         } else {
@@ -496,11 +503,12 @@ mod tests {
             Activity::Failed,
             Activity::Complete,
         ] {
-            let p = status(Voice::Playful, a, Some(2), Some("m"));
-            let q = status(Voice::Plain, a, Some(2), Some("m"));
+            let p = status(Voice::Playful, a, Some(2), Some("m"), false);
+            let q = status(Voice::Plain, a, Some(2), Some("m"), false);
             assert!(!p.is_empty() && !q.is_empty());
         }
-        assert!(status(Voice::Playful, Activity::Executing, Some(7), None).contains("007"));
+        assert!(status(Voice::Playful, Activity::Executing, Some(7), None, false).contains("007"));
+        assert!(status(Voice::Plain, Activity::Streaming, Some(4), None, true).contains("004"));
         assert!(greeting(Voice::Plain, Some(9), "nest").contains("nest"));
         assert!(!greeting(Voice::Plain, Some(9), "nest").contains("Morning"));
         assert!(greeting(Voice::Playful, Some(9), "nest").starts_with("Morning"));

@@ -77,6 +77,9 @@ pub struct Document {
     pub rows: Vec<Row>,
     /// The kind every ordinary row takes while a card is open.
     container: RowKind,
+    /// Whether the last turn labelled was Pane's, so one turn of several
+    /// messages carries the name once.
+    pane_open: bool,
 }
 impl Document {
     pub fn push(
@@ -217,8 +220,9 @@ impl Document {
         // What the card drew is the session's own header, not conversation:
         // an empty conversation is still empty underneath it.
         let card_rows = d.rows.len();
-        // A card's body sits inside two edges and a three-column indent.
-        let inner = width.saturating_sub(6).max(1);
+        // A card's body sits inside two edges, a three-column indent and the
+        // column kept clear before the gutter: nine columns in all.
+        let inner = width.saturating_sub(9).max(1);
         let mut cell: usize = 0;
         let mut after_return = false;
         let mut feedback = false;
@@ -360,7 +364,7 @@ impl Document {
                     .or(src.as_deref())
                     .unwrap_or("");
                 match tab {
-                    CellTab::Code => d.wrapped(program, Tone::Code, None, inner, id, 2),
+                    CellTab::Code => d.program(program, inner, id),
                     CellTab::Diff => d.diff(v.and_then(|v| v.changes.as_deref()), inner, id),
                     CellTab::Output => {
                         if let Some(v) = v {
@@ -403,23 +407,14 @@ impl Document {
                         d.push(format!("↳ {why}"), Tone::Normal, None, inner, id);
                     }
                     if tab == CellTab::Code {
+                        // What actually happened, in order, then what came
+                        // back: the chain of calls is the cell's own record,
+                        // never read off the program's text.
+                        if let Some(execution) = &v.execution {
+                            d.calls(execution, inner, id);
+                        }
                         if let Some(output) = &v.output {
                             d.result(output, inner, id);
-                        }
-                        if let Some(execution) = &v.execution {
-                            for line in execution
-                                .lines()
-                                .filter(|l| l.contains(" · failed") || l.contains(" · denied"))
-                            {
-                                d.line(
-                                    vec![
-                                        ("  ✕ ".to_string(), Tone::Failure),
-                                        (clip(line, inner.saturating_sub(6)), Tone::Failure),
-                                    ],
-                                    None,
-                                    id,
-                                );
-                            }
                         }
                     }
                 }
@@ -483,16 +478,8 @@ impl Document {
             );
         }
         if let Some(fragment) = &s.streaming_tool_input {
-            d.wrapped(
-                "Receiving cell input · not executed",
-                Tone::Accent,
-                None,
-                width,
-                usize::MAX - 3,
-                2,
-            );
-            // Fragments are protocol text, never a claimed valid program.
-            d.wrapped(fragment, Tone::Muted, None, width, usize::MAX - 3, 2);
+            d.turn_pane(usize::MAX - 3);
+            d.streaming(fragment, n.cells.len() + 1, s, width);
         }
         if let Some(text) = &s.streaming_text {
             let text = crate::prompt::completion_text(text).unwrap_or_else(|| text.clone());
@@ -508,6 +495,7 @@ impl Document {
     }
     /// The person's turn: a label, then the words, each under the gutter.
     fn turn_you(&mut self, text: &str, width: usize, id: usize) {
+        self.pane_open = false;
         self.kinded(
             vec![(voice::YOU.to_string(), Tone::You)],
             None,
@@ -524,9 +512,10 @@ impl Document {
     /// Pane's turn begins: the mark and the name, once, above whatever it
     /// says and does.
     fn turn_pane(&mut self, id: usize) {
-        if self.rows.last().is_some_and(|r| r.kind == RowKind::Pane) {
+        if self.pane_open {
             return;
         }
+        self.pane_open = true;
         self.kinded(
             vec![(format!("⠿ {}", voice::PANE), Tone::Accent)],
             None,
@@ -627,22 +616,232 @@ impl Document {
     /// said. Nothing here judges the work -- the mark reports the words the
     /// run produced, and the words stay on the line beside it.
     fn result(&mut self, output: &str, width: usize, id: usize) {
-        for line in output.lines().take(4) {
-            let lower = line.to_lowercase();
-            let bad = ["fail", "error", "panic", "✕"]
-                .iter()
-                .any(|w| lower.contains(w));
+        // A value that is JSON is shown as JSON is read, one field to a
+        // line; the runtime's own cut marker stays as it came.
+        let pretty = serde_json::from_str::<serde_json::Value>(output.trim())
+            .ok()
+            .filter(|v| v.is_object() || v.is_array())
+            .and_then(|v| serde_json::to_string_pretty(&v).ok());
+        let text = pretty.as_deref().unwrap_or(output);
+        let head: String = text.lines().take(4).collect::<Vec<_>>().join("\n");
+        let lower = head.to_lowercase();
+        let bad = ["fail", "error", "panic", "✕"]
+            .iter()
+            .any(|w| lower.contains(w));
+        let mut lines = text.lines();
+        if let Some(first) = lines.next() {
             self.line(
                 vec![
                     (
                         format!("{} ", if bad { "✕" } else { "✓" }),
                         if bad { Tone::Failure } else { Tone::Success },
                     ),
-                    (clip(line, width.saturating_sub(4)), Tone::Normal),
+                    (clip(first, width.saturating_sub(4)), Tone::Normal),
                 ],
                 None,
                 id,
             );
+        }
+        let rest: Vec<&str> = lines.collect();
+        for line in rest.iter().take(9) {
+            self.line(
+                vec![
+                    ("  ".to_string(), Tone::Normal),
+                    (clip(line, width.saturating_sub(4)), Tone::Muted),
+                ],
+                None,
+                id,
+            );
+        }
+        if rest.len() > 9 {
+            self.line(
+                vec![(
+                    format!(
+                        "  … {} more lines · Full output has them all",
+                        rest.len() - 9
+                    ),
+                    Tone::Muted,
+                )],
+                None,
+                id,
+            );
+        }
+    }
+    /// The program, with the calls that act on the world lit up: `read`,
+    /// `edit`, `bash`, a helper, a check -- every `await`ed call and every
+    /// call on one of the runtime's own objects -- so the chain of events a
+    /// cell will cause is read off it at a glance.
+    fn program(&mut self, program: &str, width: usize, id: usize) {
+        for line in program.split('\n') {
+            self.spans_wrapped(highlight_calls(line), width, 2, id);
+        }
+    }
+    /// Spans on one logical line, wrapped into the width under a hanging
+    /// indent, so a highlighted call survives the wrap.
+    fn spans_wrapped(
+        &mut self,
+        spans: Vec<(String, Tone)>,
+        width: usize,
+        indent: usize,
+        id: usize,
+    ) {
+        let avail = width.saturating_sub(indent).max(1);
+        let pad = " ".repeat(indent);
+        let mut row: Vec<(String, Tone)> = vec![(pad.clone(), Tone::Code)];
+        let mut used = 0;
+        for (text, tone) in spans {
+            let mut part = String::new();
+            for c in text.chars() {
+                if c.is_control() && c != '\t' {
+                    continue;
+                }
+                let s = if c == '\t' {
+                    "    ".to_string()
+                } else {
+                    c.to_string()
+                };
+                let w = span_width(&s);
+                if used + w > avail && used > 0 {
+                    if !part.is_empty() {
+                        row.push((std::mem::take(&mut part), tone));
+                    }
+                    self.line(
+                        std::mem::replace(&mut row, vec![(pad.clone(), Tone::Code)]),
+                        None,
+                        id,
+                    );
+                    used = 0;
+                }
+                part.push_str(&s);
+                used += w;
+            }
+            if !part.is_empty() {
+                row.push((part, tone));
+            }
+        }
+        self.line(row, None, id);
+    }
+    /// The chain of calls a cell actually made, one per line: what ran, on
+    /// what, and how it ended. Read off the cell's record, so a call the
+    /// program names but never reached is not on it.
+    fn calls(&mut self, execution: &str, width: usize, id: usize) {
+        if execution.starts_with("No tool calls") {
+            self.line(
+                vec![(
+                    "  · no tool calls ran in this cell".to_string(),
+                    Tone::Muted,
+                )],
+                None,
+                id,
+            );
+            return;
+        }
+        for line in execution.lines() {
+            let line = line
+                .trim_start()
+                .trim_start_matches("├─ ")
+                .trim_start_matches("└─ ")
+                .trim_start_matches("├─")
+                .trim_start_matches("└─")
+                .trim();
+            let (what, status) = match line.find(" · ") {
+                Some(i) => (&line[..i], &line[i + " · ".len()..]),
+                None => (line, ""),
+            };
+            let word = status.split(" · ").next().unwrap_or("");
+            let (mark, tone) = match word {
+                "returned" => ("✓", Tone::Success),
+                "started" => ("●", Tone::Accent),
+                "failed" => ("✕", Tone::Failure),
+                "denied" => ("⊘", Tone::Warning),
+                _ => ("·", Tone::Muted),
+            };
+            let (tool, arg) = match what.split_once(' ') {
+                Some((tool, arg)) => (tool.to_string(), arg.to_string()),
+                None => (what.to_string(), String::new()),
+            };
+            let detail = status
+                .split_once(" · ")
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_default();
+            let mut left = vec![
+                (format!("  {mark} "), tone),
+                (format!("{tool:<7} "), Tone::Accent),
+                (arg, Tone::Normal),
+            ];
+            if !detail.is_empty() {
+                left.push((format!("  {detail}"), tone));
+            }
+            let right = vec![(word.to_string(), tone)];
+            let row = justify(left, right, width);
+            self.line(row, None, id);
+        }
+    }
+    /// What the screen shows of a cell the model is still writing.
+    ///
+    /// The provider sends the program as fragments of a JSON string, and
+    /// that text is nobody's to read. Decoded, the fragments are the program
+    /// as it forms; `ui.stream` chooses between that, one quiet line, and
+    /// the raw text for anyone debugging the protocol itself.
+    fn streaming(&mut self, fragment: &str, cell: usize, s: &ScreenState, width: usize) {
+        let id = usize::MAX - 3;
+        let code = partial_code(fragment);
+        match (s.stream, code) {
+            (crate::tui::Stream::Raw, _) | (_, None) => {
+                self.wrapped(
+                    "Receiving cell input · not executed",
+                    Tone::Accent,
+                    None,
+                    width,
+                    id,
+                    2,
+                );
+                // Fragments are protocol text, never a claimed valid program.
+                let shown: String = if s.stream == crate::tui::Stream::Raw {
+                    fragment.to_string()
+                } else {
+                    fragment.lines().take(3).collect::<Vec<_>>().join("\n")
+                };
+                self.wrapped(shown, Tone::Muted, None, width, id, 2);
+            }
+            (crate::tui::Stream::Quiet, Some(code)) => {
+                self.line(
+                    vec![(
+                        format!(
+                            "  ● writing cell {cell:03} · {} lines so far · not executed",
+                            code.lines().count().max(1)
+                        ),
+                        Tone::Accent,
+                    )],
+                    None,
+                    id,
+                );
+            }
+            (crate::tui::Stream::Code, Some(code)) => {
+                let lines: Vec<&str> = code.lines().collect();
+                self.line(
+                    vec![(
+                        format!(
+                            "  ● writing cell {cell:03} · {} lines so far · not executed",
+                            lines.len().max(1)
+                        ),
+                        Tone::Accent,
+                    )],
+                    None,
+                    id,
+                );
+                let skip = lines.len().saturating_sub(12);
+                if skip > 0 {
+                    self.line(
+                        vec![(format!("    … {skip} lines above"), Tone::Muted)],
+                        None,
+                        id,
+                    );
+                }
+                for line in lines.iter().skip(skip) {
+                    self.spans_wrapped(highlight_calls(line), width, 4, id);
+                }
+            }
         }
     }
     /// What a session says about itself before anyone has said anything to
@@ -692,7 +891,7 @@ impl Document {
             .first()
             .copied()
             .map(str::to_string)
-            .unwrap_or(model);
+            .unwrap_or_else(|| model.clone());
         let project = s.project.as_deref().unwrap_or("no project");
         let facts = [
             (
@@ -712,6 +911,15 @@ impl Document {
                     "code · cells · little helpers".to_string()
                 },
                 Tone::Line,
+            ),
+            (
+                // The model line, when the startup note took its place.
+                if startup.is_empty() {
+                    String::new()
+                } else {
+                    clip(&model, width.saturating_sub(voice::FACE_WIDTH + 4))
+                },
+                Tone::Muted,
             ),
         ];
         for (i, (glyph, (text, tone))) in art.iter().zip(facts).enumerate() {
@@ -894,6 +1102,7 @@ impl Document {
             (format!("◈ {label}"), Tone::Accent),
             (detail, Tone::Normal),
             (cost, Tone::Muted),
+            (String::new(), Tone::Normal),
         ]) {
             let text = clip(&text, width.saturating_sub(voice::FACE_WIDTH + 4));
             self.line(
@@ -1108,6 +1317,96 @@ impl Document {
     }
 }
 const OPEN_DIFF: &str = "open diff ↗";
+
+/// The runtime's own objects: a call on one of these acts on the world or
+/// on the session, whether or not the program awaits it.
+const ACTING: [&str; 22] = [
+    "read", "write", "edit", "bash", "fd", "grep", "glob", "fetch", "search", "ssh", "web",
+    "checks", "helper", "agent", "handles", "bg", "decide", "mcp", "send", "print", "ask", "plan",
+];
+/// One line of a program as spans: acting calls in the accent, the three
+/// words that shape a cell quiet, everything else as code.
+pub(crate) fn highlight_calls(line: &str) -> Vec<(String, Tone)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out: Vec<(String, Tone)> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    while i < chars.len() {
+        let c = chars[i];
+        if (c.is_alphabetic() || c == '_') && (i == 0 || !ident(chars[i - 1])) {
+            let start = i;
+            while i < chars.len() && ident(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let call = chars.get(i) == Some(&'(');
+            let base = word.split('.').next().unwrap_or("");
+            let awaited = plain.trim_end().ends_with("await");
+            let tone = if call && (awaited || ACTING.contains(&base)) {
+                Some(Tone::Accent)
+            } else if matches!(word.as_str(), "await" | "const" | "return" | "let") && !call {
+                Some(Tone::Muted)
+            } else {
+                None
+            };
+            match tone {
+                Some(tone) => {
+                    if !plain.is_empty() {
+                        out.push((std::mem::take(&mut plain), Tone::Code));
+                    }
+                    out.push((word, tone));
+                }
+                None => plain.push_str(&word),
+            }
+            continue;
+        }
+        plain.push(c);
+        i += 1;
+    }
+    if !plain.is_empty() || out.is_empty() {
+        out.push((plain, Tone::Code));
+    }
+    out
+}
+/// The program inside a half-arrived tool call: the JSON string under
+/// `"code"`, decoded as far as it has come. `None` until the key is there,
+/// or for a call that carries no program.
+pub(crate) fn partial_code(fragment: &str) -> Option<String> {
+    let key = fragment.find("\"code\"")?;
+    let rest = &fragment[key + "\"code\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let body = rest.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('/') => out.push('/'),
+                Some('b') | Some('f') => {}
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if hex.len() < 4 {
+                        break;
+                    }
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                // An escape cut in half by the fragment boundary.
+                _ => break,
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
 
 fn changed_files(v: &CellView) -> usize {
     v.changes

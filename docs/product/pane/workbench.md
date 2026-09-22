@@ -46,7 +46,12 @@ with six states read off the session's activity, and `ui.voice = playful | plain
 chooses between its first-person copy and the plain statement of the same
 facts; structure never changes with the voice. The opening greets by project and
 local hour and offers chips read from the repository (last commit, uncommitted
-changes, a test command), each of which types a message.
+changes, a test command), each of which types a message. Inside an open cell
+the program's acting calls are lit and the chain of calls the cell actually
+made is listed from its record with how each ended; a cell still being
+written is shown as the decoded program (`ui.stream = code | quiet | raw`).
+An approval offers `[a]`, ask Pane for another way: the call is refused as a
+denial is and the words reach the program as the refusal's rule.
 
 Clicks activate on release. A drag selects/copies text instead of opening a cell
 or path. Wheel events go to the open local surface or to the conversation, not
