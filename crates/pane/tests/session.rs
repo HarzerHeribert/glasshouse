@@ -4850,13 +4850,23 @@ fn prompt_write_grants_do_not_include_denied_path_components() {
         Some(r#"{"permissions":{"allow":["Write(src/**)"],"deny":["Write(secrets/**)"]}}"#),
     );
     let facts = pane::session::session_facts(&profile);
+    // `session_facts` sorts and dedups only to make the list deterministic
+    // and unique; the two entries are joined into a sentence for the model
+    // (`render_session_facts`), so their relative ORDER carries no meaning.
+    // Sorting a Windows `\\?\C:\...` path against `Write(src/**)` lands
+    // differently than sorting a Unix `/tmp/...` path against it (`\` sorts
+    // after `W`, `/` sorts before it), so an order-sensitive assertion here
+    // was really pinned to the host's path spelling, not to the contract.
+    let mut actual = facts.writable.clone();
+    actual.sort();
+    let mut expected = vec![
+        profile.root().display().to_string(),
+        "Write(src/**)".to_string(),
+    ];
+    expected.sort();
     assert_eq!(
-        facts.writable,
-        vec![
-            profile.root().display().to_string(),
-            "Write(src/**)".to_string()
-        ],
-        "the root is writable whether or not a rule says so"
+        actual, expected,
+        "the root is writable whether or not a rule says so, regardless of listing order"
     );
     let text = pane::prompt::render_session_facts(&facts);
     assert!(text.contains("deny rules still apply"));
@@ -7230,10 +7240,21 @@ fn the_event_stream_announces_a_cell_before_it_runs() {
     let root = scratch_dir("observe-root");
     let rollout = root.join("rollout.jsonl");
     let marker = root.join("the-cell-ran");
+    // The command line is scenery for this test -- only the event stream's
+    // ordering is under test -- so it must actually run on the interpreter
+    // this host's `bash` tool answers to: `cmd.exe` has no `touch`, and a
+    // Windows path's backslashes must reach the pane-script string literal
+    // escaped (`{:?}`) rather than interpolated raw, or the parser eats them
+    // as (mostly unrecognized) escapes of its own. Same fix as
+    // `instruction_boundary.rs`'s `create_file_cell`.
+    let touch_command = if cfg!(windows) {
+        format!("type nul > \"{}\"", marker.display())
+    } else {
+        format!("touch {}", marker.display())
+    };
     let (base_url, _bodies) = start_fake_provider(vec![
         assistant_reply(&format!(
-            "```pane\nawait bash({{ command: \"touch {}\" }});\nreturn 1;\n```",
-            marker.display()
+            "```pane\nawait bash({{ command: {touch_command:?} }});\nreturn 1;\n```",
         )),
         assistant_reply("done\n<!-- pane:done -->"),
         ending_reply(),
@@ -7286,9 +7307,9 @@ fn the_event_stream_announces_a_cell_before_it_runs() {
         .as_array()
         .expect("certain command lines");
     assert!(
-        commands.iter().any(|c| c
-            .as_str()
-            .is_some_and(|c| c.starts_with("touch ") && c.contains("the-cell-ran"))),
+        commands
+            .iter()
+            .any(|c| c.as_str() == Some(touch_command.as_str())),
         "the literal command line is named before it runs: {commands:?}"
     );
     assert!(

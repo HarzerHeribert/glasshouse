@@ -1549,7 +1549,13 @@ fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
     let global = store.path(pane::settings::Scope::Global);
 
     app.send(b"/settings\r");
-    app.contains("Settings");
+    // **The surface's own heading, not the control that opened it.** The
+    // session bar's `[ Settings ]` is gone the moment the surface is drawn,
+    // so a probe for the mixed-case spelling was really a race against the
+    // frame before it -- one the Unix stream happened to win and a ConPTY,
+    // which coalesces the redraw, lost every time. Its sibling below already
+    // waits for the heading.
+    app.contains("SETTINGS");
     app.contains("Global");
     app.contains("Project");
     app.contains(&project.display().to_string());

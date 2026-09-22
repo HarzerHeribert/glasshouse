@@ -1450,6 +1450,19 @@ fn handles_mid_cell_includes_the_current_cells_bindings() {
     assert_eq!(returned_string(&after), "earlier,a,b", "{after:?}");
 }
 
+/// Whether ripgrep is on `PATH`, which is what decides whether a `grep` call
+/// is served by ripgrep or by the host's own `grep` — `tools::invoke` asks the
+/// same question and substitutes the binary, so a test that cares which one
+/// answered has to ask it too rather than guess from the platform.
+///
+/// Gated to match its one caller: unused is an error here.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn ripgrep_on_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|directory| directory.join("rg").is_file()))
+        .unwrap_or(false)
+}
+
 /// `grep -r` prints lines that are not located matches — `Binary file …
 /// matches` is the routine one. Attributing them to the searched path with
 /// `line: 0` made them indistinguishable from a hit at the top of a file, so
@@ -1475,12 +1488,16 @@ fn a_grep_line_that_is_not_a_match_has_no_line_number() {
          located.length, new Set(located.map(m => m.path)).size].join(\",\");\n",
         path = fixture.root.to_string_lossy()
     ));
-    // GNU grep 3.5 and later prints its `binary file matches` notice to
-    // stderr, so on the Linux cell no non-located line reaches stdout and
-    // `hits.length > located.length` is false there; BSD grep on macOS
-    // prints it to stdout and the strict form holds. Both cells check that
-    // the located match is exactly one, in exactly one file.
-    let expected = if cfg!(target_os = "macos") {
+    // **Whether an unlocated line is printed at all is a fact about the
+    // BACKEND, not about the operating system**, and keying it on the OS is
+    // why this test was red on every developer machine and green on both CI
+    // cells. `checked_call` hands a `grep` call to ripgrep wherever ripgrep
+    // is installed, and ripgrep skips a binary file with a note on *stderr*;
+    // so does GNU grep 3.5 and later. Only BSD grep, on a macOS with no
+    // ripgrep, puts the notice on stdout, and only there is there a line for
+    // the filter to remove. Every backend checks the half that matters on
+    // all of them: the located match is exactly one, in exactly one file.
+    let expected = if cfg!(target_os = "macos") && !ripgrep_on_path() {
         "true,1,1"
     } else {
         "false,1,1"
