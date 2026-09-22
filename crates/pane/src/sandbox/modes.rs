@@ -228,13 +228,8 @@ impl Narrowing {
     /// run, never on the line as one string.
     pub(super) fn command_refusal(&self, command_line: &str) -> Option<String> {
         let mode = self.mode.name();
-        command_reads_only(command_line, &self.commands).map(|why| {
-            if cfg!(windows) {
-                format!("mode {mode}: {why}, so no command runs in {mode} mode")
-            } else {
-                format!("mode {mode}: {why}; the shell is read-only")
-            }
-        })
+        command_reads_only(command_line, &self.commands)
+            .map(|why| format!("mode {mode}: {why}; the shell is read-only"))
     }
 }
 
@@ -249,12 +244,15 @@ impl Narrowing {
 ///
 /// `extra` is the caller's own list of admitted segment patterns
 /// (`cargo metadata*`), matched before the built-in [`READ_ONLY_COMMANDS`].
+///
+/// **On Windows the line is `cmd.exe`'s, and it is screened before it is
+/// read** ([`cmd_line_unreadable`]): a construct only `cmd.exe` has is a
+/// reason to ask, never a reason to guess.
 pub(crate) fn command_reads_only(command_line: &str, extra: &[String]) -> Option<String> {
-    if cfg!(windows) {
-        return Some(
-            "the command tool runs cmd.exe on Windows, whose line this check does not parse"
-                .to_string(),
-        );
+    if cfg!(windows)
+        && let Some(why) = cmd_line_unreadable(command_line)
+    {
+        return Some(why);
     }
     {
         let refuse = Some;
@@ -325,6 +323,53 @@ pub(crate) fn command_reads_only(command_line: &str, extra: &[String]) -> Option
         }
         None
     }
+}
+
+/// Why a `cmd.exe` command line is not read here at all, or `None` when it
+/// holds nothing this scan would misread.
+///
+/// **`cmd.exe` is not `sh`, so the reader below cannot simply be pointed at
+/// its line.** What the two agree about is narrow and it is exactly what is
+/// left after this screen: plain words, and the operators `&`, `&&`, `||`,
+/// `|` and a newline, all of which [`command_segments`] already splits a
+/// command of its own out of. Everything `cmd.exe` spells differently is
+/// screened out instead of guessed at — `^` escapes the next character,
+/// `%VAR%` and delayed `!VAR!` expand to text nobody here has seen, `(`…`)`
+/// groups commands, `<` and `>` redirect by rules that are not the POSIX
+/// ones (`NUL`, not `/dev/null`), and `"` quotes by rules this deliberately
+/// quote-blind scan does not track. `$` and a backtick are ordinary
+/// characters to `cmd.exe` and substitutions to the reader below, which is
+/// the same disagreement from the other side.
+///
+/// The answer is a reason to **ask**, never to refuse and never to run: a
+/// reader that cannot place a line has learned that it cannot place it. This
+/// is what keeps Windows no more permissive than POSIX — it can only add
+/// questions, never remove one.
+pub(crate) fn cmd_line_unreadable(command_line: &str) -> Option<String> {
+    const UNREADABLE: [(char, &str); 10] = [
+        ('^', "escapes the next character"),
+        ('%', "expands an environment variable"),
+        ('!', "can expand a variable under delayed expansion"),
+        ('"', "quotes, and this scan does not track quoting"),
+        ('(', "groups commands"),
+        (')', "groups commands"),
+        ('<', "redirects input"),
+        ('>', "redirects output"),
+        (
+            '$',
+            "is a plain character to cmd.exe and a substitution to this scan",
+        ),
+        (
+            '`',
+            "is a plain character to cmd.exe and a substitution to this scan",
+        ),
+    ];
+    UNREADABLE
+        .iter()
+        .find(|(character, _)| command_line.contains(*character))
+        .map(|(character, what)| {
+            format!("`{character}` {what} on cmd.exe, whose line this check does not parse")
+        })
 }
 
 enum Redirect {

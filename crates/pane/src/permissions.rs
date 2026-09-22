@@ -718,6 +718,68 @@ mod tests {
         }
     }
 
+    /// **Windows is judged, and it is judged no more generously than POSIX.**
+    ///
+    /// The command tool runs `cmd.exe /C <line>` on Windows, and this ladder
+    /// used to answer `Ask` to every line there — so a Windows session
+    /// confirmed `git status --short` forever and the person's own
+    /// `[modes] commands` list was never consulted (three reds in the
+    /// `pane (windows-latest)` cell). The line is now screened for the
+    /// constructs only `cmd.exe` has and then read by the same reader POSIX
+    /// uses.
+    ///
+    /// Host-independent on purpose: the screen is a pure function of the
+    /// line, so both halves of the contract are checked on any host. A
+    /// screened line is `Ask` by construction — [`judge_command`] returns the
+    /// screen's own reason — which is why the ordinary line is asserted
+    /// through `judge_command` and the `cmd.exe` shapes through the screen.
+    #[test]
+    fn a_cmd_exe_line_is_read_and_its_own_metacharacters_are_asked_about() {
+        use crate::sandbox::modes::cmd_line_unreadable;
+
+        // One line that must run: nothing here is spelled differently by
+        // `cmd.exe`, so the shared reader places it on Windows too.
+        assert_eq!(
+            cmd_line_unreadable("git status --short"),
+            None,
+            "an ordinary development line holds no cmd.exe construct"
+        );
+        assert_eq!(
+            judge_command("git status --short", &[], None),
+            Verdict::Runs
+        );
+
+        // And the shapes that must ask, each for the reason `cmd.exe` gives
+        // it -- a generous guess at any one of these is a security defect.
+        for line in [
+            "echo hi ^& del secrets.env",
+            "del %TEMP%\\notes",
+            "echo !PAYLOAD!",
+            "(git status) & del x",
+            "type secrets.env > C:\\out.txt",
+            "git \"status --short\"",
+        ] {
+            assert!(
+                cmd_line_unreadable(line).is_some(),
+                "cmd.exe spells this line differently, so it is not read: {line}"
+            );
+        }
+    }
+
+    /// The whole of the Windows arm, where the arm actually runs.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_ladder_runs_a_listed_line_and_asks_about_a_cmd_construct() {
+        assert_eq!(
+            judge_command("git status --short", &[], None),
+            Verdict::Runs
+        );
+        assert!(matches!(
+            judge_command("echo hi ^& del secrets.env", &[], None),
+            Verdict::Ask(_)
+        ));
+    }
+
     #[test]
     fn a_persons_own_read_only_patterns_are_honoured() {
         let line = "./deploy.sh --dry-run";
