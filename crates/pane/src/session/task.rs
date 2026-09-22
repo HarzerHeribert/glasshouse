@@ -309,6 +309,15 @@ pub(super) struct TaskState {
     /// same request as [`Self::intent`] -- `None` under the same conditions
     /// (F2, map 2614/2615's paragraph).
     pub(super) complexity: Option<crate::decide::Complexity>,
+    /// The kind answer (2026-09-23), beside the two above.
+    pub(super) kind: Option<crate::decide::Kind>,
+    /// The effort the kind set for this task, `None` when the person chose
+    /// one or the kind did not act; `would_lower` is the shadow reading.
+    pub(super) effort_set: Option<String>,
+    pub(super) effort_would_set: Option<String>,
+    /// Which brief the Scout was given, and the shadow reading.
+    pub(super) scout_brief: Option<String>,
+    pub(super) would_dissect: bool,
     /// Whether `preflight::SIGNAL_DECIDED_EXPLORATION` was one of this task's
     /// `Decision::Run` signals -- only possible with `mode = on`.
     pub(super) scout_signal: bool,
@@ -425,6 +434,11 @@ impl TaskState {
             stall: crate::progress::Stall::default(),
             intent: None,
             complexity: None,
+            kind: None,
+            effort_set: None,
+            effort_would_set: None,
+            scout_brief: None,
+            would_dissect: false,
             scout_signal: false,
             would_scout: false,
             decision_failures: 0,
@@ -468,10 +482,26 @@ impl TaskState {
         would_scout: bool,
     ) -> Self {
         self.intent = decision.as_ref().map(|decision| decision.intent.clone());
+        self.kind = decision.as_ref().and_then(|decision| decision.kind.clone());
         self.complexity = decision.map(|decision| decision.complexity);
         self.decision_failures = decision_failures;
         self.scout_signal = scout_signal;
         self.would_scout = would_scout;
+        self
+    }
+
+    /// What the kind did to this task's effort and to the Scout's brief
+    /// (2026-09-23), both computed before `TaskState` existed.
+    pub(super) fn with_kind_effects(
+        mut self,
+        effort: &super::system::EffortLease<'_, '_>,
+        scout_brief: Option<&str>,
+        would_dissect: bool,
+    ) -> Self {
+        self.effort_set = effort.set.map(|effort| effort.name().to_string());
+        self.effort_would_set = effort.would_set.map(|effort| effort.name().to_string());
+        self.scout_brief = scout_brief.map(str::to_string);
+        self.would_dissect = would_dissect;
         self
     }
 
@@ -499,6 +529,9 @@ impl TaskState {
         let complexity = self.complexity.as_ref().map(|complexity| {
             serde_json::json!({ "choice": complexity.choice, "confidence": complexity.confidence })
         });
+        let kind = self.kind.as_ref().map(
+            |kind| serde_json::json!({ "choice": kind.choice, "confidence": kind.confidence }),
+        );
         Some(serde_json::json!({
             "model": model,
             "mode": config.mode.as_str(),
@@ -508,6 +541,13 @@ impl TaskState {
             "latency_ms_total": self.intent.as_ref().map_or(0, |intent| intent.latency_ms),
             "intent": intent,
             "complexity": complexity,
+            "kind": kind,
+            "effort": {
+                "set": self.effort_set,
+                "would_set": self.effort_would_set,
+            },
+            "scout_brief": self.scout_brief,
+            "would_dissect": self.would_dissect,
             "scout_signal": self.scout_signal,
             "would_scout": self.would_scout,
             "would_hold": self.would_hold,

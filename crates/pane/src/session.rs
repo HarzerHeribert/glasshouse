@@ -1232,6 +1232,7 @@ fn run_task_inner(
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
     let (decision, decision_failures) = task_decision(task, session);
+    let effort_lease = system::EffortLease::for_kind(session, decision.as_ref());
     let proposal = mode_proposal::propose(session, decision.as_ref());
     let preflight_outcome = preflight_block(task, session, transcript, decision.as_ref());
     if let Some(block) = &preflight_outcome.block {
@@ -1337,6 +1338,11 @@ fn run_task_inner(
             decision_failures,
             preflight_outcome.scout_signal,
             preflight_outcome.would_scout,
+        )
+        .with_kind_effects(
+            &effort_lease,
+            preflight_outcome.brief.map(crate::preflight::Brief::as_str),
+            preflight_outcome.would_dissect,
         )
         .with_mode_proposal(proposal);
     output::decisions(task_state.decisions_telemetry(&session.config().decisions));

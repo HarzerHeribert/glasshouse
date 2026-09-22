@@ -266,6 +266,8 @@ const INTENT_KEY: &str = "intent";
 pub const NEEDS_EXPLORATION: &str = "needs_exploration";
 
 const COMPLEXITY_KEY: &str = "complexity";
+/// The kind question's key (2026-09-23).
+const KIND_KEY: &str = "kind";
 
 fn intent_question() -> Question {
     let mut criteria = BTreeMap::new();
@@ -336,11 +338,85 @@ pub struct Complexity {
     pub confidence: f64,
 }
 
-/// Both answers to the one request asked before a task's first turn.
+/// What the decision model answered about what kind of work one request is
+/// (2026-09-23): asked beside [`Intent`] and [`Complexity`] in the same
+/// request. `explore` and `question` lower the task's effort when the
+/// person chose none; `explore` briefs the Scout to dissect the request
+/// (`preflight::Brief::Dissection`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kind {
+    pub choice: String,
+    pub confidence: f64,
+}
+
+/// The confidence at or above which a [`Kind`] answer acts: lowers the
+/// effort, briefs the Scout to dissect.
+pub const KIND_ABOVE: f64 = 0.7;
+
+/// Understand, survey or explain a project or an area of it.
+pub const KIND_EXPLORE: &str = "explore";
+/// Make a named failure stop.
+pub const KIND_FIX: &str = "fix";
+/// Add or change behaviour.
+pub const KIND_IMPLEMENT: &str = "implement";
+/// Answer from what is known, or one quick look.
+pub const KIND_QUESTION: &str = "question";
+/// Run, build, test or execute something and report.
+pub const KIND_RUN: &str = "run";
+
+/// All three answers to the one request asked before a task's first turn.
+/// `kind` is `None` when the decision model answered the older two questions
+/// and not the third.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskDecision {
     pub intent: Intent,
     pub complexity: Complexity,
+    pub kind: Option<Kind>,
+}
+
+impl TaskDecision {
+    /// The kind, when it was answered at or above [`KIND_ABOVE`].
+    #[must_use]
+    pub fn confident_kind(&self) -> Option<&str> {
+        self.kind
+            .as_ref()
+            .filter(|kind| kind.confidence >= KIND_ABOVE)
+            .map(|kind| kind.choice.as_str())
+    }
+}
+
+/// The kind question (2026-09-23), asked in the same request as
+/// [`intent_question`] and [`complexity_question`]: what kind of work is
+/// this, which is what decides how much thinking the first turn needs and
+/// what the Scout is briefed to do.
+fn kind_question() -> Question {
+    let mut criteria = BTreeMap::new();
+    criteria.insert(
+        KIND_EXPLORE.to_string(),
+        "understand, survey or explain how a project or an area of it works; the answer is \
+         what was found, not a change"
+            .to_string(),
+    );
+    criteria.insert(
+        KIND_FIX.to_string(),
+        "make a named failure stop: a bug, a red test, an error".to_string(),
+    );
+    criteria.insert(
+        KIND_IMPLEMENT.to_string(),
+        "add or change behaviour that does not exist yet".to_string(),
+    );
+    criteria.insert(
+        KIND_QUESTION.to_string(),
+        "answer from what is already known or one quick look; no change and no survey".to_string(),
+    );
+    criteria.insert(
+        KIND_RUN.to_string(),
+        "run, build, test or execute something and report what happened".to_string(),
+    );
+    Question::Choice {
+        instructions: "What kind of work is this request?".to_string(),
+        criteria,
+    }
 }
 
 /// Asks the intent and complexity questions about `request` in one request
@@ -352,6 +428,7 @@ pub fn task_questions(model: &str, request: &str) -> Result<TaskDecision, Decide
     let questions = [
         (INTENT_KEY.to_string(), intent_question()),
         (COMPLEXITY_KEY.to_string(), complexity_question()),
+        (KIND_KEY.to_string(), kind_question()),
     ];
     let answers = decide(model, state, &questions)?;
     task_decision_of(answers)
@@ -362,6 +439,7 @@ pub fn task_questions(model: &str, request: &str) -> Result<TaskDecision, Decide
 fn task_decision_of(answers: Answers) -> Result<TaskDecision, DecideError> {
     let mut intent = None;
     let mut complexity = None;
+    let mut kind = None;
     for decision in answers.decisions {
         let Answer::Choice {
             choice, confidence, ..
@@ -383,6 +461,9 @@ fn task_decision_of(answers: Answers) -> Result<TaskDecision, DecideError> {
             key if key == COMPLEXITY_KEY => {
                 complexity = Some(Complexity { choice, confidence });
             }
+            key if key == KIND_KEY => {
+                kind = Some(Kind { choice, confidence });
+            }
             other => {
                 return Err(DecideError::Parse(format!(
                     "unexpected answer key `{other}`"
@@ -394,7 +475,11 @@ fn task_decision_of(answers: Answers) -> Result<TaskDecision, DecideError> {
         intent.ok_or_else(|| DecideError::Parse(format!("no answer for `{INTENT_KEY}`")))?;
     let complexity = complexity
         .ok_or_else(|| DecideError::Parse(format!("no answer for `{COMPLEXITY_KEY}`")))?;
-    Ok(TaskDecision { intent, complexity })
+    Ok(TaskDecision {
+        intent,
+        complexity,
+        kind,
+    })
 }
 
 /// The completion question's key, mirroring [`INTENT_KEY`]'s shape for the

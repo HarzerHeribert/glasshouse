@@ -372,8 +372,70 @@ pub(super) const PREFLIGHT_MIN_WORDS: usize = 4;
 /// A request under [`PREFLIGHT_MIN_WORDS`] words — "hi", "thanks", "carry
 /// on" — gets no preflight; everything else is decided by
 /// [`crate::preflight::should_scout`] on the request's own signals.
+/// The whole-response cap on a dissection, in tokens: ~300 words with room
+/// for the headings (memory `scout-dissection-latency-2026-09-23`).
+const DISSECTION_CAP: u32 = 640;
+
 pub(super) fn request_may_need_the_repository(task: &str) -> bool {
     task.split_whitespace().count() >= PREFLIGHT_MIN_WORDS
+}
+
+/// The effort a request's kind sets for one task, and its restoration.
+///
+/// **The person's choice always wins.** A kind acts only when the session's
+/// effort is `default` -- one the person never set -- and what it set is
+/// put back when the task ends, however the task ends, because the lease
+/// restores on drop. `explore` and `question` lower the effort to `low`:
+/// measured 2026-09-23, effort bought neither speed nor a better dissection
+/// on an exploration, and the user's steer is to keep reasoning low where
+/// it earns nothing. `mode = shadow` records what would have been set.
+pub(super) struct EffortLease<'s, 'a> {
+    session: &'a Session<'s>,
+    restore: Option<wire::Effort>,
+    pub(super) set: Option<wire::Effort>,
+    pub(super) would_set: Option<wire::Effort>,
+}
+
+impl<'s, 'a> EffortLease<'s, 'a> {
+    pub(super) fn for_kind(
+        session: &'a Session<'s>,
+        decision: Option<&crate::decide::TaskDecision>,
+    ) -> Self {
+        let mode = session.config().decisions.mode;
+        let wanted = decision
+            .and_then(crate::decide::TaskDecision::confident_kind)
+            .filter(|kind| {
+                *kind == crate::decide::KIND_EXPLORE || *kind == crate::decide::KIND_QUESTION
+            })
+            .map(|_| wire::Effort::Low)
+            .filter(|_| session.effort.get() == wire::Effort::Default);
+        let mut lease = Self {
+            session,
+            restore: None,
+            set: None,
+            would_set: None,
+        };
+        match (mode, wanted) {
+            (crate::config::DecisionMode::On, Some(effort)) => {
+                lease.restore = Some(session.effort.replace(effort));
+                lease.set = Some(effort);
+                session_println!("decision: effort {} for this task", effort.name());
+            }
+            (crate::config::DecisionMode::Shadow, Some(effort)) => {
+                lease.would_set = Some(effort);
+            }
+            _ => {}
+        }
+        lease
+    }
+}
+
+impl Drop for EffortLease<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(effort) = self.restore.take() {
+            self.session.effort.set(effort);
+        }
+    }
 }
 
 /// [`preflight_block`]'s result: the system-prompt block, if a scout ran and
@@ -382,6 +444,11 @@ pub(super) fn request_may_need_the_repository(task: &str) -> bool {
 /// `TaskState::with_decision`'s telemetry.
 pub(super) struct PreflightOutcome {
     pub(super) block: Option<String>,
+    /// Which brief the Scout ran with, when one ran.
+    pub(super) brief: Option<crate::preflight::Brief>,
+    /// `mode = shadow` and the kind read `explore`: the dissection brief
+    /// would have been chosen.
+    pub(super) would_dissect: bool,
     /// Whether `preflight::SIGNAL_DECIDED_EXPLORATION` was one of the reasons
     /// this task actually ran a scout (`mode = on` only).
     pub(super) scout_signal: bool,
@@ -393,6 +460,8 @@ pub(super) struct PreflightOutcome {
 impl PreflightOutcome {
     const NONE: Self = Self {
         block: None,
+        brief: None,
+        would_dissect: false,
         scout_signal: false,
         would_scout: false,
     };
@@ -434,6 +503,18 @@ pub(super) fn preflight_block(
     } else {
         None
     };
+    // The kind (2026-09-23): a confident `explore` briefs the Scout to
+    // dissect the request and is itself a reason to run it.
+    let explore = decision
+        .and_then(crate::decide::TaskDecision::confident_kind)
+        .is_some_and(|kind| kind == crate::decide::KIND_EXPLORE);
+    let dissect = explore && decisions.mode == crate::config::DecisionMode::On;
+    let would_dissect = explore && decisions.mode == crate::config::DecisionMode::Shadow;
+    let brief_kind = if dissect {
+        crate::preflight::Brief::Dissection
+    } else {
+        crate::preflight::Brief::Spans
+    };
     let checks_configured = crate::verification::load(session.profile)
         .map(|config| !config.checks.is_empty())
         .unwrap_or(false);
@@ -445,6 +526,16 @@ pub(super) fn preflight_block(
         decided_for_scout,
         decisions.scout_above,
     );
+    let scouting_decision = match (dissect, scouting_decision) {
+        (true, crate::preflight::Decision::Run(mut signals)) => {
+            signals.push(crate::preflight::SIGNAL_DECIDED_EXPLORE);
+            crate::preflight::Decision::Run(signals)
+        }
+        (true, crate::preflight::Decision::Skip(_)) => {
+            crate::preflight::Decision::Run(vec![crate::preflight::SIGNAL_DECIDED_EXPLORE])
+        }
+        (false, decision) => decision,
+    };
     let scout_signal = matches!(
         &scouting_decision,
         crate::preflight::Decision::Run(signals)
@@ -457,12 +548,16 @@ pub(super) fn preflight_block(
     if matches!(scouting_decision, crate::preflight::Decision::Skip(_)) {
         return PreflightOutcome {
             block: None,
+            brief: None,
+            would_dissect,
             scout_signal,
             would_scout,
         };
     }
     let none = PreflightOutcome {
         block: None,
+        brief: None,
+        would_dissect,
         scout_signal,
         would_scout,
     };
@@ -474,7 +569,7 @@ pub(super) fn preflight_block(
     };
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
-    let brief = crate::preflight::scouting_brief(task, &session.manifest);
+    let brief = crate::preflight::scouting_brief_for(brief_kind, task, &session.manifest);
     // Ranking and judging (2644, 2645): `decisions.model` set and `mode`
     // not `off` is the same gate the intent/complexity question already
     // uses above. `apply` carries `mode = on` versus `shadow` -- shadow
@@ -526,13 +621,16 @@ pub(super) fn preflight_block(
         session: session.id,
         token: &token,
     };
-    let Some(judged) = crate::helpers::preflight_judged(
-        &brief,
-        crate::helpers::HelperRoute::new(model, effort),
-        helper_context,
-        rank,
-        judge,
-        |record| {
+    // A dissection is capped where it was measured right: output length is
+    // the lever on its latency, and past ~300 words it was both slower and
+    // malformed more often.
+    let route = crate::helpers::HelperRoute {
+        model,
+        effort,
+        cap: dissect.then_some(DISSECTION_CAP),
+    };
+    let Some(judged) =
+        crate::helpers::preflight_judged(&brief, route, helper_context, rank, judge, |record| {
             let Some(ui) = session.ui else {
                 return;
             };
@@ -546,8 +644,8 @@ pub(super) fn preflight_block(
                 .push(Message::text(Role::User, task));
             visible.notebook.preflight = Some(record.clone());
             ui.publish(&visible, &ServedBy::default(), tui::Activity::Searching);
-        },
-    ) else {
+        })
+    else {
         return none;
     };
     let record = judged.record;
@@ -575,7 +673,8 @@ pub(super) fn preflight_block(
             .into_iter()
             .map(|(path, _why, text)| (path, text))
             .collect();
-        crate::preflight::render_serving(
+        crate::preflight::render_brief(
+            brief_kind,
             task,
             &record.outcome.text,
             &served,
@@ -585,6 +684,8 @@ pub(super) fn preflight_block(
     });
     PreflightOutcome {
         block,
+        brief: Some(brief_kind),
+        would_dissect,
         scout_signal,
         would_scout,
     }

@@ -249,6 +249,32 @@ model reads, never a handle it holds. A confident enough, no answer in
 carries every answer as `{cell, enough, latency_ms, candidates,
 prefetched, would_prefetch}`. Off until measured, like §10.
 
+## 12. The kind question: effort and the Scout's brief (2026-09-23)
+
+The once-per-task half of enrichment, asked in the same request as the
+intent and complexity questions so it costs no second round trip: what
+kind of work is this -- `explore`, `fix`, `implement`, `question` or `run`
+(`decide::kind_question`)? At or above `0.7` confidence it acts twice, in
+`mode = on` only. First, `explore` and `question` lower the task's effort
+to `low` when the session's effort is `default` -- a level the person set
+always wins, and what the kind set is restored when the task ends
+(`session/system.rs::EffortLease`, restored on drop). Second, `explore`
+runs the Scout even with no other signal (`SIGNAL_DECIDED_EXPLORE`) and
+briefs it to **dissect** rather than to locate (`preflight::Brief::
+Dissection`): the request as at most four tasks, the files each needs
+first (at most three, with the line where each starts), the commands that
+would verify each, what the acting model must have in hand before it
+starts, and what not to read. The answer is capped at 640 tokens, because
+measured through the gateway on luna a dissection is right at ~300 words
+and ten seconds and longer ones were slower and more often malformed; its
+sections reach the system prompt under their own headings and the named
+files are served exactly as the span brief's are. `mode = shadow` records
+`effort.would_set` and `would_dissect` and changes nothing. Telemetry:
+`decisions.kind`, `decisions.effort {set, would_set}`,
+`decisions.scout_brief` and `would_dissect`. Not built: feeding the
+dissection's `## Needs` to the Ask step before the first cell -- the lines
+are in the prompt, and the model can `ask` on them itself.
+
 ## 9. The proposed mode (2639)
 
 `[decisions] mode_above` (default `0.85`, `0.5..=1.0`): at or above it, a

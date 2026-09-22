@@ -360,6 +360,15 @@ fn decision_answer_with_complexity(
                 "choice": complexity_choice,
                 "probabilities": {"trivial": 0.0, "routine": 0.0, "needs_exploration": 0.0},
                 "confidence": complexity_confidence,
+            },
+            // The kind question (2026-09-23) rides the same request; an
+            // inert answer here, under `KIND_ABOVE`, so every older test
+            // keeps its shape. `decision_answer_with_kind` overrides it.
+            "kind": {
+                "type": "choice",
+                "choice": "fix",
+                "probabilities": {"explore": 0.0, "fix": 0.5, "implement": 0.0, "question": 0.0, "run": 0.0},
+                "confidence": 0.5,
             }
         },
         "usage": {"input_tokens": 40, "output_tokens": 12},
@@ -394,6 +403,25 @@ fn enough_answer(noul: f64) -> Value {
         },
         "usage": {"input_tokens": 30, "output_tokens": 8},
     })
+}
+
+/// All three task-start answers, for a test that scripts the kind question
+/// (2026-09-23): intent and kind as given, complexity `routine` at 0.50.
+fn decision_answer_with_kind(
+    intent_choice: &str,
+    intent_confidence: f64,
+    kind_choice: &str,
+    kind_confidence: f64,
+) -> Value {
+    let mut value =
+        decision_answer_with_complexity(intent_choice, intent_confidence, "routine", 0.50);
+    value["answers"]["kind"] = json!({
+        "type": "choice",
+        "choice": kind_choice,
+        "probabilities": {"explore": 0.0, "fix": 0.0, "implement": 0.0, "question": 0.0, "run": 0.0},
+        "confidence": kind_confidence,
+    });
+    value
 }
 
 /// The first words of `supervisor.rs`'s prose preambles -- both the old
@@ -1065,8 +1093,13 @@ fn the_decision_request_carries_purpose_model_and_the_intent_question() {
     assert!(body["questions"]["intent"]["criteria"]["read_only"].is_string());
     assert_eq!(
         body["questions"].as_object().unwrap().len(),
-        2,
-        "one request, both questions: {body}"
+        3,
+        "one request, all three questions: {body}"
+    );
+    assert_eq!(body["questions"]["kind"]["type"], "choice");
+    assert!(
+        body["questions"]["kind"]["criteria"]["explore"].is_string(),
+        "{body}"
     );
     assert_eq!(body["questions"]["complexity"]["type"], "choice");
     assert!(
@@ -2336,6 +2369,97 @@ fn a_return_that_names_files_is_enriched_when_the_decision_model_says_it_is_not_
             label == "prefetch-shadow",
             "{label}: {prefetch}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// A confident `explore` kind (2026-09-23) lowers the task's effort to
+/// `low` when the person chose none, runs the Scout with the dissection
+/// brief even with no other signal, and the Scout's tasks, files and needs
+/// reach the system prompt. In `shadow` mode the same answer is recorded as
+/// what would have happened and nothing changes.
+#[test]
+fn an_explore_request_lowers_effort_and_briefs_the_scout_to_dissect() {
+    const DISSECTION: &str = "## Tasks\n1. Find the entry point — the command that starts the server is known\n2. Read the setup — every step scripts/setup.sh takes is listed\n\n## Files\nREADME.md:1 — task 1, the quick start\nscripts/setup.sh:1 — task 2, the setup script\n\n## Verify\nbash -n scripts/setup.sh\n\n## Needs\nwhich backend the person runs on\n\n## Skip\n(none found)\n";
+    for (label, config, acting) in [
+        ("kind-explore-on", DECISIONS_ON_WITH_PREFLIGHT, true),
+        (
+            "kind-explore-shadow",
+            DECISIONS_SHADOW_WITH_PREFLIGHT,
+            false,
+        ),
+    ] {
+        let root = root(label);
+        write_config(&root, config);
+        std::fs::write(root.join("README.md"), "# Demo\n").unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/setup.sh"), "#!/bin/sh\n").unwrap();
+        let mut cells = vec![cell("c1", "answer(\"done\");")];
+        if acting {
+            cells.insert(0, prose(DISSECTION));
+        }
+        let (endpoint, messages, _decisions, _headers) = providers(
+            cells,
+            vec![Decision::Answer(decision_answer_with_kind(
+                "read_only",
+                0.94,
+                "explore",
+                0.90,
+            ))],
+            vec![],
+        );
+        let result =
+            exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None).expect("the task finishes");
+        let messages = messages.lock().unwrap();
+        let telemetry = &result["telemetry"]["decisions"];
+        assert_eq!(
+            telemetry["kind"]["choice"], "explore",
+            "{label}: {telemetry}"
+        );
+        if acting {
+            assert_eq!(
+                messages.len(),
+                2,
+                "{label}: the Scout, then the task's own turn"
+            );
+            let scout = &messages[0];
+            assert!(
+                scout.contains("## Tasks") && scout.contains("under 300 words"),
+                "{label}: {scout}"
+            );
+            let turn = &messages[1];
+            assert!(
+                turn.contains("\"effort\":\"low\""),
+                "{label}: the turn carries low effort: {turn}"
+            );
+            assert!(
+                turn.contains("## Tasks") && turn.contains("1. Find the entry point"),
+                "{label}: {turn}"
+            );
+            assert!(
+                turn.contains("## Needs") && turn.contains("which backend"),
+                "{label}: {turn}"
+            );
+            assert!(turn.contains("scout (dissection)"), "{label}: {turn}");
+            assert_eq!(telemetry["effort"]["set"], "low", "{label}: {telemetry}");
+            assert_eq!(
+                telemetry["scout_brief"], "dissection",
+                "{label}: {telemetry}"
+            );
+        } else {
+            assert_eq!(messages.len(), 1, "{label}: no signal, no Scout, one turn");
+            assert!(
+                !messages[0].contains("\"effort\""),
+                "{label}: shadow sets nothing: {}",
+                messages[0]
+            );
+            assert_eq!(
+                telemetry["effort"]["would_set"], "low",
+                "{label}: {telemetry}"
+            );
+            assert_eq!(telemetry["would_dissect"], true, "{label}: {telemetry}");
+            assert!(telemetry["scout_brief"].is_null(), "{label}: {telemetry}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

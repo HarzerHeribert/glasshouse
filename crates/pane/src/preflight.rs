@@ -58,6 +58,71 @@ const RENDER_REQUEST_HEADING: &str = "## Request (verbatim, authoritative)";
 pub const DO_NOT_PERFORM: &str = "You are scouting for the model that will act. Do not attempt the task, do not \
      build, test or fix anything, and do not report on work you did not do.";
 
+/// The Scout's two briefs (2026-09-23): the span brief, which asks where
+/// things are, and the dissection brief, which asks what the request takes
+/// -- tasks, the files each needs first, how to verify each, and what the
+/// acting model must have before it starts. The decision model's `explore`
+/// answer picks the second (`decision-model.md` §12); measured on luna, the
+/// dissection is right at ~300 words and ten seconds, and longer answers
+/// were both slower and worse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Brief {
+    Spans,
+    Dissection,
+}
+
+impl Brief {
+    /// The brief's sections, by exact heading, with what each may hold.
+    #[must_use]
+    pub fn sections(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Brief::Spans => &SECTIONS,
+            Brief::Dissection => &DISSECTION_SECTIONS,
+        }
+    }
+
+    /// The name the scouting record and telemetry use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Brief::Spans => "spans",
+            Brief::Dissection => "dissection",
+        }
+    }
+}
+
+/// The dissection brief's sections (2026-09-23).
+const DISSECTION_SECTIONS: [(&str, &str); 5] = [
+    (
+        "## Tasks",
+        "the request dissected into at most four tasks, one per line as `N. <name> — what done looks like`, in the order to do them",
+    ),
+    (
+        "## Files",
+        "for each task the files to read first, at most three, as `path/to/file.rs:120 — task N, what is there`, a line you opened rather than one you inferred",
+    ),
+    (
+        "## Verify",
+        "the commands that would show each task done, one per line, only ones this environment can run",
+    ),
+    (
+        "## Needs",
+        "what the acting model must have in hand before it starts and cannot find in the files: a choice only the person can make, a value, an environment fact",
+    ),
+    (
+        "## Skip",
+        "paths deliberately not worth reading for this request, each with the reason",
+    ),
+];
+
+/// The dissection brief's own instruction, after [`DO_NOT_PERFORM`]: the
+/// measured lever on a dissection's latency and correctness is its length.
+pub const DISSECT: &str = "Dissect the request into the tasks it takes and what each needs first. Prefer few, \
+     decisive files over many, and keep the whole answer under 300 words.";
+
+/// The signal the decision model's `explore` answer adds (2026-09-23).
+pub const SIGNAL_DECIDED_EXPLORE: &str = "the decision model read the request as exploration";
+
 /// The five sections, by exact heading, with what each may hold.
 const SECTIONS: [(&str, &str); 5] = [
     (
@@ -182,8 +247,19 @@ pub fn signals_summary(decision: &Decision) -> String {
 /// available. [`DO_NOT_PERFORM`] is stated once.
 #[must_use]
 pub fn scouting_brief(task: &str, manifest: &Manifest) -> String {
+    scouting_brief_for(Brief::Spans, task, manifest)
+}
+
+/// [`scouting_brief`] for either brief: the dissection brief carries
+/// [`DISSECT`] after [`DO_NOT_PERFORM`] and asks for its own five sections.
+#[must_use]
+pub fn scouting_brief_for(kind: Brief, task: &str, manifest: &Manifest) -> String {
     let mut brief = String::new();
     brief.push_str(DO_NOT_PERFORM);
+    if kind == Brief::Dissection {
+        brief.push(' ');
+        brief.push_str(DISSECT);
+    }
     brief.push_str("\n\n");
     brief.push_str(REQUEST_HEADING);
     brief.push('\n');
@@ -195,7 +271,7 @@ pub fn scouting_brief(task: &str, manifest: &Manifest) -> String {
          have nothing for. A span is `path/to/file.rs:120` followed by one short sentence in the \
          file's own words. Never list candidates you rejected and never pose a question back.\n",
     );
-    for (heading, holds) in SECTIONS {
+    for (heading, holds) in kind.sections() {
         brief.push('\n');
         brief.push_str(heading);
         brief.push('\n');
@@ -257,7 +333,21 @@ pub fn render_serving(
     unserved: &[(String, String)],
     ranking: Option<&str>,
 ) -> String {
-    let sections = sections_of(report);
+    render_brief(Brief::Spans, task, report, served, unserved, ranking)
+}
+
+/// [`render_serving`] for either brief: the report is read by that brief's
+/// own headings and the record names which brief it was.
+#[must_use]
+pub fn render_brief(
+    kind: Brief,
+    task: &str,
+    report: &str,
+    served: &[(String, String)],
+    unserved: &[(String, String)],
+    ranking: Option<&str>,
+) -> String {
+    let sections = sections_of(kind, report);
     let mut block = String::from("\n\n");
     block.push_str(RENDER_REQUEST_HEADING);
     block.push('\n');
@@ -309,8 +399,9 @@ pub fn render_serving(
         block.push('\n');
     }
     block.push_str(&format!(
-        "## Scouting record\nscout · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full{}{}\n",
-        SECTIONS.len(),
+        "## Scouting record\nscout ({}) · {answered} of {} sections answered · {kept} lines carried · {cut} cut · {} spans named · {} served in full{}{}\n",
+        kind.as_str(),
+        kind.sections().len(),
         spans(report).len(),
         served.len(),
         if unserved.is_empty() {
@@ -385,15 +476,16 @@ fn span(line: &str) -> Option<(String, String)> {
 /// The five sections in [`SECTIONS`] order, each with its non-empty lines;
 /// a heading the report lacks is present and empty. Text before the first
 /// recognised heading belongs to no section and is not carried.
-fn sections_of(report: &str) -> Vec<(&'static str, Vec<String>)> {
-    let mut sections: Vec<(&'static str, Vec<String>)> = SECTIONS
+fn sections_of(kind: Brief, report: &str) -> Vec<(&'static str, Vec<String>)> {
+    let mut sections: Vec<(&'static str, Vec<String>)> = kind
+        .sections()
         .iter()
         .map(|(heading, _)| (*heading, Vec::new()))
         .collect();
     let mut current: Option<usize> = None;
     for raw in report.lines() {
         let line = raw.trim();
-        if let Some(index) = heading_index(line) {
+        if let Some(index) = heading_index(kind, line) {
             current = Some(index);
             continue;
         }
@@ -409,12 +501,12 @@ fn sections_of(report: &str) -> Vec<(&'static str, Vec<String>)> {
 
 /// Which of the five headings this line is, tolerating `#` depth, a trailing
 /// colon and case.
-fn heading_index(line: &str) -> Option<usize> {
+fn heading_index(kind: Brief, line: &str) -> Option<usize> {
     let bare = line.trim_start_matches('#').trim().trim_end_matches(':');
     if bare.len() == line.len() {
         return None;
     }
-    SECTIONS
+    kind.sections()
         .iter()
         .position(|(heading, _)| heading.trim_start_matches("## ").eq_ignore_ascii_case(bare))
 }
@@ -506,10 +598,12 @@ mod tests {
 
     #[test]
     fn a_heading_is_recognised_at_any_depth_and_case() {
-        assert_eq!(heading_index("## Files"), Some(1));
-        assert_eq!(heading_index("### files:"), Some(1));
-        assert_eq!(heading_index("Files"), None);
-        assert_eq!(heading_index("## Reading"), None);
+        assert_eq!(heading_index(Brief::Spans, "## Files"), Some(1));
+        assert_eq!(heading_index(Brief::Spans, "### files:"), Some(1));
+        assert_eq!(heading_index(Brief::Spans, "Files"), None);
+        assert_eq!(heading_index(Brief::Spans, "## Reading"), None);
+        assert_eq!(heading_index(Brief::Dissection, "## Needs"), Some(3));
+        assert_eq!(heading_index(Brief::Dissection, "## Files"), Some(1));
     }
 
     #[test]
