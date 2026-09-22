@@ -144,6 +144,27 @@ impl TerminalInput {
         !self.ready.is_empty()
     }
 
+    /// Whether another **keystroke** is already waiting — which is not the
+    /// same question as whether another console *record* is.
+    ///
+    /// Asking `event::poll(ZERO)` directly is the wrong question on Windows,
+    /// where crossterm emits a `KeyEventKind::Release` record after every
+    /// press: a poll immediately after a key was read is answered by that
+    /// key's own release and says "more input is waiting" when the person has
+    /// stopped typing. This drains whatever the terminal already holds into
+    /// the resolved queue first — where [`Self::accept`] drops releases and
+    /// reassembles runs — and then reports what actually survived.
+    ///
+    /// It cannot spin: each turn either resolves an event, which ends the
+    /// loop, or consumes one the terminal already had, and the poll is for
+    /// zero duration, so it stops as soon as the terminal is empty.
+    pub(super) fn typing_waiting(&mut self) -> io::Result<bool> {
+        while !self.queued() && event::poll(Duration::ZERO)? {
+            self.accept(event::read()?);
+        }
+        Ok(self.queued())
+    }
+
     /// Read one logical event, or `None` when the bytes read so far belong to
     /// a report that is not finished. The caller loops on `None`.
     pub(super) fn read(&mut self) -> io::Result<Option<Event>> {
@@ -242,16 +263,25 @@ impl TerminalInput {
     /// Offer one event to the state machine. Everything it resolves is pushed
     /// to `ready`, in order; anything still ambiguous stays in `hold`.
     fn accept(&mut self, event: Event) {
-        // A key release carries no character, so it can neither extend a run
-        // nor end one, and an open run steps over it. Windows is why this is
-        // load-bearing: crossterm's console event source maps every
-        // `bKeyDown == false` record straight to `KeyEventKind::Release`, so
-        // one arrives between every two characters of a report there, and
-        // treating it as "not a report character" released the whole run into
-        // the composer — `[<0;10;5M[<0;10;5m` typed on screen. The caller
-        // discards releases anyway (`ui.rs`'s `Event::Key` arm), so dropping
-        // the ones that fall inside a run costs it nothing.
-        if is_key_release(&event) && matches!(self.hold, Hold::Open { .. } | Hold::Pasting { .. }) {
+        // **A key release is dropped here and never reaches a caller.** It
+        // carries no character, so it can neither extend a run nor end one,
+        // and every consumer in this crate discards it on arrival anyway --
+        // `ui.rs`'s `Event::Key` arm, `workbench::input`, `settings_ui::key`.
+        //
+        // Windows is why this is load-bearing, twice. crossterm's console
+        // event source maps every `bKeyDown == false` record straight to
+        // `KeyEventKind::Release`, so one arrives between every two
+        // characters of a report there: treating it as "not a report
+        // character" released the whole run into the composer, and
+        // `[<0;10;5M[<0;10;5m` was typed on screen. That was fixed by
+        // stepping over a release inside an open run. What the narrower fix
+        // left behind is that a release still sat in the queue between two
+        // presses, and code downstream that asks "is more input already
+        // waiting?" was answered yes by a key nobody pressed -- which is how
+        // Enter stopped sending on Windows entirely. Dropping the release at
+        // the source makes "something is waiting" mean "someone typed
+        // something", which is what every caller of it meant.
+        if is_key_release(&event) {
             return;
         }
         // Taken **once**: a second `take` would replace the state this one
@@ -587,9 +617,10 @@ mod tests {
         seen
     }
 
-    /// What the composer would be left holding. A key *release* is not typing
-    /// and never reaches the editor — `ui.rs`'s `Event::Key` arm drops one —
-    /// so this filters them exactly as the caller does.
+    /// What the composer would be left holding. The release filter is belt
+    /// and braces: [`TerminalInput::accept`] drops a key release outright, so
+    /// one reaching here would already be the defect
+    /// `a_key_release_is_never_delivered` names.
     fn typed(events: &[Event]) -> String {
         events
             .iter()
@@ -930,13 +961,10 @@ mod tests {
         let mut stream = german_console_report("[200~");
         stream.extend(chars("ab"));
         stream.extend(german_console_report("[201~"));
-        // The marker's last release follows the paste, and the caller drops
-        // releases — exactly as the report shapes are asserted.
-        let seen: Vec<Event> = drive_on(true, &stream, &[])
-            .into_iter()
-            .filter(|event| !is_key_release(event))
-            .collect();
-        assert_eq!(seen, vec![Event::Paste("ab".into())]);
+        assert_eq!(
+            drive_on(true, &stream, &[]),
+            vec![Event::Paste("ab".into())]
+        );
     }
 
     /// **The report the Windows cell watched being typed into the composer.**
@@ -971,6 +999,53 @@ mod tests {
                     "{tail} split after {split}"
                 );
             }
+        }
+    }
+
+    /// **A key release never leaves this file — and an unsent Enter is what
+    /// it costs when one does.**
+    ///
+    /// Nothing downstream reads a release: `ui.rs`, `workbench::input` and
+    /// `settings_ui::key` each drop one on arrival. What a queued release
+    /// does instead is answer a question asked of the queue, and `ui.rs` asks
+    /// one on every Enter — "is more input already behind this?", whose yes
+    /// turns the Enter into a newline. On Windows crossterm emits a release
+    /// after every press, so that question was answered yes by the Enter's
+    /// own release, every Enter became a newline, and nothing typed on that
+    /// platform was ever sent. The whole `tui_live` target was red on the
+    /// Windows cell for it.
+    ///
+    /// Driven with the console's own stream shape rather than on the one
+    /// runner that produces it, like the report shapes above.
+    #[test]
+    fn a_key_release_is_never_delivered() {
+        let pressed = |code| {
+            Event::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            ))
+        };
+        let released = |code| {
+            Event::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ))
+        };
+        for reassembles_pastes in [true, false] {
+            let stream = vec![
+                pressed(KeyCode::Char('h')),
+                released(KeyCode::Char('h')),
+                pressed(KeyCode::Enter),
+                released(KeyCode::Enter),
+            ];
+            let seen = drive_on(reassembles_pastes, &stream, &[]);
+            assert_eq!(
+                seen,
+                vec![pressed(KeyCode::Char('h')), pressed(KeyCode::Enter)],
+                "a release survived the resolver (paste reassembly: {reassembles_pastes})"
+            );
         }
     }
 

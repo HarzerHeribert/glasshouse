@@ -1811,9 +1811,18 @@ fn run(
                 // it whole -- so this is the unbracketed path alone, and
                 // `ALT` is the modifier the editor already reads as "insert
                 // a newline", so the behaviour is one the composer has.
+                //
+                // **"Already behind it" means a keystroke, not a console
+                // record**, and asking the terminal directly got that wrong
+                // on Windows: crossterm emits a release record after every
+                // press, so a poll taken the instant Enter was read is
+                // answered by Enter's own release, every Enter became a
+                // newline, and nothing a Windows user typed was ever sent.
+                // It cost the whole `tui_live` target on that cell.
+                // `typing_waiting` asks the resolved queue instead.
                 let key = if key.code == KeyCode::Enter
                     && key.modifiers.is_empty()
-                    && (input.queued() || event::poll(Duration::ZERO)?)
+                    && input.typing_waiting()?
                 {
                     KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
                 } else {
