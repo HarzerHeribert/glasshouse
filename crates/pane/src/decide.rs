@@ -231,21 +231,25 @@ pub fn decide(
 
     let parsed: ResponseBody = serde_json::from_str(&text)
         .map_err(|error| DecideError::Parse(truncate(&error.to_string())))?;
-    let decisions = questions
+    // A question the model left unanswered costs that answer only: each
+    // caller names the answers it cannot do without (a newer question, such
+    // as `kind`, must never take the older ones down with it).
+    let decisions: Vec<Decision> = questions
         .iter()
-        .map(|(key, _)| {
-            let raw = parsed
-                .answers
-                .get(key)
-                .cloned()
-                .ok_or_else(|| DecideError::Parse(format!("missing answer for `{key}`")))?;
-            Ok(Decision {
+        .filter_map(|(key, _)| {
+            let raw = parsed.answers.get(key).cloned()?;
+            Some(Decision {
                 key: key.clone(),
                 answer: Answer::from(raw),
                 latency_ms,
             })
         })
-        .collect::<Result<Vec<_>, DecideError>>()?;
+        .collect();
+    if decisions.is_empty() {
+        return Err(DecideError::Parse(
+            "the response answered no question".to_string(),
+        ));
+    }
 
     Ok(Answers {
         model: parsed.model,

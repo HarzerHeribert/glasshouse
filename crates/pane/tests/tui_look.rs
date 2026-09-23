@@ -305,8 +305,9 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
     // The workbench added `/diff`, `/activity` and `/subagents`; the
     // discovery pass added `/tool`, `/login` and `/mouse`, which worked and
     // were in no list, and removed a second `/config` that had been listed
-    // twice with two different descriptions.
-    assert_eq!(slash_matches("/").len(), 34);
+    // twice with two different descriptions. `/usage` (2026-09-23) shows
+    // each subscription's limits.
+    assert_eq!(slash_matches("/").len(), 35);
     let offered = slash_matches("/");
     let mut unique: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
     unique.sort_unstable();

@@ -303,7 +303,9 @@ fn candidate_paths(text: &str, profile: &Profile, table: &str) -> Vec<(String, P
         }
         let relative = resolved
             .strip_prefix(root)
-            .map(|p| p.to_string_lossy().into_owned())
+            // One spelling on every platform: the model and `read()` both
+            // name project paths with `/`.
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| token.to_string());
         if table.contains(&relative) || table.contains(token) {
             continue;
