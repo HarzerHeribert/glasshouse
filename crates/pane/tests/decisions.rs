@@ -1116,6 +1116,9 @@ const DECISIONS_ON_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\n
 const DECISIONS_SHADOW_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"shadow\"\n\
      [helpers]\nmodel = \"helper-tier\"\npreflight = true\nacceptance_list = false\n";
 
+const DECISIONS_ON_WITH_HELPERS: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
+     [helpers]\nmodel = \"helper-tier\"\nacceptance_list = false\n";
+
 /// A harmless scout answer: five headings, each `(none found)` -- content
 /// does not matter to these tests, only that the scout was asked at all.
 fn scout_prose() -> Value {
@@ -2382,7 +2385,10 @@ fn a_return_that_names_files_is_enriched_when_the_decision_model_says_it_is_not_
 fn an_explore_request_lowers_effort_and_briefs_the_scout_to_dissect() {
     const DISSECTION: &str = "## Tasks\n1. Find the entry point — the command that starts the server is known\n2. Read the setup — every step scripts/setup.sh takes is listed\n\n## Files\nREADME.md:1 — task 1, the quick start\nscripts/setup.sh:1 — task 2, the setup script\n\n## Verify\nbash -n scripts/setup.sh\n\n## Needs\nwhich backend the person runs on\n\n## Skip\n(none found)\n";
     for (label, config, acting) in [
-        ("kind-explore-on", DECISIONS_ON_WITH_PREFLIGHT, true),
+        // No `preflight = true`: a confident explore runs the dissection on
+        // its own -- the A/B of 2026-09-23 ran three arms with the Scout
+        // silently off because this arm set it.
+        ("kind-explore-on", DECISIONS_ON_WITH_HELPERS, true),
         (
             "kind-explore-shadow",
             DECISIONS_SHADOW_WITH_PREFLIGHT,

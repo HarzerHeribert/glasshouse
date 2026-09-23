@@ -526,10 +526,19 @@ pub(super) fn preflight_block(
     decision: Option<&crate::decide::TaskDecision>,
 ) -> PreflightOutcome {
     let helpers = session.config().helpers.clone();
-    if !helpers.enabled || !helpers.preflight || !request_may_need_the_repository(task) {
+    let decisions = session.config().decisions.clone();
+    // The kind (2026-09-23): a confident `explore` briefs the Scout to
+    // dissect the request and is itself a reason to run it -- with or
+    // without `[helpers] preflight`, which opts in the span Scout only: the
+    // dissection is what `mode = "on"` asked for when it read exploration.
+    let explore = decision
+        .and_then(crate::decide::TaskDecision::confident_kind)
+        .is_some_and(|kind| kind == crate::decide::KIND_EXPLORE);
+    let dissect = explore && decisions.mode == crate::config::DecisionMode::On;
+    if !helpers.enabled || !(helpers.preflight || dissect) || !request_may_need_the_repository(task)
+    {
         return PreflightOutcome::NONE;
     }
-    let decisions = session.config().decisions.clone();
     let complexity = decision.map(|decision| &decision.complexity);
     let clears_scout_above = complexity.is_some_and(|complexity| {
         complexity.choice == crate::decide::NEEDS_EXPLORATION
@@ -541,12 +550,6 @@ pub(super) fn preflight_block(
     } else {
         None
     };
-    // The kind (2026-09-23): a confident `explore` briefs the Scout to
-    // dissect the request and is itself a reason to run it.
-    let explore = decision
-        .and_then(crate::decide::TaskDecision::confident_kind)
-        .is_some_and(|kind| kind == crate::decide::KIND_EXPLORE);
-    let dissect = explore && decisions.mode == crate::config::DecisionMode::On;
     let would_dissect = explore && decisions.mode == crate::config::DecisionMode::Shadow;
     let brief_kind = if dissect {
         crate::preflight::Brief::Dissection
