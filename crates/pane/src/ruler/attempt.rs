@@ -182,7 +182,10 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 8] = [
     FeedbackArm {
         name: "scout",
         mode: "shadow",
-        helpers: &["preflight = true"],
+        // `always`: under `auto` the span Scout runs only for a request
+        // carrying an uncertainty signal, and the first run of this arm
+        // (2026-09-23) never ran it at all.
+        helpers: &["preflight = true", "preflight_scope = \"always\""],
     },
     FeedbackArm {
         name: "dissect",
