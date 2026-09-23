@@ -776,6 +776,24 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "limits.keep_results",
+        label: "Keep results",
+        description: "Keep this many of the newest cell results whole and collapse older ones to one line (their values stay bound). 0 keeps all.",
+        kind: Kind::Integer,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "limits.instructions_outline",
+        label: "Outline long instructions",
+        description: "Show an instruction document over 8 KB as its headings and lines; the model reads a section when its task reaches it.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "web.enabled",
         label: "Web broker",
         description: "The host-owned web broker. This grants no network access to shells or tools.",
@@ -1196,6 +1214,10 @@ pub fn shown_default(key: &str) -> Option<String> {
         "modes.explore.writable" => ".pane/scratch/**".into(),
         "modes.explore.commands" => "none".into(),
         "limits.evidence_gate" => crate::config::Limits::default().evidence_gate.to_string(),
+        "limits.keep_results" => crate::config::Limits::default().keep_results.to_string(),
+        "limits.instructions_outline" => crate::config::Limits::default()
+            .instructions_outline
+            .to_string(),
         "helpers.completion_check" => helpers.completion_check.to_string(),
         "helpers.acceptance_list" => helpers.acceptance_list.to_string(),
         "helpers.preflight_scope" => "auto".into(),
