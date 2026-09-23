@@ -167,6 +167,16 @@ enum SubscriptionsCommand {
         #[arg(long, value_name = "NAME")]
         entitlement: String,
     },
+    /// How much of each subscription's limits is used: the plan, and every
+    /// window the provider enforces with its reset time.
+    Usage {
+        /// Only this `[accounts.<name>]` table.
+        #[arg(long, value_name = "NAME")]
+        entitlement: Option<String>,
+        /// One JSON document instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
     /// Use one account's saved login once: start its broker, read its
     /// catalogue and send one small completion. Exit 0 only if it answered.
     Verify {
@@ -298,6 +308,12 @@ fn run() -> Result<()> {
         Command::Subscriptions {
             command: SubscriptionsCommand::AdoptBinary { path },
         } => adopt_binary(&data_dir(&cli)?, path),
+        Command::Subscriptions {
+            command: SubscriptionsCommand::Usage { entitlement, json },
+        } => {
+            let config = load_config(&cli)?;
+            subscription_usage(&config, &data_dir(&cli)?, entitlement.as_deref(), *json)
+        }
         Command::Subscriptions {
             command: SubscriptionsCommand::Verify { entitlement },
         } => {
@@ -790,6 +806,71 @@ fn refresh_catalogues(config: &GatewayConfig, data_dir: &Path, cache: &ModelCach
             eprintln!("account `{name}`: its catalogue could not be cached: {error}");
         }
     }
+}
+
+/// `subscriptions usage`: every subscription account (or one), read from the
+/// provider's usage endpoint with its saved login.
+fn subscription_usage(
+    config: &GatewayConfig,
+    data_dir: &Path,
+    only: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    use inference_gateway::provider::subscription_usage;
+    let mut usages = Vec::new();
+    for (name, entry) in &config.accounts {
+        if entry.subscription_broker().is_none() || only.is_some_and(|only| only != name) {
+            continue;
+        }
+        usages.extend(subscription_usage::read_all(
+            name,
+            &config::broker_auth_dir(data_dir, name),
+        ));
+    }
+    if let Some(only) = only
+        && usages.is_empty()
+    {
+        bail!("no subscription account `{only}` in the gateway configuration");
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "schema_version": 1, "accounts": usages }))?
+        );
+        return Ok(());
+    }
+    for usage in &usages {
+        let who = [usage.plan.as_deref(), usage.email.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{}{}",
+            usage.account,
+            if who.is_empty() {
+                String::new()
+            } else {
+                format!(" ({who})")
+            }
+        );
+        if let Some(error) = &usage.error {
+            println!("  {error}");
+        }
+        for window in &usage.windows {
+            println!(
+                "  {:<14} {:>5.1}% used{}",
+                window.name,
+                window.used_percent,
+                window
+                    .resets_at
+                    .as_deref()
+                    .map(|at| format!(", resets {at}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Proves a fresh login by using it: the account's broker is started, its

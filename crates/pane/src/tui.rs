@@ -733,6 +733,7 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     BuiltIn::Models => "browse models by agent, provider or intelligence",
                     BuiltIn::Entitlements => "inspect available entitlements",
                     BuiltIn::Login => "connect a subscription account",
+                    BuiltIn::Usage => "how much of each subscription's limits is used",
                     BuiltIn::Handles => "inspect runtime handles",
                     BuiltIn::Supervisor => "inspect supervisor settings",
                     BuiltIn::Rollback => "roll back to a checkpoint",

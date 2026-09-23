@@ -22,6 +22,7 @@ pub mod discovery;
 pub mod fixture;
 pub mod quota;
 pub mod registry;
+pub mod subscription_usage;
 pub mod telemetry;
 
 use crate::routing::wire::{Declared, WireProtocol};

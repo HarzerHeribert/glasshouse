@@ -969,6 +969,15 @@ pub(super) fn command(
             models(session);
         }
         "login" => login(session, argument),
+        "usage" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+            show(
+                session,
+                super::usage::panel(super::usage::read(session).as_ref(), now),
+            );
+        }
         "key" => key(session, argument),
         _ => return false,
     }

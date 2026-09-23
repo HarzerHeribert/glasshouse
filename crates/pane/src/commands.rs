@@ -14,13 +14,14 @@ use crate::contract::ProjectConfig;
 /// in no list, so the `/` menu never offered it and it read as a command pane
 /// did not have. Being absent from a menu is how a command that works comes
 /// to look broken.
-pub const BUILT_INS: [BuiltIn; 10] = [
+pub const BUILT_INS: [BuiltIn; 11] = [
     BuiltIn::Model,
     BuiltIn::Models,
     // `login` was the same defect as `exit` one line down, and outlasted its
     // fix: the variant existed and the key handler answered it, and it was
     // in no list, so the `/` menu never offered a way to connect an account.
     BuiltIn::Login,
+    BuiltIn::Usage,
     BuiltIn::Entitlements,
     BuiltIn::Handles,
     BuiltIn::Supervisor,
@@ -35,6 +36,8 @@ pub enum BuiltIn {
     Model,
     Models,
     Login,
+    /// What each subscription has used of its limits (`session/usage.rs`).
+    Usage,
     Entitlements,
     Handles,
     Supervisor,
@@ -54,6 +57,7 @@ impl BuiltIn {
             BuiltIn::Model => "model",
             BuiltIn::Models => "models",
             BuiltIn::Login => "login",
+            BuiltIn::Usage => "usage",
             BuiltIn::Entitlements => "entitlements",
             BuiltIn::Handles => "handles",
             BuiltIn::Supervisor => "supervisor",
