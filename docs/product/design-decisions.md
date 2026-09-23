@@ -5678,3 +5678,20 @@ upstream's releases pinned by checksum (`release/cliproxyapi.toml`,
 side** — subscriptions and API keys — so the person chooses per account and
 per model. Jev and free models are API accounts and were never in question.
 The Gemini subscription stays excluded (2026-09-17, above).
+
+## Memory: Pane writes, Glasshouse reads — the user, 2026-09-23
+
+What a session learns is judged, so it is written by the one component with
+a model in the loop: **Pane**. Pane keeps a bounded, dated, human-readable
+file in the project (`.pane/learned.md` or its successor), uses it from the
+next task on, and never waits on anyone to do so (suggestions to promote a
+line into the person's AGENTS.md are queued, never blocking — memory
+`suggestions-never-block`). **Glasshouse is deterministic**: it indexes,
+searches, ages, de-duplicates and shows memory files — Pane's and other
+harnesses' (CLAUDE.md, AGENTS.md) — across sessions and projects, and
+generates no text. **The contract between them is the file format**, not a
+shared database and not an API: either runs without the other. Glasshouse's
+model-based extraction (Phase 21, `crates/glasshouse/src/memory/extract/`)
+moves into Pane (option A of three; B retire, C fence it, were declined).
+Open: whether semantic search's embeddings count as inference under this
+boundary.
