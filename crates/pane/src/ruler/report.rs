@@ -37,7 +37,7 @@ pub const HEADERS: [&str; 9] = [
 /// attempt never reached its test) -- `Attempt` carries no separate exit code.
 /// `interface` and `metrics` are a `pane:<mode>` ablation arm's mode and its
 /// own telemetry figures, `null` on every other row.
-pub const JSONL_KEYS: [&str; 17] = [
+pub const JSONL_KEYS: [&str; 18] = [
     "task",
     "harness",
     "commit",
@@ -55,6 +55,7 @@ pub const JSONL_KEYS: [&str; 17] = [
     "metrics",
     "decisions_mode",
     "decisions_figures",
+    "rubric",
 ];
 
 /// The decisions table's columns, in order; rendered only when some attempt
@@ -330,7 +331,7 @@ pub fn render_jsonl(attempts: &[Attempt]) -> String {
 
 fn render_jsonl_line(attempt: &Attempt) -> String {
     format!(
-        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"cells\":{cells},\"calls\":{calls},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics},\"decisions_mode\":{decisions_mode},\"decisions_figures\":{decisions_figures}}}",
+        "{{\"task\":{task},\"harness\":{harness},\"commit\":{commit},\"attempt\":{attempt_num},\"outcome\":{outcome},\"tokens_input\":{tokens_input},\"tokens_output\":{tokens_output},\"tokens_cached_input\":{tokens_cached},\"wall_ms\":{wall_ms},\"turns\":{turns},\"cells\":{cells},\"calls\":{calls},\"exit_status\":{exit_status},\"interface\":{interface},\"metrics\":{metrics},\"decisions_mode\":{decisions_mode},\"decisions_figures\":{decisions_figures},\"rubric\":{rubric}}}",
         task = json_str(attempt.task),
         harness = json_str(attempt.harness.as_str()),
         commit = json_str(&attempt.base_commit),
@@ -360,7 +361,93 @@ fn render_jsonl_line(attempt: &Attempt) -> String {
             .decision_figures
             .as_ref()
             .map_or("null".to_string(), render_decision_figures),
+        rubric = attempt.rubric.as_ref().map_or("null".to_string(), |score| {
+            format!(
+                "{{\"found\":[{}],\"total\":{}}}",
+                score
+                    .found
+                    .iter()
+                    .map(|name| json_str(name))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                score.total
+            )
+        }),
     )
+}
+
+/// The rubric tasks' A/B table: one row per (task, harness) with the mean
+/// facts stated, how many attempts passed, and the mean wall-clock, cells
+/// and parent and helper tokens -- what a context-handling arm is judged
+/// by. Empty when no attempt carried a rubric score.
+pub fn render_rubric_table(attempts: &[Attempt]) -> String {
+    let mut keys: Vec<(&str, &str)> = Vec::new();
+    for attempt in attempts.iter().filter(|a| a.rubric.is_some()) {
+        let key = (attempt.task, attempt.harness.as_str());
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    if keys.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\ntask | harness | facts | passed | wall | cells | parent tokens | helper tokens\n",
+    );
+    for (task, harness) in keys {
+        let rows: Vec<&Attempt> = attempts
+            .iter()
+            .filter(|a| a.task == task && a.harness.as_str() == harness)
+            .collect();
+        let scored: Vec<&Attempt> = rows
+            .iter()
+            .copied()
+            .filter(|a| a.rubric.is_some())
+            .collect();
+        let total = scored
+            .first()
+            .and_then(|a| a.rubric.as_ref())
+            .map_or(0, |score| score.total);
+        let mean = |values: Vec<f64>| -> String {
+            if values.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{:.1}", values.iter().sum::<f64>() / values.len() as f64)
+            }
+        };
+        let facts = mean(
+            scored
+                .iter()
+                .filter_map(|a| a.rubric.as_ref().map(|score| f64::from(score.count())))
+                .collect(),
+        );
+        let passed = rows.iter().filter(|a| a.outcome.completed()).count();
+        let wall = mean(rows.iter().map(|a| a.wall_clock.as_secs_f64()).collect());
+        let cells = mean(
+            rows.iter()
+                .filter_map(|a| a.program.map(|p| f64::from(p.cells)))
+                .collect(),
+        );
+        let parent = mean(
+            rows.iter()
+                .filter_map(|a| a.metrics.as_ref().and_then(|m| m.parent_known_tokens))
+                .map(|n| n as f64)
+                .collect(),
+        );
+        let helper = mean(
+            rows.iter()
+                .filter_map(|a| a.metrics.as_ref().and_then(|m| m.helper_known_tokens))
+                .map(|n| n as f64)
+                .collect(),
+        );
+        writeln!(
+            out,
+            "{task} | {harness} | {facts}/{total} | {passed}/{} | {wall}s | {cells} | {parent} | {helper}",
+            rows.len()
+        )
+        .expect("String write is infallible");
+    }
+    out
 }
 
 /// The decision figures under stable keys; an absent figure is `null`.

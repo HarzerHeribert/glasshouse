@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::decisions::DecisionFigures;
 use super::interface::{self, Metrics};
 use super::meter::Meter;
-use super::model::{Attempt, Harness, Outcome, Program, Task, Tokens};
+use super::model::{Attempt, Harness, Outcome, Program, RubricScore, Task, Tokens};
 
 /// Serializes every attempt's harness-launch-through-meter-read span,
 /// process-wide.
@@ -86,6 +86,9 @@ pub struct HarnessCommand {
 pub struct DecisionsArm {
     pub model: Option<String>,
     pub mode: String,
+    /// `[helpers]` switches the arm turns on, each a key set to `true`
+    /// (`reduce_returns`, `prefetch_returns`); empty for a decisions arm.
+    pub helpers: &'static [&'static str],
 }
 
 impl HarnessCommand {
@@ -128,9 +131,71 @@ impl HarnessCommand {
             decisions: Some(DecisionsArm {
                 model: model.map(str::to_string),
                 mode: mode.to_string(),
+                helpers: &[],
             }),
         }
     }
+
+    /// The `pane` row expanded into one `pane:feedback-<arm>` arm: a
+    /// decisions arm whose `.pane/config.toml` also turns on the `[helpers]`
+    /// switches `arm` names ([`FEEDBACK_ARMS`]).
+    pub fn pane_feedback_arm(
+        pane: &HarnessCommand,
+        model: &str,
+        arm: &FeedbackArm,
+    ) -> HarnessCommand {
+        let mut command = Self::pane_decisions_arm(pane, Some(model), arm.mode);
+        if let Some(decisions) = command.decisions.as_mut() {
+            decisions.helpers = arm.helpers;
+        }
+        command
+    }
+}
+
+/// One `--pane-feedback` arm: the decision mode and the `[helpers]`
+/// switches it runs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedbackArm {
+    pub name: &'static str,
+    pub mode: &'static str,
+    pub helpers: &'static [&'static str],
+}
+
+/// The context-handling arms (2026-09-23): `shadow` asks every question and
+/// acts on none, the baseline; `dissect` acts on the request's kind (effort
+/// and the Scout's dissection); `reduce` and `prefetch` add one return-side
+/// switch each; `all` turns everything on.
+pub const FEEDBACK_ARMS: [FeedbackArm; 5] = [
+    FeedbackArm {
+        name: "shadow",
+        mode: "shadow",
+        helpers: &[],
+    },
+    FeedbackArm {
+        name: "dissect",
+        mode: "on",
+        helpers: &[],
+    },
+    FeedbackArm {
+        name: "reduce",
+        mode: "on",
+        helpers: &["reduce_returns"],
+    },
+    FeedbackArm {
+        name: "prefetch",
+        mode: "on",
+        helpers: &["prefetch_returns"],
+    },
+    FeedbackArm {
+        name: "all",
+        mode: "on",
+        helpers: &["reduce_returns", "prefetch_returns"],
+    },
+];
+
+/// The `--harness` row name of the `pane` row's `feedback-<arm>` arm.
+pub fn feedback_arm_name(arm: &str) -> String {
+    format!("pane:feedback-{arm}")
 }
 
 /// The `--harness` row name of the `pane` row's `<mode>` arm.
@@ -249,6 +314,10 @@ pub struct RunOpts {
     /// exit is `Errored` rather than scored. This stays an `Option` because
     /// the other rows carry their own configuration.
     pub parent_model: Option<String>,
+    /// The helper model every `pane` row's session runs its Scout, lister
+    /// and checker with, written as `[helpers] model`; `None` leaves the
+    /// helpers without a model, so none of them runs.
+    pub helpers_model: Option<String>,
 }
 
 /// Runs one attempt of `task` by `harness` and returns its record.
@@ -275,9 +344,10 @@ pub fn run_one(task: &Task, harness: &Harness, attempt_no: u32, opts: &RunOpts) 
         metrics: None,
         decisions_mode: None,
         decision_figures: None,
+        rubric: None,
     };
 
-    if task.test.is_empty() || scratch_inside_checkout(&opts.scratch) {
+    if (task.test.is_empty() && task.rubric.is_empty()) || scratch_inside_checkout(&opts.scratch) {
         return errored();
     }
 
@@ -342,6 +412,7 @@ fn run_attempt_in(
             metrics,
             decisions_mode: decisions_mode.clone(),
             decision_figures,
+            rubric: None,
         };
 
     let Some(command) = opts.harnesses.get(harness.as_str()) else {
@@ -356,11 +427,11 @@ fn run_attempt_in(
         );
     };
 
+    let pane_row = is_pane_row(harness.as_str());
     if let Err(_message) = write_pane_config(
         dir,
-        is_pane_row(harness.as_str())
-            .then_some(opts.parent_model.as_deref())
-            .flatten(),
+        pane_row.then_some(opts.parent_model.as_deref()).flatten(),
+        pane_row.then_some(opts.helpers_model.as_deref()).flatten(),
         command.decisions.as_ref(),
     ) {
         return finish(
@@ -424,8 +495,10 @@ fn run_attempt_in(
     if let Some(gateway) = &opts.gateway {
         launch.env("ANTHROPIC_BASE_URL", gateway);
     }
-    let result_file = (command.interface.is_some() || command.decisions.is_some())
-        .then(|| dir.join(interface::RESULT_FILE));
+    // A rubric task is judged by the answer, so its stdout is always kept.
+    let result_file =
+        (command.interface.is_some() || command.decisions.is_some() || !task.rubric.is_empty())
+            .then(|| dir.join(interface::RESULT_FILE));
     if let Some(path) = &result_file {
         match fs::File::create(path) {
             Ok(file) => {
@@ -475,6 +548,33 @@ fn run_attempt_in(
     }
     let metrics = result_file.as_deref().and_then(read_metrics);
     let decision_figures = result_file.as_deref().and_then(read_decision_figures);
+
+    if !task.rubric.is_empty() {
+        let answer = result_file
+            .as_deref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|text| answer_of(&text));
+        let wall_clock = start_wall.elapsed();
+        let (tokens, turns) = opts.meter.read(dir, start_time, SystemTime::now());
+        let score = answer.map(|answer| RubricScore::of(task.rubric, &answer));
+        let outcome = match &score {
+            Some(score) if score.count() >= task.rubric_bound() => Outcome::Pass,
+            Some(_) => Outcome::Fail,
+            None => Outcome::Errored,
+        };
+        let mut attempt = finish(
+            outcome,
+            tokens,
+            wall_clock,
+            turns,
+            diff_shortstat(dir),
+            metrics,
+            decision_figures,
+        );
+        attempt.rubric = score;
+        attempt.program = rollout.as_deref().and_then(read_program);
+        return attempt;
+    }
 
     let test_result = run_test_commands(dir, task.test);
 
@@ -539,10 +639,13 @@ pub fn is_pane_row(row: &str) -> bool {
 fn write_pane_config(
     dir: &Path,
     parent_model: Option<&str>,
+    helpers_model: Option<&str>,
     arm: Option<&DecisionsArm>,
 ) -> Result<(), String> {
     let decisions_model = arm.and_then(|arm| arm.model.as_deref());
-    if parent_model.is_none() && decisions_model.is_none() {
+    let helper_switches = arm.map_or(&[][..], |arm| arm.helpers);
+    let helpers_wanted = helpers_model.is_some() || !helper_switches.is_empty();
+    if parent_model.is_none() && decisions_model.is_none() && !helpers_wanted {
         return Ok(());
     }
     let config_dir = dir.join(".pane");
@@ -551,6 +654,7 @@ fn write_pane_config(
     for (table, wanted) in [
         ("[model]", parent_model.is_some()),
         ("[decisions]", decisions_model.is_some()),
+        ("[helpers]", helpers_wanted),
     ] {
         if wanted && existing.contains(table) {
             return Err(format!(
@@ -574,8 +678,30 @@ fn write_pane_config(
             arm.map_or("", |arm| arm.mode.as_str())
         ));
     }
+    if helpers_wanted {
+        content.push_str("[helpers]\n");
+        if let Some(model) = helpers_model {
+            content.push_str(&format!("enabled = true\nmodel = \"{model}\"\n"));
+        }
+        for switch in helper_switches {
+            content.push_str(&format!("{switch} = true\n"));
+        }
+    }
     fs::write(&config_path, content)
         .map_err(|e| format!("could not write {}: {e}", config_path.display()))
+}
+
+/// The answer a harness gave, from its captured stdout: the `answer` of
+/// Pane's last `result` line when there is one, else the whole text -- a
+/// harness that prints its answer plainly is read as it printed it.
+fn answer_of(stdout: &str) -> String {
+    stdout
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["type"] == "result")
+        .and_then(|value| value["answer"].as_str().map(str::to_string))
+        .unwrap_or_else(|| stdout.to_string())
 }
 
 /// The argv for one attempt: the row's template with `{root}`, `{statement}`

@@ -236,6 +236,7 @@ fn base_task(commit: &'static str, test: &'static [&'static [&'static str]]) -> 
         statement: "do the thing",
         test,
         shortstat_lines: 100,
+        rubric: &[],
     }
 }
 
@@ -258,6 +259,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     }
 }
 
@@ -540,6 +542,7 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -597,6 +600,7 @@ fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("claude-code");
 
@@ -645,6 +649,7 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("codex");
 
@@ -706,6 +711,7 @@ fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -762,6 +768,8 @@ fn the_accepted_flags_are_exactly_these() {
             "--pane-decisions",
             "--decisions-model",
             "--parent-model",
+            "--pane-feedback",
+            "--helpers-model",
             "--out"
         ]
     );
@@ -826,6 +834,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
         harnesses: attempt::default_harnesses(),
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("pane");
 
@@ -884,6 +893,7 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
         harnesses: attempt::default_harnesses(),
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness2 = Harness::new("claude-code");
 
@@ -937,6 +947,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
         harnesses: attempt::default_harnesses(),
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let pane_harness = Harness::new("pane");
     let pane_result = attempt::run_one(&pane_task, &pane_harness, 1, &pane_opts);
@@ -959,6 +970,7 @@ fn via_glasshouse_takes_one_profile_per_row() {
         harnesses: attempt::default_harnesses(),
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let claude_harness = Harness::new("claude-code");
     let claude_result = attempt::run_one(&claude_task, &claude_harness, 1, &claude_opts);
@@ -1212,6 +1224,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
         harnesses: attempt::default_harnesses(),
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness2 = Harness::new("pane");
 
@@ -1549,6 +1562,7 @@ fn a_pane_arm_captures_its_stdout_and_carries_the_metrics() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
     let harness = Harness::new("pane:hybrid");
 
@@ -1614,6 +1628,7 @@ fn a_pane_arm_without_a_telemetry_document_is_unmeasured_not_zero() {
         harnesses,
         rollouts: None,
         parent_model: None,
+        helpers_model: None,
     };
 
     let result = attempt::run_one(&task, &Harness::new("pane:cells"), 1, &opts);
@@ -1850,6 +1865,7 @@ fn a_decisions_off_arm_gets_no_config_file_while_shadow_and_on_get_the_exact_tom
             harnesses,
             rollouts: None,
             parent_model: None,
+            helpers_model: None,
         };
 
         let result = attempt::run_one(&task, &Harness::new(arm_name.as_str()), 1, &opts);
@@ -1935,6 +1951,7 @@ fn decision_attempt(
         metrics: None,
         decisions_mode: Some(arm.rsplit('-').next().unwrap().to_string()),
         decision_figures,
+        rubric: None,
     }
 }
 
@@ -2048,6 +2065,7 @@ fn a_pane_attempt_writes_the_parent_model_into_its_own_project_config() {
         harnesses,
         rollouts: None,
         parent_model: Some("gpt-5-6-sol".to_string()),
+        helpers_model: None,
     };
 
     let result = attempt::run_one(&task, &Harness::new("pane"), 1, &opts);
@@ -2166,5 +2184,119 @@ fn a_foreign_row_alone_needs_no_parent_model() {
     assert!(
         message.contains("no-such-task"),
         "the parent-model check must not fire for a foreign row: {message}"
+    );
+}
+
+/// An explore task is judged by the facts its answer states, and a
+/// `--pane-feedback` arm's worktree carries the decision mode and the
+/// `[helpers]` switches of its arm: the `reduce` arm reads `on` with
+/// `reduce_returns`, and every pane row gets the helper model.
+#[test]
+fn a_rubric_task_is_scored_on_its_answer_and_a_feedback_arm_writes_its_switches() {
+    use pane::ruler::model::Fact;
+    let scratch = scratch_dir("feedback-rubric");
+    let argv_record = scratch.join("argv.txt");
+    // The fake reads its own worktree's config into the answer, so the
+    // assertions below see exactly what the attempt was launched with.
+    let path = scratch.join("fake_pane.sh");
+    let seen = scratch.join("config.seen");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"{}\"\ncp .pane/config.toml \"{}\"\nprintf '%s\\n' '{{\"type\":\"text\",\"text\":\"working\"}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"answer\":\"It cuts a worktree at the parent commit; the meter reads tokens.\"}}'\nexit 0\n",
+            argv_record.display(),
+            seen.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+
+    let mut table = attempt::default_harnesses();
+    let rows = cli::expand_pane_feedback(
+        &["pane".to_string()],
+        &["reduce".to_string()],
+        "jev-latest",
+        &mut table,
+    )
+    .unwrap();
+    assert_eq!(rows, vec!["pane:feedback-reduce"]);
+    let mut arm = table.remove("pane:feedback-reduce").unwrap();
+    arm.program = path;
+    let mut harnesses = HashMap::new();
+    harnesses.insert("pane:feedback-reduce".to_string(), arm);
+
+    const FACTS: &[Fact] = &[
+        Fact {
+            name: "worktree",
+            any: &["worktree"],
+        },
+        Fact {
+            name: "parent",
+            any: &["parent commit"],
+        },
+        Fact {
+            name: "meter",
+            any: &["meter"],
+        },
+        Fact {
+            name: "suspect",
+            any: &["suspect"],
+        },
+    ];
+    let task = Task {
+        test: &[],
+        rubric: FACTS,
+        ..base_task(leak(head_commit()), &[])
+    };
+    let opts = RunOpts {
+        parent_model: Some("gpt-5-6-sol".to_string()),
+        helpers_model: Some("gpt-5.6-luna".to_string()),
+        ..base_opts(scratch.clone(), PathBuf::from("unused"))
+    };
+    let opts = RunOpts { harnesses, ..opts };
+
+    let result = attempt::run_one(&task, &Harness::new("pane:feedback-reduce"), 1, &opts);
+    let score = result.rubric.clone().expect("the answer was scored");
+    assert_eq!(
+        score.found,
+        vec!["worktree", "parent", "meter"],
+        "{score:?}"
+    );
+    assert_eq!(score.total, 4);
+    assert_eq!(task.rubric_bound(), 3);
+    assert!(
+        result.outcome.completed(),
+        "3 of 4 meets the bound: {:?}",
+        result.outcome
+    );
+    assert_eq!(result.decisions_mode.as_deref(), Some("on"));
+
+    let jsonl = pane::ruler::report::render_jsonl(std::slice::from_ref(&result));
+    assert!(
+        jsonl.contains("\"rubric\":{\"found\":[\"worktree\",\"parent\",\"meter\"],\"total\":4}"),
+        "{jsonl}"
+    );
+    let table = pane::ruler::report::render_rubric_table(std::slice::from_ref(&result));
+    assert!(
+        table.contains("T1 | pane:feedback-reduce | 3.0/4 | 1/1"),
+        "{table}"
+    );
+
+    // The config the attempt was launched with: decisions on with Jev, the
+    // reducer switched on, the parent and helper models written.
+    let config = fs::read_to_string(&seen).unwrap();
+    for expected in [
+        "[model]\nparent = \"gpt-5-6-sol\"",
+        "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"",
+        "[helpers]\nenabled = true\nmodel = \"gpt-5.6-luna\"\nreduce_returns = true",
+    ] {
+        assert!(config.contains(expected), "{expected} in {config}");
+    }
+    let argv = read_argv(&argv_record);
+    assert!(
+        argv.ends_with(&["--output-format".to_string(), "json".to_string()]),
+        "{argv:?}"
     );
 }

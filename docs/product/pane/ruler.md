@@ -167,6 +167,27 @@ attempts whose telemetry document was never captured. **`overrides` is a
 proxy for a false hold, not a measured one, until the campaign says
 otherwise.**
 
+### Context-handling arms and the explore tasks (2026-09-23)
+
+`--pane-feedback shadow,dissect,reduce,prefetch,all` expands the `pane` row
+into `pane:feedback-<arm>` arms (`attempt::FEEDBACK_ARMS`): `shadow` asks
+every decision question and acts on none; `dissect` runs `mode = "on"`, so
+the request's kind sets the effort and briefs the Scout to dissect; `reduce`
+and `prefetch` add `[helpers] reduce_returns` or `prefetch_returns`; `all`
+turns both on. The decision model is `--decisions-model`, or `jev-latest`.
+`--helpers-model <id>` writes `[helpers] enabled = true, model = <id>` into
+every `pane` row's worktree — without it no Scout, lister or checker runs in
+an attempt. One expansion at a time, as for the other two.
+
+`X1` and `X2` are **explore tasks**: no test command and no change, judged by
+the eight facts their answer must state (`tasks.rs`'s `RULER_FACTS`,
+`RETURN_FACTS` — each spelled several ways, compared case-insensitively). An
+attempt passes at three quarters of its rubric. The answer is read from the
+captured stdout: Pane's last `result` line's `answer`, or the whole text for
+a harness that prints plainly. The JSONL gains `rubric` (`found`, `total`),
+and the report a rubric table per task and arm: mean facts, passes, wall,
+cells, parent and helper tokens.
+
 ## 5. Three ways this measurement can lie, and what the ruler does about each
 
 **A task whose statement leaks its answer.** The statements above are derived

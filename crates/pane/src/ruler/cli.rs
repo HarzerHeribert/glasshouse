@@ -39,6 +39,8 @@ pub const ACCEPTED_FLAGS: &[&str] = &[
     "--pane-decisions",
     "--decisions-model",
     "--parent-model",
+    "--pane-feedback",
+    "--helpers-model",
     "--out",
 ];
 
@@ -119,6 +121,19 @@ pub struct RunArgs {
     /// tree. The other rows configure their own model and ignore this.
     #[arg(long)]
     pub parent_model: Option<String>,
+    /// Expands the `pane` row into one `pane:feedback-<arm>` arm per listed
+    /// arm of [`attempt::FEEDBACK_ARMS`] (`shadow,dissect,reduce,prefetch,all`),
+    /// each attempt's `.pane/config.toml` carrying the decision mode and the
+    /// `[helpers]` switches of its arm. The decision model is
+    /// `--decisions-model`, or Jev's default. Refused beside the other two
+    /// expansions: one expansion at a time.
+    #[arg(long, value_delimiter = ',')]
+    pub pane_feedback: Vec<String>,
+    /// The helper model every `pane` row's session runs its Scout, its
+    /// acceptance lister and its checker with, written as `[helpers] model`.
+    /// Without it no helper runs in an attempt.
+    #[arg(long)]
+    pub helpers_model: Option<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -156,9 +171,14 @@ fn run(flags: &[String]) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if !args.pane_interface.is_empty() && !args.pane_decisions.is_empty() {
+    let expansions = [
+        !args.pane_interface.is_empty(),
+        !args.pane_decisions.is_empty(),
+        !args.pane_feedback.is_empty(),
+    ];
+    if expansions.iter().filter(|given| **given).count() > 1 {
         return Err(
-            "--pane-interface and --pane-decisions cannot be combined: one expansion at a time"
+            "--pane-interface, --pane-decisions and --pane-feedback cannot be combined: one expansion at a time"
                 .to_string(),
         );
     }
@@ -186,6 +206,14 @@ fn run(flags: &[String]) -> Result<(), String> {
         &harnesses,
         &args.pane_decisions,
         args.decisions_model.as_deref(),
+        &mut harness_table,
+    )?;
+    let harnesses = expand_pane_feedback(
+        &harnesses,
+        &args.pane_feedback,
+        args.decisions_model
+            .as_deref()
+            .unwrap_or(crate::decide::DEFAULT_MODEL),
         &mut harness_table,
     )?;
     let via_glasshouse = via_glasshouse.map(|profiles| {
@@ -217,6 +245,7 @@ fn run(flags: &[String]) -> Result<(), String> {
         },
         harnesses: harness_table,
         parent_model: args.parent_model.clone(),
+        helpers_model: args.helpers_model.clone(),
         // Created before the first attempt rather than with the records at
         // the end: an attempt writes its rollout while it runs, and a
         // missing directory would leave every one of them unstated.
@@ -249,6 +278,7 @@ fn run(flags: &[String]) -> Result<(), String> {
         "{}",
         report::render_decisions_table(&decisions::rows(&attempts))
     );
+    print!("{}", report::render_rubric_table(&attempts));
     write_records(&args.out, &attempts)
 }
 
@@ -387,6 +417,62 @@ pub fn expand_pane_decisions(
             table.insert(
                 name.clone(),
                 HarnessCommand::pane_decisions_arm(&pane, arm_model, mode),
+            );
+            rows.push(name);
+        }
+    }
+    Ok(rows)
+}
+
+/// Replaces the `pane` row in `selected` with one `pane:feedback-<arm>` row
+/// per arm, adding each arm's [`HarnessCommand`] to `table`. No arms: the
+/// selection is returned unchanged. Refuses an arm outside
+/// [`attempt::FEEDBACK_ARMS`], an arm listed twice, and any arm list when
+/// `pane` was not selected -- all before any worktree is cut.
+pub fn expand_pane_feedback(
+    selected: &[String],
+    arms: &[String],
+    model: &str,
+    table: &mut HashMap<String, HarnessCommand>,
+) -> Result<Vec<String>, String> {
+    if arms.is_empty() {
+        return Ok(selected.to_vec());
+    }
+    if !selected.iter().any(|row| row == "pane") {
+        return Err(
+            "--pane-feedback expands the pane row, and --harness did not select pane".to_string(),
+        );
+    }
+    let mut parsed = Vec::new();
+    for name in arms {
+        let arm = attempt::FEEDBACK_ARMS
+            .iter()
+            .find(|arm| arm.name == name)
+            .ok_or_else(|| {
+                format!(
+                    "--pane-feedback knows shadow, dissect, reduce, prefetch and all, not `{name}`"
+                )
+            })?;
+        if parsed.contains(&arm) {
+            return Err(format!("--pane-feedback names {name} twice"));
+        }
+        parsed.push(arm);
+    }
+    let pane = table
+        .get("pane")
+        .cloned()
+        .ok_or_else(|| "the harness table has no pane row to expand".to_string())?;
+    let mut rows = Vec::new();
+    for row in selected {
+        if row != "pane" {
+            rows.push(row.clone());
+            continue;
+        }
+        for arm in &parsed {
+            let name = attempt::feedback_arm_name(arm.name);
+            table.insert(
+                name.clone(),
+                HarnessCommand::pane_feedback_arm(&pane, model, arm),
             );
             rows.push(name);
         }

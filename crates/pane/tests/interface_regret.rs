@@ -28,6 +28,7 @@ fn arm(task: &'static str, mode: &str, attempt_no: u32, metrics: Option<Metrics>
         metrics,
         decisions_mode: None,
         decision_figures: None,
+        rubric: None,
     }
 }
 
@@ -286,6 +287,7 @@ fn render_table_without_interfaces_is_unchanged() {
         metrics: None,
         decisions_mode: None,
         decision_figures: None,
+        rubric: None,
     };
     let table = report::render_table(&Score::of(std::slice::from_ref(&plain)));
     // An attempt that kept no rollout reads unmeasured in both program
@@ -301,7 +303,7 @@ aggregate  claude-code  1/1 pass  150  10s  3  —  —  —\n";
     let jsonl = report::render_jsonl(std::slice::from_ref(&plain));
     assert!(
         jsonl.contains(
-            "\"interface\":null,\"metrics\":null,\"decisions_mode\":null,\"decisions_figures\":null}"
+            "\"interface\":null,\"metrics\":null,\"decisions_mode\":null,\"decisions_figures\":null,\"rubric\":null}"
         ),
         "{jsonl}"
     );

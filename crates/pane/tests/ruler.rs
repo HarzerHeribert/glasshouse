@@ -35,6 +35,7 @@ fn attempt(
         metrics: None,
         decisions_mode: None,
         decision_figures: None,
+        rubric: None,
     }
 }
 
@@ -362,13 +363,14 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
             "metrics",
             "decisions_mode",
             "decisions_figures",
+            "rubric",
         ]
     );
 }
 
 #[test]
-fn the_catalogue_is_twelve_tasks_four_per_tier() {
-    assert_eq!(tasks::CATALOGUE.len(), 12);
+fn the_catalogue_is_twelve_commit_tasks_four_per_tier_and_two_explore_tasks() {
+    assert_eq!(tasks::CATALOGUE.len(), 14);
 
     let mut ids = HashSet::new();
     for task in tasks::CATALOGUE {
@@ -377,10 +379,21 @@ fn the_catalogue_is_twelve_tasks_four_per_tier() {
 
     for tier in Tier::ALL {
         assert_eq!(
-            tasks::in_tier(tier).count(),
+            tasks::in_tier(tier)
+                .filter(|task| task.rubric.is_empty())
+                .count(),
             4,
-            "tier {tier:?} should have four tasks"
+            "tier {tier:?} should have four commit tasks"
         );
+    }
+
+    // An explore task is judged by its answer alone: eight facts, no test
+    // command, and a pass bound of three quarters.
+    for id in ["X1", "X2"] {
+        let task = tasks::lookup(id).unwrap_or_else(|| panic!("task {id} should exist"));
+        assert_eq!(task.rubric.len(), 8, "{id}");
+        assert!(task.test.is_empty(), "{id}");
+        assert_eq!(task.rubric_bound(), 6, "{id}");
     }
 }
 

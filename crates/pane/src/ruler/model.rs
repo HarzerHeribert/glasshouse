@@ -65,9 +65,68 @@ pub struct Task {
     /// tenth of this is reported `pass (suspect)` with the figure — the ruler
     /// does not judge the diff, it prints the number that makes a human look.
     pub shortstat_lines: u32,
+    /// The facts an explore task's answer must state; empty for a task
+    /// judged by its test commands. A rubric task has no test command and
+    /// changes nothing: it passes when its answer states at least
+    /// [`Task::rubric_bound`] of these.
+    pub rubric: &'static [Fact],
+}
+
+/// One fact an explore task's answer must state. Found when the answer
+/// contains any of `any`, compared case-insensitively -- several spellings
+/// because a fact can be put in more than one set of words, and never a
+/// judgement: the ruler reads text, it does not grade prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fact {
+    pub name: &'static str,
+    pub any: &'static [&'static str],
+}
+
+impl Fact {
+    #[must_use]
+    pub fn stated_in(&self, answer: &str) -> bool {
+        let answer = answer.to_lowercase();
+        self.any
+            .iter()
+            .any(|spelling| answer.contains(&spelling.to_lowercase()))
+    }
+}
+
+/// What a rubric task's answer stated: the facts found, by name, of how many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RubricScore {
+    pub found: Vec<&'static str>,
+    pub total: u32,
+}
+
+impl RubricScore {
+    #[must_use]
+    pub fn of(rubric: &'static [Fact], answer: &str) -> Self {
+        Self {
+            found: rubric
+                .iter()
+                .filter(|fact| fact.stated_in(answer))
+                .map(|fact| fact.name)
+                .collect(),
+            total: u32::try_from(rubric.len()).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.found.len()).unwrap_or(u32::MAX)
+    }
 }
 
 impl Task {
+    /// The facts a rubric answer must state to pass: three quarters of the
+    /// rubric, rounded up.
+    pub fn rubric_bound(&self) -> u32 {
+        u32::try_from(self.rubric.len() * 3)
+            .unwrap_or(u32::MAX)
+            .div_ceil(4)
+    }
+
     /// The bound below which a passing attempt is suspect: a tenth of the
     /// commit's own changed-line count, rounded down.
     pub fn suspect_bound(&self) -> u32 {
@@ -246,4 +305,7 @@ pub struct Attempt {
     /// model's figures; `None` when no document was captured -- unmeasured,
     /// never a zero.
     pub decision_figures: Option<DecisionFigures>,
+    /// A rubric task's score, read from the answer the harness gave; `None`
+    /// for a task judged by its test commands, or an answer never captured.
+    pub rubric: Option<RubricScore>,
 }
