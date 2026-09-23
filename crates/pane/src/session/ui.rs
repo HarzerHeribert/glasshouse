@@ -2414,6 +2414,8 @@ mod tests {
                         selectable: Some(true),
                         unavailable_reason: None,
                         connect: None,
+                        pooled: None,
+                        note: None,
                     },
                     tui::ModelGroup {
                         provider: "openrouter".into(),
@@ -2423,6 +2425,8 @@ mod tests {
                         selectable: Some(true),
                         unavailable_reason: None,
                         connect: None,
+                        pooled: None,
+                        note: None,
                     },
                 ],
                 tui::TierModels::default(),

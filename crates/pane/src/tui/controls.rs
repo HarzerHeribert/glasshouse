@@ -139,7 +139,7 @@ struct ModelDetail {
     score: Option<f64>,
     unavailable_reason: Option<String>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelGroup {
     pub provider: String,
     pub account: String,
@@ -150,6 +150,12 @@ pub struct ModelGroup {
     /// The provider whose login flow would connect this account, when it is
     /// connectable and not yet connected. `None` for every other row.
     pub connect: Option<String>,
+    /// A subscription account: `Some(true)` when it is in its provider's
+    /// pool, `Some(false)` when the person took it out. `None` for an
+    /// account of any other kind, which is listed on its own as before.
+    pub pooled: Option<bool>,
+    /// The plan and the last usage reading, for a subscription's row.
+    pub note: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct PanelRow {
@@ -628,6 +634,12 @@ impl Panel {
             });
         }
         let mut entries = Vec::new();
+        // A provider's subscription accounts are one pool (2026-09-23): each
+        // account is a row that ⏎ takes in or out of it, and the models are
+        // listed once, for every account in it -- under a synthetic group
+        // built here, since no single account is the route.
+        let mut pools: BTreeMap<String, ModelGroup> = BTreeMap::new();
+        let mut pool_header: Option<String> = None;
         for group in search.matched.iter().filter(|group| {
             search
                 .providers
@@ -642,6 +654,49 @@ impl Panel {
                 });
                 continue;
             }
+            if let Some(in_pool) = group.pooled {
+                if pool_header.as_deref() != Some(group.provider.as_str()) {
+                    self.rows.push(PanelRow {
+                        text: format!(
+                            "{} · accounts · ⏎ takes one in or out of the pool",
+                            group.provider
+                        ),
+                        command: None,
+                    });
+                    pool_header = Some(group.provider.clone());
+                }
+                search.choices.push(self.rows.len());
+                self.rows.push(PanelRow {
+                    text: format!(
+                        "  {} {}{}",
+                        if in_pool { "●" } else { "○" },
+                        group.account,
+                        match (&group.note, in_pool) {
+                            (_, false) => " — out of the pool".to_string(),
+                            (Some(note), true) => format!(" — {note}"),
+                            (None, true) => String::new(),
+                        }
+                    ),
+                    command: Some(format!(
+                        "/pool {} {}",
+                        group.account,
+                        if in_pool { "exclude" } else { "include" }
+                    )),
+                });
+                if in_pool {
+                    let pool = pools
+                        .entry(group.provider.clone())
+                        .or_insert_with(|| ModelGroup {
+                            provider: group.provider.clone(),
+                            account: "pool".into(),
+                            scope: "served by every account in the pool".into(),
+                            selectable: Some(true),
+                            ..ModelGroup::default()
+                        });
+                    pool.models.extend(group.models.iter().cloned());
+                }
+                continue;
+            }
             for id in &group.models {
                 let score = search
                     .intelligence
@@ -649,6 +704,20 @@ impl Panel {
                     .copied()
                     .filter(|score| score.is_finite() && *score >= 0.0);
                 entries.push((group, id, score));
+            }
+        }
+        for pool in pools.values_mut() {
+            pool.models.sort();
+            pool.models.dedup();
+        }
+        for pool in pools.values() {
+            for id in &pool.models {
+                let score = search
+                    .intelligence
+                    .get(&normalise(id))
+                    .copied()
+                    .filter(|score| score.is_finite() && *score >= 0.0);
+                entries.push((pool, id, score));
             }
         }
         entries.sort_by(|(a, x, sx), (b, y, sy)| {
@@ -868,6 +937,8 @@ mod tests {
                     selectable: None,
                     unavailable_reason: None,
                     connect: None,
+                    pooled: None,
+                    note: None,
                 })
                 .collect(),
             TierModels::default(),
@@ -923,6 +994,8 @@ mod tests {
                 selectable: Some(false),
                 unavailable_reason: Some("Pinned to another account".into()),
                 connect: None,
+                pooled: None,
+                note: None,
             }],
             TierModels::default(),
         );
@@ -987,6 +1060,8 @@ mod tests {
                 selectable: Some(true),
                 unavailable_reason: None,
                 connect: None,
+                pooled: None,
+                note: None,
             }],
             TierModels {
                 parent: "opus-5".into(),
@@ -1025,6 +1100,8 @@ mod tests {
                     selectable: Some(false),
                     unavailable_reason: Some("another route is active".into()),
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
                 ModelGroup {
                     provider: "google".into(),
@@ -1034,6 +1111,8 @@ mod tests {
                     selectable: Some(true),
                     unavailable_reason: None,
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
             ],
             TierModels::default(),
@@ -1071,6 +1150,8 @@ mod tests {
                 selectable: Some(true),
                 unavailable_reason: None,
                 connect: None,
+                pooled: None,
+                note: None,
             }],
             TierModels::default(),
         );
@@ -1188,6 +1269,8 @@ mod tests {
                 selectable: Some(true),
                 unavailable_reason: None,
                 connect: None,
+                pooled: None,
+                note: None,
             }],
             TierModels::default(),
         )
@@ -1258,6 +1341,70 @@ mod tests {
         );
     }
 
+    /// A provider's subscriptions are one pool: each account is a row whose
+    /// ⏎ takes it in or out, with its plan and usage; the models are listed
+    /// once, and only those an account in the pool serves.
+    #[test]
+    fn subscriptions_of_one_provider_are_a_pool_with_a_toggle_per_account() {
+        let account = |name: &str, pooled: bool, models: &[&str]| ModelGroup {
+            provider: "claude".into(),
+            account: name.into(),
+            scope: "account-declared".into(),
+            models: models.iter().map(|m| (*m).to_string()).collect(),
+            selectable: Some(true),
+            pooled: Some(pooled),
+            note: Some("Max 20x · 5h 4% · week 16%".into()),
+            ..ModelGroup::default()
+        };
+        let panel = Panel::models(
+            "Models",
+            vec![
+                account("claude-a", true, &["claude-opus-5-5", "claude-sonnet-5"]),
+                account("claude-b", true, &["claude-opus-5-5"]),
+                account("claude-c", false, &["claude-only-on-c"]),
+            ],
+            TierModels {
+                parent: "claude-opus-5-5".into(),
+                helper: None,
+                subagent: None,
+            },
+        )
+        .with_intelligence(BTreeMap::new());
+        let row = |needle: &str| {
+            panel
+                .rows
+                .iter()
+                .find(|row| row.text.contains(needle))
+                .unwrap_or_else(|| panic!("no row with {needle}: {:#?}", panel.rows))
+        };
+        assert_eq!(
+            row("● claude-a — Max 20x").command.as_deref(),
+            Some("/pool claude-a exclude")
+        );
+        assert_eq!(
+            row("○ claude-c — out of the pool").command.as_deref(),
+            Some("/pool claude-c include")
+        );
+        let listed = |id: &str| {
+            panel
+                .rows
+                .iter()
+                .filter(|row| row.command.as_deref() == Some(&format!("/model {id}")))
+                .count()
+        };
+        assert_eq!(
+            listed("claude-opus-5-5"),
+            1,
+            "one row for a model two accounts serve"
+        );
+        assert_eq!(listed("claude-sonnet-5"), 1);
+        assert_eq!(
+            listed("claude-only-on-c"),
+            0,
+            "an account out of the pool serves nothing"
+        );
+    }
+
     /// Three tiers in one visit: stage each, apply once, or throw the lot
     /// away. Before this, `Enter` applied one row and closed.
     #[test]
@@ -1272,6 +1419,8 @@ mod tests {
                 selectable: Some(true),
                 unavailable_reason: None,
                 connect: None,
+                pooled: None,
+                note: None,
             }],
             TierModels {
                 parent: "big".into(),

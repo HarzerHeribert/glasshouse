@@ -54,6 +54,9 @@ struct Account {
     /// The provider whose flow would connect it.
     #[serde(default)]
     connect_with: Option<String>,
+    /// Whether it is in its pool; every account is unless taken out.
+    #[serde(default)]
+    pooled: Option<bool>,
 }
 
 pub(super) fn models(session: &Session<'_>) {
@@ -688,6 +691,13 @@ fn model_panel(catalogue: Option<Catalogue>, tiers: TierModels) -> Panel {
                         (Some(_), _) => Some("not connected — press enter to connect".into()),
                         (None, existing) => existing,
                     };
+                    // A subscription is a member of its provider's pool,
+                    // listed with its plan and last usage reading.
+                    let pooled = account
+                        .connect_with
+                        .is_some()
+                        .then(|| account.pooled.unwrap_or(true));
+                    let note = super::usage::latest_summary(&account.account);
                     tui::ModelGroup {
                         provider: account.provider.unwrap_or_else(|| "native harness".into()),
                         account: account.account,
@@ -700,6 +710,8 @@ fn model_panel(catalogue: Option<Catalogue>, tiers: TierModels) -> Panel {
                         },
                         unavailable_reason,
                         connect,
+                        pooled,
+                        note,
                     }
                 })
                 .collect(),
@@ -969,6 +981,7 @@ pub(super) fn command(
             models(session);
         }
         "login" => login(session, argument),
+        "pool" => pool(session, argument),
         "usage" => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -982,6 +995,40 @@ pub(super) fn command(
         _ => return false,
     }
     true
+}
+
+/// `/pool <account> include|exclude`: take a subscription account into its
+/// provider's pool or out of it (the gateway reads it on its next request),
+/// then show the picker again so the row's mark moves under the cursor.
+fn pool(session: &Session<'_>, argument: Option<&str>) {
+    let mut words = argument.unwrap_or_default().split_whitespace();
+    let (Some(account), Some(action @ ("include" | "exclude"))) = (words.next(), words.next())
+    else {
+        session_println!("Use /pool <account> include|exclude");
+        return;
+    };
+    let flag = if action == "include" {
+        "--include"
+    } else {
+        "--exclude"
+    };
+    match session.gateway.run(
+        &["subscriptions", "pool", "--entitlement", account, flag],
+        None,
+    ) {
+        Some(_) => {
+            session_println!(
+                "{account}: {} its pool",
+                if action == "include" {
+                    "back in"
+                } else {
+                    "taken out of"
+                }
+            );
+            models(session);
+        }
+        None => session_println!("ERROR: the gateway could not change {account}'s pool"),
+    }
 }
 
 fn rollback(session: &Session<'_>, argument: Option<&str>) {

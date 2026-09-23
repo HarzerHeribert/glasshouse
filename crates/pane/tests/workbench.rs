@@ -182,6 +182,8 @@ fn navigator() -> Navigator {
         selectable: Some(available),
         unavailable_reason: (!available).then(|| "No credential configured".into()),
         connect: None,
+        pooled: None,
+        note: None,
     };
     let panel = Panel::models(
         "Models",

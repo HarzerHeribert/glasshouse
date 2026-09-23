@@ -45,7 +45,47 @@ pub(super) fn read(session: &Session<'_>) -> Option<Usage> {
 
 fn read_from(gateway: &crate::gateway::Gateway) -> Option<Usage> {
     let bytes = gateway.run(&["subscriptions", "usage", "--json"], None)?;
-    serde_json::from_slice(&bytes).ok()
+    let usage: Usage = serde_json::from_slice(&bytes).ok()?;
+    if let Ok(mut latest) = LATEST.lock() {
+        *latest = Some(
+            usage
+                .accounts
+                .iter()
+                .map(|a| (a.account.clone(), summary(a)))
+                .collect(),
+        );
+    }
+    Some(usage)
+}
+
+/// The last reading's one-line summary per account, for the model picker:
+/// the picker never waits on the providers, it shows what was last read.
+static LATEST: std::sync::Mutex<Option<Vec<(String, String)>>> = std::sync::Mutex::new(None);
+
+/// `Max 20x · 5h 4% · week 16%`, from the last reading, when there was one.
+pub(super) fn latest_summary(account: &str) -> Option<String> {
+    let latest = LATEST.lock().ok()?;
+    let lines: Vec<&str> = latest
+        .as_ref()?
+        .iter()
+        .filter(|(name, _)| name == account)
+        .map(|(_, line)| line.as_str())
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" | "))
+}
+
+fn summary(account: &AccountUsage) -> String {
+    let mut parts: Vec<String> = account.plan.iter().cloned().collect();
+    if let Some(error) = &account.error {
+        parts.push(error.clone());
+    }
+    parts.extend(
+        account
+            .windows
+            .iter()
+            .map(|w| format!("{} {:.0}%", w.name, w.used_percent)),
+    );
+    parts.join(" · ")
 }
 
 /// Warnings the start-of-session check left, shown at the next task's end.

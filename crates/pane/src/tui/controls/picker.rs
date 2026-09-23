@@ -397,6 +397,8 @@ mod tests {
                     selectable: Some(true),
                     unavailable_reason: None,
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
                 ModelGroup {
                     provider: "beta".into(),
@@ -406,6 +408,8 @@ mod tests {
                     selectable: Some(true),
                     unavailable_reason: None,
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
             ],
             TierModels {
@@ -471,6 +475,8 @@ mod tests {
                     selectable: Some(true),
                     unavailable_reason: None,
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
                 ModelGroup {
                     provider: "beta".into(),
@@ -480,6 +486,8 @@ mod tests {
                     selectable: Some(false),
                     unavailable_reason: Some("Locked".into()),
                     connect: None,
+                    pooled: None,
+                    note: None,
                 },
             ],
             TierModels::default(),

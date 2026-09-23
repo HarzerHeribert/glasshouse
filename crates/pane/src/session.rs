@@ -1112,6 +1112,7 @@ fn is_session_control(name: &str) -> bool {
             | "entitlements"
             | "login"
             | "usage"
+            | "pool"
             | "key"
             | "supervisor"
             | "rollback"
