@@ -678,9 +678,11 @@ sixth is four reds of one shape on 2026-09-06:**
    exports it into every child, and `tests/pty_smoke.rs:3526` correctly
    refuses to certify overlay hygiene under it. `ci-local.sh` and
    `blast-radius.sh` now unset the three provider variables for their own
-   cargo invocations, so a gate from any pane sees a clean environment; a
-   `cargo test` you run by hand still needs the `env -u` prefix
-   (`launch-notes.md` says so). The worker's own `claude` keeps its
+   cargo invocations, so a gate from any pane sees a clean environment. A
+   `cargo test` run by hand needs the `env -u` prefix **only when
+   `env | grep ^ANTHROPIC_` names one** — on 2026-09-23 none was set in the
+   user's shell or in the session's, and the user asked for the reflexive
+   prefix to stop. The worker's own `claude` keeps its
    environment — it needs the base URL to reach the API at all. Do not "fix"
    the test.
 4. **macOS `cargo test` is fail-fast.** One red target hides every later one;
