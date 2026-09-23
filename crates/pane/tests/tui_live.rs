@@ -1855,6 +1855,14 @@ fn live_a_second_escape_escalates_to_the_call_in_flight_and_still_spares_the_ses
         app.child.try_wait().unwrap().is_none(),
         "a second Escape ended the session"
     );
+    // **And the call really is given up on.** The provider still holds the
+    // first turn and never answers it, so the only way the task stops
+    // thinking is that it stopped waiting (2026-09-23: it did not, and the
+    // Escape printed "Cancelling" seven times while the turn went on).
+    app.wait(
+        "the cancelled turn ends while the provider still holds it",
+        |screen| !screen.contents().contains("thinking"),
+    );
     drop(release);
 
     app.send(b"\x03");

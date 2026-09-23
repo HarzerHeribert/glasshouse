@@ -190,3 +190,16 @@ mod tests {
         );
     }
 }
+
+/// Whether this cell delivered the pending interrupt: any call of its
+/// trajectory that ended as a `Cancelled` throw did.
+///
+/// **The trajectory rather than the cell's own ending**, because a program
+/// may catch the throw (`runtime-contract.md` §9.1's stated limit) and a
+/// Ctrl-C the program swallowed was still delivered -- reading the cell's
+/// outcome instead would leave the flag raised and cancel the next cell too.
+pub(super) fn delivered_the_interrupt(record: &super::CellRecord) -> bool {
+    record.calls.iter().any(
+        |call| matches!(&call.ended, super::Ended::Threw { class } if class == super::CANCELLED),
+    )
+}

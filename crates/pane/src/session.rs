@@ -63,6 +63,7 @@ mod cell_view;
 mod context;
 mod controls;
 mod ending;
+use ending::delivered_the_interrupt;
 mod mode_proposal;
 mod native;
 mod notices;
@@ -354,20 +355,6 @@ fn watch(state: &Interrupter, steer: Option<Arc<ui::Steer>>) -> ! {
         first = Some(now);
         state.raise();
     }
-}
-
-/// Whether this cell delivered the pending interrupt: any call of its
-/// trajectory that ended as a `Cancelled` throw did.
-///
-/// **The trajectory rather than the cell's own ending**, because a program
-/// may catch the throw (`runtime-contract.md` §9.1's stated limit) and a
-/// Ctrl-C the program swallowed was still delivered -- reading the cell's
-/// outcome instead would leave the flag raised and cancel the next cell too.
-fn delivered_the_interrupt(record: &CellRecord) -> bool {
-    record
-        .calls
-        .iter()
-        .any(|call| matches!(&call.ended, Ended::Threw { class } if class == CANCELLED))
 }
 
 /// The two rollout writes in this module, and every one of them goes through
@@ -1428,6 +1415,14 @@ fn run_task_inner(
         let (turn, elapsed_ms) =
             match send_task_turn_recovering(transcript, session, &runtime, task, rollout, cause) {
                 Ok(sent) => sent,
+                // The second Escape: the turn was given up on, which is the
+                // person stopping the task, not the task failing.
+                Err(error) if error.contains(wire::CANCELLED_TURN) => {
+                    session.interrupt.consumed();
+                    incomplete = false;
+                    stopped_by_request = true;
+                    break;
+                }
                 Err(error) => {
                     task_state.salvage(&error);
                     return Err(error);
@@ -2540,11 +2535,12 @@ fn send_task_turn(
     let conversation = &request;
     let surface = session.surface();
     if let Some(ui) = session.ui {
-        wire::send_turn_streaming_on(
-            conversation,
-            &model,
+        wire::send_turn_streaming_cancellable(
+            conversation.clone(),
+            model.clone(),
             session.effort.get(),
             surface,
+            &|| session.interrupt.pending.load(Ordering::SeqCst),
             &mut |delta| match delta {
                 wire::StreamDelta::Text(text) => ui.append_delta(&text),
                 // Root's UI integration replaces these no-ops with

@@ -74,25 +74,47 @@ pub(super) fn shape(
     let threshold = config.helpers.reduce_above_tokens;
     // Acts in `shadow` too since 2026-09-23: a log shortened with the whole
     // value still bound stops nothing, so it is advice-shaped, not a gate.
+    // Every large field's question at once: each waits up to Jev's timeout,
+    // and asked in turn six fields held the turn for twelve seconds
+    // (2026-09-23) -- no Escape reaches a call like that.
+    let answers: Vec<Option<Result<crate::decide::FieldShape, crate::decide::DecideError>>> =
+        std::thread::scope(|scope| {
+            let asked: Vec<_> = fields
+                .iter()
+                .map(|field| {
+                    let text = field.text();
+                    let large = crate::runtime::preview::estimate_tokens(&text) >= threshold;
+                    let model = model.as_str();
+                    let name = field.name.as_str();
+                    large.then(|| {
+                        scope.spawn(move || crate::decide::field_shape(model, name, &text))
+                    })
+                })
+                .collect();
+            asked
+                .into_iter()
+                .map(|handle| handle.map(|h| h.join().expect("a shape question does not panic")))
+                .collect()
+        });
     let shaped = fields
         .iter()
-        .map(|field| shape_field(&model, threshold, runtime, task_state, field))
+        .zip(answers)
+        .map(|(field, answer)| match answer {
+            None => field.clone(),
+            Some(answer) => shape_field(answer, runtime, task_state, field),
+        })
         .collect();
     Terminal::Fields(shaped)
 }
 
 fn shape_field(
-    model: &str,
-    threshold: usize,
+    answer: Result<crate::decide::FieldShape, crate::decide::DecideError>,
     runtime: &Runtime,
     task_state: &mut TaskState,
     field: &ReturnedField,
 ) -> ReturnedField {
     let text = field.text();
-    if crate::runtime::preview::estimate_tokens(&text) < threshold {
-        return field.clone();
-    }
-    let answer = match crate::decide::field_shape(model, &field.name, &text) {
+    let answer = match answer {
         Ok(answer) => answer,
         Err(error) => {
             session_println!(

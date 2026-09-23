@@ -1707,6 +1707,81 @@ pub fn send_turn_streaming_on(
     surface: Surface,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
+    send_turn_streaming_while(conversation, model, effort, surface, &mut || true, on_delta)
+}
+
+/// What a turn the person cancelled ends with.
+pub const CANCELLED_TURN: &str = "the person cancelled the call in flight";
+
+/// [`send_turn_streaming_on`], but one the caller can give up on at any
+/// moment: the request runs on its own thread, deltas come back over a
+/// channel, and `cancelled` is asked every [`CANCEL_POLL`].
+///
+/// **Giving up never waits on the socket.** A blocking read cannot be
+/// interrupted, and a reasoning model sends nothing for minutes, so a check
+/// between lines is a check that never runs — measured 2026-09-23: a second
+/// Escape printed "Cancelling the call in flight" seven times while the
+/// turn went on. The abandoned thread stops reading at its next line, which
+/// drops the connection and ends the generation upstream.
+pub fn send_turn_streaming_cancellable(
+    conversation: Conversation,
+    model: String,
+    effort: Effort,
+    surface: Surface,
+    cancelled: &dyn Fn() -> bool,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<Turn, WireError> {
+    enum Event {
+        Delta(StreamDelta),
+        Done(Result<Turn, WireError>),
+    }
+    let (events, received) = std::sync::mpsc::channel::<Event>();
+    let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_abandoned = abandoned.clone();
+    std::thread::spawn(move || {
+        let deltas = events.clone();
+        let result = send_turn_streaming_while(
+            &conversation,
+            &model,
+            effort,
+            surface,
+            &mut || !reader_abandoned.load(std::sync::atomic::Ordering::SeqCst),
+            &mut |delta| {
+                let _ = deltas.send(Event::Delta(delta));
+            },
+        );
+        let _ = events.send(Event::Done(result));
+    });
+    loop {
+        match received.recv_timeout(CANCEL_POLL) {
+            Ok(Event::Delta(delta)) => on_delta(delta),
+            Ok(Event::Done(result)) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancelled() {
+                    abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Err(WireError::Stream(CANCELLED_TURN.to_string()));
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(WireError::Stream(
+                    "the turn's thread ended without an answer".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+/// How often a cancellable turn asks whether it was given up on.
+pub const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn send_turn_streaming_while(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    surface: Surface,
+    keep_reading: &mut dyn FnMut() -> bool,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     // **The same allowance the whole-response path asks for.** This read
     // `MAX_TOKENS` — the 8,192-token documented fallback — while
@@ -1751,7 +1826,7 @@ pub fn send_turn_streaming_on(
         });
     }
 
-    read_sse_stream(&mut response, &mut || true, on_delta)
+    read_sse_stream(&mut response, keep_reading, on_delta)
 }
 
 /// The SSE half of a streamed turn, shared by the task path
