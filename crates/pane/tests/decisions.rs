@@ -1168,6 +1168,12 @@ fn an_explore_request_is_dissected_in_one_request_over_the_file_listing() {
         "one request, no tool offered: {scout}"
     );
     assert!(messages[1].contains("1. Read the setup"), "{}", messages[1]);
+    assert!(
+        messages[1].contains("## Served in full (1)")
+            && messages[1].contains("### scripts/setup.sh"),
+        "the file the dissection named reaches the turn: {}",
+        messages[1]
+    );
     assert_eq!(
         result["telemetry"]["decisions"]["scout_brief"],
         "dissection"

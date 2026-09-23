@@ -99,7 +99,7 @@ const DISSECTION_SECTIONS: [(&str, &str); 5] = [
     ),
     (
         "## Files",
-        "for each task the files to read first, at most three, as `path/to/file.rs:120 — task N, what is there`, a line you opened rather than one you inferred",
+        "for each task the files to read first, at most three, as `path/to/file.rs — task N, what is there`; add `:120` only for a line you opened, never one you inferred",
     ),
     (
         "## Verify",
@@ -503,6 +503,48 @@ pub fn spans(report: &str) -> Vec<(String, String)> {
     named
 }
 
+/// Every file a dissection's `## Files` section names, with or without a
+/// line number, in its order: a one-shot dissection cannot open a file, so
+/// it names paths, and a path it names must be served like a span or the
+/// dissection's main output never reaches the acting model (the first
+/// one-shot run, 2026-09-23, served nothing and cost the parent more).
+#[must_use]
+pub fn dissection_files(report: &str) -> Vec<(String, String)> {
+    let mut named: Vec<(String, String)> = Vec::new();
+    let files = sections_of(Brief::Dissection, report)
+        .into_iter()
+        .find(|(heading, _)| *heading == "## Files")
+        .map(|(_, lines)| lines)
+        .unwrap_or_default();
+    for line in files {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let Some((index, path)) = words.iter().enumerate().find_map(|(index, word)| {
+            let token = trim_token(word).trim_end_matches([':', '.', ',', ';']);
+            let path = token.split_once(':').map_or(token, |(path, _)| path);
+            path_like(path).then(|| (index, path.to_string()))
+        }) else {
+            continue;
+        };
+        if named.iter().any(|(seen, _)| *seen == path) {
+            continue;
+        }
+        let why = words[index + 1..]
+            .join(" ")
+            .trim_start_matches(['-', '—', '–', ':', ' '])
+            .trim()
+            .to_string();
+        named.push((
+            path,
+            if why.is_empty() {
+                "named by the scout.".to_string()
+            } else {
+                why
+            },
+        ));
+    }
+    named
+}
+
 /// The first `path:line` on one line, and the rest of that line as its why.
 ///
 /// A path must carry an extension: `line 12:3` and a bare `Makefile:9` are
@@ -682,6 +724,25 @@ mod tests {
         assert_eq!(heading_index(Brief::Spans, "## Reading"), None);
         assert_eq!(heading_index(Brief::Dissection, "## Needs"), Some(3));
         assert_eq!(heading_index(Brief::Dissection, "## Files"), Some(1));
+    }
+
+    /// A dissection's files are served whether or not they carry a line:
+    /// a bare path from the listing and a `path:line` both count, prose
+    /// under the heading does not, and a path named twice is served once.
+    #[test]
+    fn a_dissection_names_files_with_or_without_a_line() {
+        let report = "## Tasks\n1. read it\n## Files\nscripts/setup.sh — task 1, the setup\n\
+            - `src/main.rs:12` — task 1, the entry\nsee the docs for more\nscripts/setup.sh — again\n## Verify\nbash -n scripts/setup.sh\n";
+        assert_eq!(
+            dissection_files(report),
+            vec![
+                (
+                    "scripts/setup.sh".to_string(),
+                    "task 1, the setup".to_string()
+                ),
+                ("src/main.rs".to_string(), "task 1, the entry".to_string()),
+            ]
+        );
     }
 
     /// A dissection's needs go to the Ask step only when it named one; the

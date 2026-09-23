@@ -730,7 +730,14 @@ pub(super) fn preflight_block(
     // The next task clears it before deciding whether another preflight runs.
     transcript.notebook.preflight = Some(record.clone());
     let block = record.outcome.ok.then(|| {
-        let named = crate::preflight::spans(&record.outcome.text);
+        let mut named = crate::preflight::spans(&record.outcome.text);
+        if brief_kind == crate::preflight::Brief::Dissection {
+            for (path, why) in crate::preflight::dissection_files(&record.outcome.text) {
+                if !named.iter().any(|(seen, _)| *seen == path) {
+                    named.push((path, why));
+                }
+            }
+        }
         let (served, unserved) = preflight_serving(session.profile, &named);
         let served: Vec<(String, String)> = served
             .into_iter()
