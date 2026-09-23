@@ -174,8 +174,9 @@ pub struct FeedbackArm {
 /// `working` and `outline` are `lanes` plus one engine change each (A and B,
 /// 2026-09-23): the newest two results kept whole, or long instruction
 /// documents outlined. Their lines open a `[limits]` table, so they come
-/// last: every line after it lands in that table.
-pub const FEEDBACK_ARMS: [FeedbackArm; 11] = [
+/// last: every line after it lands in that table. `turns` is `lanes` plus
+/// the turn-economy line (D).
+pub const FEEDBACK_ARMS: [FeedbackArm; 12] = [
     FeedbackArm {
         name: "bare",
         mode: "off",
@@ -237,6 +238,20 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 11] = [
             "learn = true",
             "[limits]",
             "instructions_outline = true",
+        ],
+    },
+    FeedbackArm {
+        name: "turns",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[limits]",
+            "turn_economy = true",
         ],
     },
     FeedbackArm {

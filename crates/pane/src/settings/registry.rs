@@ -814,6 +814,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "limits.turn_economy",
+        label: "Turn economy",
+        description: "Tell the model that every turn re-sends the whole conversation, so it plans the task in fewer, whole-step cells.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "web.enabled",
         label: "Web broker",
         description: "The host-owned web broker. This grants no network access to shells or tools.",
@@ -1235,6 +1244,7 @@ pub fn shown_default(key: &str) -> Option<String> {
         "modes.explore.commands" => "none".into(),
         "limits.evidence_gate" => crate::config::Limits::default().evidence_gate.to_string(),
         "limits.keep_results" => crate::config::Limits::default().keep_results.to_string(),
+        "limits.turn_economy" => crate::config::Limits::default().turn_economy.to_string(),
         "limits.instructions_outline" => crate::config::Limits::default()
             .instructions_outline
             .to_string(),

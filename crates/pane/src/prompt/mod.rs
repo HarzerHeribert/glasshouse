@@ -408,6 +408,16 @@ pub fn keep_recent_results(conversation: &mut Conversation, keep: usize) {
     }
 }
 
+/// The turn-economy line (`[limits] turn_economy`): what a turn costs, said
+/// once, so the plan is made in whole steps rather than discovered in small
+/// ones.
+pub const TURN_ECONOMY: &str = "\n\n## Turns are the expensive unit\n\nEvery turn re-sends \
+    this whole conversation, so a task done in four turns costs about half of one done in \
+    eight. Plan the task as few cells as it honestly needs: each cell does a whole step -- \
+    read everything the step needs at once, make the edits, run the check, and branch on its \
+    result in the same program -- and yield only when the next decision needs evidence this \
+    cell cannot produce.";
+
 /// How many results the collapse boundary advances at a time.
 pub const COLLAPSE_STEP: usize = 3;
 /// What a collapsed result says in place of its output.

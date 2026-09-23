@@ -42,11 +42,14 @@ pub struct Limits {
     /// Keep this many of the newest cell results in full and collapse every
     /// older one to its first line (`prompt::keep_recent_results`); `0`
     /// keeps them all. The values stay bound in the runtime, so nothing is
-    /// lost that one expression cannot bring back. Off until measured.
+    /// lost that one expression cannot bring back.
     pub keep_results: usize,
     /// Show a long instruction document as its headings and their lines
-    /// (`project::instructions::root_outlined`). Off until measured.
+    /// (`project::instructions::root_outlined`). Off: measured worse.
     pub instructions_outline: bool,
+    /// Tell the model what a turn costs (`prompt::TURN_ECONOMY`), so it
+    /// plans the task in fewer, whole-step cells. Off until measured.
+    pub turn_economy: bool,
 }
 
 impl Default for Limits {
@@ -63,8 +66,13 @@ impl Default for Limits {
             // 800k in Claude code." A fraction carries that across models:
             // 85% of a 922k window is 784k, and 85% of a small one is small.
             compact_above_percent: 85,
-            keep_results: 0,
+            // Two since 2026-09-23: end to end it cut the parent's tokens
+            // 38 % on a fix at equal outcomes (n = 3, the steadiest arm).
+            keep_results: 2,
+            // Measured and dropped the same day: with only headings the
+            // model reread the document 30-47 times and found fewer facts.
             instructions_outline: false,
+            turn_economy: false,
         }
     }
 }
@@ -826,6 +834,7 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             "compact_above_percent",
             "keep_results",
             "instructions_outline",
+            "turn_economy",
         ]
         .contains(&key.as_str())
         {
@@ -875,7 +884,15 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             .ok_or_else(|| "pane.toml: `instructions_outline` must be true or false".to_string())?,
     };
 
+    let turn_economy = match table.get("turn_economy") {
+        None => defaults.turn_economy,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `turn_economy` must be true or false".to_string())?,
+    };
+
     Ok(Limits {
+        turn_economy,
         cell_wall_clock_s,
         response_bytes,
         cells,
