@@ -307,14 +307,18 @@ fn providers_full(
                             response.len()
                         );
                     }
+                    // Answered from its own thread, so a slow decision holds
+                    // only its own caller -- never the next request.
                     Decision::Sleep(duration) => {
-                        std::thread::sleep(duration);
-                        let response = "{}";
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
-                            response.len()
-                        );
+                        std::thread::spawn(move || {
+                            std::thread::sleep(duration);
+                            let response = "{}";
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                                response.len()
+                            );
+                        });
                     }
                 }
             } else {
@@ -1073,6 +1077,31 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
     assert!(slow.join("a.txt").exists());
     assert_eq!(result["telemetry"]["decisions"]["failed"], 1);
     let _ = std::fs::remove_dir_all(slow);
+}
+
+#[test]
+fn a_shadow_task_waits_for_its_decision_only_as_long_as_a_healthy_answer_takes() {
+    // Shadow records the answer and acts on none of it, so a slow Jev must
+    // not hold the first turn for its whole timeout (2026-09-23 evening:
+    // 1.8-3.0 s answers, every task waited the full 2 s).
+    let root = root("decision-shadow-late");
+    write_config(&root, DECISIONS_SHADOW);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![cell("c1", "answer(\"done\");")],
+        vec![Decision::Sleep(Duration::from_millis(1500))],
+        vec![],
+    );
+    let started = std::time::Instant::now();
+    let result = exec_bounded(&root, &endpoint, "read the file for me", None)
+        .expect("a late shadow decision never holds the task");
+    let took = started.elapsed();
+    assert_eq!(messages.lock().unwrap().len(), 1);
+    assert_eq!(result["telemetry"]["decisions"]["failed"], 1, "counted as late");
+    assert!(
+        took < Duration::from_millis(1400),
+        "the task waited {took:?} for a decision shadow never acts on"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
