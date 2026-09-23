@@ -177,6 +177,20 @@ enum SubscriptionsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Take an account into its pool or out of it. Every account whose
+    /// catalogue serves a model is in that model's pool unless taken out;
+    /// the change reaches a serving gateway on its next request.
+    Pool {
+        /// The `[accounts.<name>]` table.
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+        /// Take it into the pool.
+        #[arg(long, conflicts_with = "exclude")]
+        include: bool,
+        /// Take it out of the pool.
+        #[arg(long)]
+        exclude: bool,
+    },
     /// Use one account's saved login once: start its broker, read its
     /// catalogue and send one small completion. Exit 0 only if it answered.
     Verify {
@@ -309,6 +323,32 @@ fn run() -> Result<()> {
             command: SubscriptionsCommand::AdoptBinary { path },
         } => adopt_binary(&data_dir(&cli)?, path),
         Command::Subscriptions {
+            command:
+                SubscriptionsCommand::Pool {
+                    entitlement,
+                    include,
+                    exclude,
+                },
+        } => {
+            let config = load_config(&cli)?;
+            if !config.accounts.contains_key(entitlement.as_str()) {
+                bail!("no [accounts.{entitlement}] table in the gateway configuration");
+            }
+            let state = inference_gateway::provider::pool_state::PoolState::at(&data_dir(&cli)?);
+            if *include || *exclude {
+                state.set(entitlement, *include)?;
+            }
+            println!(
+                "{entitlement}: {}",
+                if state.excluded(entitlement) {
+                    "out of its pool"
+                } else {
+                    "in its pool"
+                }
+            );
+            Ok(())
+        }
+        Command::Subscriptions {
             command: SubscriptionsCommand::Usage { entitlement, json },
         } => {
             let config = load_config(&cli)?;
@@ -432,6 +472,11 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
         let accounts = config.accounts.clone();
         let providers = providers.clone();
         let data_dir = data_dir.to_path_buf();
+        // Which accounts the person took out of their pool, read live per
+        // request so a toggle needs no restart.
+        let pool_state = std::sync::Arc::new(
+            inference_gateway::provider::pool_state::PoolState::at(&data_dir),
+        );
         move || {
             pool::pool_from_catalogue(
                 &accounts,
@@ -443,6 +488,13 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
                 // fail-closed default.
                 &|_| false,
             )
+            .map(|mut built| {
+                let state = std::sync::Arc::clone(&pool_state);
+                built.upstream = built
+                    .upstream
+                    .with_exclusion(std::sync::Arc::new(move |account| state.excluded(account)));
+                built
+            })
         }
     };
     let gateway = match build() {
@@ -675,6 +727,7 @@ fn entitlements(config: &GatewayConfig, data_dir: &Path, json: bool, refresh: bo
         refresh_catalogues(config, data_dir, &cache);
     }
 
+    let pool_state = inference_gateway::provider::pool_state::PoolState::at(data_dir);
     let mut accounts = Vec::new();
     for (name, entry) in &config.accounts {
         let provider = match entry.subscription_broker() {
@@ -726,6 +779,7 @@ fn entitlements(config: &GatewayConfig, data_dir: &Path, json: bool, refresh: bo
             "unavailable_reason": Option::<String>::None,
             "authenticated": authenticated,
             "connect_with": connect_with,
+            "pooled": !pool_state.excluded(name),
         }));
     }
 

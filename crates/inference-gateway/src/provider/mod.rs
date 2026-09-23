@@ -20,6 +20,7 @@ pub mod discovery;
 /// enable it for its own tests without the library carrying it otherwise.
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+pub mod pool_state;
 pub mod quota;
 pub mod registry;
 pub mod subscription_usage;

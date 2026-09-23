@@ -216,6 +216,9 @@ pub struct UpstreamBackend {
     /// as the user marked it. [`Cost::Metered`] when nobody marked anything,
     /// which is the fail-closed direction.
     cost: Cost,
+    /// The `[accounts.<name>]` this backend was built from, when a pool built
+    /// it; a model's pool, its exclusions and its rests are keyed by it.
+    account: Option<String>,
 }
 
 enum BackendCredential {
@@ -272,6 +275,7 @@ impl UpstreamBackend {
             credential: BackendCredential::Provider(credential),
             credential_id,
             cost,
+            account: None,
         })
     }
 
@@ -324,6 +328,7 @@ impl UpstreamBackend {
             credential_id,
             cost: Cost::Free,
             models: Vec::new(),
+            account: None,
         }
         .with_models(models))
     }
@@ -352,6 +357,19 @@ impl UpstreamBackend {
         self.models.sort();
         self.models.dedup();
         self
+    }
+
+    /// This backend as a member of `account`'s pool.
+    #[must_use]
+    pub fn with_account(mut self, account: &str) -> Self {
+        self.account = Some(account.to_owned());
+        self
+    }
+
+    /// The account name a pool knows this backend by, else its provider.
+    #[must_use]
+    pub fn account(&self) -> &str {
+        self.account.as_deref().unwrap_or(&self.provider)
     }
 
     /// Whether this backend's account declares `model`.
@@ -549,7 +567,17 @@ pub struct Upstream {
     backends: Vec<UpstreamBackend>,
     /// Which of `backends` is serving. Only ever set to a valid index.
     serving: AtomicUsize,
+    /// Accounts answering `429` rest until the instant beside them: the
+    /// next request for a model several accounts serve goes to the next
+    /// one in its pool (2026-09-23, the user's pooled subscriptions).
+    cooling: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Whether the person took an account out of its pool; read per
+    /// request (`provider::pool_state`). `None` excludes nothing.
+    excluded: Option<Exclusion>,
 }
+
+/// Whether an account (by name) is out of its pool.
+pub type Exclusion = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Why an [`Upstream`] could not be built.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -607,6 +635,8 @@ impl Upstream {
         Ok(Self {
             backends: vec![backend],
             serving: AtomicUsize::new(0),
+            cooling: std::sync::Mutex::default(),
+            excluded: None,
         })
     }
 
@@ -619,7 +649,39 @@ impl Upstream {
         Ok(Self {
             backends,
             serving: AtomicUsize::new(0),
+            cooling: std::sync::Mutex::default(),
+            excluded: None,
         })
+    }
+
+    /// The same upstream, asking `excluded` which accounts are out of their
+    /// pool on every request.
+    #[must_use]
+    pub fn with_exclusion(mut self, excluded: Exclusion) -> Self {
+        self.excluded = Some(excluded);
+        self
+    }
+
+    /// `account` answered `429`: rest it for `rest`, so the next request for
+    /// a model its pool shares goes to another account.
+    pub fn cool_down(&self, account: &str, rest: std::time::Duration) {
+        if let Ok(mut cooling) = self.cooling.lock() {
+            cooling.insert(account.to_string(), std::time::Instant::now() + rest);
+        }
+    }
+
+    fn cooling(&self, account: &str) -> bool {
+        self.cooling
+            .lock()
+            .ok()
+            .and_then(|cooling| cooling.get(account).copied())
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    fn is_excluded(&self, account: &str) -> bool {
+        self.excluded
+            .as_ref()
+            .is_some_and(|excluded| excluded(account))
     }
 
     /// The backend currently serving.
@@ -684,17 +746,30 @@ impl Upstream {
         }
     }
 
-    /// The first backend declaring `model`, or `None`.
+    /// The first backend of `model`'s pool that is in it and not resting,
+    /// else the first in it at all, or `None`.
     ///
-    /// First rather than best: the order is the configured one, and a pool
-    /// that lists an account earlier is saying it prefers it. Choosing on
+    /// A model's pool is every backend declaring it, in configuration
+    /// order. First rather than best: the order is the configured one, and
+    /// staying on one account keeps the provider's prompt cache warm, where
+    /// spreading requests would throw it away every switch. An account the
+    /// person took out of the pool is never chosen; one resting after a
+    /// `429` is chosen only when every other one rests too. Choosing on
     /// price or measured quality is a ranking decision that belongs to
     /// routing, not to the thing that carries the bytes.
     #[must_use]
     pub fn for_model(&self, model: &str) -> Option<&UpstreamBackend> {
-        self.backends
+        let mut pool = self
+            .backends
             .iter()
-            .find(|backend| backend.serves_model(model))
+            .filter(|backend| backend.serves_model(model))
+            .filter(|backend| !self.is_excluded(backend.account()))
+            .peekable();
+        let first = *pool.peek()?;
+        Some(
+            pool.find(|backend| !self.cooling(backend.account()))
+                .unwrap_or(first),
+        )
     }
 
     /// Every backend, assigned first.
@@ -896,6 +971,46 @@ mod per_model_tests {
         );
         assert_eq!(pool.serving_for(Some("gpt-5.6-luna")).provider(), "chatgpt");
         assert_eq!(pool.serving_for(Some("gpt-6-astra")).provider(), "chatgpt");
+    }
+
+    /// A model's pool: every account of that kind, in order. The first
+    /// serves until it answers `429`, then the next; an account taken out of
+    /// the pool is never chosen; and when every one rests, the first in the
+    /// pool is used rather than nothing.
+    #[test]
+    fn a_pool_stays_on_one_account_skips_a_resting_one_and_never_an_excluded_one() {
+        let excluded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = std::sync::Arc::clone(&excluded);
+        let pool = Upstream::with_failover(vec![
+            backend("cliproxyapi", &["claude-opus-5-5"]).with_account("claude-a"),
+            backend("cliproxyapi", &["claude-opus-5-5"]).with_account("claude-b"),
+            backend("cliproxyapi", &["claude-opus-5-5"]).with_account("claude-c"),
+        ])
+        .unwrap()
+        .with_exclusion(std::sync::Arc::new(move |account: &str| {
+            seen.lock().unwrap().iter().any(|name| name == account)
+        }));
+        let chosen = |pool: &Upstream| {
+            pool.for_model("claude-opus-5-5")
+                .map(|b| b.account().to_string())
+        };
+
+        assert_eq!(chosen(&pool).as_deref(), Some("claude-a"));
+        pool.cool_down("claude-a", std::time::Duration::from_secs(600));
+        assert_eq!(chosen(&pool).as_deref(), Some("claude-b"));
+        excluded.lock().unwrap().push("claude-b".into());
+        assert_eq!(chosen(&pool).as_deref(), Some("claude-c"));
+        pool.cool_down("claude-c", std::time::Duration::from_secs(600));
+        assert_eq!(
+            chosen(&pool).as_deref(),
+            Some("claude-a"),
+            "all resting: the first in the pool"
+        );
+        excluded
+            .lock()
+            .unwrap()
+            .extend(["claude-a".into(), "claude-c".into()]);
+        assert_eq!(chosen(&pool), None, "every account taken out: none");
     }
 
     /// A catalogue and a request spell a version differently often enough

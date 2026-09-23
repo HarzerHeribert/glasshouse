@@ -205,7 +205,7 @@ pub fn pool_from_catalogue(
         if entry.subscription_broker().is_some() {
             match RunningSubscriptionBroker::start(&broker_paths(name), name) {
                 Ok(broker) => match subscription_backend(broker) {
-                    Ok(backend) => backends.push(backend),
+                    Ok(backend) => backends.push(backend.with_account(name)),
                     Err(error) => notes.push(format!("account `{name}`: {error}")),
                 },
                 Err(error) => {
@@ -270,10 +270,13 @@ pub fn pool_from_catalogue(
                 Cost::Metered
             },
         ) {
-            Ok(backend) => backends.push(match entry.models() {
-                Some(models) => backend.with_models(models),
-                None => backend,
-            }),
+            Ok(backend) => backends.push(
+                match entry.models() {
+                    Some(models) => backend.with_models(models),
+                    None => backend,
+                }
+                .with_account(name),
+            ),
             Err(error) => notes.push(format!("account `{name}`: {error}")),
         }
     }

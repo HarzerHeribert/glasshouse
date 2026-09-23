@@ -703,6 +703,11 @@ fn forward(
 
     let (parts, mut body) = response.into_parts();
     let status = parts.status;
+    // A rate-limited account rests, so the next request for a model its
+    // pool shares goes to the next account in it (`Upstream::for_model`).
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        upstream.cool_down(serving.account(), rest_after(&parts.headers));
+    }
     let declared_length = body.content_length();
     // Capability map line 1229's gateway half. Headers only, read before
     // anything below rewrites or filters them for relay — never the body,
@@ -1368,6 +1373,17 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         tool_rounds: None,
         repairs: None,
     }
+}
+
+/// How long a `429`'s account rests: its `Retry-After` seconds, held to
+/// between thirty seconds and six hours, else ten minutes.
+fn rest_after(headers: &ureq::http::HeaderMap) -> std::time::Duration {
+    let seconds = headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(600);
+    std::time::Duration::from_secs(seconds.clamp(30, 6 * 60 * 60))
 }
 
 #[cfg(test)]
