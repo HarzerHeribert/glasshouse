@@ -31,6 +31,7 @@ pub mod preflight;
 pub mod progress;
 pub mod project;
 pub mod prompt;
+pub mod reader;
 pub mod rollout;
 pub mod ruler;
 pub mod runtime;

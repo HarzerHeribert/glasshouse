@@ -66,14 +66,7 @@ pub(super) fn helper_callback(
     // 2026-09-23, a find loop given only the question searched the wrong
     // directories and answered "could not determine" in 2 of 2 calls, while
     // a listing lifted offline recall from 0.62 to 0.88 on the same task.
-    let input = if spec.name == crate::helpers::SCOUT.name {
-        match crate::preflight::listing_section(state.profile.root()) {
-            Some(listing) => format!("{input}\n{listing}"),
-            None => input,
-        }
-    } else {
-        input
-    };
+    let question = input.clone();
     let input = if spec.name == "check" {
         format!(
             "Original checker request:\n{}\n\n{}",
@@ -90,15 +83,19 @@ pub(super) fn helper_callback(
     // ends on silence (`wire::SIDE_ERRAND_SILENCE`) and never on duration —
     // so without this one helper could spend the cell's clock.
     let _away = state.away_from_js();
-    let call = crate::helpers::run(
-        spec,
-        crate::helpers::HelperRoute::new(&model, effort),
-        &input,
-        &state.profile,
-        &state.glasshouse,
-        &state.session,
-        &token,
-    );
+    let call = if spec.name == crate::helpers::SCOUT.name {
+        find(&question, &model, effort, &state, &token)
+    } else {
+        crate::helpers::run(
+            spec,
+            crate::helpers::HelperRoute::new(&model, effort),
+            &input,
+            &state.profile,
+            &state.glasshouse,
+            &state.session,
+            &token,
+        )
+    };
     let ok = call.outcome.ok;
     let cancelled = call.outcome.cancelled;
     let answer = call.outcome.text.clone();
@@ -139,13 +136,55 @@ pub(super) fn helper_callback(
     }
     // The reader: a Scout's spans come back with the lines behind them,
     // read from disk here rather than retyped by the helper (`excerpts.rs`).
-    let answer = if spec.name == crate::helpers::SCOUT.name {
-        crate::excerpts::attach(&answer, &state.profile)
-    } else {
-        answer
-    };
+    // The finder's answer already carries its excerpts (`find` below).
     let value = js_string(scope, &answer);
     retval.set(value);
+}
+
+/// The reader: one toolless request over Pane's own evidence
+/// (`reader.rs`), its spans served from disk (`excerpts.rs`) -- and the
+/// Scout's search loop, given the listing, only when nothing it named
+/// verified. Measured 2026-09-23: the loop alone searched the wrong
+/// directories twice and took 60 s for the one call that worked.
+fn find(
+    question: &str,
+    model: &str,
+    effort: crate::wire::Effort,
+    state: &RuntimeState,
+    token: &crate::tools::invoke::CancellationToken,
+) -> crate::helpers::HelperCall {
+    let root = state.profile.root();
+    let route = || crate::helpers::HelperRoute::new(model, effort);
+    let mut call = crate::helpers::run(
+        &crate::reader::FINDER,
+        route(),
+        &crate::reader::brief(question, root),
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+        token,
+    );
+    if call.outcome.ok {
+        let served = crate::excerpts::attach(&call.outcome.text, &state.profile);
+        if served.contains(crate::excerpts::HEADING) {
+            call.outcome.text = served;
+            return call;
+        }
+    }
+    let listing = crate::preflight::listing_section(root).unwrap_or_default();
+    let mut looked = crate::helpers::run(
+        &crate::helpers::SCOUT,
+        route(),
+        &format!("{question}\n{listing}"),
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+        token,
+    );
+    if looked.outcome.ok {
+        looked.outcome.text = crate::excerpts::attach(&looked.outcome.text, &state.profile);
+    }
+    looked
 }
 
 /// What the lane and the `/cell` inspector show for one helper call.
