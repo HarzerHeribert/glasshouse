@@ -121,13 +121,13 @@ pub(super) fn panel(usage: Option<&Usage>, now_unix: i64) -> Panel {
     let Some(usage) = usage else {
         return Panel::text(
             "Usage",
-            "The gateway could not be asked for subscription usage.".to_string(),
+            "The gateway could not be asked for subscription usage.",
         );
     };
     if usage.accounts.is_empty() {
         return Panel::text(
             "Usage",
-            "No subscription account is configured; /login connects one.".to_string(),
+            "No subscription account is configured; /login connects one.",
         );
     }
     let mut rows = Vec::new();

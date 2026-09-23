@@ -3035,7 +3035,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            startup::default_decisions_model(&off, &[typesafe.clone()]),
+            startup::default_decisions_model(&off, std::slice::from_ref(&typesafe)),
             None
         );
         let chosen = crate::config::DecisionsConfig {

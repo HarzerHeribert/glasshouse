@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 /// shapes asked for and a log reduced ([`shape`]), what it points at fetched
 /// when it is not enough ([`enrich`]), then rendered within this turn's return budget (`TaskSpend::render_return`), with the usage line
 /// carrying the figures. The screen shows the same text the model reads.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one place a returned value meets the session, the task, the budget and the profile"
+)]
 pub(super) fn show(
     session: &Session<'_>,
     runtime: &Runtime,

@@ -16,10 +16,13 @@ use anyhow::{Context as _, Result};
 
 const FILE: &str = "pool.toml";
 
+/// The file's modification time and size, and the set it held then.
+type Cached = Option<(Option<(SystemTime, u64)>, BTreeSet<String>)>;
+
 /// The exclusion list, cached by modification time.
 pub struct PoolState {
     path: PathBuf,
-    cache: Mutex<Option<(Option<(SystemTime, u64)>, BTreeSet<String>)>>,
+    cache: Mutex<Cached>,
 }
 
 impl PoolState {

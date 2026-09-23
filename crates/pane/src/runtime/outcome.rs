@@ -950,8 +950,7 @@ mod tests {
         let body = rendered.text.strip_prefix("### readme\n").expect("heading");
         let last_numbered = body
             .lines()
-            .filter(|line| line.contains(" | line "))
-            .last()
+            .rfind(|line| line.contains(" | line "))
             .expect("some lines kept");
         let last: usize = last_numbered
             .split(" | ")
