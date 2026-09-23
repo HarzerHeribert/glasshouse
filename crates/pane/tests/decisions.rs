@@ -41,7 +41,47 @@ fn root(label: &str) -> PathBuf {
 fn write_config(root: &Path, text: &str) {
     let dir = root.join(".pane");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.toml"), text).unwrap();
+    std::fs::write(dir.join("config.toml"), pinned(text)).unwrap();
+}
+
+/// `text` with the `[helpers]` defaults these tests were written against,
+/// for every key the test does not set itself: the acceptance list on, and
+/// neither the checker behind the answer nor the learned-notes writer, whose
+/// extra requests (defaults since 2026-09-23) would shift every scripted
+/// answer. A test about one of them sets it and is left alone.
+fn pinned(text: &str) -> String {
+    let set = |key: &str| {
+        text.lines()
+            .any(|line| line.trim_start().starts_with(&format!("{key} =")))
+    };
+    let mut keys = String::new();
+    for (key, value) in [
+        ("acceptance_list", "true"),
+        ("completion_check", "false"),
+        ("learn", "false"),
+    ] {
+        if !set(key) {
+            keys.push_str(&format!("{key} = {value}\n"));
+        }
+    }
+    if text.lines().any(|line| line.trim() == "[helpers]") {
+        text.replacen("[helpers]\n", &format!("[helpers]\n{keys}"), 1)
+    } else {
+        format!("{text}\n[helpers]\n{keys}")
+    }
+}
+
+/// The sentences the gate noted beside the answer without holding it.
+fn notes(result: &Value) -> Vec<String> {
+    result["telemetry"]["after_answer"]["notes"]
+        .as_array()
+        .map(|notes| {
+            notes
+                .iter()
+                .map(|note| note.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What the decision endpoint does with one scripted question.
@@ -1342,31 +1382,30 @@ fn a_failed_decision_leaves_preflight_exactly_as_it_is_today() {
 
 // -- the completion question (2616) --------------------------------------
 
+/// A confident no is the decision model's reading, not a fact: it is a note
+/// beside the answer and never holds it (2026-09-23, *lanes, not gates*).
 #[test]
-fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
+fn a_confident_no_is_a_note_beside_the_answer_and_never_holds() {
     let root = root("completion-no");
     write_config(&root, DECISIONS_ON);
     let (endpoint, messages, decisions, _headers) = providers(
-        vec![
-            cell("c1", "answer(\"done\");"),
-            cell("c2", "answer(\"done\");"),
-        ],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Answer(completion_answer(0.06))],
     );
-    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
-        .expect("a held completion is recorded unverified, not a refusal");
+    let result =
+        exec_bounded(&root, &endpoint, "fix the bug", None).expect("a noted completion finishes");
     let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert_eq!(messages.len(), 1, "no held turn");
     assert!(
         // The diff is empty (this task never wrote a file), so the
         // answer-state addendum to 2616 is what asked the question.
-        messages[1].contains("the decision model reads the answer as not satisfying the request"),
-        "{}",
-        messages[1]
+        notes(&result).iter().any(
+            |n| n.contains("the decision model reads the answer as not satisfying the request")
+        ),
+        "{result}"
     );
-    assert_eq!(result["telemetry"]["completion"]["verified"], false);
-    assert_eq!(result["telemetry"]["completion"]["deferred"], 1);
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 0);
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["noul"], 0.06, "{telemetry}");
     assert_eq!(telemetry["finding_added"], true, "{telemetry}");
@@ -1383,6 +1422,10 @@ fn a_confident_no_holds_the_completion_once_then_records_it_unverified() {
 fn a_changed_diff_is_asked_again_and_a_fixed_task_verifies() {
     let root = root("completion-changed-diff");
     write_config(&root, DECISIONS_ON);
+    // A fact holds the first claim (the contract's `b.txt` is missing), so
+    // the task claims twice over two different diffs; the decision model's
+    // own no is only a note and would hold nothing.
+    write_checks_toml(&root, "[contract]\nrequired = [\"b.txt\"]\n");
     let (endpoint, messages, decisions, _headers) = providers(
         vec![
             cell(
@@ -1408,14 +1451,21 @@ fn a_changed_diff_is_asked_again_and_a_fixed_task_verifies() {
         2,
         "held on the first diff, then a second cell whose diff has changed"
     );
+    assert!(messages[1].contains("b.txt"), "{}", messages[1]);
     assert!(
-        messages[1].contains("the decision model reads the diff as not satisfying the request"),
-        "{}",
+        !messages[1].contains("the decision model reads the diff as not satisfying the request"),
+        "the model's reading is never what holds: {}",
         messages[1]
     );
-    assert_eq!(
-        result["telemetry"]["completion"]["verified"], true,
-        "the fixed diff is judged fresh, not against the stale no: {result}"
+    // The fixed diff stands: no second hold. It is not *verified* -- no
+    // check ever ran, and that note rides beside the answer.
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 1, "{result}");
+    assert_eq!(result["telemetry"]["completion"]["verified"], false, "{result}");
+    assert!(
+        result["telemetry"]["after_answer"]["notes"][0]
+            .as_str()
+            .is_some_and(|note| note.contains("Run a verification")),
+        "{result}"
     );
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["noul"], 0.95, "{telemetry}");
@@ -1501,8 +1551,8 @@ fn a_yes_never_removes_a_mechanical_finding() {
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             cell("c1", "answer(\"done\");"),
-            prose("The change holds; nothing more is needed."),
             cell("c2", "answer(\"done\");"),
+            prose("holds\nnothing more is needed."),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.94))],
@@ -1512,7 +1562,11 @@ fn a_yes_never_removes_a_mechanical_finding() {
     assert_eq!(
         messages.lock().unwrap().len(),
         3,
-        "the checker still runs, then the same claim finishes unverified"
+        "held once, the same claim finishes unverified, then the checker behind the answer"
+    );
+    assert_eq!(
+        result["telemetry"]["after_answer"]["checks"][0]["verdict"], "holds",
+        "{result}"
     );
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["noul"], 0.94, "{telemetry}");
@@ -1530,91 +1584,76 @@ fn a_yes_never_removes_a_mechanical_finding() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-// -- the fresh checker's own result, judged (2645) --------------------------
+// -- the fresh checker, behind the answer (2026-09-23) -----------------------
 
-/// A confident no (0.05, at or below the default 0.10 floor) on the fresh
-/// checker's own return carries the one line, and the checker's own finding
-/// is delivered exactly as it would be with no judge at all -- never
-/// withheld, truncated or rerun.
+/// The checker runs after the answer and its verdict is a note for the
+/// person: a "does not hold" costs the model no turn and never reaches it,
+/// and nothing judges the checker's own result any more (2645's judge sat on
+/// a hold that no longer exists).
 #[test]
-fn a_confident_no_checker_judge_carries_the_line_and_leaves_the_finding_intact() {
-    let root = root("checker-judge-no");
+fn a_checker_that_says_does_not_hold_is_a_note_behind_the_answer_and_costs_no_turn() {
+    let root = root("checker-after-no");
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
-    let (endpoint, messages, decisions, _headers) = providers_with_rank_and_judge(
+    let (endpoint, messages, decisions, _headers) = providers(
         vec![
             cell("c1", "answer(\"done\");"),
-            prose("does not hold: the diff misses the retry path"),
-            cell("c2", "answer(\"done\");"),
+            prose("does not hold\nthe diff misses the retry path"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.55))],
-        vec![],
-        vec![Decision::Answer(checker_judge_answer(0.05))],
     );
     let result = exec_bounded(&root, &endpoint, "fix the bug", None)
-        .expect("a flagged checker still finishes the task");
+        .expect("a flagged checker never holds the task");
     let bodies = messages.lock().unwrap();
     assert_eq!(
         bodies.len(),
-        3,
-        "the task turn, the checker's own request, then the held retry"
+        2,
+        "the task turn, then the checker's own request"
     );
     assert!(
-        bodies[2].contains("does not hold: the diff misses the retry path"),
-        "the checker's own finding is never withheld: {}",
-        bodies[2]
+        !bodies[0].contains("the diff misses the retry path"),
+        "the checker's words never reach the model"
     );
+    let check = &result["telemetry"]["after_answer"]["checks"][0];
+    assert_eq!(check["verdict"], "does not hold", "{result}");
     assert!(
-        bodies[2].contains("decision: this result may not answer what was asked (0.05)"),
-        "a confident no carries the line: {}",
-        bodies[2]
+        check["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("the diff misses the retry path"),
+        "{check}"
     );
-    let helpers_telemetry = &result["telemetry"]["decisions"]["helpers"];
-    assert_eq!(helpers_telemetry["checked"], 1, "{helpers_telemetry}");
-    assert_eq!(helpers_telemetry["flagged"], 1, "{helpers_telemetry}");
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 0);
     assert_eq!(
         decisions.lock().unwrap().len(),
-        3,
-        "the intent question, the completion question, and the checker's own judge"
+        2,
+        "the intent question and the completion question -- no judge on the checker"
     );
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// A confident yes (0.9) on the fresh checker's own return carries nothing.
-/// Also kills the `helper_no_below`-comparison mutation: widening the floor
-/// to `<= 1.0` would flag this case too.
+/// A checker that finds the answer holds leaves one quiet verdict, and the
+/// task's own figures are those of a run with no checker at all.
 #[test]
-fn a_confident_yes_checker_judge_carries_nothing() {
-    let root = root("checker-judge-yes");
+fn a_checker_that_says_holds_leaves_one_verdict_and_nothing_else() {
+    let root = root("checker-after-yes");
     write_config(&root, DECISIONS_ON_WITH_CHECKER);
-    let (endpoint, messages, _decisions, _headers) = providers_with_rank_and_judge(
+    let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             cell("c1", "answer(\"done\");"),
-            prose("does not hold: the diff misses the retry path"),
-            cell("c2", "answer(\"done\");"),
+            prose("holds\nthe answer does what was asked"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer(0.55))],
-        vec![],
-        vec![Decision::Answer(checker_judge_answer(0.9))],
     );
     let result = exec_bounded(&root, &endpoint, "fix the bug", None)
-        .expect("an unflagged checker still finishes the task");
-    let bodies = messages.lock().unwrap();
-    assert_eq!(bodies.len(), 3);
-    assert!(
-        bodies[2].contains("does not hold: the diff misses the retry path"),
-        "{}",
-        bodies[2]
-    );
-    assert!(
-        !bodies[2].contains("decision:"),
-        "a confident yes carries nothing: {}",
-        bodies[2]
-    );
-    let helpers_telemetry = &result["telemetry"]["decisions"]["helpers"];
-    assert_eq!(helpers_telemetry["checked"], 1, "{helpers_telemetry}");
-    assert_eq!(helpers_telemetry["flagged"], 0, "{helpers_telemetry}");
+        .expect("a checker behind the answer finishes");
+    assert_eq!(messages.lock().unwrap().len(), 2);
+    let checks = &result["telemetry"]["after_answer"]["checks"];
+    assert_eq!(checks.as_array().map(Vec::len), Some(1), "{checks}");
+    assert_eq!(checks[0]["verdict"], "holds", "{checks}");
+    assert_eq!(result["telemetry"]["completion"]["verified"], true);
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 0);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1761,26 +1800,27 @@ fn a_large_diff_is_cut_at_a_hunk_boundary_and_still_asked() {
 // -- diff hygiene (2641) --------------------------------------------------
 
 #[test]
-fn a_confident_out_of_scope_yes_is_one_finding_held_once_with_the_reason() {
+fn a_confident_out_of_scope_yes_is_a_note_with_the_reason_and_never_holds() {
     let root = root("hygiene-out-of-scope");
     write_config(&root, DECISIONS_ON);
     let held = "await write({path: \"a.txt\", content: \"1\"});\nanswer(\"done\");";
     let (endpoint, messages, decisions, _headers) = providers(
-        vec![cell("c1", held), cell("c2", held)],
+        vec![cell("c1", held)],
         vec![Decision::Answer(decision_answer("modify", 0.99))],
         vec![Decision::Answer(completion_answer_with_hygiene(
             0.94,
             [0.5, 0.95, 0.5, 0.5, 0.5],
         ))],
     );
-    let result = exec_bounded(&root, &endpoint, "fix the bug", None)
-        .expect("a hygiene finding is held once, not a refusal");
+    let result =
+        exec_bounded(&root, &endpoint, "fix the bug", None).expect("a hygiene note never holds");
     let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert_eq!(messages.len(), 1, "no held turn");
     assert!(
-        messages[1].contains("the diff changes files the request did not ask about"),
-        "{}",
-        messages[1]
+        notes(&result)
+            .iter()
+            .any(|n| n.contains("the diff changes files the request did not ask about")),
+        "{result}"
     );
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["hygiene_findings"], 1, "{telemetry}");
@@ -1884,27 +1924,25 @@ fn an_answer_only_task_with_an_empty_diff_is_asked_over_the_answer_state() {
 }
 
 #[test]
-fn a_confident_no_over_the_answer_state_is_one_finding_held_once() {
+fn a_confident_no_over_the_answer_state_is_a_note_and_never_holds() {
     let root = root("answer-state-no");
     write_config(&root, DECISIONS_ON);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![
-            cell("c1", "answer(\"done\");"),
-            cell("c2", "answer(\"done\");"),
-        ],
+        vec![cell("c1", "answer(\"done\");")],
         vec![],
         vec![Decision::Answer(completion_answer(0.05))],
     );
     let result = exec_bounded(&root, &endpoint, "read the file for me", None)
-        .expect("a confident no over the answer state is held once, not a refusal");
+        .expect("a confident no over the answer state is a note");
     let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 2, "held once, then the same claim again");
+    assert_eq!(messages.len(), 1, "no held turn");
     assert!(
-        messages[1].contains("the decision model reads the answer as not satisfying the request"),
-        "{}",
-        messages[1]
+        notes(&result).iter().any(
+            |n| n.contains("the decision model reads the answer as not satisfying the request")
+        ),
+        "{result}"
     );
-    assert_eq!(result["telemetry"]["completion"]["verified"], false);
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 0);
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["state"], "answer", "{telemetry}");
     assert_eq!(telemetry["finding_added"], true, "{telemetry}");
@@ -1960,14 +1998,13 @@ fn a_judge_item_answered_yes_is_satisfied_without_the_checker() {
 }
 
 #[test]
-fn a_judge_item_answered_no_is_a_finding_held_once_then_verifies_unverified_with_the_item_named() {
+fn a_judge_item_answered_no_is_a_note_naming_the_item_and_never_holds() {
     let root = root("judge-no");
     write_config(&root, DECISIONS_ON_WITH_LISTER_NO_CHECKER);
     let (endpoint, messages, _decisions, _headers) = providers(
         vec![
             prose("judge: the tone is friendly"),
             cell("c1", "answer(\"done\");"),
-            cell("c1b", "answer(\"done\");"),
         ],
         vec![],
         vec![Decision::Answer(completion_answer_with_judge(
@@ -1976,19 +2013,20 @@ fn a_judge_item_answered_no_is_a_finding_held_once_then_verifies_unverified_with
         ))],
     );
     let result = exec_bounded(&root, &endpoint, "make sure the tone is friendly", None)
-        .expect("a not-satisfied judge item holds once, then verifies unverified");
+        .expect("a not-satisfied judge item is a note");
     let messages = messages.lock().unwrap();
     assert_eq!(
         messages.len(),
-        3,
-        "the lister, the first turn, the held claim again"
+        2,
+        "the lister, the first turn -- no held turn"
     );
     assert!(
-        messages[2].contains("the tone is friendly"),
-        "the held block names the item: {}",
-        messages[2]
+        notes(&result)
+            .iter()
+            .any(|n| n.contains("the tone is friendly")),
+        "the note names the item: {result}"
     );
-    assert_eq!(result["telemetry"]["completion"]["verified"], false);
+    assert_eq!(result["telemetry"]["completion"]["deferred"], 0);
     let telemetry = &result["telemetry"]["decisions"]["completion"];
     assert_eq!(telemetry["judged"]["no"], 1, "{telemetry}");
     let _ = std::fs::remove_dir_all(root);
@@ -2236,14 +2274,14 @@ fn an_unanswerable_supervision_question_never_nudges() {
 /// A large returned field the decision model reads as a log goes to the
 /// reducer before the model sees it (`session/returned.rs`): the rules rung
 /// drops the passing lines with no helper request, the failure stays, and
-/// the lossiness line says what went. In `shadow` mode the same answer is
-/// recorded and the field is paged untouched.
+/// the lossiness line says what went. Since 2026-09-23 `shadow` reduces
+/// too: the whole value stays bound, so a shortened log stops nothing.
 #[test]
 fn a_large_returned_log_is_reduced_when_the_decision_model_reads_it_as_one() {
     const LOG_CELL: &str = "const lines = [];\nfor (let i = 0; i < 1500; i++) lines.push(`test case_${i} ... ok`);\nlines.push(\"test the_one_that_matters ... FAILED\");\nlines.push(\"test result: FAILED. 1500 passed; 1 failed\");\nreturn { run: lines.join(\"\\n\"), n: 1 };";
     for (label, decisions_toml, reduced) in [
         ("reduce-on", DECISIONS_ON, true),
-        ("reduce-shadow", DECISIONS_SHADOW, false),
+        ("reduce-shadow", DECISIONS_SHADOW, true),
     ] {
         let root = root(label);
         write_config(
@@ -2318,7 +2356,7 @@ fn a_large_returned_log_is_reduced_when_the_decision_model_reads_it_as_one() {
         assert_eq!(shapes[0]["field"], "run", "{label}: {shapes}");
         assert_eq!(shapes[0]["choice"], "log", "{label}: {shapes}");
         assert_eq!(shapes[0]["reduced"], reduced, "{label}: {shapes}");
-        assert_eq!(shapes[0]["would_reduce"], !reduced, "{label}: {shapes}");
+        assert!(shapes[0]["would_reduce"].is_null(), "{label}: {shapes}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

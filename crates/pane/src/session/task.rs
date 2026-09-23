@@ -279,6 +279,10 @@ pub(super) struct Observed {
 /// filesystem the task changed.
 pub(super) struct TaskState {
     pub(super) task: String,
+    /// Every in-project file a cell read or took context from, with how
+    /// many times: what the learned-notes writer learns from (`learned.rs`).
+    pub(super) opened: std::collections::BTreeMap<String, u32>,
+    pub(super) learn_asked: bool,
     pub(super) capsule: crate::runtime::capsule::Capsule,
     pub(super) guard: crate::progress::Guard,
     pub(super) checkpoints: crate::progress::Checkpoints,
@@ -429,6 +433,8 @@ impl TaskState {
             evidence_gate: config.limits.evidence_gate,
             completion_check: config.helpers.completion_check,
             checker_ran: false,
+            opened: std::collections::BTreeMap::new(),
+            learn_asked: false,
             acceptance: Vec::new(),
             acceptance_verdicts: Vec::new(),
             stall: crate::progress::Stall::default(),
@@ -630,6 +636,14 @@ impl TaskState {
                 verification.exit_code == Some(0),
             );
         }
+        for call in &record.calls {
+            if matches!(call.tool.as_str(), "read" | "context")
+                && matches!(call.ended, Ended::Ok)
+                && let Some(path) = call.args.get("path")
+            {
+                *self.opened.entry(path.clone()).or_default() += 1;
+            }
+        }
         let mut notices = Vec::new();
         // Only a failing frame can repeat without progress: a denied or
         // thrown call, or a thrown cell. A successful frame ends the streak.
@@ -708,6 +722,22 @@ impl TaskState {
             last_mutation,
         );
         let mut findings = findings;
+        if let Some(verification) = self.capsule.last_verification()
+            && verification.exit_code.is_some_and(|code| code != 0)
+            && last_mutation.is_none_or(|cell| cell <= verification.cell)
+        {
+            findings.push(crate::completion::Finding {
+                kind: crate::completion::FindingKind::VerificationFailed,
+                path: None,
+                sentence: format!(
+                    "`{}` (cell {}) exited {}, and nothing changed after it: fix what it \
+                     reports, or say in the answer why it fails.",
+                    verification.command,
+                    verification.cell,
+                    verification.exit_code.unwrap_or_default()
+                ),
+            });
+        }
         let has_acceptance = !self.acceptance.is_empty();
         if has_acceptance {
             // Every item is decided against the tree or a command run
@@ -940,83 +970,23 @@ impl TaskState {
             ));
         }
 
-        let mut sentences: Vec<String> = findings
-            .iter()
-            .map(|finding| finding.sentence.clone())
-            .collect();
-        let mut checker = None;
-        if self.completion_check && !self.checker_ran {
-            let helpers = session.config().helpers.clone();
-            if helpers.enabled
-                && let Some(model) = helpers.model.as_deref()
-                && let Some(effort) = helpers.effort.for_helper("check")
-            {
-                self.checker_ran = true;
-                let diff = diff
-                    .clone()
-                    .unwrap_or_else(|| "(no observed changes)".to_string());
-                let evidence = crate::completion::fresh_checker_evidence(
-                    &self.task,
-                    &diff,
-                    &self.capsule.fact_lines(),
-                    &findings,
-                    &crate::acceptance::judge_texts(&self.acceptance),
-                );
-                // The checker is judged with the same one `noul` as the
-                // preflight Scout's own result (2645), gated the same way
-                // that judge is: a decision model configured and `mode` not
-                // `off`. `apply` carries `mode = on` versus `shadow`.
-                let decisions_active = decisions_config.model.is_some()
-                    && decisions_config.mode != crate::config::DecisionMode::Off;
-                let checker_judge = decisions_active.then(|| crate::helpers::HelperJudge {
-                    model: decisions_config
-                        .model
-                        .as_deref()
-                        .expect("decisions_active checked model.is_some()"),
-                    floor: decisions_config.helper_no_below,
-                    apply: decisions_config.mode == crate::config::DecisionMode::On,
-                });
-                let token = invoke::CancellationToken::new();
-                let helper_context = crate::helpers::HelperContext {
-                    profile: session.profile,
-                    glasshouse: session.glasshouse,
-                    session: session.id,
-                    token: &token,
-                };
-                if let Some((record, judged)) = crate::helpers::check_completion_judged(
-                    &evidence,
-                    crate::helpers::HelperRoute::new(model, effort),
-                    helper_context,
-                    checker_judge,
-                ) {
-                    if let Some((noul, latency_ms)) = judged {
-                        output::helpers_checked(noul, decisions_config.helper_no_below, latency_ms);
-                    }
-                    let verdict = record
-                        .outcome
-                        .text
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_ascii_lowercase();
-                    if record.outcome.ok && verdict.starts_with("does not hold") {
-                        sentences.push(format!(
-                            "Independent checker: {}",
-                            crate::helper_context::bounded_string(&record.outcome.text, 600)
-                        ));
-                    }
-                    checker = Some(record);
-                }
-            }
+        // Only a fact holds the answer (`FindingKind::holds`); every other
+        // finding is a note beside it.
+        let (hard, soft): (Vec<_>, Vec<_>) = findings.iter().partition(|f| f.kind.holds());
+        let sentences: Vec<String> = hard.iter().map(|f| f.sentence.clone()).collect();
+        let notes: Vec<String> = soft.iter().map(|f| f.sentence.clone()).collect();
+        if sentences.is_empty() || self.deferred_findings.as_ref() == Some(&sentences) {
+            self.after_answer(&diff, &findings, &notes, session);
         }
         if sentences.is_empty() {
-            output::completion(true, true, &[], self.gate_deferrals);
-            return (None, checker);
+            // Verified only when nothing was noted either: an answer that
+            // stands beside a note stands, but is not a verified one.
+            output::completion(true, notes.is_empty(), &notes, self.gate_deferrals);
+            return (None, None);
         }
         if self.deferred_findings.as_ref() == Some(&sentences) {
             output::completion(true, false, &sentences, self.gate_deferrals);
-            return (None, checker);
+            return (None, None);
         }
         self.deferred_findings = Some(sentences.clone());
         self.gate_deferrals += 1;
@@ -1028,7 +998,92 @@ impl TaskState {
             listed.join("\n"),
             self.capsule.render()
         );
-        (Some(text), checker)
+        (Some(text), None)
+    }
+
+    /// Once the answer stands: the notes the gate did not hold on, shown to
+    /// the person, and the fresh checker started behind the answer
+    /// (`after.rs`), once per task.
+    fn after_answer(
+        &mut self,
+        diff: &Option<String>,
+        findings: &[crate::completion::Finding],
+        notes: &[String],
+        session: &Session<'_>,
+    ) {
+        output::completion_notes(notes);
+        if !notes.is_empty() {
+            super::ui::output(format!(
+                "{}{}",
+                crate::tui::history::NOTED,
+                notes.join("\n")
+            ));
+        }
+        let helpers = session.config().helpers.clone();
+        if helpers.learn
+            && helpers.enabled
+            && !self.learn_asked
+            && let Some(model) = helpers.model.clone()
+        {
+            self.learn_asked = true;
+            let changed: Vec<String> = self
+                .files
+                .created
+                .iter()
+                .chain(self.files.modified.iter())
+                .map(|path| path.display().to_string())
+                .collect();
+            let headings: Vec<String> = crate::project::instructions::root(session.profile)
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .take(40)
+                .map(str::to_string)
+                .collect();
+            if let Some(ask) = crate::learned::ask(
+                &self.task,
+                &self.opened,
+                &changed,
+                &crate::learned::read(session.profile),
+                &headings,
+            ) {
+                super::after::spawn_learn(super::after::Learn {
+                    ask,
+                    model,
+                    profile: session.profile.clone(),
+                    glasshouse: session.glasshouse.clone(),
+                    session: session.id.clone(),
+                });
+            }
+        }
+        if !self.completion_check || self.checker_ran {
+            return;
+        }
+        let (true, Some(model), Some(effort)) = (
+            helpers.enabled,
+            helpers.model.clone(),
+            helpers.effort.for_helper("check"),
+        ) else {
+            return;
+        };
+        self.checker_ran = true;
+        let diff = diff
+            .clone()
+            .unwrap_or_else(|| "(no observed changes)".to_string());
+        let evidence = crate::completion::fresh_checker_evidence(
+            &self.task,
+            &diff,
+            &self.capsule.fact_lines(),
+            findings,
+            &crate::acceptance::judge_texts(&self.acceptance),
+        );
+        super::after::spawn(super::after::Check {
+            evidence,
+            model,
+            effort,
+            profile: session.profile.clone(),
+            glasshouse: session.glasshouse.clone(),
+            session: session.id.clone(),
+        });
     }
 
     /// A prose answer is a completion claim, and the evidence gate covers it

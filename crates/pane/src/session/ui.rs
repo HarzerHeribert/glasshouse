@@ -26,6 +26,13 @@ static DRAWING: Mutex<()> = Mutex::new(());
 thread_local! { static OUTPUT: RefCell<Option<mpsc::Sender<Update>>> = const { RefCell::new(None) }; }
 thread_local! { static STARTUP: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; }
 
+/// A handle on the terminal's update channel for a thread that finishes
+/// after the task that started it (`after.rs`), or `None` outside a
+/// terminal session.
+pub(super) fn sender() -> Option<mpsc::Sender<Update>> {
+    OUTPUT.with(|output| output.borrow().clone())
+}
+
 pub(super) fn output(message: String) {
     if super::output::active() {
         eprintln!("{message}");

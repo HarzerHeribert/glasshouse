@@ -549,6 +549,12 @@ pub fn dissection_files(report: &str) -> Vec<(String, String)> {
 ///
 /// A path must carry an extension: `line 12:3` and a bare `Makefile:9` are
 /// not spans, and serving nothing is the safe direction.
+/// Whether `number` is a line (`120`) or a range (`120-148`).
+fn first_line(number: &str) -> bool {
+    let first = number.split_once('-').map_or(number, |(first, _)| first);
+    !first.is_empty() && first.chars().all(|c| c.is_ascii_digit())
+}
+
 fn span(line: &str) -> Option<(String, String)> {
     let words: Vec<&str> = line.split_whitespace().collect();
     for (index, word) in words.iter().enumerate() {
@@ -560,11 +566,7 @@ fn span(line: &str) -> Option<(String, String)> {
         let Some((path, number)) = token.rsplit_once(':') else {
             continue;
         };
-        if path.is_empty()
-            || !path.contains('.')
-            || number.is_empty()
-            || !number.chars().all(|c| c.is_ascii_digit())
-        {
+        if path.is_empty() || !path.contains('.') || number.is_empty() || !first_line(number) {
             continue;
         }
         let rest = words[index + 1..].join(" ");

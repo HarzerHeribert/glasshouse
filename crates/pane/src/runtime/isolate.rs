@@ -2319,11 +2319,12 @@ mod tests {
     const BINDINGS_DECIDE_SOURCE: &str = include_str!("bindings/decide.rs");
     const BINDINGS_WEB_SOURCE: &str = include_str!("bindings/web.rs");
     const HELPER_SOURCE: &str = include_str!("bindings/helper.rs");
+    const SEARCH_SOURCE: &str = include_str!("bindings/search.rs");
     const ISOLATE_DECIDE_SOURCE: &str = include_str!("isolate/decide.rs");
     const ISOLATE_WEB_SOURCE: &str = include_str!("isolate/web.rs");
     const RESPONSE_SOURCE: &str = include_str!("isolate/response.rs");
 
-    const SOURCES: [(&str, &str); 14] = [
+    const SOURCES: [(&str, &str); 15] = [
         ("isolate.rs", ISOLATE_SOURCE),
         ("bindings.rs", BINDINGS_SOURCE),
         ("state.rs", STATE_SOURCE),
@@ -2335,6 +2336,7 @@ mod tests {
         ("bindings/decide.rs", BINDINGS_DECIDE_SOURCE),
         ("bindings/web.rs", BINDINGS_WEB_SOURCE),
         ("bindings/helper.rs", HELPER_SOURCE),
+        ("bindings/search.rs", SEARCH_SOURCE),
         ("isolate/decide.rs", ISOLATE_DECIDE_SOURCE),
         ("isolate/web.rs", ISOLATE_WEB_SOURCE),
         ("isolate/response.rs", RESPONSE_SOURCE),

@@ -75,7 +75,7 @@ What the helpers did in those runs:
   shot); the one-shot is ~16× cheaper than the loop for the same or better
   effect; both slower than bare by 40–70 s.
 
-## 4. What this recommends (awaiting the user's ruling)
+## 4. What this recommended — ruled and built 2026-09-23 (*Lanes, not gates*, design-decisions)
 
 1. **Defaults for a strong parent model: no helper on the critical path.** On
    every editing task bare was fastest and cheapest at equal accuracy. The
@@ -90,6 +90,17 @@ What the helpers did in those runs:
    the tool-loop Scout stays opt-in.
 4. **Prefetch and the effort lease are off**; `enough`'s threshold, if
    prefetch is revisited, is 0.25, and it would prefetch one file, not three.
+
+## 4a. Where the parent's context goes (offline, the bare runs)
+
+Weighted by how often each part is resent: the system prompt and project
+instructions about 60 % (52 KB of its 82 KB is this repository's own
+CLAUDE.md), tool results 25–30 % — search hits and listings the largest part,
+then file text (~14 %), then command output (~7 %) — and the cells' own
+source the rest. **A helper can save at most the tool-result share**, which
+matches the 10–19 % parent-token drops measured where a Scout helped. Priced
+at list rates (Sol $4/$20, Luna $0.20/$1.20 per M), Luna's own tokens never
+mattered: 1–15 cents per task.
 
 ## 5. Limits — read before acting on a number
 

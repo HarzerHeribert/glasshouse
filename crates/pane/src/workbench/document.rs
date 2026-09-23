@@ -1039,18 +1039,24 @@ impl Document {
     fn notes(&mut self, s: &ScreenState, next: &mut usize, upto: usize, width: usize) {
         while let Some(note) = s.history.get(*next).filter(|n| n.after <= upto) {
             *next += 1;
-            let bad = note.text.starts_with("ERROR:");
-            for line in note.text.lines() {
+            let kind = crate::tui::NoteKind::of(&note.text);
+            let (mark_tone, first_tone) = match kind {
+                crate::tui::NoteKind::Error => (Tone::Failure, Tone::Failure),
+                crate::tui::NoteKind::Checked => (Tone::Success, Tone::Muted),
+                crate::tui::NoteKind::Flagged => (Tone::Warning, Tone::Warning),
+                crate::tui::NoteKind::Learned => (Tone::Helper, Tone::Helper),
+                crate::tui::NoteKind::Plain => (Tone::Line, Tone::Muted),
+            };
+            for (index, line) in note.text.lines().enumerate() {
+                let (mark, text_tone) = if index == 0 {
+                    (kind.mark(), first_tone)
+                } else {
+                    (" ", Tone::Muted)
+                };
                 self.kinded(
                     vec![
-                        (
-                            format!("  {} ", if bad { "✕" } else { "·" }),
-                            if bad { Tone::Failure } else { Tone::Line },
-                        ),
-                        (
-                            clip(line, width.saturating_sub(5)),
-                            if bad { Tone::Failure } else { Tone::Muted },
-                        ),
+                        (format!("  {mark} "), mark_tone),
+                        (clip(line, width.saturating_sub(5)), text_tone),
                     ],
                     None,
                     usize::MAX - 4,

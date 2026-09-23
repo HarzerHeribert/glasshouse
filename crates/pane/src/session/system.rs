@@ -59,6 +59,9 @@ pub(super) fn build_system_prompt(
     }
     system.push_str("\n\n");
     system.push_str(&crate::project::orientation::collect(profile));
+    // Last, so a note written behind one answer changes only the tail of
+    // the next task's prompt and the cached prefix before it survives.
+    system.push_str(&crate::learned::section(profile));
     system
 }
 /// [`build_system_prompt`] for a session that is already running: the same

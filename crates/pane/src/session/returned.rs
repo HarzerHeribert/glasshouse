@@ -72,10 +72,11 @@ pub(super) fn shape(
         return terminal.clone();
     }
     let threshold = config.helpers.reduce_above_tokens;
-    let acting = config.decisions.mode == crate::config::DecisionMode::On;
+    // Acts in `shadow` too since 2026-09-23: a log shortened with the whole
+    // value still bound stops nothing, so it is advice-shaped, not a gate.
     let shaped = fields
         .iter()
-        .map(|field| shape_field(&model, threshold, acting, runtime, task_state, field))
+        .map(|field| shape_field(&model, threshold, runtime, task_state, field))
         .collect();
     Terminal::Fields(shaped)
 }
@@ -83,7 +84,6 @@ pub(super) fn shape(
 fn shape_field(
     model: &str,
     threshold: usize,
-    acting: bool,
     runtime: &Runtime,
     task_state: &mut TaskState,
     field: &ReturnedField,
@@ -108,7 +108,7 @@ fn shape_field(
     };
     let wants_reduction =
         answer.choice == crate::decide::FIELD_LOG && answer.confidence >= REDUCE_ABOVE;
-    let reduced = (wants_reduction && acting)
+    let reduced = wants_reduction
         .then(|| runtime.reduce_returned(&text))
         .flatten();
     session_println!(
@@ -117,11 +117,10 @@ fn shape_field(
         answer.choice,
         answer.confidence,
         answer.latency_ms,
-        match (&reduced, wants_reduction, acting) {
-            (Some(_), _, _) => " · reduced",
-            (None, true, true) => " · not reduced",
-            (None, true, false) => " · would reduce (shadow)",
-            (None, false, _) => "",
+        match (&reduced, wants_reduction) {
+            (Some(_), _) => " · reduced",
+            (None, true) => " · not reduced",
+            (None, false) => "",
         }
     );
     task_state.field_shapes.push(serde_json::json!({
@@ -130,7 +129,6 @@ fn shape_field(
         "confidence": answer.confidence,
         "latency_ms": answer.latency_ms,
         "reduced": reduced.is_some(),
-        "would_reduce": wants_reduction && !acting,
     }));
     match reduced {
         Some(reduced) => ReturnedField {

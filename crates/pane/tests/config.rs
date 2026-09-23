@@ -400,18 +400,22 @@ fn parent_and_helper_model_fields_require_concrete_ids() {
 #[test]
 fn the_acceptance_list_and_its_effort_are_configurable() {
     let config = pane::config::PaneConfig::parse(
-        "[helpers]\nmodel = \"m\"\nacceptance_list = false\n[helpers.effort]\naccept = \"medium\"\n",
+        "[helpers]\nmodel = \"m\"\nacceptance_list = true\n[helpers.effort]\naccept = \"medium\"\n",
     )
     .unwrap();
-    assert!(!config.helpers.acceptance_list);
+    assert!(config.helpers.acceptance_list);
     assert_eq!(
         config.helpers.effort.for_helper("accept"),
         Some(pane::wire::Effort::Medium)
     );
     let defaults = pane::config::PaneConfig::parse("[helpers]\nmodel = \"m\"\n").unwrap();
     assert!(
-        defaults.helpers.acceptance_list,
-        "on by default beside a helper model"
+        !defaults.helpers.acceptance_list,
+        "off by default since 2026-09-23: its derived items were the measured false alarms"
+    );
+    assert!(
+        defaults.helpers.completion_check && defaults.helpers.learn,
+        "the checker behind the answer and the learned notes are on by default"
     );
     assert_eq!(
         defaults.helpers.effort.for_helper("accept"),

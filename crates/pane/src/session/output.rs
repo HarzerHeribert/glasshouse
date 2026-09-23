@@ -174,6 +174,9 @@ struct Telemetry {
     recovery: [CauseUsage; 4],
     current_cause: RequestCause,
     completion: Option<Value>,
+    /// What the gate noted without holding, and what the checker behind
+    /// the answer said (`after.rs`).
+    after_answer: Option<Value>,
     no_progress_notices: u64,
     stall_notices: u64,
     acceptance: Option<Value>,
@@ -229,6 +232,7 @@ impl Default for Telemetry {
             recovery: Default::default(),
             current_cause: RequestCause::Implementation,
             completion: None,
+            after_answer: None,
             no_progress_notices: 0,
             stall_notices: 0,
             acceptance: None,
@@ -470,6 +474,7 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
             "repair_usage": telemetry.recovery[cause_index(RequestCause::Repair)].value(),
         },
         "completion": telemetry.completion,
+        "after_answer": telemetry.after_answer,
         "progress": {
             "no_progress_notices": telemetry.no_progress_notices,
             "stall_notices": telemetry.stall_notices,
@@ -939,6 +944,47 @@ pub(super) fn cell_frame(
     let mut data = serde_json::to_value(record).expect("cell record is serializable");
     data["origin"] = json!(origin.as_str());
     emit("cell", data);
+}
+
+/// Records the findings the gate noted without holding the answer.
+pub(super) fn completion_notes(notes: &[String]) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            let entry = state
+                .telemetry
+                .after_answer
+                .get_or_insert_with(|| json!({"notes": [], "checks": []}));
+            if let Some(list) = entry["notes"].as_array_mut() {
+                list.extend(notes.iter().map(|note| json!(note)));
+            }
+        }
+    });
+}
+
+/// Records the checks that finished behind the answer.
+/// `wait_ms` is how long the exit waited for them: the answer was already
+/// out, so time-to-answer is the run's wall time less it.
+pub(super) fn after_checks(notes: &[super::after::Note], learned: &[String], wait_ms: u64) {
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            let entry = state
+                .telemetry
+                .after_answer
+                .get_or_insert_with(|| json!({"notes": [], "checks": []}));
+            entry["learned"] = json!(learned);
+            entry["wait_ms"] = json!(wait_ms);
+            if let Some(list) = entry["checks"].as_array_mut() {
+                list.extend(notes.iter().map(|note| {
+                    json!({
+                        "verdict": note.verdict,
+                        "text": note.text,
+                        "input_tokens": note.record.usage.input_tokens,
+                        "output_tokens": note.record.usage.output_tokens,
+                    })
+                }));
+            }
+        }
+    });
 }
 
 /// Records the completion claim and what verified it.

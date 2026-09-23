@@ -125,6 +125,13 @@ pub(super) fn helper_callback(
         throw_tool_error(scope, &answer);
         return;
     }
+    // The reader: a Scout's spans come back with the lines behind them,
+    // read from disk here rather than retyped by the helper (`excerpts.rs`).
+    let answer = if spec.name == crate::helpers::SCOUT.name {
+        crate::excerpts::attach(&answer, &state.profile)
+    } else {
+        answer
+    };
     let value = js_string(scope, &answer);
     retval.set(value);
 }

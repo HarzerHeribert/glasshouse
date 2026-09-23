@@ -123,6 +123,30 @@ pub enum FindingKind {
     /// An acceptance list's `judge` item the decision model reads as not
     /// satisfied, at or below `[decisions] judge_no_below` (2642).
     JudgeNotSatisfied,
+    /// The task's last verification command exited non-zero and nothing
+    /// changed after it: the answer stands on a check that failed.
+    VerificationFailed,
+}
+
+impl FindingKind {
+    /// Whether this finding holds the answer back once, or only rides along
+    /// as a note. **Only a fact holds**: a verification that failed, or the
+    /// project's own declared contract broken (`.glasshouse/checks.toml`).
+    /// A cheap model's reading, a derived acceptance item or a stale check is
+    /// a note -- measured 2026-09-23: 11 of 11 findings of those kinds held
+    /// an attempt that then passed its own test.
+    #[must_use]
+    pub fn holds(self) -> bool {
+        matches!(
+            self,
+            Self::RequiredMissing
+                | Self::ForbiddenPresent
+                | Self::ExclusiveDirExtra
+                | Self::UnexpectedArtifact
+                | Self::CoverageOutsideTree
+                | Self::VerificationFailed
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

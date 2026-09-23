@@ -326,8 +326,8 @@ pub struct HelpersConfig {
     pub reduce_above_tokens: usize,
     /// Ask the decision model what kind of text a large returned field is,
     /// and send a log to the reducer before the model reads it
-    /// (`session/returned.rs`). Needs `[decisions] model`; in `shadow` mode
-    /// the answer is recorded and nothing is reduced. Off until measured.
+    /// (`session/returned.rs`). Needs `[decisions] model` and a mode other
+    /// than `off`; the whole value stays bound, so it acts in `shadow` too.
     pub reduce_returns: bool,
     /// Ask the decision model whether a returned value is enough to go on,
     /// and fetch the in-project files it names when it is not
@@ -339,6 +339,9 @@ pub struct HelpersConfig {
     /// (2026-09-23: ~15x cheaper and 4-8x faster at equal recall offline).
     /// Off until measured end to end.
     pub scout_oneshot: bool,
+    /// Write `.pane/learned.md` behind the answer of a task that had to
+    /// search (`learned.rs`), and read it into the next task's prompt.
+    pub learn: bool,
 }
 
 /// `[helpers] preflight_scope` -- which tasks the Scout runs for when
@@ -455,14 +458,21 @@ impl Default for HelpersConfig {
             preflight: false,
             preflight_scope: PreflightScope::Auto,
             completion: CompletionStyle::Silent,
-            completion_check: false,
-            acceptance_list: true,
+            // Behind the answer since 2026-09-23 (`session/after.rs`): it
+            // costs the person no wait and the model no turn.
+            completion_check: true,
+            // Off: its derived items were the false alarms measured that day
+            // (a prose "contains" item, a command the machine lacks).
+            acceptance_list: false,
             enabled: true,
             calls_per_cell: 8,
             reduce_above_tokens: 2048,
-            reduce_returns: false,
+            // On since 2026-09-23: Jev reads a field's shape at 97 % and the
+            // whole value stays bound, so a shortened log loses nothing.
+            reduce_returns: true,
             prefetch_returns: false,
             scout_oneshot: false,
+            learn: true,
         }
     }
 }
@@ -1314,6 +1324,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "reduce_returns",
             "prefetch_returns",
             "scout_oneshot",
+            "learn",
         ]
         .contains(&key.as_str())
         {
@@ -1404,6 +1415,12 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             .as_bool()
             .ok_or_else(|| "pane.toml: `scout_oneshot` must be true or false".to_string())?,
     };
+    let learn = match table.get("learn") {
+        None => defaults.learn,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `learn` must be true or false".to_string())?,
+    };
 
     Ok(HelpersConfig {
         model,
@@ -1419,6 +1436,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         reduce_returns,
         prefetch_returns,
         scout_oneshot,
+        learn,
     })
 }
 

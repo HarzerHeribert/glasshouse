@@ -5701,3 +5701,26 @@ over the codebase is not built either: an agent's `rg` and reading has
 been enough, and codebase graphs and indexes proved more upkeep than gain;
 revisit only if real sessions keep missing files whose words the request
 does not contain (the ruler's X2 is one such case).
+
+## Lanes, not gates: helpers never stand between the model and the answer — the user, 2026-09-23
+
+After the day's measurements (`docs/product/pane/helper-measurements.md`),
+the user ruled "build it all": **the main model's loop is the only thing
+that blocks.** Every helper runs beside it, after it, or only when a
+measured condition fires. **What holds an answer** is a fact: a verification
+the task ran that failed with nothing changed after it, or the project's own
+declared contract (`FindingKind::holds`). A cheap model's reading, a derived
+acceptance item or a stale check is a **note** shown beside the answer. The
+fresh checker runs **behind** the answer (`session/after.rs`) and its verdict
+is a note for the person, never a turn for the model. Nothing runs before the
+first turn by default. **The reader** is `helper.find`, called by the model
+when it would otherwise search broadly: its spans come back with the exact
+lines attached, read from disk by Pane (`excerpts.rs`), so the model need not
+reopen them — a list of paths alone saved no reads. Jev shortens a returned
+log it reads as one (the whole value stays bound), and otherwise advises;
+`mode = on`'s stops stay opt-in. The learned-notes writer runs behind the
+answer too (`learned.rs`, the memory ruling above). Why: on the tasks
+measured, every helper that sat in the critical path cost 28–168 % wall time
+at equal accuracy, and the part of the parent's context a helper can touch
+at all is about a quarter of it (the rest is the system prompt and
+instructions, resent every request).

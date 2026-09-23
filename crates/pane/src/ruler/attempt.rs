@@ -167,8 +167,11 @@ pub struct FeedbackArm {
 /// Scout; `dissect` acts on the request's kind (effort and the Scout's
 /// dissection); `reduce` and `prefetch` add one return-side switch each;
 /// `all` turns everything on; `oneshot` is `dissect` with the one-shot
-/// dissection instead of the Scout's search loop.
-pub const FEEDBACK_ARMS: [FeedbackArm; 8] = [
+/// dissection instead of the Scout's search loop; `lanes` is the design of
+/// 2026-09-23 spelled out whatever the defaults become -- nothing before the
+/// first turn, `helper.find` with verified excerpts, logs shortened, the
+/// checker and the learned-notes writer behind the answer.
+pub const FEEDBACK_ARMS: [FeedbackArm; 9] = [
     FeedbackArm {
         name: "bare",
         mode: "off",
@@ -191,6 +194,18 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 8] = [
         name: "dissect",
         mode: "on",
         helpers: &[],
+    },
+    FeedbackArm {
+        name: "lanes",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+        ],
     },
     FeedbackArm {
         name: "oneshot",

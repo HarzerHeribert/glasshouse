@@ -488,6 +488,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "helpers.learn",
+        label: "Learned notes",
+        description: "After a task that had to search, note where things live in .pane/learned.md, and read those notes into the next task.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "helpers.scout_oneshot",
         label: "One-shot dissection",
         description: "Dissect an exploring request in one request over the project's file listing instead of the Scout's search loop.",
@@ -1194,6 +1203,7 @@ pub fn shown_default(key: &str) -> Option<String> {
         "helpers.reduce_returns" => helpers.reduce_returns.to_string(),
         "helpers.prefetch_returns" => helpers.prefetch_returns.to_string(),
         "helpers.scout_oneshot" => helpers.scout_oneshot.to_string(),
+        "helpers.learn" => helpers.learn.to_string(),
         "ask.enabled" => ask.enabled.to_string(),
         "ask.jev" => "off".into(),
         "ask.decide_above" => ask.decide_above.to_string(),

@@ -173,7 +173,11 @@ const HELPER_CLOSE: &str = "};\n\
     // and reports evidence rather than conclusions. It throws ToolError when helpers\n\
     // are not configured, when this cell has used its call ceiling, or when the call\n\
     // itself failed — so attempt the work first and pay for a helper only in the\n\
-    // branch that needs one. What it returns is yours to keep or drop.\n";
+    // branch that needs one. What it returns is yours to keep or drop.\n\
+    // `helper.find` is the exception: before a broad search whose hits you would\n\
+    // then open, ask it where the thing lives. Its spans come back with the exact\n\
+    // lines attached, read from disk by Pane, so you act on them without reopening\n\
+    // the files, and its reading never enters your context.\n";
 /// The `decide` declaration: the decision model, offered to the program that
 /// is holding the evidence.
 ///

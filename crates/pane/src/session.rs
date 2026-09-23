@@ -56,6 +56,7 @@ macro_rules! session_println {
     ($($arg:tt)*) => { ui::output(format!($($arg)*)) };
 }
 
+mod after;
 mod args;
 mod ask;
 mod cell_view;
@@ -429,6 +430,7 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
         return resume::print_listing(&parsed.root);
     }
     let result = run(parsed);
+    after::finish_run();
     machine_output.finish(&result)?;
     result
 }

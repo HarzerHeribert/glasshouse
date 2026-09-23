@@ -135,7 +135,7 @@ pub struct HelperSpec {
 /// needs, because a scout that stops mid-search reports a hole as an absence.
 pub const SCOUT: HelperSpec = HelperSpec {
     name: "find",
-    summary: "Find where something lives in this project and answer with file:line spans, never a diagnosis.",
+    summary: "Find where something lives in this project. Answers with file:line spans and Pane appends those exact lines, read from disk: trust them rather than reopening the files. Cheaper than a broad search whose hits you would have to read.",
     verb: "scanning",
     preamble: "Never state a number you did not compute. You have a runtime: count and total in a \
         cell and report what it returned. A computed number is evidence; an estimated one \
@@ -148,10 +148,12 @@ pub const SCOUT: HelperSpec = HelperSpec {
         scouting for the model that will act, so never attempt the request it quotes and \
         never report on work you did not do.\n\
         \n\
-        Answer with spans only. For each: the path and the line as `path/to/file.rs:120`, a line \
-        you actually opened rather than one you inferred, then one short sentence saying what is \
-        there in the file's own words. Put the spans that answer the question first. If nothing \
-        matches, say that in one line.\n\
+        Answer with spans only. For each: the path and the lines as `path/to/file.rs:120-148`, \
+        the range that holds what was asked for -- the whole function or block, at most 80 lines -- \
+        and only lines you actually opened, then one short sentence saying what is there in the \
+        file's own words. The caller is shown exactly those lines, read from the file, so a \
+        precise range is the whole of your answer's value. Name at most six spans; put the ones \
+        that answer the question first. If nothing matches, say that in one line.\n\
         \n\
         Never state a cause. Never propose a fix. Never report anything you did not read \
         — you are returning evidence, and a wrong diagnosis the caller trusts is worse than no \
