@@ -8,6 +8,7 @@ Usage:
   pane exec [task] [session options]
   pane --resume [id] | --continue | --sessions
   pane doctor [--root <path>] [--json]
+  pane update [--check]
   pane config [global|local] [key] [value] [--root <path>]
   pane session --root <path> [options]
   pane ruler run [options]
@@ -42,6 +43,9 @@ fn main() -> std::io::Result<()> {
     }
     if args.first().map(String::as_str) == Some("session") {
         return dispatch_session(&cli_workflows::session_options(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("update") {
+        std::process::exit(pane::update::command(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("doctor") {
         std::process::exit(cli_workflows::doctor(&args[1..]));

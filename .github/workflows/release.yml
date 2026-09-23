@@ -15,6 +15,14 @@ on:
   push:
     tags:
       - "v*"
+  # The broker-bump workflow cuts a release by calling this one: a tag pushed
+  # with the workflow's own token starts no other workflow.
+  workflow_call:
+    inputs:
+      tag:
+        description: "The tag to build and publish"
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       dry_run:
@@ -60,6 +68,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # Both versions are declared once, in Cargo.toml -- the same read
       # ci-extended.yml and scripts/ci-local.sh use, so none of the three can
@@ -91,7 +101,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ -n "${{ inputs.tag }}" ]; then
+            v="${{ inputs.tag }}"
+            v="${v#v}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
             v="${GITHUB_REF_NAME#v}"
           else
             v="0.1.0-dry"
@@ -100,7 +113,7 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p glasshouse -p pane
+        run: cargo build --release --locked --target ${{ matrix.target }} -p glasshouse -p pane -p inference-gateway
 
       # Proves the binary that will ship actually runs before it is packaged.
       # pane's top-level command has no --version/--help output of its own
@@ -114,6 +127,7 @@ jobs:
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release"
           "$BIN/glasshouse" --version
+          "$BIN/inference-gateway" --version
           "$BIN/pane" --help < /dev/null
       - name: Verify binaries (Windows)
         if: runner.os == 'Windows'
@@ -121,6 +135,8 @@ jobs:
         run: |
           $bin = "target/${{ matrix.target }}/release"
           & "$bin/glasshouse.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin/inference-gateway.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "" | & "$bin/pane.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -134,8 +150,8 @@ jobs:
           STAGE="$RUNNER_TEMP/$NAME"
           BIN="target/${{ matrix.target }}/release"
           mkdir -p "$STAGE"
-          cp "$BIN/glasshouse" "$BIN/pane" "$STAGE/"
-          cp README.md "$STAGE/"
+          cp "$BIN/glasshouse" "$BIN/pane" "$BIN/inference-gateway" "$STAGE/"
+          cp README.md release/cliproxyapi.toml "$STAGE/"
           cp LICENSE* "$STAGE/" 2>/dev/null || true
           tar czf "$NAME.tar.gz" -C "$RUNNER_TEMP" "$NAME"
           shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
@@ -149,7 +165,9 @@ jobs:
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item "$bin/glasshouse.exe" $stage
           Copy-Item "$bin/pane.exe" $stage
+          Copy-Item "$bin/inference-gateway.exe" $stage
           Copy-Item README.md $stage
+          Copy-Item release/cliproxyapi.toml $stage
           Get-ChildItem -Path . -Filter "LICENSE*" -File | ForEach-Object { Copy-Item $_.FullName $stage }
           Compress-Archive -Path "$stage/*" -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
@@ -189,9 +207,10 @@ jobs:
       # workflow_dispatch run publishes only if someone explicitly set
       # dry_run to false, and even then only on a tag ref.
       - name: Publish pre-release
-        if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != true
+        if: (startsWith(github.ref, 'refs/tags/') || inputs.tag != '') && inputs.dry_run != true
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           prerelease: true
           generate_release_notes: true
           files: |

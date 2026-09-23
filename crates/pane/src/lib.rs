@@ -43,6 +43,7 @@ pub mod supervisor;
 pub mod telemetry;
 pub mod tools;
 pub mod tui;
+pub mod update;
 pub mod web;
 pub mod wire;
 

@@ -619,6 +619,17 @@ fn run(args: SessionArgs) -> Result<(), String> {
             startup::supervisor_line(&config.borrow().supervisor, &config.borrow().decisions)
         );
     }
+    // A newer release already installed is said once at start; a check for
+    // one runs at most daily, on its own thread, only for a terminal session
+    // of a release install (`update.rs`).
+    if terminal {
+        if let Some(notice) =
+            crate::update::Install::of_running().and_then(|i| crate::update::installed_notice(&i))
+        {
+            ui::output(notice);
+        }
+        crate::update::check_in_background();
+    }
     if config.borrow().decisions.model.is_none() && !terminal {
         session_println!("decisions: off (no model)");
     } else if let Some(model) = default_decisions.filter(|_| !terminal) {
@@ -1199,6 +1210,11 @@ fn run_task(
         session.plan.replace(Some(plan));
     }
     transcript.notebook.handlers.clear();
+    if session.ui.is_some()
+        && let Some(notice) = crate::update::take_notice()
+    {
+        ui::output(notice);
+    }
     if let Some(ui) = session.ui {
         ui.handler_cancellations();
         ui.publish(
