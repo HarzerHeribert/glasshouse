@@ -6,11 +6,18 @@ first; routing stays static*. Tier Amber; one Sonnet worker.
 ## 1. Configuration: `.pane/config.toml`, read once at session start
 
     [decisions]
-    model       = "jev-latest"   # no default: unset means decisions are off, said once at start
+    model       = "jev-latest"   # default when unset and the gateway serves a TypeSafe account; else off, said once at start
     mode        = "shadow"       # "off" | "shadow" | "on"; default "shadow" when a model is set
     hold_above  = 0.85           # confidence at or above which a read-only intent holds; 0.5..=1.0
     scout_above = 0.85           # confidence at or above which needs_exploration adds a scout signal; 0.5..=1.0
     command_runs_above = 0.85    # confidence at or above which a command line runs unasked on `auto`; 0.5..=1.0
+
+**Jev is the default** (2026-09-23): an unset `model` becomes `jev-latest`
+when the gateway's entitlements list an account whose provider is
+`typesafe` — the account `/v1/systemone` routes to — and `mode` is not
+`off`. The session says so on its start lines; `pane doctor` reports the
+model it will use, or warns that every decision question is inert. An
+explicit `model` or `mode = "off"` is never overridden.
 
 A value outside its range is refused at start with one sentence. `model`
 names no tool, path or grant, exactly as `[supervisor] model` does not.

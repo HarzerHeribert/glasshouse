@@ -22,6 +22,9 @@ use crate::wire;
 /// The decision endpoint's path, appended to [`wire::base_url`] exactly as
 /// the Messages path is appended in `wire.rs`.
 const DECISION_PATH: &str = "/v1/systemone";
+/// The decision model a session uses when none is configured and the
+/// gateway serves a TypeSafe account (`session/startup.rs`).
+pub const DEFAULT_MODEL: &str = "jev-latest";
 
 /// The header the gateway routes the decision request on, mirroring
 /// `wire::MODEL_HEADER`'s name -- private there, so it is spelled once more

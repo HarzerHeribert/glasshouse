@@ -589,6 +589,29 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // concrete choice would make Pane silently spend against a model the
     // person did not select, so a terminal opens the picker instead.
     let requested = startup::requested_model(args.model.as_deref(), &config.borrow(), terminal)?;
+    let glasshouse = match &args.glasshouse {
+        Some(path) => Glasshouse::Command {
+            glasshouse: path.clone(),
+        },
+        None => Glasshouse::Command {
+            glasshouse: PathBuf::from("glasshouse"),
+        },
+    };
+    let gateway = gateway::select(args.gateway.as_deref(), &glasshouse, &args.root);
+    let accounts = startup::served_accounts(&gateway);
+    // Jev is the default decision model wherever the gateway can route it:
+    // an unset `[decisions] model` with a TypeSafe account served means
+    // `jev-latest`, so every decision question is asked rather than inert.
+    // Only for a gateway Pane starts itself, whose listing is the binary and
+    // configuration that will serve it; a hosted session's listing describes
+    // this machine's gateway, not the one it was handed. An explicit model,
+    // or `mode = "off"`, is left exactly as written.
+    let default_decisions = matches!(gateway, gateway::Gateway::Command { .. })
+        .then(|| startup::default_decisions_model(&config.borrow().decisions, &accounts))
+        .flatten();
+    if let Some(model) = default_decisions {
+        config.borrow_mut().decisions.model = Some(model.to_string());
+    }
     session_println!("{}", resume::resume_hint(&session_id));
     if !terminal {
         session_println!(
@@ -598,6 +621,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
     }
     if config.borrow().decisions.model.is_none() && !terminal {
         session_println!("decisions: off (no model)");
+    } else if let Some(model) = default_decisions.filter(|_| !terminal) {
+        session_println!("decisions: {model} (the gateway serves a TypeSafe account)");
     }
     session_println!("{}", startup::permissions_line(&ladder));
 
@@ -620,16 +645,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // Collected once the profile is final: the manifest reports the grants
     // in force, and a bypass applied above changes what it says.
     let manifest = system_manifest(&profile, &config.borrow());
-    let glasshouse = match &args.glasshouse {
-        Some(path) => Glasshouse::Command {
-            glasshouse: path.clone(),
-        },
-        None => Glasshouse::Command {
-            glasshouse: PathBuf::from("glasshouse"),
-        },
-    };
-    let gateway = gateway::select(args.gateway.as_deref(), &glasshouse, &args.root);
-    let accounts = startup::served_accounts(&gateway);
     let roster = startup::subagent_roster(&gateway, &accounts);
     let started_on = requested.map(|model| startup::settle_model(model, &accounts));
     // Held for the whole session: dropping it kills the gateway pane started.
@@ -1234,14 +1249,24 @@ fn run_task_inner(
     let (decision, decision_failures) = task_decision(task, session);
     let effort_lease = system::EffortLease::for_kind(session, decision.as_ref());
     let proposal = mode_proposal::propose(session, decision.as_ref());
-    let preflight_outcome = preflight_block(task, session, transcript, decision.as_ref());
+    // The acceptance lister runs beside the Scout: two independent reads of
+    // the same request, and in series the person waited for both.
+    let (preflight_outcome, acceptance_record) = std::thread::scope(|scope| {
+        let lister = system::start_acceptance(task, session)
+            .map(|pending| scope.spawn(move || pending.call()));
+        let preflight = preflight_block(task, session, transcript, decision.as_ref());
+        (
+            preflight,
+            lister.and_then(|handle| handle.join().ok().flatten()),
+        )
+    });
     if let Some(block) = &preflight_outcome.block {
         transcript.conversation.system.push_str(block);
     }
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
-    let acceptance_items = append_acceptance(task, session, transcript, &mut budget);
+    let acceptance_items = append_acceptance(session, acceptance_record, transcript, &mut budget);
     {
         let _line = session.interrupt.writing();
         rollout
@@ -2973,6 +2998,41 @@ mod tests {
             Some("claude-opus-5"),
             "the account's own spelling wins a tie"
         );
+    }
+
+    /// Jev is the decision model by default exactly when a served account is
+    /// TypeSafe's; a configured model and `mode = "off"` are left alone.
+    #[test]
+    fn jev_is_the_default_decision_model_when_the_gateway_serves_typesafe() {
+        let typesafe = startup::ServedAccount {
+            account: "typesafe".into(),
+            provider: Some("typesafe".into()),
+            ..Default::default()
+        };
+        let chatgpt = startup::ServedAccount {
+            account: "chatgpt".into(),
+            provider: Some("openai".into()),
+            ..Default::default()
+        };
+        let unset = crate::config::DecisionsConfig::default();
+        assert_eq!(
+            startup::default_decisions_model(&unset, &[chatgpt.clone(), typesafe.clone()]),
+            Some("jev-latest")
+        );
+        assert_eq!(startup::default_decisions_model(&unset, &[chatgpt]), None);
+        let off = crate::config::DecisionsConfig {
+            mode: crate::config::DecisionMode::Off,
+            ..Default::default()
+        };
+        assert_eq!(
+            startup::default_decisions_model(&off, &[typesafe.clone()]),
+            None
+        );
+        let chosen = crate::config::DecisionsConfig {
+            model: Some("jev-1.13.0".into()),
+            ..Default::default()
+        };
+        assert_eq!(startup::default_decisions_model(&chosen, &[typesafe]), None);
     }
 
     /// A listed id is kept, and a family word is settled among accounts that

@@ -211,6 +211,9 @@ pub fn doctor(args: &[String]) -> i32 {
             },
         });
     }
+    if let Some((config, _)) = settings.as_ref() {
+        checks.push(decisions_check(&config.decisions));
+    }
     checks.push(sandbox_check(full_access));
     let report = Report {
         schema_version: 1,
@@ -237,6 +240,60 @@ pub fn doctor(args: &[String]) -> i32 {
         }
     }
     if report.ok { 0 } else { 1 }
+}
+
+/// Whether Jev -- the decision model every small judgement goes to -- will
+/// answer: a configured model, or the default the session takes when the
+/// gateway serves a TypeSafe account. Without one every decision question
+/// is inert and Pane runs its fallbacks, which is a warning, not an error.
+fn decisions_check(decisions: &pane::config::DecisionsConfig) -> Check {
+    let mode = decisions.mode.as_str();
+    if decisions.mode == pane::config::DecisionMode::Off {
+        return Check {
+            name: "decisions",
+            status: "warning",
+            detail: "[decisions] mode is `off`: no decision question is asked and Pane runs every fallback".into(),
+        };
+    }
+    if let Some(model) = &decisions.model {
+        return Check {
+            name: "decisions",
+            status: "ok",
+            detail: format!("decision model `{model}`, mode {mode}"),
+        };
+    }
+    let serves_typesafe = find_executable("inference-gateway")
+        .and_then(|gateway| {
+            std::process::Command::new(gateway)
+                .args(["entitlements", "--json"])
+                .output()
+                .ok()
+        })
+        .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+        .is_some_and(|listing| {
+            listing["accounts"].as_array().is_some_and(|accounts| {
+                accounts.iter().any(|account| {
+                    account["provider"].as_str() == Some("typesafe")
+                        && account["selectable"].as_bool() != Some(false)
+                })
+            })
+        });
+    if serves_typesafe {
+        Check {
+            name: "decisions",
+            status: "ok",
+            detail: format!(
+                "decision model `{}` by default (the gateway serves a TypeSafe account), mode {mode}",
+                pane::decide::DEFAULT_MODEL
+            ),
+        }
+    } else {
+        Check {
+            name: "decisions",
+            status: "warning",
+            detail: "no decision model: [decisions] model is unset and the gateway serves no TypeSafe account, so every decision question is inert; add a typesafe account to the gateway or set `decisions.model`".into(),
+        }
+    }
 }
 
 /// Settings a person actually set that cannot take effect, each named with

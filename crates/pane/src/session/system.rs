@@ -89,30 +89,68 @@ pub(super) const PREFLIGHT_SERVE_BYTES: u64 = 32 * 1024;
 /// items its completion is checked against (`acceptance.rs`). Runs once per
 /// task before the first turn when `[helpers] acceptance_list` is on; a
 /// request too short to need the repository gets none.
-pub(super) fn acceptance_block(
+///
+/// The call, ready to run on another thread: everything
+/// it reads is owned or `Sync`, so it runs beside the preflight Scout rather
+/// than after it -- the two are independent reads of the same request, and
+/// in series the person waited for both (2026-09-23).
+pub(super) struct PendingAcceptance<'s> {
+    task: String,
+    model: String,
+    effort: crate::wire::Effort,
+    profile: &'s crate::sandbox::profile::Profile,
+    glasshouse: &'s crate::glasshouse::Glasshouse,
+    session_id: &'s crate::contract::SessionId,
+    token: invoke::CancellationToken,
+}
+
+impl PendingAcceptance<'_> {
+    pub(super) fn call(self) -> Option<crate::helpers::HelperRecord> {
+        crate::helpers::acceptance_list(
+            &self.task,
+            crate::helpers::HelperRoute::new(&self.model, self.effort),
+            self.profile,
+            self.glasshouse,
+            self.session_id,
+            &self.token,
+        )
+    }
+}
+
+/// The lister's call for this task, or `None` when no list is derived.
+pub(super) fn start_acceptance<'s>(
     task: &str,
+    session: &'s Session<'_>,
+) -> Option<PendingAcceptance<'s>> {
+    let helpers = session.config().helpers.clone();
+    if !helpers.enabled || !helpers.acceptance_list || !request_may_need_the_repository(task) {
+        return None;
+    }
+    let model = helpers.model.clone()?;
+    let effort = helpers.effort.for_helper("accept")?;
+    let token = invoke::CancellationToken::new();
+    session.interrupt.arm(token.clone());
+    Some(PendingAcceptance {
+        task: task.to_string(),
+        model,
+        effort,
+        profile: session.profile,
+        glasshouse: session.glasshouse,
+        session_id: session.id,
+        token,
+    })
+}
+
+/// The lister's answer parsed into the block, the items and the record.
+pub(super) fn finish_acceptance(
     session: &Session<'_>,
+    record: Option<crate::helpers::HelperRecord>,
 ) -> Option<(
     String,
     Vec<crate::acceptance::Item>,
     crate::helpers::HelperRecord,
 )> {
-    let helpers = session.config().helpers.clone();
-    if !helpers.enabled || !helpers.acceptance_list || !request_may_need_the_repository(task) {
-        return None;
-    }
-    let model = helpers.model.as_deref()?;
-    let effort = helpers.effort.for_helper("accept")?;
-    let token = invoke::CancellationToken::new();
-    session.interrupt.arm(token.clone());
-    let record = crate::helpers::acceptance_list(
-        task,
-        crate::helpers::HelperRoute::new(model, effort),
-        session.profile,
-        session.glasshouse,
-        session.id,
-        &token,
-    )?;
+    let record = record?;
     if record.outcome.cancelled {
         session.interrupt.consumed();
     }
@@ -351,12 +389,12 @@ pub(super) fn task_decision(
 /// request, shown beside the preflight, paid for as one helper call, and
 /// returned for the task state to check when the model claims completion.
 pub(super) fn append_acceptance(
-    task: &str,
     session: &Session<'_>,
+    record: Option<crate::helpers::HelperRecord>,
     transcript: &mut Transcript,
     budget: &mut TaskSpend,
 ) -> Vec<crate::acceptance::Item> {
-    let Some((block, items, record)) = acceptance_block(task, session) else {
+    let Some((block, items, record)) = finish_acceptance(session, record) else {
         return Vec::new();
     };
     transcript.conversation.system.push_str(&block);

@@ -19,6 +19,27 @@ pub(crate) struct ServedAccount {
     pub authenticated: Option<bool>,
     #[serde(default)]
     pub connect_with: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// The provider whose account answers the decision model's questions.
+pub(crate) const DECISIONS_PROVIDER: &str = "typesafe";
+
+/// The decision model a session gets when `[decisions] model` is unset: Jev,
+/// when a served account is TypeSafe's (the gateway routes `/v1/systemone`
+/// to it). `None` when a model is configured, when the mode is `off`, or when
+/// no account could answer -- then decisions stay off, said once at start.
+pub(super) fn default_decisions_model(
+    decisions: &crate::config::DecisionsConfig,
+    accounts: &[ServedAccount],
+) -> Option<&'static str> {
+    (decisions.model.is_none()
+        && decisions.mode != crate::config::DecisionMode::Off
+        && accounts.iter().any(|a| {
+            a.provider.as_deref() == Some(DECISIONS_PROVIDER) && a.selectable != Some(false)
+        }))
+    .then_some(crate::decide::DEFAULT_MODEL)
 }
 
 #[derive(serde::Deserialize)]

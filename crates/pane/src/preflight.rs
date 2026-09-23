@@ -115,6 +115,21 @@ const DISSECTION_SECTIONS: [(&str, &str); 5] = [
     ),
 ];
 
+/// The heading whose lines go to the Ask step.
+const NEEDS_HEADING: &str = "## Needs";
+
+/// How the acting model uses a dissection: the tasks are the checklist its
+/// answer is held to, and the files above are already read for it.
+pub const DISSECTION_USE: &str = "\nWork the tasks above in order and answer every one of them; \
+     start from the files served below instead of listing the tree again.\n";
+
+/// The Ask step for a dissection's needs: a need that blocks the request and
+/// that no file can answer is asked of the person before any change; every
+/// other need becomes an assumption stated in the answer.
+pub const NEEDS_USE: &str = "Before you change anything, ask the person with `ask` only for a need \
+     above that blocks the request and that no file can answer; for every other need, state the \
+     assumption you made in your answer.\n";
+
 /// The dissection brief's own instruction, after [`DO_NOT_PERFORM`]: the
 /// measured lever on a dissection's latency and correctness is its length.
 pub const DISSECT: &str = "Dissect the request into the tasks it takes and what each needs first. Prefer few, \
@@ -361,7 +376,14 @@ pub fn render_brief(
         block.push('\n');
         block.push_str(heading);
         block.push('\n');
-        let lines: Vec<&str> = if lines.is_empty() || is_open_question(lines) {
+        // A need is often a question for the person, so `## Needs` keeps its
+        // questions; every other section reads one as the scout not knowing.
+        let unanswered = if *heading == NEEDS_HEADING {
+            says_nothing(lines)
+        } else {
+            says_nothing(lines) || is_open_question(lines)
+        };
+        let lines: Vec<&str> = if unanswered {
             vec!["(none found)"]
         } else {
             answered += 1;
@@ -384,6 +406,15 @@ pub fn render_brief(
         block.push_str(&format!(
             "\n({cut} lines of the scout's report were cut at the {RENDER_LINE_BOUND}-line bound)\n"
         ));
+    }
+    if kind == Brief::Dissection {
+        block.push_str(DISSECTION_USE);
+        if sections
+            .iter()
+            .any(|(heading, lines)| *heading == NEEDS_HEADING && !says_nothing(lines))
+        {
+            block.push_str(NEEDS_USE);
+        }
     }
 
     block.push_str(&format!("\n## Served in full ({})\n", served.len()));
@@ -511,6 +542,18 @@ fn heading_index(kind: Brief, line: &str) -> Option<usize> {
         .position(|(heading, _)| heading.trim_start_matches("## ").eq_ignore_ascii_case(bare))
 }
 
+/// Whether a section's lines are empty or only say there is nothing:
+/// `(none)`, `none.`, `n/a`, `-`.
+fn says_nothing(lines: &[String]) -> bool {
+    lines.iter().all(|line| {
+        let word = line
+            .trim()
+            .trim_matches(|c: char| matches!(c, '(' | ')' | '.' | '-' | '*' | ' '))
+            .to_ascii_lowercase();
+        word.is_empty() || matches!(word.as_str(), "none" | "none found" | "n/a" | "nothing")
+    })
+}
+
 fn is_open_question(lines: &[String]) -> bool {
     lines.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
@@ -604,6 +647,33 @@ mod tests {
         assert_eq!(heading_index(Brief::Spans, "## Reading"), None);
         assert_eq!(heading_index(Brief::Dissection, "## Needs"), Some(3));
         assert_eq!(heading_index(Brief::Dissection, "## Files"), Some(1));
+    }
+
+    /// A dissection's needs go to the Ask step only when it named one; the
+    /// tasks-in-order line rides every dissection, and a span brief gets
+    /// neither.
+    #[test]
+    fn a_dissection_with_needs_carries_the_ask_step() {
+        let with_needs =
+            "## Tasks\n1. read — know it\n## Needs\n- which backend does the person run?\n";
+        let block = render_brief(Brief::Dissection, "explore", with_needs, &[], &[], None);
+        assert!(block.contains(DISSECTION_USE), "{block}");
+        assert!(block.contains(NEEDS_USE), "{block}");
+        assert!(
+            block.contains("which backend does the person run?"),
+            "{block}"
+        );
+
+        let without = "## Tasks\n1. read — know it\n## Needs\n(none)\n";
+        let block = render_brief(Brief::Dissection, "explore", without, &[], &[], None);
+        assert!(block.contains(DISSECTION_USE), "{block}");
+        assert!(!block.contains(NEEDS_USE), "{block}");
+
+        let block = render_brief(Brief::Spans, "fix it", with_needs, &[], &[], None);
+        assert!(
+            !block.contains(DISSECTION_USE) && !block.contains(NEEDS_USE),
+            "{block}"
+        );
     }
 
     #[test]
