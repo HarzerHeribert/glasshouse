@@ -1250,7 +1250,7 @@ fn run_task_inner(
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
     let has_history = !transcript.conversation.messages.is_empty();
-    let (decision, decision_failures) = task_decision(task, session, has_history);
+    let (decision, decision_failures, pending_decision) = task_decision(task, session, has_history);
     let effort_lease = system::EffortLease::for_kind(session, decision.as_ref());
     let proposal = mode_proposal::propose(session, decision.as_ref());
     // The acceptance lister runs beside the Scout: two independent reads of
@@ -1374,6 +1374,7 @@ fn run_task_inner(
             preflight_outcome.would_dissect,
         )
         .with_mode_proposal(proposal);
+    task_state.pending_decision = pending_decision;
     output::decisions(task_state.decisions_telemetry(&session.config().decisions));
 
     loop {
@@ -1428,6 +1429,7 @@ fn run_task_inner(
                     return Err(error);
                 }
             };
+        task_state.settle_decision(session, false);
         let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
         let served = gateway::served_by(session.gateway, since);
         record_request(
@@ -1845,6 +1847,9 @@ fn run_task_inner(
     // thread is joined, so nothing this task started is still running when
     // the isolate that could have read its result is gone.
     bg::shutdown(session.id);
+    // A one-shot run waits for a shadow decision so its result records it; a
+    // person at the terminal is never held for one.
+    task_state.settle_decision(session, session.ui.is_none());
     if stopped_by_request {
         // Said to the model as well as to the person. A turn that simply
         // stops leaves the next one reading a transcript whose last cell

@@ -283,6 +283,8 @@ pub(super) struct TaskState {
     /// many times: what the learned-notes writer learns from (`learned.rs`).
     pub(super) opened: std::collections::BTreeMap<String, u32>,
     pub(super) learn_asked: bool,
+    /// A `shadow` task decision still on its way (`system::task_decision`).
+    pub(super) pending_decision: Option<super::system::PendingDecision>,
     pub(super) capsule: crate::runtime::capsule::Capsule,
     pub(super) guard: crate::progress::Guard,
     pub(super) checkpoints: crate::progress::Checkpoints,
@@ -435,6 +437,7 @@ impl TaskState {
             checker_ran: false,
             opened: std::collections::BTreeMap::new(),
             learn_asked: false,
+            pending_decision: None,
             acceptance: Vec::new(),
             acceptance_verdicts: Vec::new(),
             stall: crate::progress::Stall::default(),
@@ -494,6 +497,46 @@ impl TaskState {
         self.scout_signal = scout_signal;
         self.would_scout = would_scout;
         self
+    }
+
+    /// Folds a `shadow` decision in once it is back -- `wait` bounds it by
+    /// the request's own timeout -- with the would-be effects it would have
+    /// had, so shadow still measures what `on` would do.
+    pub(super) fn settle_decision(&mut self, session: &Session<'_>, wait: bool) {
+        let Some(pending) = &self.pending_decision else {
+            return;
+        };
+        let Some(answer) = pending.settle(wait) else {
+            return;
+        };
+        self.pending_decision = None;
+        match answer {
+            Ok(decision) => {
+                let lease = super::system::EffortLease::for_kind(session, Some(&decision));
+                self.effort_would_set = lease.would_set.map(|effort| effort.name().to_string());
+                let proposal = super::mode_proposal::propose(session, Some(&decision));
+                self.mode_would_apply = proposal.would_apply;
+                self.mode_proposed = self.mode_proposed || proposal.proposed;
+                // The preflight's own shadow figures, from the same answer
+                // under the same conditions (`system::preflight_block`).
+                let helpers = &session.config().helpers;
+                let needs_tree =
+                    helpers.enabled && super::system::request_may_need_the_repository(&self.task);
+                self.would_dissect = needs_tree
+                    && decision
+                        .confident_kind()
+                        .is_some_and(|kind| kind == crate::decide::KIND_EXPLORE);
+                self.would_scout = needs_tree
+                    && helpers.preflight
+                    && decision.complexity.choice == crate::decide::NEEDS_EXPLORATION
+                    && decision.complexity.confidence >= session.config().decisions.scout_above;
+                self.intent = Some(decision.intent.clone());
+                self.kind = decision.kind.clone();
+                self.complexity = Some(decision.complexity);
+            }
+            Err(()) => self.decision_failures += 1,
+        }
+        output::decisions(self.decisions_telemetry(&session.config().decisions));
     }
 
     /// What the kind did to this task's effort and to the Scout's brief

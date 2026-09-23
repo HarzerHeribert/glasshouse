@@ -353,36 +353,35 @@ fn apply_drift_hold(
 }
 
 /// The decision model's one request, asked once per task beside
-/// [`preflight_block`] and [`append_acceptance`] -- before the first turn,
-/// never inside it. Carries both the intent and complexity questions
-/// (`docs/product/pane/decision-model.md`; F2 for the latter). Runs on its
-/// own thread, joined here: the 2 s bound is already inside the request
-/// (`decide::DECISION_TIMEOUT`), the same reason `helpers.rs::wait_for_helper`
-/// moves a side errand off the caller's own thread. A failed or absent
-/// decision leaves the task exactly as it is today; the error is recorded in
-/// the notice, never surfaced as a task failure.
+/// [`preflight_block`] and [`append_acceptance`], on its own thread.
+///
+/// **In `on` the task waits for it, because it decides; in `shadow` it does
+/// not, because it only records** -- the answer is collected after the
+/// model's first turn ([`PendingDecision::settle`]), by which time it is
+/// nearly always back, and at the task's end at the latest. A failed or
+/// absent decision leaves the task exactly as it is; the error is recorded,
+/// never surfaced as a task failure.
 pub(super) fn task_decision(
     task: &str,
     session: &Session<'_>,
     has_history: bool,
-) -> (Option<crate::decide::TaskDecision>, u32) {
+) -> (
+    Option<crate::decide::TaskDecision>,
+    u32,
+    Option<PendingDecision>,
+) {
     // A resumed conversation already holds at least one earlier request.
     let earlier_requests = session.requests.get().max(u32::from(has_history));
     session.requests.set(earlier_requests.saturating_add(1));
     let decisions = session.config().decisions.clone();
     let Some(model) = decisions.model else {
-        return (None, 0);
+        return (None, 0, None);
     };
     if decisions.mode == crate::config::DecisionMode::Off {
-        return (None, 0);
+        return (None, 0, None);
     }
     let request = task.to_string();
     let context = crate::decide::TaskContext::of(earlier_requests, &session.project.instructions);
-    // In `shadow` the answer is only recorded, so the first turn waits for
-    // it no longer than a healthy answer takes (measured ~300 ms); a slow
-    // one is dropped as late. In `on` it decides, so its own bound holds.
-    // Measured 2026-09-23 evening: Jev answering in 1.8-3.0 s made every
-    // task wait the full 2 s for nothing.
     let (sent, answer) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = sent.send(crate::decide::task_questions_in(
@@ -391,39 +390,61 @@ pub(super) fn task_decision(
             Some(&context),
         ));
     });
-    let waited = if decisions.mode == crate::config::DecisionMode::Shadow {
-        answer.recv_timeout(SHADOW_WAIT).map_err(|_| ())
-    } else {
-        answer.recv().map_err(|_| ())
-    };
-    match waited {
-        Err(()) => {
-            session_println!(
-                "decision: no answer in time (shadow waits {} ms)",
-                SHADOW_WAIT.as_millis()
-            );
-            (None, 1)
-        }
-        Ok(Ok(decision)) => {
-            session_println!(
-                "decision: intent {} ({:.2}), complexity {} ({:.2}), {} ms",
-                decision.intent.choice,
-                decision.intent.confidence,
-                decision.complexity.choice,
-                decision.complexity.confidence,
-                decision.intent.latency_ms
-            );
-            (Some(decision), 0)
-        }
-        Ok(Err(error)) => {
-            session_println!("decision: no answer ({error})");
-            (None, 1)
-        }
+    let pending = PendingDecision { answer };
+    if decisions.mode == crate::config::DecisionMode::Shadow {
+        return (None, 0, Some(pending));
+    }
+    match pending.settle(true) {
+        Some(Ok(decision)) => (Some(decision), 0, None),
+        Some(Err(())) | None => (None, 1, None),
     }
 }
 
-/// How long a `shadow` task waits for its decision before its first turn.
-pub(super) const SHADOW_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
+/// A task decision still on its way.
+pub(super) struct PendingDecision {
+    answer:
+        std::sync::mpsc::Receiver<Result<crate::decide::TaskDecision, crate::decide::DecideError>>,
+}
+
+impl PendingDecision {
+    /// The answer if it is back -- or, with `wait`, once it is, bounded by
+    /// the request's own [`crate::decide::DECISION_TIMEOUT`]. `None` means
+    /// not back yet; `Some(Err(()))` a request that failed, said once.
+    pub(super) fn settle(&self, wait: bool) -> Option<Result<crate::decide::TaskDecision, ()>> {
+        let received = if wait {
+            self.answer
+                .recv_timeout(crate::decide::DECISION_TIMEOUT + std::time::Duration::from_secs(1))
+                .map_err(|_| ())
+        } else {
+            match self.answer.try_recv() {
+                Ok(answer) => Ok(answer),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+            }
+        };
+        Some(match received {
+            Ok(Ok(decision)) => {
+                session_println!(
+                    "decision: intent {} ({:.2}), complexity {} ({:.2}), {} ms",
+                    decision.intent.choice,
+                    decision.intent.confidence,
+                    decision.complexity.choice,
+                    decision.complexity.confidence,
+                    decision.intent.latency_ms
+                );
+                Ok(decision)
+            }
+            Ok(Err(error)) => {
+                session_println!("decision: no answer ({error})");
+                Err(())
+            }
+            Err(()) => {
+                session_println!("decision: no answer (the request never returned)");
+                Err(())
+            }
+        })
+    }
+}
 
 /// The acceptance list in the task's system block: derived once from the
 /// request, shown beside the preflight, paid for as one helper call, and

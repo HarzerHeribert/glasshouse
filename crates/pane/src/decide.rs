@@ -36,9 +36,13 @@ const MODEL_HEADER: &str = "x-glasshouse-model";
 /// is the same shape for `"helper"`).
 const PURPOSE_HEADER: (&str, &str) = ("x-glasshouse-purpose", "decision");
 
-/// The decision request's own bound -- a side errand, not the 120 s task
-/// turn ceiling `helpers.rs` uses.
-const DECISION_TIMEOUT: Duration = Duration::from_secs(2);
+/// The decision request's own bound: past it an answer is lost, not late.
+/// Fifteen seconds since 2026-09-23 (the user: "timing Jev out after 2
+/// seconds is dumb; measuring it isn't") -- that evening Jev answered in
+/// 1.8-3.0 s, and a 2 s bound threw away nearly every answer. Nothing a
+/// person waits on holds for it: `shadow` collects its task decision after
+/// the model's turn (`session/system.rs`).
+pub const DECISION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The most of a request or response body an error or notice carries.
 const ERROR_BODY_LIMIT: usize = 200;

@@ -1080,27 +1080,39 @@ fn a_failed_or_slow_decision_leaves_the_task_as_it_is() {
 }
 
 #[test]
-fn a_shadow_task_waits_for_its_decision_only_as_long_as_a_healthy_answer_takes() {
+fn a_shadow_task_never_waits_for_its_decision_before_the_first_turn() {
     // Shadow records the answer and acts on none of it, so a slow Jev must
-    // not hold the first turn for its whole timeout (2026-09-23 evening:
-    // 1.8-3.0 s answers, every task waited the full 2 s).
+    // not hold the first turn (the user, 2026-09-23: "just wait, but not --
+    // and measure it"). The cell stamps when it ran; the decision takes 3 s.
     let root = root("decision-shadow-late");
     write_config(&root, DECISIONS_SHADOW);
     let (endpoint, messages, _decisions, _headers) = providers(
-        vec![cell("c1", "answer(\"done\");")],
-        vec![Decision::Sleep(Duration::from_millis(1500))],
+        vec![cell(
+            "c1",
+            "await write({path: \"ran.txt\", content: String(Date.now())});\nanswer(\"done\");",
+        )],
+        vec![Decision::Sleep(Duration::from_secs(3))],
         vec![],
     );
-    let started = std::time::Instant::now();
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     let result = exec_bounded(&root, &endpoint, "read the file for me", None)
-        .expect("a late shadow decision never holds the task");
-    let took = started.elapsed();
+        .expect("a slow shadow decision never holds the task");
     assert_eq!(messages.lock().unwrap().len(), 1);
-    assert_eq!(result["telemetry"]["decisions"]["failed"], 1, "counted as late");
+    let ran: u128 = std::fs::read_to_string(root.join("ran.txt"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert!(
-        took < Duration::from_millis(1400),
-        "the task waited {took:?} for a decision shadow never acts on"
+        ran - started < 2_500,
+        "the first turn waited {} ms for a decision shadow never acts on",
+        ran - started
     );
+    // Measured, not dropped: the answer was still waited for at the end.
+    assert_eq!(result["telemetry"]["decisions"]["failed"], 1, "{result}");
     let _ = std::fs::remove_dir_all(root);
 }
 
