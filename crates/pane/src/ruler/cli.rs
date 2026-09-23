@@ -122,7 +122,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub parent_model: Option<String>,
     /// Expands the `pane` row into one `pane:feedback-<arm>` arm per listed
-    /// arm of [`attempt::FEEDBACK_ARMS`] (`shadow,dissect,reduce,prefetch,all`),
+    /// arm of [`attempt::FEEDBACK_ARMS`] (`bare,shadow,scout,dissect,reduce,prefetch,all`),
     /// each attempt's `.pane/config.toml` carrying the decision mode and the
     /// `[helpers]` switches of its arm. The decision model is
     /// `--decisions-model`, or Jev's default. Refused beside the other two
@@ -450,7 +450,7 @@ pub fn expand_pane_feedback(
             .find(|arm| arm.name == name)
             .ok_or_else(|| {
                 format!(
-                    "--pane-feedback knows shadow, dissect, reduce, prefetch and all, not `{name}`"
+                    "--pane-feedback knows bare, shadow, scout, dissect, reduce, prefetch and all, not `{name}`"
                 )
             })?;
         if parsed.contains(&arm) {

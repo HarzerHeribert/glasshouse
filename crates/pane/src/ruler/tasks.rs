@@ -161,6 +161,70 @@ pub static CATALOGUE: &[Task] = &[
         shortstat_lines: 0,
         rubric: RETURN_FACTS,
     },
+    // Editing, fixing and writing (2026-09-23): each judged by its own check
+    // after the harness stops -- the ruler never reads the model's claim.
+    // The four cut at `91f34c29^` start from a tree whose own tests are green.
+    Task {
+        id: "F1",
+        tier: Tier::Standard,
+        commit: "587f994b",
+        statement: "`cargo test -p pane --test request_modes` fails: four tests say a read-only request no longer proposes the explore mode. Find the cause and fix it without weakening the tests.",
+        test: &[&["cargo", "test", "-p", "pane", "--test", "request_modes"]],
+        shortstat_lines: 12,
+        rubric: &[],
+    },
+    Task {
+        id: "I1",
+        tier: Tier::Standard,
+        commit: "91f34c29",
+        statement: "scripts/release/next-tag.py: also accept release-candidate tags, so `v1.2.3-rc.4` gives `v1.2.3-rc.5`; every form it accepts today must keep working.",
+        test: &[&[
+            "sh",
+            "-c",
+            "t=scripts/release/next-tag.py; [ \"$(python3 $t v1.2.3-rc.4)\" = v1.2.3-rc.5 ] && [ \"$(python3 $t v0.1.0-pre.3)\" = v0.1.0-pre.4 ] && [ \"$(python3 $t v0.1.0)\" = v0.1.1-pre.1 ] && [ \"$(python3 $t)\" = v0.1.0-pre.1 ]",
+        ]],
+        shortstat_lines: 4,
+        rubric: &[],
+    },
+    Task {
+        id: "I2",
+        tier: Tier::Standard,
+        commit: "91f34c29",
+        statement: "Add `pub fn is_prerelease(tag: &str) -> bool` to crates/pane/src/update.rs: true for a release tag with a `-pre.N` part, false for a plain release tag and for anything that is not a release tag. Cover it with a unit test.",
+        test: &[&[
+            "sh",
+            "-c",
+            "printf '%s\\n' '#[test] fn hidden() { use pane::update::is_prerelease as p; assert!(p(\"v0.1.0-pre.2\")); assert!(!p(\"v0.1.0\")); assert!(!p(\"v0.1.0-pre.1-1316-gf96f87f0\")); assert!(!p(\"main\")); }' > crates/pane/tests/ruler_hidden_prerelease.rs && cargo test -p pane --test ruler_hidden_prerelease && cargo test -p pane --lib update::",
+        ]],
+        shortstat_lines: 15,
+        rubric: &[],
+    },
+    Task {
+        id: "W1",
+        tier: Tier::Standard,
+        commit: "91f34c29",
+        statement: "Document subscription pools in sites/INSTALLERS.md: what a pool is, the `inference-gateway subscriptions pool --entitlement <name> --include|--exclude` command, and how the model picker shows and toggles accounts.",
+        test: &[&[
+            "sh",
+            "-c",
+            "f=sites/INSTALLERS.md; grep -q 'subscriptions pool' $f && grep -q -- '--exclude' $f && grep -q -- '--include' $f && grep -qi 'picker' $f",
+        ]],
+        shortstat_lines: 12,
+        rubric: &[],
+    },
+    Task {
+        id: "E1",
+        tier: Tier::Standard,
+        commit: "91f34c29",
+        statement: "Rename Pane's `/usage` slash command to `/limits` everywhere it is offered, dispatched, described and tested; the gateway's `subscriptions usage` command keeps its name.",
+        test: &[&[
+            "sh",
+            "-c",
+            "grep -q '\"limits\"' crates/pane/src/commands.rs && ! grep -q '\"usage\" =>' crates/pane/src/session/controls.rs && cargo test -p pane --test tui_look && cargo test -p pane --test project",
+        ]],
+        shortstat_lines: 10,
+        rubric: &[],
+    },
 ];
 
 /// X1's eight facts, each true of `ruler/attempt.rs` at X1's commit.

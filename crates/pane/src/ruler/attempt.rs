@@ -86,8 +86,8 @@ pub struct HarnessCommand {
 pub struct DecisionsArm {
     pub model: Option<String>,
     pub mode: String,
-    /// `[helpers]` switches the arm turns on, each a key set to `true`
-    /// (`reduce_returns`, `prefetch_returns`); empty for a decisions arm.
+    /// `[helpers]` lines the arm writes verbatim (`reduce_returns = true`,
+    /// `enabled = false`); empty for a decisions arm.
     pub helpers: &'static [&'static str],
 }
 
@@ -161,15 +161,27 @@ pub struct FeedbackArm {
     pub helpers: &'static [&'static str],
 }
 
-/// The context-handling arms (2026-09-23): `shadow` asks every question and
-/// acts on none, the baseline; `dissect` acts on the request's kind (effort
-/// and the Scout's dissection); `reduce` and `prefetch` add one return-side
-/// switch each; `all` turns everything on.
-pub const FEEDBACK_ARMS: [FeedbackArm; 5] = [
+/// The helper arms (2026-09-23): `bare` runs no helper and asks Jev
+/// nothing; `shadow` asks every question and acts on none, with the default
+/// helpers (acceptance list, completion check); `scout` adds the span
+/// Scout; `dissect` acts on the request's kind (effort and the Scout's
+/// dissection); `reduce` and `prefetch` add one return-side switch each;
+/// `all` turns everything on.
+pub const FEEDBACK_ARMS: [FeedbackArm; 7] = [
+    FeedbackArm {
+        name: "bare",
+        mode: "off",
+        helpers: &["enabled = false"],
+    },
     FeedbackArm {
         name: "shadow",
         mode: "shadow",
         helpers: &[],
+    },
+    FeedbackArm {
+        name: "scout",
+        mode: "shadow",
+        helpers: &["preflight = true"],
     },
     FeedbackArm {
         name: "dissect",
@@ -179,17 +191,17 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 5] = [
     FeedbackArm {
         name: "reduce",
         mode: "on",
-        helpers: &["reduce_returns"],
+        helpers: &["reduce_returns = true"],
     },
     FeedbackArm {
         name: "prefetch",
         mode: "on",
-        helpers: &["prefetch_returns"],
+        helpers: &["prefetch_returns = true"],
     },
     FeedbackArm {
         name: "all",
         mode: "on",
-        helpers: &["reduce_returns", "prefetch_returns"],
+        helpers: &["reduce_returns = true", "prefetch_returns = true"],
     },
 ];
 
@@ -680,11 +692,18 @@ fn write_pane_config(
     }
     if helpers_wanted {
         content.push_str("[helpers]\n");
+        let sets_enabled = helper_switches
+            .iter()
+            .any(|line| line.trim_start().starts_with("enabled"));
         if let Some(model) = helpers_model {
-            content.push_str(&format!("enabled = true\nmodel = \"{model}\"\n"));
+            if !sets_enabled {
+                content.push_str("enabled = true\n");
+            }
+            content.push_str(&format!("model = \"{model}\"\n"));
         }
-        for switch in helper_switches {
-            content.push_str(&format!("{switch} = true\n"));
+        for line in helper_switches {
+            content.push_str(line);
+            content.push('\n');
         }
     }
     fs::write(&config_path, content)

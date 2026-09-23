@@ -370,7 +370,7 @@ fn the_table_and_the_jsonl_have_exactly_these_columns() {
 
 #[test]
 fn the_catalogue_is_twelve_commit_tasks_four_per_tier_and_two_explore_tasks() {
-    assert_eq!(tasks::CATALOGUE.len(), 14);
+    assert_eq!(tasks::CATALOGUE.len(), 19);
 
     let mut ids = HashSet::new();
     for task in tasks::CATALOGUE {
@@ -380,7 +380,7 @@ fn the_catalogue_is_twelve_commit_tasks_four_per_tier_and_two_explore_tasks() {
     for tier in Tier::ALL {
         assert_eq!(
             tasks::in_tier(tier)
-                .filter(|task| task.rubric.is_empty())
+                .filter(|task| task.id.starts_with(['L', 'S', 'H']))
                 .count(),
             4,
             "tier {tier:?} should have four commit tasks"
