@@ -166,8 +166,9 @@ pub struct FeedbackArm {
 /// helpers (acceptance list, completion check); `scout` adds the span
 /// Scout; `dissect` acts on the request's kind (effort and the Scout's
 /// dissection); `reduce` and `prefetch` add one return-side switch each;
-/// `all` turns everything on.
-pub const FEEDBACK_ARMS: [FeedbackArm; 7] = [
+/// `all` turns everything on; `oneshot` is `dissect` with the one-shot
+/// dissection instead of the Scout's search loop.
+pub const FEEDBACK_ARMS: [FeedbackArm; 8] = [
     FeedbackArm {
         name: "bare",
         mode: "off",
@@ -187,6 +188,11 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 7] = [
         name: "dissect",
         mode: "on",
         helpers: &[],
+    },
+    FeedbackArm {
+        name: "oneshot",
+        mode: "on",
+        helpers: &["scout_oneshot = true"],
     },
     FeedbackArm {
         name: "reduce",

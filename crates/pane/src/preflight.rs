@@ -130,6 +130,41 @@ pub const NEEDS_USE: &str = "Before you change anything, ask the person with `as
      above that blocks the request and that no file can answer; for every other need, state the \
      assumption you made in your answer.\n";
 
+/// The most paths a one-shot dissection's listing carries: past this the
+/// listing costs more to read than a search loop costs to run.
+pub const LISTING_PATHS: usize = 3000;
+
+/// The project's tracked files as a brief section, for the one-shot
+/// dissection (`helpers::DISSECTOR`): `git ls-files` under `root`, at most
+/// [`LISTING_PATHS`] of them. `None` outside a git repository or when git
+/// fails -- the Scout's search loop then runs instead.
+#[must_use]
+pub fn listing_section(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let paths: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let shown = paths.len().min(LISTING_PATHS);
+    let mut section = format!(
+        "\n## Project files ({} of {} tracked)\n",
+        shown,
+        paths.len()
+    );
+    for path in &paths[..shown] {
+        section.push_str(path);
+        section.push('\n');
+    }
+    Some(section)
+}
+
 /// The dissection brief's own instruction, after [`DO_NOT_PERFORM`]: the
 /// measured lever on a dissection's latency and correctness is its length.
 pub const DISSECT: &str = "Dissect the request into the tasks it takes and what each needs first. Prefer few, \

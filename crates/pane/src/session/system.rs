@@ -617,7 +617,16 @@ pub(super) fn preflight_block(
     };
     let token = invoke::CancellationToken::new();
     session.interrupt.arm(token.clone());
-    let brief = crate::preflight::scouting_brief_for(brief_kind, task, &session.manifest);
+    let mut brief = crate::preflight::scouting_brief_for(brief_kind, task, &session.manifest);
+    // The one-shot dissection answers from the file listing in one request
+    // instead of searching; without a listing the search loop runs.
+    let listing = (dissect && helpers.scout_oneshot)
+        .then(|| crate::preflight::listing_section(&session.project.root))
+        .flatten();
+    let oneshot = listing.is_some();
+    if let Some(listing) = &listing {
+        brief.push_str(listing);
+    }
     // Ranking and judging (2644, 2645): `decisions.model` set and `mode`
     // not `off` is the same gate the intent/complexity question already
     // uses above. `apply` carries `mode = on` versus `shadow` -- shadow
@@ -677,8 +686,14 @@ pub(super) fn preflight_block(
         effort,
         cap: dissect.then_some(DISSECTION_CAP),
     };
-    let Some(judged) =
-        crate::helpers::preflight_judged(&brief, route, helper_context, rank, judge, |record| {
+    let Some(judged) = crate::helpers::preflight_judged(
+        &brief,
+        route,
+        helper_context,
+        rank,
+        judge,
+        oneshot,
+        |record| {
             let Some(ui) = session.ui else {
                 return;
             };
@@ -692,8 +707,8 @@ pub(super) fn preflight_block(
                 .push(Message::text(Role::User, task));
             visible.notebook.preflight = Some(record.clone());
             ui.publish(&visible, &ServedBy::default(), tui::Activity::Searching);
-        })
-    else {
+        },
+    ) else {
         return none;
     };
     let record = judged.record;

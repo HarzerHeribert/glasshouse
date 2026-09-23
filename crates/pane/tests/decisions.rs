@@ -1116,6 +1116,64 @@ const DECISIONS_ON_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\n
 const DECISIONS_SHADOW_WITH_PREFLIGHT: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"shadow\"\n\
      [helpers]\nmodel = \"helper-tier\"\npreflight = true\nacceptance_list = false\n";
 
+const DECISIONS_ON_ONESHOT: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
+     [helpers]\nmodel = \"helper-tier\"\nacceptance_list = false\nscout_oneshot = true\n";
+
+/// With `scout_oneshot`, a confident explore is dissected in one toolless
+/// request over the project's file listing: the Scout's request carries the
+/// tracked files and offers no tool, and its dissection reaches the turn.
+#[test]
+fn an_explore_request_is_dissected_in_one_request_over_the_file_listing() {
+    const DISSECTION: &str = "## Tasks\n1. Read the setup — every step is known\n\n## Files\nscripts/setup.sh — task 1, the setup\n\n## Verify\nbash -n scripts/setup.sh\n\n## Needs\n(none)\n\n## Skip\n(none found)\n";
+    let root = root("kind-explore-oneshot");
+    write_config(&root, DECISIONS_ON_ONESHOT);
+    std::fs::write(root.join("README.md"), "# Demo\n").unwrap();
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("scripts/setup.sh"), "#!/bin/sh\n").unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .expect("git runs")
+    };
+    git(&["init", "-q"]);
+    git(&["add", "README.md", "scripts/setup.sh"]);
+    let (endpoint, messages, _decisions, _headers) = providers(
+        vec![prose(DISSECTION), cell("c1", "answer(\"done\");")],
+        vec![Decision::Answer(decision_answer_with_kind(
+            "read_only",
+            0.94,
+            "explore",
+            0.90,
+        ))],
+        vec![],
+    );
+    let result = exec_bounded(&root, &endpoint, NO_SIGNAL_TASK, None).expect("the task finishes");
+    let messages = messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the dissection, then the task's own turn"
+    );
+    let scout = &messages[0];
+    assert!(scout.contains("## Project files"), "{scout}");
+    assert!(
+        scout.contains("scripts/setup.sh") && scout.contains("README.md"),
+        "{scout}"
+    );
+    assert!(
+        !scout.contains("\"tools\""),
+        "one request, no tool offered: {scout}"
+    );
+    assert!(messages[1].contains("1. Read the setup"), "{}", messages[1]);
+    assert_eq!(
+        result["telemetry"]["decisions"]["scout_brief"],
+        "dissection"
+    );
+}
+
 const DECISIONS_ON_WITH_HELPERS: &str = "[decisions]\nmodel = \"jev-latest\"\nmode = \"on\"\n\
      [helpers]\nmodel = \"helper-tier\"\nacceptance_list = false\n";
 

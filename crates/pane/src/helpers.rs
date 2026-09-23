@@ -169,6 +169,31 @@ pub const SCOUT: HelperSpec = HelperSpec {
     call_sites: &[CallSite::Preflight, CallSite::Cell],
 };
 
+/// Dissect an exploring request in one toolless request (2026-09-23): the
+/// brief carries the project's file listing and its instruction headings,
+/// so the answer can only name paths that exist and takes no search loop.
+/// Measured offline: recall of the files the acting model went on to read
+/// equal to or better than [`SCOUT`]'s loop where names reveal the files, at
+/// about a fifteenth of the tokens and a fifth of the time. Not in
+/// [`HELPERS`]: it is never offered to a cell and serves one call site only
+/// when `[helpers] scout_oneshot` picks it.
+pub const DISSECTOR: HelperSpec = HelperSpec {
+    name: "dissect",
+    summary: "Dissect a request from the project's file listing, in one answer.",
+    verb: "dissecting",
+    preamble: "You are scouting for the model that will act. You cannot open files: you \
+        have the request, the project's file listing and its instruction headings, and \
+        nothing else. Answer the brief's sections and nothing else. Name only paths that \
+        appear in the listing, never invent one, and never attempt the request or report \
+        on work you did not do.",
+    tools: &[],
+    max_tokens: 640,
+    max_turns: 1,
+    input: InputKind::Request,
+    output: OutputKind::Spans,
+    call_sites: &[CallSite::Preflight],
+};
+
 /// Reduce build output, logs and test results to their distinct failures.
 ///
 /// `tools` is empty, so this helper cannot reach the filesystem at all -- the
@@ -1568,11 +1593,16 @@ pub fn preflight_judged(
     context: HelperContext<'_>,
     rank: Option<(&[ScoutCandidate], ScoutRankRoute<'_>)>,
     judge: Option<HelperJudge<'_>>,
+    oneshot: bool,
     mut progress: impl FnMut(&HelperRecord),
 ) -> Option<PreflightJudged> {
-    let spec = HELPERS
-        .iter()
-        .find(|spec| spec.call_sites.contains(&CallSite::Preflight))?;
+    let spec = if oneshot {
+        &DISSECTOR
+    } else {
+        HELPERS
+            .iter()
+            .find(|spec| spec.call_sites.contains(&CallSite::Preflight))?
+    };
     let request = crate::preflight::request_in(input).unwrap_or(input);
 
     let ranking = rank.and_then(|(candidates, rank_route)| {

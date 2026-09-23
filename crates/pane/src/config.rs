@@ -334,6 +334,11 @@ pub struct HelpersConfig {
     /// (`session/returned.rs`). Needs `[decisions] model`; in `shadow` mode
     /// the answer is recorded and nothing is fetched. Off until measured.
     pub prefetch_returns: bool,
+    /// Dissect an exploring request in one toolless request over the
+    /// project's file listing instead of the Scout's search loop
+    /// (2026-09-23: ~15x cheaper and 4-8x faster at equal recall offline).
+    /// Off until measured end to end.
+    pub scout_oneshot: bool,
 }
 
 /// `[helpers] preflight_scope` -- which tasks the Scout runs for when
@@ -457,6 +462,7 @@ impl Default for HelpersConfig {
             reduce_above_tokens: 2048,
             reduce_returns: false,
             prefetch_returns: false,
+            scout_oneshot: false,
         }
     }
 }
@@ -1307,6 +1313,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             "reduce_above_tokens",
             "reduce_returns",
             "prefetch_returns",
+            "scout_oneshot",
         ]
         .contains(&key.as_str())
         {
@@ -1391,6 +1398,12 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
             .as_bool()
             .ok_or_else(|| "pane.toml: `prefetch_returns` must be true or false".to_string())?,
     };
+    let scout_oneshot = match table.get("scout_oneshot") {
+        None => defaults.scout_oneshot,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `scout_oneshot` must be true or false".to_string())?,
+    };
 
     Ok(HelpersConfig {
         model,
@@ -1405,6 +1418,7 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         reduce_above_tokens,
         reduce_returns,
         prefetch_returns,
+        scout_oneshot,
     })
 }
 
