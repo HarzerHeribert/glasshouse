@@ -1,0 +1,48 @@
+{"question": "task", "request": "explore this project", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "how does the gateway pick which account serves a request?", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "give me an overview of the crates/pane/src/runtime module", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "walk me through what happens between a user typing a task and the first model request", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "where is the retry logic for 429s implemented", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "what does the --yolo flag do", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "what's the difference between shadow and on mode for decisions", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "which rust version does this repo use", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "trivial"}
+{"question": "task", "request": "what is 2^20", "expect_kind": "question", "expect_intent": "other", "expect_complexity": "trivial"}
+{"question": "task", "request": "thanks, that's all", "expect_kind": "question", "expect_intent": "other", "expect_complexity": "trivial"}
+{"question": "task", "request": "the test a_pool_stays_on_one_account fails on windows, fix it", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "fix the typo 'recieve' in README.md", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "trivial"}
+{"question": "task", "request": "cargo build fails with error E0063 missing field `account` in upstream.rs, please fix", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "pane crashes when I press ctrl-c twice during a cell, find out why and fix it", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "the install script refuses the archive with a checksum mismatch, fix", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "users report the model picker is empty after login \u2014 investigate and fix", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "off by one in paging: the cursor line says +11 lines but only 10 are hidden. fix", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "add a --json flag to `pane doctor`", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "implement a /usage command that shows subscription limits", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "add a unit test for parse_tag covering a missing patch number", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "rename the function `render_brief` to `render_scout_brief` everywhere", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "create a CONTRIBUTING.md explaining how to run the tests", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "add support for Gemini API keys in the gateway, with tests", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "refactor session.rs so it drops under the 2500 line ceiling", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "bump the ureq dependency to 3.1 and make everything compile", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "delete the unused examples folder", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "trivial"}
+{"question": "task", "request": "run the tests", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "trivial"}
+{"question": "task", "request": "run cargo test -p pane --test decisions and tell me what fails", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "trivial"}
+{"question": "task", "request": "build the release binary and install it into a new version dir", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "routine"}
+{"question": "task", "request": "start the dev server and check that the landing page loads", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "routine"}
+{"question": "task", "request": "run the benchmark suite and summarise the results", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "routine"}
+{"question": "task", "request": "lint everything with clippy and report warnings", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "trivial"}
+{"question": "task", "request": "git status", "expect_kind": "run", "expect_intent": "read_only", "expect_complexity": "trivial"}
+{"question": "task", "request": "show me the last 5 commits", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "trivial"}
+{"question": "task", "request": "read src/update.rs and explain what it does", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "find every place we call unwrap() on user input", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "is there any code path where a token could be logged? audit it", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "review my last commit for bugs", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "what would it take to support Windows in the updater? don't change anything yet", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "plan how we could add a sidebar usage line", "expect_kind": "explore", "expect_intent": "read_only", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "erkl\u00e4r mir kurz wie das rubric scoring im ruler funktioniert", "expect_kind": "question", "expect_intent": "read_only", "expect_complexity": "routine"}
+{"question": "task", "request": "mach den test gr\u00fcn", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "pls fix teh failing ci", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "make pane faster", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "add logging", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
+{"question": "task", "request": "check if the gateway is running and restart it if not", "expect_kind": "run", "expect_intent": "run", "expect_complexity": "routine"}
+{"question": "task", "request": "update the docs to mention the new pool command, then run the doc tests", "expect_kind": "implement", "expect_intent": "modify", "expect_complexity": "routine"}
+{"question": "task", "request": "look at the failing sweep, tell me what's wrong, and fix what is ours", "expect_kind": "fix", "expect_intent": "modify", "expect_complexity": "needs_exploration"}
