@@ -84,6 +84,10 @@ impl fmt::Debug for BrokerApiKey {
     }
 }
 
+/// How long [`RunningSubscriptionBroker::verify_credential`] may take: one
+/// short completion, first token included.
+const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A live one-entitlement CLIProxyAPI sidecar.
 ///
 /// Dropping this value kills and reaps the process and removes its ephemeral
@@ -331,6 +335,50 @@ impl RunningSubscriptionBroker {
             .map_err(|_| {
                 anyhow::anyhow!("the subscription broker model catalogue could not be read")
             })
+    }
+
+    /// One small completion for `model` through this sidecar: proof that
+    /// the credential it holds is accepted, not merely present on disk. The
+    /// error names the status only -- a refusal's body can carry account
+    /// details, and this line is shown to the person.
+    pub fn verify_credential(&self, model: &str) -> Result<()> {
+        let agent = Agent::new_with_config(
+            Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .accept_encoding(AutoHeaderValue::None)
+                .timeout_connect(Some(crate::provider::discovery::CONNECT_TIMEOUT))
+                .timeout_global(Some(VERIFY_TIMEOUT))
+                .build(),
+        );
+        // Written as text: the relay names no serialization crate
+        // (`no_part_of_the_relay_deserializes_anything`), and a model id
+        // from the catalogue needs no escaping once it is held to these.
+        if model.is_empty()
+            || !model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/'))
+        {
+            bail!("the model id to try is not a plain identifier");
+        }
+        let body = format!(
+            r#"{{"model":"{model}","max_tokens":16,"messages":[{{"role":"user","content":"Reply with ok."}}]}}"#
+        );
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let response = agent
+            .post(&url)
+            .header(
+                "authorization",
+                format!("Bearer {}", self.internal_key.expose()),
+            )
+            .header("content-type", "application/json")
+            .send(body.as_bytes())
+            .map_err(|_| anyhow::anyhow!("the subscription broker did not answer"))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            bail!("{model} was refused with HTTP {status}");
+        }
+        Ok(())
     }
 
     fn terminate(&mut self) {

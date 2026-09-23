@@ -749,6 +749,34 @@ fn fake_broker_login(scratch: &std::path::Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 auth=$(/usr/bin/sed -n 's/^auth-dir: "\(.*\)"$/\1/p' "$2")
+if [ "$3" = "-local-model" ]; then
+# Serving, as `connect` starts it to use the saved login once: the model
+# list, and one completion -- refused with 401 when a `refuse` marker sits
+# beside the auth directory (the broker runs with a cleared environment).
+exec python3 - "$2" "$auth/../served.txt" "$auth/../refuse" <<'PY'
+import os, socket, sys
+lines = open(sys.argv[1]).read().splitlines()
+port = int(next(l.split(":", 1)[1].strip() for l in lines if l.startswith("port:")))
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", port))
+listener.listen()
+while True:
+    connection, _ = listener.accept()
+    request = connection.recv(65536).decode(errors="replace")
+    line = request.split("\r\n", 1)[0]
+    with open(sys.argv[2], "a") as log:
+        log.write(line + "\n")
+    if line.startswith("GET /v1/models"):
+        status, body = "200 OK", '{"data":[{"id":"claude-image-x"},{"id":"claude-haiku-test"}]}'
+    elif os.path.exists(sys.argv[3]):
+        status, body = "401 Unauthorized", '{"error":"token revoked"}'
+    else:
+        status, body = "200 OK", '{"choices":[]}'
+    connection.sendall(f"HTTP/1.1 {status}\r\ncontent-length: {len(body)}\r\nconnection: close\r\n\r\n{body}".encode())
+    connection.close()
+PY
+fi
 echo "$@" > "$auth/../args.txt"
 echo "To authenticate from a remote machine, an SSH tunnel may be required."
 echo "  ssh -L 54545:127.0.0.1:54545 root@203.0.113.7 -p 22"
@@ -864,6 +892,75 @@ fn connect_drives_the_broker_login_and_forwards_a_pasted_address() {
     assert!(
         leftovers.is_empty(),
         "the login's private config is removed: {leftovers:?}"
+    );
+}
+
+/// A saved credential the provider refuses is a failed sign-in, never
+/// "connected": `connect` uses the login once before it says so, and the
+/// served broker was asked for its models and one completion.
+#[cfg(unix)]
+#[test]
+fn connect_fails_when_the_saved_credential_is_refused() {
+    use std::io::Write as _;
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let config_path = scratch.path().join("gateway.toml");
+    std::fs::write(
+        &config_path,
+        "[accounts.zeta]\nkind = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
+    )
+    .expect("the configuration is written");
+    let entitlement_dir = scratch
+        .path()
+        .join("subscription-brokers")
+        .join(format!("entitlement-{}", hex_of("zeta")));
+    std::fs::create_dir_all(&entitlement_dir).expect("the entitlement directory");
+    std::fs::write(entitlement_dir.join("refuse"), "").expect("the refusal marker");
+    let mut child = gateway(&config_path, scratch.path())
+        .args([
+            "subscriptions",
+            "connect",
+            "anthropic",
+            "--entitlement",
+            "zeta",
+            "--json",
+            "--no-browser",
+        ])
+        .env(
+            "GLASSHOUSE_CLIPROXYAPI_BIN",
+            fake_broker_login(scratch.path()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(b"http://localhost:54545/callback?code=c&state=s\n")
+        .expect("the paste is written");
+    let status = wait_for_exit(&mut child);
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
+    assert!(!status.success(), "{stdout}");
+    assert!(!stdout.contains("\"connected\""), "{stdout}");
+    assert!(
+        stdout.contains("using it failed")
+            && stdout.contains("claude-haiku-test was refused with HTTP 401"),
+        "{stdout}"
+    );
+    let served = std::fs::read_to_string(
+        scratch
+            .path()
+            .join("subscription-brokers")
+            .join(format!("entitlement-{}", hex_of("zeta")))
+            .join("served.txt"),
+    )
+    .unwrap();
+    assert!(
+        served.contains("GET /v1/models") && served.contains("POST /v1/chat/completions"),
+        "{served}"
     );
 }
 

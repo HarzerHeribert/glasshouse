@@ -167,6 +167,13 @@ enum SubscriptionsCommand {
         #[arg(long, value_name = "NAME")]
         entitlement: String,
     },
+    /// Use one account's saved login once: start its broker, read its
+    /// catalogue and send one small completion. Exit 0 only if it answered.
+    Verify {
+        /// The `[accounts.<name>]` table to verify.
+        #[arg(long, value_name = "NAME")]
+        entitlement: String,
+    },
     /// Adopt a CLIProxyAPI executable into this gateway's managed tools, pinned by its digest.
     AdoptBinary {
         /// The executable to copy in.
@@ -291,6 +298,17 @@ fn run() -> Result<()> {
         Command::Subscriptions {
             command: SubscriptionsCommand::AdoptBinary { path },
         } => adopt_binary(&data_dir(&cli)?, path),
+        Command::Subscriptions {
+            command: SubscriptionsCommand::Verify { entitlement },
+        } => {
+            let config = load_config(&cli)?;
+            if !config.accounts.contains_key(entitlement.as_str()) {
+                bail!("no [accounts.{entitlement}] table in the gateway configuration");
+            }
+            verify_login(&data_dir(&cli)?, entitlement)?;
+            println!("{entitlement}: the saved login works");
+            Ok(())
+        }
         Command::Credentials { command } => {
             let config = load_config(&cli)?;
             let data_dir = data_dir(&cli)?;
@@ -774,6 +792,50 @@ fn refresh_catalogues(config: &GatewayConfig, data_dir: &Path, cache: &ModelCach
     }
 }
 
+/// Proves a fresh login by using it: the account's broker is started, its
+/// catalogue read (and cached, so the models it now serves are listed at
+/// once), and one small completion sent to a light model from it.
+fn verify_login(data_dir: &Path, entitlement: &str) -> Result<()> {
+    let paths = config::broker_paths(data_dir, entitlement);
+    let broker = RunningSubscriptionBroker::start(&paths, entitlement)?;
+    let document = broker.model_catalogue_document()?;
+    let models = pool::parse_model_catalogue(&document);
+    let model = probe_model(&models).context("the account's catalogue names no model to try")?;
+    broker.verify_credential(&model)?;
+    let cache = ModelCache::at(config::model_cache_dir(data_dir));
+    let base_url = format!("{}/v1", broker.base_url());
+    let endpoint = format!("{base_url}/models");
+    let catalogue = ModelCatalogue::new(
+        entitlement,
+        base_url,
+        endpoint,
+        now_unix_seconds(),
+        models.into_iter().map(ModelEntry::new).collect(),
+    );
+    if let Err(error) = cache.store(&catalogue) {
+        eprintln!("account `{entitlement}`: its catalogue could not be cached: {error}");
+    }
+    Ok(())
+}
+
+/// The model a login is tried against: a light text model when the
+/// catalogue has one, never an image or review model.
+fn probe_model(models: &[String]) -> Option<String> {
+    let text: Vec<&String> = models
+        .iter()
+        .filter(|m| {
+            !["image", "review", "embedding", "spark"]
+                .iter()
+                .any(|w| m.contains(w))
+        })
+        .collect();
+    ["haiku", "luna", "mini", "flash", "sonnet"]
+        .iter()
+        .find_map(|light| text.iter().find(|m| m.contains(light)))
+        .or_else(|| text.first())
+        .map(|m| (*m).clone())
+}
+
 /// How `subscriptions connect` was asked to run.
 #[derive(Debug, Clone, Copy)]
 struct ConnectHow {
@@ -888,6 +950,7 @@ fn connect(
 
     let mut output = LoginOutput::default();
     let mut connected = false;
+    let mut account = None;
     for line in std::io::BufReader::new(stdout)
         .lines()
         .map_while(Result::ok)
@@ -907,18 +970,29 @@ fn connect(
                     login::open_in_browser(verification_url);
                 }
             }
-            flow::Progress::Connected { .. } => connected = true,
+            // Held until the credential has been used once: a saved file
+            // is not a working login (2026-09-23, a sign-in reported
+            // connected that nobody had checked).
+            flow::Progress::Connected { account: saved } => {
+                connected = true;
+                account = saved.clone();
+                continue;
+            }
             _ => {}
         }
         emit(&progress);
     }
     let status = broker.wait()?;
-    if connected {
-        return Ok(());
-    }
-    if status.success() && credential_present(&paths.auth_dir).unwrap_or(false) {
-        emit(&flow::Progress::Connected { account: None });
-        return Ok(());
+    if connected || (status.success() && credential_present(&paths.auth_dir).unwrap_or(false)) {
+        return match verify_login(data_dir, entitlement) {
+            Ok(()) => {
+                emit(&flow::Progress::Connected { account });
+                Ok(())
+            }
+            Err(error) => fail!(format!(
+                "the sign-in saved a credential, but using it failed: {error:#}"
+            )),
+        };
     }
     let reason = output
         .failure()
@@ -1484,6 +1558,31 @@ fn credential_present(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login is tried against a light text model, never an image or
+    /// review model, and any text model when no light one is listed.
+    #[test]
+    fn a_login_is_tried_against_a_light_text_model() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            probe_model(&ids(&[
+                "gpt-image-2",
+                "codex-auto-review",
+                "gpt-6-sol",
+                "gpt-6-luna"
+            ])),
+            Some("gpt-6-luna".into())
+        );
+        assert_eq!(
+            probe_model(&ids(&["claude-opus-5-5", "claude-haiku-4-5-20251001"])),
+            Some("claude-haiku-4-5-20251001".into())
+        );
+        assert_eq!(
+            probe_model(&ids(&["gpt-image-2", "big-model"])),
+            Some("big-model".into())
+        );
+        assert_eq!(probe_model(&ids(&["gpt-image-2"])), None);
+    }
 
     /// What a served turn costs reaches disk, including the figure two
     /// dogfooding sessions could never see.

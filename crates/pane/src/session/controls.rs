@@ -640,11 +640,24 @@ impl SignIn {
             rows.push(row("pasted; finishing the sign-in…".into(), None));
         }
         rows.push(row(
-            self.outcome
-                .clone()
-                .unwrap_or_else(|| "waiting for the sign-in…".into()),
+            self.outcome.clone().unwrap_or_else(|| {
+                "waiting for the sign-in, then one request to check it works…".into()
+            }),
             None,
         ));
+        // The browser's last page is the broker's local callback, which has
+        // already closed by the time a person looks at it.
+        if self
+            .outcome
+            .as_deref()
+            .is_some_and(|said| !said.starts_with("failed:"))
+        {
+            rows.push(row(
+                "The browser tab may say it cannot connect — that is expected once the sign-in has finished; you can close it."
+                    .into(),
+                None,
+            ));
+        }
         let mut panel = Panel::rows(format!("Connecting {}", self.account), rows);
         panel.selected = panel
             .rows
