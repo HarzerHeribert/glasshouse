@@ -91,6 +91,23 @@ struct Limits {
 /// Root instructions, followed by a bounded contents-free index of nested
 /// documents the model can load when a later tool path makes them relevant.
 pub fn root(profile: &Profile) -> String {
+    root_as(profile, false)
+}
+
+/// A document over this many bytes is outlined rather than inlined when the
+/// outline is asked for: under it the whole text costs little, and a short
+/// AGENTS.md is exactly the one whose every rule should be in view.
+pub const OUTLINE_ABOVE_BYTES: usize = 8 * 1024;
+
+/// [`root`], with each document over [`OUTLINE_ABOVE_BYTES`] shown as its
+/// headings and their line numbers (`[limits] instructions_outline`). The
+/// model reads a section when its task reaches it; measured 2026-09-23, this
+/// repository's 49 KB CLAUDE.md was a third of every request's input.
+pub fn root_outlined(profile: &Profile) -> String {
+    root_as(profile, true)
+}
+
+fn root_as(profile: &Profile, outline: bool) -> String {
     let mut limits = Limits::default();
     let docs = load_candidates(
         profile,
@@ -105,7 +122,7 @@ pub fn root(profile: &Profile) -> String {
         complete: load.complete,
     };
     let mut rendered = super::workflows::user_instructions();
-    rendered.push_str(&render(profile, &load, Some(&index)));
+    rendered.push_str(&render(profile, &load, Some(&index), outline));
     rendered
 }
 
@@ -291,7 +308,7 @@ fn structured(docs: BTreeMap<(PathBuf, PathBuf), String>, limits: &Limits) -> In
 }
 
 fn render_documents(profile: &Profile, load: &InstructionLoad) -> String {
-    render(profile, load, None)
+    render(profile, load, None, false)
 }
 
 fn discover(profile: &Profile, limits: &mut Limits) -> Vec<PathBuf> {
@@ -379,7 +396,12 @@ fn discover(profile: &Profile, limits: &mut Limits) -> Vec<PathBuf> {
     found.into_iter().collect()
 }
 
-fn render(profile: &Profile, load: &InstructionLoad, index: Option<&InstructionIndex>) -> String {
+fn render(
+    profile: &Profile,
+    load: &InstructionLoad,
+    index: Option<&InstructionIndex>,
+    outline: bool,
+) -> String {
     let mut out = String::new();
     if !load.documents.is_empty() {
         out.push_str("## Project instructions\n\nDocuments in the same directory have equal scope; their order below does not define precedence. Resolve contradictions explicitly. Deeper directory scopes apply only inside that directory.\n");
@@ -395,10 +417,14 @@ fn render(profile: &Profile, load: &InstructionLoad, index: Option<&InstructionI
                 .filter(|path| !path.as_os_str().is_empty())
                 .map(display_relative)
                 .unwrap_or_else(|| ".".into());
+            let body = if outline && document.text.len() > OUTLINE_ABOVE_BYTES {
+                outlined(&display_relative(relative), &document.text)
+            } else {
+                document.text.trim_end().to_string()
+            };
             out.push_str(&format!(
-                "\n### `{}` (scope `{scope}`)\n\n{}\n",
+                "\n### `{}` (scope `{scope}`)\n\n{body}\n",
                 display_relative(relative),
-                document.text.trim_end()
             ));
         }
     }
@@ -431,6 +457,29 @@ fn render(profile: &Profile, load: &InstructionLoad, index: Option<&InstructionI
         out.push_str(&reasons.into_iter().collect::<Vec<_>>().join(", "));
         out.push_str(".\n");
         out.push_str(&render_named_omissions(profile, &load.omissions));
+    }
+    out
+}
+
+/// A long document as its headings, each with the line it starts on, and the
+/// one instruction that makes the outline safe: read a section before acting
+/// where it applies.
+fn outlined(path: &str, text: &str) -> String {
+    let lines = text.lines().count();
+    let mut out = format!(
+        "Only the headings of this document ({} KB, {lines} lines) are shown, to keep every \
+         request small. Before you act in an area a heading covers, read that section: \
+         `(await read({{path: \"{path}\"}})).excerpt({{start: <line>, lines: 60}})`.\n",
+        text.len() / 1024
+    );
+    let mut fenced = false;
+    for (index, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        if !fenced && line.starts_with('#') {
+            out.push_str(&format!("L{} {line}\n", index + 1));
+        }
     }
     out
 }
@@ -475,4 +524,19 @@ fn display_relative(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_outline_lists_headings_with_their_lines_and_skips_fenced_ones() {
+        let text = "# Title\nintro\n```sh\n# not a heading\n```\n## Rules\nbody\n";
+        let out = outlined("CLAUDE.md", text);
+        assert!(out.contains("L1 # Title\n"), "{out}");
+        assert!(out.contains("L6 ## Rules\n"), "{out}");
+        assert!(!out.contains("not a heading"), "{out}");
+        assert!(out.contains(r#"read({path: "CLAUDE.md"})"#), "{out}");
+    }
 }

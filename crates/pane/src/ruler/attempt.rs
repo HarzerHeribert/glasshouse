@@ -171,7 +171,11 @@ pub struct FeedbackArm {
 /// 2026-09-23 spelled out whatever the defaults become -- nothing before the
 /// first turn, `helper.find` with verified excerpts, logs shortened, the
 /// checker and the learned-notes writer behind the answer.
-pub const FEEDBACK_ARMS: [FeedbackArm; 9] = [
+/// `working` and `outline` are `lanes` plus one engine change each (A and B,
+/// 2026-09-23): the newest two results kept whole, or long instruction
+/// documents outlined. Their lines open a `[limits]` table, so they come
+/// last: every line after it lands in that table.
+pub const FEEDBACK_ARMS: [FeedbackArm; 11] = [
     FeedbackArm {
         name: "bare",
         mode: "off",
@@ -205,6 +209,34 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 9] = [
             "reduce_returns = true",
             "prefetch_returns = false",
             "learn = true",
+        ],
+    },
+    FeedbackArm {
+        name: "working",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[limits]",
+            "keep_results = 2",
+        ],
+    },
+    FeedbackArm {
+        name: "outline",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[limits]",
+            "instructions_outline = true",
         ],
     },
     FeedbackArm {

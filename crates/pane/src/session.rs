@@ -70,6 +70,7 @@ mod resume;
 mod returned;
 mod startup;
 mod system;
+use system::{estimate_request_tokens, estimate_task_request_tokens};
 mod task;
 mod usage;
 
@@ -681,6 +682,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         (
             Conversation {
                 system: build_system_prompt(
+                    &config.borrow().limits,
                     &config.borrow().web,
                     &config.borrow().agents,
                     &config.borrow().helpers,
@@ -2533,7 +2535,8 @@ fn send_task_turn(
     task: &str,
 ) -> Result<wire::Turn, wire::WireError> {
     let model = session.model.borrow();
-    let request = prompt::with_task_context(conversation, &model, task);
+    let mut request = prompt::with_task_context(conversation, &model, task);
+    prompt::keep_recent_results(&mut request, session.config().limits.keep_results);
     let conversation = &request;
     let surface = session.surface();
     if let Some(ui) = session.ui {
@@ -2560,16 +2563,6 @@ fn send_task_turn(
             surface,
         )
     }
-}
-
-fn estimate_request_tokens(conversation: &Conversation, model: &str) -> u64 {
-    estimate_task_request_tokens(conversation, model, "")
-}
-
-fn estimate_task_request_tokens(conversation: &Conversation, model: &str, task: &str) -> u64 {
-    let request = prompt::with_task_context(conversation, model, task);
-    let body = wire::request_body_on_model(&request, model);
-    preview::estimate_tokens(&String::from_utf8_lossy(&body)) as u64
 }
 
 /// Splits a slash command's name from whatever follows it -- `/memory a

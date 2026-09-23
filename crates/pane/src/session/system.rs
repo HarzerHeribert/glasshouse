@@ -14,6 +14,7 @@ use super::*;
 /// byte, so there is no second spelling of the contract here to drift from it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_system_prompt(
+    limits: &crate::config::Limits,
     web: &crate::web::WebConfig,
     agents: &crate::config::AgentsConfig,
     helpers: &crate::config::HelpersConfig,
@@ -24,7 +25,11 @@ pub(super) fn build_system_prompt(
     manifest: &crate::manifest::Manifest,
 ) -> String {
     // Configuration/grants remain session-scoped; guidance is read fresh.
-    let instructions = crate::project::instructions::root(profile);
+    let instructions = if limits.instructions_outline {
+        crate::project::instructions::root_outlined(profile)
+    } else {
+        crate::project::instructions::root(profile)
+    };
     // The Runtime block declares `web` only when `[web]` reaches something,
     // the same predicate the runtime binds it on (map 2658).
     let web = prompt::declarations::WebReach::from_config(web);
@@ -68,6 +73,7 @@ pub(super) fn build_system_prompt(
 /// block, from what the session holds.
 pub(super) fn system_prompt_for(session: &Session<'_>) -> String {
     build_system_prompt(
+        &session.config().limits,
         &session.config().web,
         &session.config().agents,
         &session.config().helpers,
@@ -937,4 +943,20 @@ pub fn system_manifest(profile: &Profile, config: &PaneConfig) -> crate::manifes
             .push("agent.run: subagents are off in this configuration".into());
     }
     manifest
+}
+
+/// The tokens a request for `conversation` would carry, estimated from its
+/// wire body (moved from `session.rs` for the size ratchet, 2026-09-23).
+pub(super) fn estimate_request_tokens(conversation: &Conversation, model: &str) -> u64 {
+    estimate_task_request_tokens(conversation, model, "")
+}
+
+pub(super) fn estimate_task_request_tokens(
+    conversation: &Conversation,
+    model: &str,
+    task: &str,
+) -> u64 {
+    let request = prompt::with_task_context(conversation, model, task);
+    let body = wire::request_body_on_model(&request, model);
+    preview::estimate_tokens(&String::from_utf8_lossy(&body)) as u64
 }

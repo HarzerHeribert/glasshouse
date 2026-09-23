@@ -39,6 +39,14 @@ pub struct Limits {
     /// lose the sections the newest one restates in full. An unknown window
     /// sweeps nothing, because there is no fraction to be over.
     pub compact_above_percent: u64,
+    /// Keep this many of the newest cell results in full and collapse every
+    /// older one to its first line (`prompt::keep_recent_results`); `0`
+    /// keeps them all. The values stay bound in the runtime, so nothing is
+    /// lost that one expression cannot bring back. Off until measured.
+    pub keep_results: usize,
+    /// Show a long instruction document as its headings and their lines
+    /// (`project::instructions::root_outlined`). Off until measured.
+    pub instructions_outline: bool,
 }
 
 impl Default for Limits {
@@ -55,6 +63,8 @@ impl Default for Limits {
             // 800k in Claude code." A fraction carries that across models:
             // 85% of a 922k window is 784k, and 85% of a small one is small.
             compact_above_percent: 85,
+            keep_results: 0,
+            instructions_outline: false,
         }
     }
 }
@@ -541,6 +551,12 @@ const COMPACT_ABOVE_PERCENT: Range = Range {
     min: 50,
     max: 99,
 };
+/// `0` keeps every result; past a few dozen there is nothing left to save.
+const KEEP_RESULTS: Range = Range {
+    key: "keep_results",
+    min: 0,
+    max: 64,
+};
 const CALLS_PER_CELL: Range = Range {
     key: "calls_per_cell",
     min: 1,
@@ -808,6 +824,8 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             "cells",
             "evidence_gate",
             "compact_above_percent",
+            "keep_results",
+            "instructions_outline",
         ]
         .contains(&key.as_str())
         {
@@ -846,12 +864,25 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         None => defaults.cells,
     };
 
+    let keep_results = match int_field(table, "keep_results")? {
+        Some(v) => usize::try_from(KEEP_RESULTS.check(v)?).expect("range is non-negative"),
+        None => defaults.keep_results,
+    };
+    let instructions_outline = match table.get("instructions_outline") {
+        None => defaults.instructions_outline,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "pane.toml: `instructions_outline` must be true or false".to_string())?,
+    };
+
     Ok(Limits {
         cell_wall_clock_s,
         response_bytes,
         cells,
         evidence_gate,
         compact_above_percent,
+        keep_results,
+        instructions_outline,
     })
 }
 

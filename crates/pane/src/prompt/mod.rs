@@ -377,6 +377,43 @@ pub fn project_runtime_history(conversation: &mut Conversation, active_from: usi
     }
 }
 
+/// Collapses every cell result but the newest `keep` to its first line (the
+/// `[cell N yielded in …]` header) plus one sentence saying its values are
+/// still bound. `0` keeps everything.
+///
+/// **The boundary moves in steps of [`COLLAPSE_STEP`] results**, so the
+/// request prefix changes once every few turns rather than on every turn:
+/// each collapse re-sends the history uncached once, then it is cached
+/// again. Measured offline 2026-09-23 over six recorded tasks: keeping two
+/// results would have saved 24 % of the parent's input, one 34 %.
+pub fn keep_recent_results(conversation: &mut Conversation, keep: usize) {
+    if keep == 0 {
+        return;
+    }
+    let results: Vec<usize> = conversation
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.historical.is_some() && m.content.len() == 1)
+        .map(|(i, _)| i)
+        .collect();
+    let collapse = results.len().saturating_sub(keep) / COLLAPSE_STEP * COLLAPSE_STEP;
+    for &i in &results[..collapse] {
+        if let Block::Text(text) | Block::ToolResult { content: text, .. } =
+            &mut conversation.messages[i].content[0]
+        {
+            let head = text.lines().next().unwrap_or("").to_string();
+            *text = format!("{head}\n{COLLAPSED}");
+        }
+    }
+}
+
+/// How many results the collapse boundary advances at a time.
+pub const COLLAPSE_STEP: usize = 3;
+/// What a collapsed result says in place of its output.
+pub const COLLAPSED: &str = "[output collapsed to keep the context small; every value this cell \
+    bound is still live in the runtime -- return it again if you need it]";
+
 /// Why the preamble is being replaced, and **it is always something observed
 /// rather than something counted** (the user, 2026-09-17: "Limits are dumb for
 /// abstract tasks").
@@ -1203,6 +1240,39 @@ pub fn checkpoint(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn older_results_collapse_in_steps_and_the_newest_stay_whole() {
+        let mut conversation = Conversation {
+            system: String::new(),
+            messages: (1..=7)
+                .map(|n| {
+                    crate::contract::Message::runtime(
+                        format!("[cell {n} yielded]\nbig output {n}"),
+                        format!("[cell {n} yielded]\nbig output {n}"),
+                    )
+                })
+                .collect(),
+        };
+        keep_recent_results(&mut conversation, 2);
+        let texts: Vec<String> = conversation
+            .messages
+            .iter()
+            .map(|m| match &m.content[0] {
+                Block::Text(text) => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        // Seven results, two kept: five over, collapsed in a step of three.
+        for (index, text) in texts.iter().enumerate() {
+            let collapsed = text.ends_with(COLLAPSED);
+            assert_eq!(collapsed, index < 3, "result {}: {text}", index + 1);
+            assert!(text.starts_with(&format!("[cell {} yielded]", index + 1)));
+        }
+        let before = conversation.clone();
+        keep_recent_results(&mut conversation, 0);
+        assert_eq!(conversation.messages.len(), before.messages.len());
+    }
     use super::*;
 
     /// The table's segments are byte-exact slices of the constant, each
