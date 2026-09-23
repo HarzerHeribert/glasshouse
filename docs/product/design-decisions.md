@@ -5693,5 +5693,11 @@ generates no text. **The contract between them is the file format**, not a
 shared database and not an API: either runs without the other. Glasshouse's
 model-based extraction (Phase 21, `crates/glasshouse/src/memory/extract/`)
 moves into Pane (option A of three; B retire, C fence it, were declined).
-Open: whether semantic search's embeddings count as inference under this
-boundary.
+**No embeddings** (the user, same day): an embedding is a model call, so
+Glasshouse's memory search stays lexical, and none is needed — the learned
+file is kept small enough to load whole (about 150–200 lines, stale lines
+dropped); anything beyond that is found by word search. Semantic search
+over the codebase is not built either: an agent's `rg` and reading has
+been enough, and codebase graphs and indexes proved more upkeep than gain;
+revisit only if real sessions keep missing files whose words the request
+does not contain (the ruler's X2 is one such case).
