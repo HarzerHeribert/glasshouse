@@ -317,7 +317,11 @@ impl Document {
                     (format!(" {}", clock(s.pulse.elapsed_ms)), Tone::Muted),
                 ]
             } else if v.is_some_and(|v| v.execution.is_some()) {
-                vec![("✓ EXECUTED".to_string(), Tone::Success)]
+                let landing = cell == n.cells.len() && super::motion::settling(s);
+                vec![(
+                    "✓ EXECUTED".to_string(),
+                    if landing { Tone::Accent } else { Tone::Success },
+                )]
             } else {
                 vec![("RECORDED".to_string(), Tone::Muted)]
             };
@@ -358,7 +362,7 @@ impl Document {
                 d.tabstrip(cell, tab, v.and_then(|v| v.changes.as_deref()), inner, id);
                 if v.is_some_and(|v| v.origin != crate::abi::Origin::AuthoredCell) {
                     d.push(
-                        if s.voice.playful() {
+                        if s.speaking().playful() {
                             "built-in step (I didn't write this one) · Host-lowered tool frame"
                         } else {
                             "Host-lowered tool frame · not model-authored source"
@@ -444,7 +448,7 @@ impl Document {
                 );
             }
             if let Some(v) = v {
-                d.helpers(cell, v, ui, width, id);
+                d.helpers(cell, v, s, ui, width, id);
                 if let Some(answer) = v.returned.as_ref() {
                     let answer =
                         crate::prompt::completion_text(answer).unwrap_or_else(|| answer.clone());
@@ -456,10 +460,21 @@ impl Document {
             d.blank(id);
         }
         d.notes(s, &mut note, usize::MAX, width);
+        d.behind(s, width);
         if let Some(p) = &n.preflight {
             d.kinded(
                 vec![
-                    ("◇ PREFLIGHT · SCOUT  ".to_string(), Tone::Helper),
+                    (
+                        format!(
+                            "{} PREFLIGHT · SCOUT  ",
+                            if !p.outcome.ok && p.outcome.text.is_empty() {
+                                super::motion::busy(s)
+                            } else {
+                                "◇"
+                            }
+                        ),
+                        Tone::Helper,
+                    ),
                     (
                         clip(&format!("{} {}", p.verb, p.asked), width.saturating_sub(24)),
                         Tone::Muted,
@@ -500,12 +515,29 @@ impl Document {
             if d.rows.len() == card_rows {
                 d.turn_pane(usize::MAX - 1);
             }
-            d.wrapped(text, Tone::Normal, None, width, usize::MAX - 1, 2);
+            d.arriving(&text, s, width);
         }
         if d.rows.len() == card_rows {
             d.opening(s, width);
         }
         d
+    }
+    /// Prose the model is still writing -- its thinking, before any cell --
+    /// under a rail in the accent, with a caret where the next words land.
+    /// The rail marks it as live; the caret is its one moving cell.
+    fn arriving(&mut self, text: &str, s: &ScreenState, width: usize) {
+        let before = self.rows.len();
+        self.wrapped(text, Tone::Normal, None, width, usize::MAX - 1, 2);
+        let last = self.rows.len().saturating_sub(1);
+        for (i, row) in self.rows[before..].iter_mut().enumerate() {
+            let words = row.text.get(2..).unwrap_or("").to_string();
+            row.spans = vec![("▎ ".into(), Tone::Accent), (words, Tone::Normal)];
+            if before + i == last {
+                row.spans
+                    .push((super::motion::caret(s).into(), Tone::Accent));
+            }
+            row.text = row.spans.iter().map(|(t, _)| t.as_str()).collect();
+        }
     }
     /// The person's turn: a label, then the words, each under the gutter.
     fn turn_you(&mut self, text: &str, width: usize, id: usize) {
@@ -554,14 +586,21 @@ impl Document {
         let mut lines = answer.splitn(2, '\n');
         let first = lines.next().unwrap_or("").trim();
         let first = if first.is_empty() {
-            voice::done_line(s.voice, v.error.is_some()).to_string()
+            voice::done_line(s.speaking(), v.error.is_some()).to_string()
         } else {
             first.to_string()
         };
         // The words as the model returned them, on their own line: a test
         // or a person reading a line back finds exactly that line.
         let before = self.rows.len();
-        self.wrapped(first, Tone::Strong, None, width, id, 2);
+        // The answer the moment it lands is drawn in the accent for a few
+        // frames, then settles to plain emphasis.
+        let tone = if latest && super::motion::settling(s) {
+            Tone::Accent
+        } else {
+            Tone::Strong
+        };
+        self.wrapped(first, tone, None, width, id, 2);
         if let Some(row) = self.rows.get_mut(before) {
             row.kind = RowKind::Answer;
         }
@@ -600,7 +639,7 @@ impl Document {
             ("✓", Tone::Success)
         };
         let facts = if facts.is_empty() {
-            voice::done_line(s.voice, v.error.is_some()).to_lowercase()
+            voice::done_line(s.speaking(), v.error.is_some()).to_lowercase()
         } else {
             facts.join(" · ")
         };
@@ -812,10 +851,17 @@ impl Document {
                 .split_once(" · ")
                 .map(|(_, rest)| rest.to_string())
                 .unwrap_or_default();
+            // A call still running holds the eye; one that returned is the
+            // record, and recedes so the result and the answer lead.
+            let (name, said) = if word == "returned" {
+                (Tone::Muted, Tone::Muted)
+            } else {
+                (Tone::Accent, Tone::Normal)
+            };
             let mut left = vec![
                 (format!("  {mark} "), tone),
-                (format!("{tool:<7} "), Tone::Accent),
-                (arg, Tone::Normal),
+                (format!("{tool:<7} "), name),
+                (arg, said),
             ];
             if !detail.is_empty() {
                 left.push((format!("  {detail}"), tone));
@@ -856,7 +902,8 @@ impl Document {
                 self.line(
                     vec![(
                         format!(
-                            "  ● writing cell {cell:03} · {} lines so far · not executed",
+                            "  {} writing cell {cell:03} · {} lines so far · not executed",
+                            super::motion::busy(s),
                             code.lines().count().max(1)
                         ),
                         Tone::Accent,
@@ -870,7 +917,8 @@ impl Document {
                 self.line(
                     vec![(
                         format!(
-                            "  ● writing cell {cell:03} · {} lines so far · not executed",
+                            "  {} writing cell {cell:03} · {} lines so far · not executed",
+                            super::motion::busy(s),
                             lines.len().max(1)
                         ),
                         Tone::Accent,
@@ -921,12 +969,21 @@ impl Document {
             .collect();
         *next += opening;
         let asking = false;
-        let still = s.reduced_motion || s.selection.is_some();
-        let art = voice::face(
-            voice::Face::of(s.activity, asking),
-            s.animation_frame,
-            still,
-        );
+        let still = !s.motion_live();
+        let face = voice::Face::of(s.activity, asking);
+        let bird = s.look == crate::tui::Look::Bird;
+        // The instrument's card is one still mark and the facts; the bird's
+        // is its face. Either way the card is chrome and holds still.
+        let (art, art_width) = if bird {
+            (
+                voice::face(face, s.animation_frame, still).to_vec(),
+                voice::FACE_WIDTH,
+            )
+        } else {
+            let mut marks = vec![super::motion::card_mark(face).to_string()];
+            marks.resize(voice::FACE_ROWS, " ".into());
+            (marks, 1)
+        };
         // **The affordance beside the fact.** A card that states what the
         // session is and says nothing about how to change it makes a reader
         // go looking; naming the control on the same line is the cheapest
@@ -943,17 +1000,17 @@ impl Document {
         let project = s.project.as_deref().unwrap_or("no project");
         let facts = [
             (
-                voice::greeting(s.voice, s.local_hour, project),
+                voice::greeting(s.speaking(), s.local_hour, project),
                 Tone::Strong,
             ),
             (
-                clip(&second, width.saturating_sub(voice::FACE_WIDTH + 4)),
+                clip(&second, width.saturating_sub(art_width + 4)),
                 Tone::Muted,
             ),
             (
                 if startup.len() > 1 {
                     format!("+{} more · /activity", startup.len() - 1)
-                } else if s.voice.playful() {
+                } else if s.speaking().playful() {
                     "code · cells · little helpers · one small bird".to_string()
                 } else {
                     "code · cells · little helpers".to_string()
@@ -965,18 +1022,21 @@ impl Document {
                 if startup.is_empty() {
                     String::new()
                 } else {
-                    clip(&model, width.saturating_sub(voice::FACE_WIDTH + 4))
+                    clip(&model, width.saturating_sub(art_width + 4))
                 },
                 Tone::Muted,
             ),
         ];
-        for (i, (glyph, (text, tone))) in art.iter().zip(facts).enumerate() {
+        for (glyph, (text, tone)) in art.iter().zip(facts) {
+            // The instrument draws no row it has nothing to say on.
+            if !bird && text.is_empty() {
+                continue;
+            }
             // The bird is the row's only target: a click anywhere on it is a
             // remark, never a surface opening under a stray report.
-            let _ = i;
             self.line(
                 vec![(format!(" {glyph}  "), Tone::Accent), (text, tone)],
-                Some(Action::Quip),
+                bird.then_some(Action::Quip),
                 0,
             );
         }
@@ -987,10 +1047,17 @@ impl Document {
     /// paragraph on an empty screen is read once and never again; a row of
     /// chips is read every time someone does not know what to type.
     fn opening(&mut self, s: &ScreenState, width: usize) {
-        self.wrapped(voice::invitation(s.voice), Tone::Normal, None, width, 0, 2);
+        self.wrapped(
+            voice::invitation(s.speaking()),
+            Tone::Normal,
+            None,
+            width,
+            0,
+            2,
+        );
         self.blank(0);
         let chips: Vec<(String, Action, bool)> = if s.suggestions.is_empty() {
-            voice::suggestions(s.voice, None, 0, false)
+            voice::suggestions(s.speaking(), None, 0, false)
         } else {
             s.suggestions.clone()
         }
@@ -1019,7 +1086,7 @@ impl Document {
         }
         self.blank(0);
         self.wrapped(
-            if s.voice.playful() {
+            if s.speaking().playful() {
                 "or just type. / for commands · @ for a file in this project"
             } else {
                 "Type / for commands · @ for a path in this project"
@@ -1038,9 +1105,12 @@ impl Document {
     /// can scroll back to it -- the same notes the Activity surface lists.
     fn notes(&mut self, s: &ScreenState, next: &mut usize, upto: usize, width: usize) {
         while let Some(note) = s.history.get(*next).filter(|n| n.after <= upto) {
+            let settling = super::motion::note_settling(s, *next);
             *next += 1;
             let kind = crate::tui::NoteKind::of(&note.text);
             let (mark_tone, first_tone) = match kind {
+                // A verdict just in stands out for a moment, then settles.
+                _ if settling => (Tone::Accent, Tone::Strong),
                 crate::tui::NoteKind::Error => (Tone::Failure, Tone::Failure),
                 crate::tui::NoteKind::Checked => (Tone::Success, Tone::Muted),
                 crate::tui::NoteKind::Flagged => (Tone::Warning, Tone::Warning),
@@ -1063,6 +1133,24 @@ impl Document {
                     RowKind::Note,
                 );
             }
+        }
+    }
+    /// Work still running behind the answer, one row each, where its
+    /// verdict will land; the row goes when the work ends.
+    fn behind(&mut self, s: &ScreenState, width: usize) {
+        for lane in &s.behind {
+            self.kinded(
+                vec![
+                    (format!("  {} ", super::motion::busy(s)), Tone::Helper),
+                    (
+                        clip(&voice::behind(s.speaking(), lane), width.saturating_sub(5)),
+                        Tone::Helper,
+                    ),
+                ],
+                None,
+                usize::MAX - 4,
+                RowKind::Note,
+            );
         }
     }
     /// A full-width separator in the one colour reserved for separators.
@@ -1120,14 +1208,19 @@ impl Document {
             id,
         );
     }
-    /// The bird at work inside a running cell, and beside it what is
-    /// actually happening, what was last observed, and at whose cost.
+    /// What is actually happening inside a running cell, how long it has
+    /// been, and at whose cost -- beside the bird at work, or under the
+    /// instrument's scanner.
     fn work(&mut self, s: &ScreenState, v: Option<&CellView>, width: usize, id: usize) {
-        let still = s.reduced_motion || s.selection.is_some();
+        let still = !s.motion_live();
         let helper = v.and_then(|v| v.helpers.last());
         let waiting = helper.is_some_and(|h| !h.outcome.ok && h.outcome.text.is_empty());
-        let (label, detail) =
-            voice::working(s.voice, s.activity, waiting, &clock(s.pulse.elapsed_ms));
+        let (label, detail) = voice::working(
+            s.speaking(),
+            s.activity,
+            waiting,
+            &clock(s.pulse.elapsed_ms),
+        );
         let cost = helper.map_or_else(
             || {
                 s.model
@@ -1146,6 +1239,25 @@ impl Document {
                 )
             },
         );
+        if s.look == crate::tui::Look::Instrument {
+            let label = format!("◆ {label}  ");
+            let mut head = vec![(label.clone(), Tone::Accent)];
+            if span_width(&label) + 12 < width {
+                head.extend(super::motion::scanner(s));
+            }
+            self.line(head, None, id);
+            for (text, tone) in [(detail, Tone::Normal), (cost, Tone::Muted)] {
+                self.line(
+                    vec![
+                        ("  ".into(), tone),
+                        (clip(&text, width.saturating_sub(4)), tone),
+                    ],
+                    None,
+                    id,
+                );
+            }
+            return;
+        }
         let art = voice::face(voice::Face::Working, s.animation_frame, still);
         for (glyph, (text, tone)) in art.into_iter().zip([
             (format!("◈ {label}"), Tone::Accent),
@@ -1257,7 +1369,15 @@ impl Document {
         out.push((files, Tone::Muted));
         out
     }
-    fn helpers(&mut self, cell: usize, v: &CellView, ui: &Workbench, width: usize, id: usize) {
+    fn helpers(
+        &mut self,
+        cell: usize,
+        v: &CellView,
+        s: &ScreenState,
+        ui: &Workbench,
+        width: usize,
+        id: usize,
+    ) {
         for (i, h) in v.helpers.iter().enumerate() {
             let waiting = !h.outcome.ok && h.outcome.text.is_empty();
             let tone = if waiting {
@@ -1295,7 +1415,15 @@ impl Document {
             );
             let left = vec![
                 (
-                    format!("     ◇ {}  ", h.helper),
+                    format!(
+                        "     {} {}  ",
+                        if waiting {
+                            super::motion::busy(s)
+                        } else {
+                            "◇"
+                        },
+                        h.helper
+                    ),
                     if tone == Tone::Normal {
                         Tone::Helper
                     } else {

@@ -31,9 +31,20 @@ pub(crate) fn presentation(state: &mut tui::ScreenState, values: &toml::Value) {
         Some("hide") => tui::SidebarVisibility::Hidden,
         _ => tui::SidebarVisibility::Auto,
     };
-    state.reduced_motion = value(values, "ui.reduced_motion")
+    // Off when either key says so: `ui.reduced_motion` predates the level.
+    let reduced = value(values, "ui.reduced_motion")
         .and_then(toml::Value::as_bool)
         .unwrap_or(false);
+    state.set_motion(if reduced {
+        tui::Motion::Off
+    } else {
+        word("ui.motion")
+            .and_then(tui::Motion::parse)
+            .unwrap_or_default()
+    });
+    state.look = word("ui.look")
+        .and_then(tui::Look::parse)
+        .unwrap_or_default();
     state.voice = word("ui.voice")
         .and_then(tui::Voice::parse)
         .unwrap_or_default();

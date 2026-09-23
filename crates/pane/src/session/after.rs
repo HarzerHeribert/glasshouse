@@ -57,7 +57,7 @@ pub(super) struct Check {
 
 /// What one piece of work behind the answer produced.
 enum Done {
-    Check(Note),
+    Check(Box<Note>),
     /// Lines added to `.pane/learned.md`.
     Learned(Vec<String>),
     /// The work could not be done, and why: a check that failed is said,
@@ -68,8 +68,22 @@ enum Done {
 
 static PENDING: Mutex<Vec<JoinHandle<Done>>> = Mutex::new(Vec::new());
 
-fn start(work: impl FnOnce() -> Done + Send + 'static) {
-    let handle = std::thread::spawn(work);
+/// Runs `work` on its own thread, and tells a terminal session when the
+/// lane starts and ends, so the screen shows it working behind the answer.
+/// Any note the work sends arrives before the end, so the verdict replaces
+/// the working row rather than following a gap.
+fn start(lane: &'static str, work: impl FnOnce() -> Done + Send + 'static) {
+    let sender = ui::sender();
+    if let Some(sender) = &sender {
+        let _ = sender.send(ui::Update::Behind(lane, true));
+    }
+    let handle = std::thread::spawn(move || {
+        let done = work();
+        if let Some(sender) = sender {
+            let _ = sender.send(ui::Update::Behind(lane, false));
+        }
+        done
+    });
     if let Ok(mut pending) = PENDING.lock() {
         pending.push(handle);
     }
@@ -87,7 +101,7 @@ pub(super) struct Learn {
 /// Asks the writer once and appends what passes `learned::accept`.
 pub(super) fn spawn_learn(learn: Learn) {
     let sender: Option<Sender<ui::Update>> = ui::sender();
-    start(move || {
+    start("learn", move || {
         let token = crate::tools::invoke::CancellationToken::new();
         let call = crate::helpers::run(
             &crate::learned::WRITER,
@@ -128,7 +142,7 @@ pub(super) fn learned_line(lines: &[String]) -> String {
 /// the moment it exists; otherwise it waits for [`settle`].
 pub(super) fn spawn(check: Check) {
     let sender: Option<Sender<ui::Update>> = ui::sender();
-    start(move || {
+    start("check", move || {
         let token = crate::tools::invoke::CancellationToken::new();
         let context = crate::helpers::HelperContext {
             profile: &check.profile,
@@ -145,6 +159,15 @@ pub(super) fn spawn(check: Check) {
             return Done::Failed("check: no checker in the roster".into());
         };
         if !record.outcome.ok {
+            // A check that ran and failed is said, never mistaken for one
+            // that found nothing.
+            if let Some(sender) = &sender {
+                let checked = crate::tui::history::CHECKED;
+                let reason = record.outcome.text.lines().next().unwrap_or("");
+                let _ = sender.send(ui::Update::Notice(format!(
+                    "{checked}could not run · {reason}"
+                )));
+            }
             return Done::Failed(format!("check: {}", record.outcome.text));
         }
         let verdict = record
@@ -164,7 +187,7 @@ pub(super) fn spawn(check: Check) {
         if let Some(sender) = sender {
             let _ = sender.send(ui::Update::Notice(note.line()));
         }
-        Done::Check(note)
+        Done::Check(Box::new(note))
     });
 }
 
@@ -183,7 +206,7 @@ pub(super) fn settle(wait: bool) -> (Vec<Note>, Vec<String>, Vec<String>) {
     for handle in pending.drain(..) {
         if wait || handle.is_finished() {
             match handle.join() {
-                Ok(Done::Check(note)) => notes.push(note),
+                Ok(Done::Check(note)) => notes.push(*note),
                 Ok(Done::Learned(lines)) => learned.extend(lines),
                 Ok(Done::Failed(reason)) => failed.push(reason),
                 Ok(Done::Nothing) => {}

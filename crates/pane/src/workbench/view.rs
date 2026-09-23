@@ -232,8 +232,11 @@ fn session_bar(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui
         Tone::Strong,
         s.theme,
     );
-    g.hits
-        .push((Rect::new(a.x, a.y, chrome::width(brand), 1), Action::Quip));
+    // Only the bird answers a click on the name; the instrument has no remark.
+    if s.look == crate::tui::Look::Bird {
+        g.hits
+            .push((Rect::new(a.x, a.y, chrome::width(brand), 1), Action::Quip));
+    }
     let model = clip(s.model.as_deref().unwrap_or("choose model"), 18);
     controls(
         f,
@@ -526,7 +529,7 @@ pub fn render(
         row(
             f,
             g.composer,
-            voice::placeholder(s.voice),
+            voice::placeholder(s.speaking()),
             Tone::Muted,
             s.theme,
         );
@@ -1024,15 +1027,14 @@ fn dock_top(
             | Activity::Waiting
     );
     // A long wait is exactly when a person looks here to ask whether the
-    // session is alive, so the flap keeps beating; only reduced motion and
-    // a selection in progress hold it.
-    let still = s.reduced_motion || s.selection.is_some() || !running;
+    // session is alive, so the mark keeps moving; only motion off and a
+    // selection in progress hold it.
     let cell = matches!(s.activity, Activity::Executing | Activity::Streaming)
         .then_some(n.cells.len() + 1);
     let status = format!(
         "{}{}",
         voice::status(
-            s.voice,
+            s.speaking(),
             s.activity,
             cell,
             s.model.as_deref(),
@@ -1043,7 +1045,7 @@ fn dock_top(
     let lead = format!(
         "{} {} {} ",
         if boxed { "╭─" } else { "" },
-        voice::flap(s.animation_frame, still),
+        super::motion::dock_mark(s, running),
         status
     );
     let lead = lead.trim_start().to_string();
@@ -1206,7 +1208,7 @@ fn dock_bottom(
     if s.status_line == StatusLine::Full {
         let hint = format!(
             " {} ",
-            voice::hint(s.voice, n.cells.len() + s.history.len())
+            voice::hint(s.speaking(), n.cells.len() + s.history.len())
         );
         let hw = chrome::width(&hint);
         if x + hw + 2 < limit {

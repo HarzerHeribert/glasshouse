@@ -1275,7 +1275,7 @@ fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
         .lines()
         .find(|l| l.starts_with("╭─"))
         .expect("the dock has a top edge");
-    assert!(top.contains("complete ✓"), "{top}");
+    assert!(top.contains("✓ complete"), "{top}");
     let bottom = screen.lines().last().unwrap();
     assert!(bottom.starts_with("╰─"), "{bottom}");
     assert!(bottom.contains("⟨ effort default ⟩"), "{bottom}");
@@ -1294,6 +1294,7 @@ fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
 #[test]
 fn plain_voice_keeps_every_fact_and_drops_the_remarks() {
     let (c, n, mut s) = fixture();
+    s.look = pane::tui::Look::Bird;
     s.sidebar = pane::tui::SidebarVisibility::Shown;
     let mut u = Workbench::default();
     let playful = text(&draw(&c, &n, &s, &mut u, 140, 40));
@@ -1376,6 +1377,9 @@ fn the_opening_offers_the_projects_own_suggestions_as_chips() {
     s.suggestions.clear();
     let mut u = Workbench::default();
     let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("⟨ explore this project ⟩"), "{screen}");
+    s.look = pane::tui::Look::Bird;
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
     assert!(screen.contains("⟨ show me around ⟩"), "{screen}");
 }
 
@@ -1416,6 +1420,7 @@ fn the_latest_answer_offers_what_to_do_next() {
 #[test]
 fn the_bird_holds_still_under_reduced_motion_and_flaps_otherwise() {
     let (c, n, mut s) = fixture();
+    s.look = pane::tui::Look::Bird;
     s.activity = Activity::Thinking;
     let mut u = Workbench::default();
     let a = text(&draw(&c, &n, &s, &mut u, 100, 40));
@@ -1468,4 +1473,168 @@ fn the_answer_is_shown_once_under_the_card_and_not_again_inside_it() {
     let text = words(&doc(&c, &n, &s, &u));
     assert!(text.contains("the answer is below"), "{text}");
     assert_eq!(text.matches("Nothing else changed.").count(), 1, "{text}");
+}
+
+/// Cells that differ between two frames.
+fn changed(a: &Buffer, b: &Buffer) -> usize {
+    a.content
+        .iter()
+        .zip(&b.content)
+        .filter(|(a, b)| a != b)
+        .count()
+}
+
+/// The default look carries no bird: no face, no nest, no flap, and the
+/// card is not a thing to click for a remark.
+#[test]
+fn the_instrument_look_has_no_bird_and_bird_brings_it_back() {
+    let (_, n, mut s) = fixture();
+    let c = Conversation::default();
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    for bird in ["nest", "bird", "⡔", "⠤⠤⠤"] {
+        assert!(
+            !screen.contains(bird),
+            "{bird} in the instrument:\n{screen}"
+        );
+    }
+    assert!(!u.geometry.hits.iter().any(|(_, a)| *a == Action::Quip));
+    assert!(u.local_command("/bird", &mut s, &n));
+    assert_eq!(s.look, pane::tui::Look::Bird);
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("⡔"), "the bird's face:\n{screen}");
+    assert!(u.local_command("/bird off", &mut s, &n));
+    assert_eq!(s.look, pane::tui::Look::Instrument);
+    assert!(u.local_command("/bird", &mut s, &n));
+    assert!(
+        u.local_command("/bird", &mut s, &n),
+        "a second /bird toggles back"
+    );
+    assert_eq!(s.look, pane::tui::Look::Instrument);
+}
+
+/// An idle screen is still between frames but for the heartbeat's one
+/// cell, and fully still with motion off.
+#[test]
+fn an_idle_screen_moves_one_cell_at_most_and_none_when_off() {
+    let (c, n, mut s) = fixture();
+    s.activity = Activity::Idle;
+    let mut u = Workbench::default();
+    let a = draw(&c, &n, &s, &mut u, 100, 40);
+    s.animation_frame = 1;
+    let b = draw(&c, &n, &s, &mut u, 100, 40);
+    assert_eq!(changed(&a, &b), 1, "the heartbeat is one cell");
+    s.set_motion(pane::tui::Motion::Off);
+    let a = draw(&c, &n, &s, &mut u, 100, 40);
+    s.animation_frame = 2;
+    assert_eq!(changed(&a, &draw(&c, &n, &s, &mut u, 100, 40)), 0);
+}
+
+/// Prose still arriving -- the model's thinking -- is marked live by a
+/// rail and ends in a caret that breathes; motion off holds the caret.
+#[test]
+fn arriving_prose_carries_a_rail_and_a_moving_caret() {
+    let (c, n, mut s) = fixture();
+    s.activity = Activity::Streaming;
+    s.streaming_text = Some("Reading the guard first.".into());
+    let mut u = Workbench::default();
+    let a = draw(&c, &n, &s, &mut u, 100, 40);
+    let line = text(&a)
+        .lines()
+        .find(|l| l.contains("Reading the guard first."))
+        .unwrap()
+        .to_string();
+    assert!(line.contains("▎ Reading the guard first.▍"), "{line}");
+    s.animation_frame = 1;
+    let b = draw(&c, &n, &s, &mut u, 100, 40);
+    assert!(changed(&a, &b) <= 3, "{}", changed(&a, &b));
+    assert!(!text(&b).contains("first.▍"), "the caret breathes");
+    s.set_motion(pane::tui::Motion::Off);
+    let a = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    s.animation_frame = 2;
+    assert_eq!(a, text(&draw(&c, &n, &s, &mut u, 100, 40)));
+}
+
+/// A check behind the answer shows while it runs, then its verdict lands
+/// emphasised for a few frames and settles to its own colour.
+#[test]
+fn a_check_behind_the_answer_runs_visibly_then_settles_into_its_verdict() {
+    let (c, n, mut s) = fixture();
+    s.lane("check", true);
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(screen.contains("checking the answer"), "{screen}");
+    s.note(format!("{}holds", pane::tui::history::CHECKED));
+    s.landed_note();
+    s.lane("check", false);
+    let d = doc(&c, &n, &s, &u);
+    let verdict = d
+        .rows
+        .iter()
+        .find(|r| r.text.contains("checked after the answer: holds"))
+        .expect("the verdict is in the transcript");
+    assert_eq!(verdict.spans[0].1, Tone::Accent, "it lands emphasised");
+    assert!(
+        !words(&d).contains("checking the answer"),
+        "the working row went"
+    );
+    for _ in 0..10 {
+        s.advance_landing();
+    }
+    let d = doc(&c, &n, &s, &u);
+    let verdict = d
+        .rows
+        .iter()
+        .find(|r| r.text.contains("checked after the answer: holds"))
+        .unwrap();
+    assert_eq!(verdict.spans[0].1, Tone::Success, "then it settles");
+}
+
+/// A running cell under the instrument: a label and a scanner in place of
+/// the bird, moving at most two cells of its own a frame; motion off holds it.
+#[test]
+fn a_running_cell_scans_instead_of_pecking() {
+    let (mut c, mut n, mut s) = fixture();
+    c.messages.push(Message::text(Role::User, "and again"));
+    let mut m = Message::text(Role::Assistant, "Once more.");
+    m.content.push(Block::ToolUse {
+        id: "call-2".into(),
+        name: "execute_cell".into(),
+        input: serde_json::json!({"code": "await checks.run(\"tests\");"}),
+    });
+    c.messages.push(m);
+    n.cells[0].execution = Some("checks.run · completed".into());
+    s.activity = Activity::Executing;
+    let mut u = Workbench::default();
+    let a = draw(&c, &n, &s, &mut u, 100, 40);
+    let screen = text(&a);
+    assert!(screen.contains("◆ Executing this cell"), "{screen}");
+    assert!(screen.contains("━━"), "{screen}");
+    assert!(!screen.contains("⡔"), "no bird:\n{screen}");
+    s.animation_frame = 1;
+    let b = draw(&c, &n, &s, &mut u, 100, 40);
+    // Two for the scanner, one for the dock's mark.
+    assert!(changed(&a, &b) <= 3, "{}", changed(&a, &b));
+    s.set_motion(pane::tui::Motion::Off);
+    let a = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    s.animation_frame = 5;
+    assert_eq!(a, text(&draw(&c, &n, &s, &mut u, 100, 40)));
+}
+
+/// `/motion` takes the three levels and says what each one does.
+#[test]
+fn motion_takes_three_levels() {
+    let (_, n, mut s) = fixture();
+    let mut u = Workbench::default();
+    for (word, level) in [
+        ("calm", pane::tui::Motion::Calm),
+        ("off", pane::tui::Motion::Off),
+        ("full", pane::tui::Motion::Full),
+    ] {
+        assert!(u.local_command(&format!("/motion {word}"), &mut s, &n));
+        assert_eq!(s.motion, level);
+        assert_eq!(s.reduced_motion, level == pane::tui::Motion::Off);
+    }
+    assert!(u.local_command("/motion sideways", &mut s, &n));
+    assert_eq!(s.motion, pane::tui::Motion::Full);
 }

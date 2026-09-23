@@ -6,6 +6,7 @@ mod chrome;
 mod document;
 mod input;
 mod models;
+mod motion;
 mod settings;
 mod theme;
 mod view;

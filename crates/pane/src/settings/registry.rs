@@ -70,6 +70,8 @@ const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 const VOICES: &[&str] = &["playful", "plain"];
 const STREAMS: &[&str] = &["code", "quiet", "raw"];
+const LOOKS: &[&str] = &["instrument", "bird"];
+const MOTIONS: &[&str] = &["full", "calm", "off"];
 /// The working mode a session starts in. `build` is this file's word for the
 /// runtime's `execute`; both are accepted, and `build` is what is written.
 const MODES: &[&str] = &["build", "explore", "plan"];
@@ -379,9 +381,27 @@ static SPECS: &[SettingSpec] = &[
         restart: false,
     },
     SettingSpec {
+        key: "ui.look",
+        label: "Look",
+        description: "The instrument, precise and calm, or the bird, with its face, flap and voice. /bird switches between them.",
+        kind: Kind::Choice,
+        choices: LOOKS,
+        basic: true,
+        restart: false,
+    },
+    SettingSpec {
+        key: "ui.motion",
+        label: "Motion",
+        description: "How much moves while Pane works: full, calm (slower, no heartbeat) or off (nothing moves). Only what is changing ever moves.",
+        kind: Kind::Choice,
+        choices: MOTIONS,
+        basic: true,
+        restart: false,
+    },
+    SettingSpec {
         key: "ui.voice",
         label: "Voice",
-        description: "How Pane talks. Playful greets you, remarks and whispers hints; plain says the same facts and nothing else.",
+        description: "How the bird look talks. Playful greets you, remarks and whispers hints; plain says the same facts and nothing else. The instrument always speaks plainly.",
         kind: Kind::Choice,
         choices: VOICES,
         basic: true,
@@ -399,7 +419,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.reduced_motion",
         label: "Reduced motion",
-        description: "Freezes the working mark and every other animation. Nothing is hidden by it; the same words stay on screen.",
+        description: "Freezes every animation, the same as motion off. Nothing is hidden by it; the same words stay on screen.",
         kind: Kind::Bool,
         choices: &[],
         basic: true,

@@ -306,8 +306,8 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
     // discovery pass added `/tool`, `/login` and `/mouse`, which worked and
     // were in no list, and removed a second `/config` that had been listed
     // twice with two different descriptions. `/usage` (2026-09-23) shows
-    // each subscription's limits.
-    assert_eq!(slash_matches("/").len(), 35);
+    // each subscription's limits. `/bird` (2026-09-23) switches the look.
+    assert_eq!(slash_matches("/").len(), 36);
     let offered = slash_matches("/");
     let mut unique: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
     unique.sort_unstable();
@@ -348,7 +348,7 @@ fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
                 "/models".into(),
                 "browse models by agent, provider or intelligence"
             ),
-            ("/motion".into(), "on or off · reduce animation"),
+            ("/motion".into(), "full, calm or off · how much moves"),
             ("/mode".into(), "execute, explore (reads only) or plan"),
             ("/mouse".into(), "release or recapture the mouse · Ctrl-G")
         ]

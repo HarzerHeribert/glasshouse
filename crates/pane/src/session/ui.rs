@@ -185,6 +185,8 @@ pub(super) enum Update {
     Effort(crate::wire::Effort),
     Panel(Box<tui::Panel>),
     Notice(String),
+    /// Work behind the answer started (`true`) or ended, by lane name.
+    Behind(&'static str, bool),
     Stop,
     /// The session loop has taken the oldest queued message and is running
     /// it; it is a task now and no longer waiting.
@@ -966,7 +968,9 @@ fn run(
                 Update::Notice(message) => {
                     workbench.notice = message.lines().next().unwrap_or("").to_owned();
                     state.note(message);
+                    state.landed_note();
                 }
+                Update::Behind(lane, running) => state.lane(lane, running),
                 Update::SecretPrompt(title) => {
                     state.secret_prompt = Some(tui::SecretPrompt::new(title));
                     // A panel over a modal prompt would take the Enter that
@@ -993,15 +997,19 @@ fn run(
             state.activity = Activity::Idle;
             dirty = true;
         }
-        let moving =
-            busy || state.activity == Activity::Starting || state.completion_tick.is_some();
-        if moving
-            && last_tick.elapsed()
-                >= Duration::from_millis(if state.reduced_motion { 1000 } else { 120 })
-        {
+        // Frames are owed only while something changes state; an idle
+        // screen draws its one heartbeat, or nothing (`tui/look.rs`).
+        let moving = busy || state.activity == Activity::Starting || state.settling_or_behind();
+        let period = if moving {
+            Some(state.frame_period())
+        } else {
+            state.heartbeat()
+        };
+        if period.is_some_and(|period| last_tick.elapsed() >= period) {
             if !state.reduced_motion {
                 state.animation_frame = state.animation_frame.wrapping_add(1);
             }
+            state.advance_landing();
             if let Some(start) = task_started {
                 state.pulse.elapsed_ms = start.elapsed().as_millis() as u64;
             }
@@ -1944,24 +1952,6 @@ fn run(
                         editor.take();
                         state.fullscreen = !state.fullscreen;
                         state.notice = None;
-                        continue;
-                    }
-                    if editor.text.split_whitespace().next() == Some("/motion") {
-                        let text = editor.take();
-                        match text.split_whitespace().nth(1) {
-                            Some("off" | "reduce") => state.reduced_motion = true,
-                            Some("on") => state.reduced_motion = false,
-                            _ => {
-                                state.note("Usage: /motion on | off");
-                                continue;
-                            }
-                        }
-                        state.completion_tick = None;
-                        state.note(if state.reduced_motion {
-                            "Motion reduced. /motion on restores animation."
-                        } else {
-                            "Motion on. /motion off reduces animation."
-                        });
                         continue;
                     }
                     if !busy && matches!(editor.text.trim(), "/settings" | "/statusline") {

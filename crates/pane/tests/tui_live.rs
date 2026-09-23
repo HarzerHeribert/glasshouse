@@ -1011,6 +1011,9 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     app.contains("[ Helper ]");
     app.contains("a-model");
     app.contains("z-model");
+    // The list's last line, so the snapshot is of a whole frame, not one
+    // the pty is still delivering.
+    app.contains("z-account");
     let content = app.screen.screen().contents();
     assert!(content.find("a-account").unwrap() < content.find("z-account").unwrap());
     assert!(content.find("a-model").unwrap() < content.find("b-model").unwrap());
@@ -1955,4 +1958,150 @@ fn workbench_pointer_opens_settings_only_on_release_and_wheel_stays_local() {
     app.contains("⠿ PANE");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
+}
+
+/// Serves a task turn slowly -- the model's prose first, then a cell that
+/// runs for a moment and answers -- and holds every helper request that
+/// arrives after it (the fresh checker behind the answer) until released.
+fn motion_provider() -> (String, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (release, held) = mpsc::channel::<()>();
+    let held = std::sync::Arc::new(std::sync::Mutex::new(held));
+    thread::spawn(move || {
+        let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { return };
+            let (answered, held) = (answered.clone(), held.clone());
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        len = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; len];
+                if reader.read_exact(&mut body).is_err() {
+                    return;
+                }
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let helper = request["model"] == "helper-tier";
+                let pieces: Vec<(&str, u64)> = if helper {
+                    if answered.load(std::sync::atomic::Ordering::SeqCst) {
+                        let _ = held.lock().unwrap().recv();
+                    }
+                    vec![("holds\nThe run returned the value the answer claims.", 0)]
+                } else {
+                    answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    vec![
+                        ("Reading the motion guard first; ", 500),
+                        ("the check is cheap, so I will run it ", 500),
+                        ("and report what it says.\n\n", 500),
+                        (
+                            "```pane\nconst t = Date.now();\nwhile (Date.now() - t < 1800) {}\nanswer(\"The guard holds: 3 of 3 cases pass.\");\n```",
+                            0,
+                        ),
+                    ]
+                };
+                if request["stream"] != true {
+                    let text: String = pieces.iter().map(|(t, _)| *t).collect();
+                    let body = serde_json::json!({"role":"assistant","content":[{"type":"text","text":text}],"usage":{"input_tokens":20,"output_tokens":9}}).to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    return;
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                );
+                let event = |stream: &mut std::net::TcpStream, value: serde_json::Value| {
+                    let _ = write!(stream, "data: {value}\n\n");
+                    let _ = stream.flush();
+                };
+                event(
+                    &mut stream,
+                    serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":20}}}),
+                );
+                for (text, pause) in pieces {
+                    event(
+                        &mut stream,
+                        serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}}),
+                    );
+                    thread::sleep(Duration::from_millis(pause));
+                }
+                event(
+                    &mut stream,
+                    serde_json::json!({"type":"message_delta","usage":{"output_tokens":9}}),
+                );
+                event(&mut stream, serde_json::json!({"type":"message_stop"}));
+            });
+        }
+    });
+    (base, release)
+}
+
+/// One turn through a real terminal: the model's prose arrives under a
+/// live rail, the cell runs, the answer lands, and the check behind the
+/// answer is visible while it runs and settles into its verdict. The frames
+/// are printed (`--nocapture`) so the look can be read, not only asserted.
+fn walk_a_turn(bird: bool) {
+    let (base, release) = motion_provider();
+    let mut app = App::start_with_helpers(&base, "helper-tier");
+    app.contains("fixture-model");
+    let frame = |app: &mut App, name: &str| {
+        // A whole frame, not one the pty is still delivering.
+        app.settle(90);
+        eprintln!(
+            "--- {} · {name} ---\n{}",
+            if bird { "bird" } else { "instrument" },
+            app.screen.screen().contents()
+        );
+    };
+    if bird {
+        app.send(b"/bird\r");
+        app.contains("Bird look on");
+    }
+    app.settle(300);
+    frame(&mut app, "idle");
+    app.send(b"check the motion guard\r");
+    app.contains("the check is cheap");
+    frame(&mut app, "prose arriving");
+    if !bird {
+        app.contains("▎ Reading the motion guard");
+    }
+    app.contains("xecuting this cell");
+    frame(&mut app, "cell running");
+    app.contains_line("The guard holds: 3 of 3 cases pass.");
+    app.contains("checking the answer");
+    frame(&mut app, "answer landed, check behind it");
+    release.send(()).unwrap();
+    app.contains("checked after the answer: holds");
+    app.refute(
+        "the working row goes when its verdict lands",
+        "checking the answer",
+    );
+    app.settle(1200);
+    frame(&mut app, "verdict settled");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn the_instrument_moves_where_attention_is_and_the_check_lands_behind_the_answer() {
+    walk_a_turn(false);
+}
+
+#[test]
+fn the_bird_look_walks_the_same_turn() {
+    walk_a_turn(true);
 }

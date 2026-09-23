@@ -803,7 +803,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
                     state.local_hour = crate::workbench::voice::local_hour();
                     if let Some(root) = state.settings_root.clone() {
                         state.suggestions =
-                            crate::workbench::voice::project_suggestions(&root, state.voice);
+                            crate::workbench::voice::project_suggestions(&root, state.speaking());
                     }
                     state
                 },

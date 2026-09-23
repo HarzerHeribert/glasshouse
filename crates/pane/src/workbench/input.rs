@@ -155,19 +155,46 @@ impl Workbench {
                 }
                 true
             }
-            ["/motion", word @ ("on" | "off" | "reduce")] => {
-                s.reduced_motion = *word != "on";
-                s.completion_tick = None;
-                self.persist("ui.reduced_motion", &s.reduced_motion.to_string(), s);
-                s.note(if s.reduced_motion {
-                    "Motion reduced. /motion on restores animation."
-                } else {
-                    "Motion on. /motion off reduces animation."
+            ["/motion", word] if crate::tui::Motion::parse(word).is_some() => {
+                let motion = crate::tui::Motion::parse(word).unwrap_or_default();
+                s.set_motion(motion);
+                // The older switch is kept in step, or a saved `true` would
+                // hold every later level at off.
+                let off = (motion == crate::tui::Motion::Off).to_string();
+                self.persist("ui.reduced_motion", &off, s);
+                self.persist("ui.motion", motion.name(), s);
+                s.note(match motion {
+                    crate::tui::Motion::Off => {
+                        "Motion reduced: off, nothing moves. /motion full or calm restores it."
+                    }
+                    crate::tui::Motion::Calm => {
+                        "Motion: calm · working marks turn slowly, no heartbeat or scanner."
+                    }
+                    crate::tui::Motion::Full => "Motion: full · /motion calm or off for less.",
                 });
                 true
             }
-            ["/motion"] => {
-                s.note("Usage: /motion on | off");
+            ["/motion", ..] => {
+                s.note("Usage: /motion full | calm | off");
+                true
+            }
+            ["/bird", rest @ ..] if rest.len() <= 1 => {
+                let look = match rest.first().copied() {
+                    None if s.look == crate::tui::Look::Bird => crate::tui::Look::Instrument,
+                    None | Some("on") => crate::tui::Look::Bird,
+                    Some("off") => crate::tui::Look::Instrument,
+                    Some(_) => {
+                        s.note("Usage: /bird, /bird on or /bird off");
+                        return true;
+                    }
+                };
+                s.look = look;
+                self.persist("ui.look", look.name(), s);
+                s.note(if look == crate::tui::Look::Bird {
+                    "Bird look on. /bird again for the instrument."
+                } else {
+                    "Instrument look. /bird brings the bird back."
+                });
                 true
             }
             ["/stream", word @ ("code" | "quiet" | "raw")] => {
@@ -796,7 +823,7 @@ impl Workbench {
             }
             Action::Quip => {
                 self.quips += 1;
-                self.notice = if s.voice.playful() {
+                self.notice = if s.speaking().playful() {
                     super::voice::quip(self.quips).to_string()
                 } else {
                     "Pane · click any chip to change what it names".to_string()

@@ -28,8 +28,8 @@ const EVERYDAY: [&str; 8] = [
     "permissions.mode",
     "helpers.enabled",
     "ui.theme",
-    "ui.voice",
-    "ui.stream",
+    "ui.look",
+    "ui.motion",
 ];
 pub struct Preferences {
     pub scope: Scope,
@@ -195,7 +195,8 @@ impl Preferences {
         crate::settings_session::presentation(&mut resolved, &self.loaded.values);
         match key {
             "ui.theme" => s.theme = resolved.theme,
-            "ui.reduced_motion" => s.reduced_motion = resolved.reduced_motion,
+            "ui.reduced_motion" | "ui.motion" => s.set_motion(resolved.motion),
+            "ui.look" => s.look = resolved.look,
             "ui.statusline" => s.status_line = resolved.status_line,
             "ui.sidebar" => s.sidebar = resolved.sidebar,
             "ui.voice" => s.voice = resolved.voice,
@@ -266,7 +267,8 @@ impl Preferences {
             for (key, _) in &previous {
                 match key.as_str() {
                     "ui.theme" => s.theme = resolved.theme,
-                    "ui.reduced_motion" => s.reduced_motion = resolved.reduced_motion,
+                    "ui.reduced_motion" | "ui.motion" => s.set_motion(resolved.motion),
+                    "ui.look" => s.look = resolved.look,
                     "ui.statusline" => s.status_line = resolved.status_line,
                     "ui.sidebar" => s.sidebar = resolved.sidebar,
                     "ui.voice" => s.voice = resolved.voice,

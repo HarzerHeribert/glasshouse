@@ -1,4 +1,5 @@
-//! Pane's character: the bird, and every line it says.
+//! Every line Pane says, and the bird look's art (`/bird`). The instrument
+//! look speaks the plain voice; the bird speaks whichever `ui.voice` names.
 //!
 //! **The words and the face live in one place so the two voices cannot
 //! drift.** Each line here is written twice, for [`Voice::Playful`] and
@@ -320,6 +321,17 @@ pub fn quip(n: usize) -> &'static str {
         "Perch here any time.",
     ];
     QUIPS[n % QUIPS.len()]
+}
+/// The row for work still running behind the answer: `check` is the fresh
+/// checker, `learn` the notes writer. The answer above it stands either way.
+pub fn behind(voice: Voice, lane: &str) -> String {
+    match (voice.playful(), lane) {
+        (true, "check") => "a second bird is checking the answer…".into(),
+        (true, "learn") => "noting what this task taught me…".into(),
+        (false, "check") => "checking the answer · it stands as given".into(),
+        (false, "learn") => "writing learned notes · .pane/learned.md".into(),
+        (_, other) => format!("{other} · behind the answer"),
+    }
 }
 /// The first line of a finished turn's block, when the model returned no
 /// words of its own to put there.

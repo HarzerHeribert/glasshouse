@@ -24,6 +24,8 @@ pub(crate) use hit::{Hit, ScreenGeometry, StatusField};
 mod inspection;
 pub use inspection::Inspection;
 mod lane;
+mod look;
+pub use look::{Look, Motion};
 mod markdown;
 mod ribbon;
 mod scroll;
@@ -288,6 +290,14 @@ pub struct ScreenState {
     pub recap: Option<HelperRecord>,
     /// Whether Pane speaks with its character or plainly (`ui.voice`).
     pub voice: Voice,
+    /// The instrument or the bird (`ui.look`, `/bird`).
+    pub look: Look,
+    /// How much moves (`ui.motion`); `reduced_motion` is kept equal to `Off`.
+    pub motion: Motion,
+    /// Work running behind the answer (the checker, the notes writer), by name.
+    pub behind: Vec<String>,
+    /// A verdict that just landed in `history`, and its settle frame.
+    pub note_landing: Option<(usize, usize)>,
     /// What is shown of a cell while the model is still writing it.
     pub stream: Stream,
     /// The local hour when the session started, for the greeting; `None`
@@ -768,7 +778,8 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                     "/telemetry".to_string(),
                     "live activity, requests and execution · Ctrl-T",
                 ),
-                ("/motion".to_string(), "on or off · reduce animation"),
+                ("/motion".to_string(), "full, calm or off · how much moves"),
+                ("/bird".to_string(), "the bird look, on or off"),
                 (
                     "/cells".to_string(),
                     "inspect code and real results by cell",
