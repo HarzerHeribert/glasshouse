@@ -62,6 +62,18 @@ pub(super) fn helper_callback(
         asked: asked.clone(),
         ..crate::helpers::HelperRecord::default()
     });
+    // The reader starts from the project's file listing: measured
+    // 2026-09-23, a find loop given only the question searched the wrong
+    // directories and answered "could not determine" in 2 of 2 calls, while
+    // a listing lifted offline recall from 0.62 to 0.88 on the same task.
+    let input = if spec.name == crate::helpers::SCOUT.name {
+        match crate::preflight::listing_section(state.profile.root()) {
+            Some(listing) => format!("{input}\n{listing}"),
+            None => input,
+        }
+    } else {
+        input
+    };
     let input = if spec.name == "check" {
         format!(
             "Original checker request:\n{}\n\n{}",

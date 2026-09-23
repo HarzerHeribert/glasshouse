@@ -1460,7 +1460,10 @@ fn a_changed_diff_is_asked_again_and_a_fixed_task_verifies() {
     // The fixed diff stands: no second hold. It is not *verified* -- no
     // check ever ran, and that note rides beside the answer.
     assert_eq!(result["telemetry"]["completion"]["deferred"], 1, "{result}");
-    assert_eq!(result["telemetry"]["completion"]["verified"], false, "{result}");
+    assert_eq!(
+        result["telemetry"]["completion"]["verified"], false,
+        "{result}"
+    );
     assert!(
         result["telemetry"]["after_answer"]["notes"][0]
             .as_str()

@@ -142,7 +142,9 @@ pub const SCOUT: HelperSpec = HelperSpec {
         is a conclusion, and conclusions are not yours to draw.\n\
         \n\
         You find where something lives in this project. You can read, glob, grep and \
-        fetch context, and you can change nothing.\n\
+        fetch context, and you can change nothing. When the project's file listing follows \
+        the question, start from it: pick the files whose paths fit, open them, and search \
+        only for what the paths do not reveal.\n\
         \n\
         When your input is a scouting brief, answer its sections and nothing else: you are \
         scouting for the model that will act, so never attempt the request it quotes and \

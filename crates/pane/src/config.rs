@@ -412,7 +412,9 @@ impl Default for HelperEfforts {
             // consequential helper decision.
             find: crate::wire::Effort::Low,
             reduce: crate::wire::Effort::Medium,
-            check: crate::wire::Effort::High,
+            // Medium since 2026-09-23: the check is a note behind the
+            // answer, and at high it took 85 s on a two-line fix.
+            check: crate::wire::Effort::Medium,
             accept: crate::wire::Effort::Low,
             // A parse failure is punctuation, and the mender is shown the
             // parser's own verdict on where it is -- there is nothing to

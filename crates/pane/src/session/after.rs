@@ -60,6 +60,9 @@ enum Done {
     Check(Note),
     /// Lines added to `.pane/learned.md`.
     Learned(Vec<String>),
+    /// The work could not be done, and why: a check that failed is said,
+    /// never mistaken for one that found nothing.
+    Failed(String),
     Nothing,
 }
 
@@ -96,7 +99,7 @@ pub(super) fn spawn_learn(learn: Learn) {
             &token,
         );
         if !call.outcome.ok {
-            return Done::Nothing;
+            return Done::Failed(format!("learn: {}", call.outcome.text));
         }
         let existing = crate::learned::read(&learn.profile);
         let lines = crate::learned::accept(&call.outcome.text, &existing, learn.profile.root());
@@ -139,10 +142,10 @@ pub(super) fn spawn(check: Check) {
             context,
             None,
         ) else {
-            return Done::Nothing;
+            return Done::Failed("check: no checker in the roster".into());
         };
         if !record.outcome.ok {
-            return Done::Nothing;
+            return Done::Failed(format!("check: {}", record.outcome.text));
         }
         let verdict = record
             .outcome
@@ -169,26 +172,38 @@ pub(super) fn spawn(check: Check) {
 /// lines -- of the work that has ended, or with `wait`, of all of it. A
 /// session about to exit waits, so its result carries them; a terminal
 /// session between tasks does not.
-pub(super) fn settle(wait: bool) -> (Vec<Note>, Vec<String>) {
+pub(super) fn settle(wait: bool) -> (Vec<Note>, Vec<String>, Vec<String>) {
     let Ok(mut pending) = PENDING.lock() else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     };
     let mut notes = Vec::new();
     let mut learned = Vec::new();
+    let mut failed = Vec::new();
     let mut still = Vec::new();
     for handle in pending.drain(..) {
         if wait || handle.is_finished() {
             match handle.join() {
                 Ok(Done::Check(note)) => notes.push(note),
                 Ok(Done::Learned(lines)) => learned.extend(lines),
-                Ok(Done::Nothing) | Err(_) => {}
+                Ok(Done::Failed(reason)) => failed.push(reason),
+                Ok(Done::Nothing) => {}
+                Err(_) => failed.push("a thread behind the answer panicked".into()),
             }
         } else {
             still.push(handle);
         }
     }
     *pending = still;
-    (notes, learned)
+    (notes, learned, failed)
+}
+
+/// A one-task run, then [`finish_run`] -- inside `run`, while the session's
+/// gateway still serves: the work behind the answer asks it too, and it
+/// stops when `run` returns (measured: `Connection reset by peer`).
+pub(super) fn around<T>(task: impl FnOnce() -> T) -> T {
+    let result = task();
+    finish_run();
+    result
 }
 
 /// The end of a one-task run: wait for the work behind the answer so the
@@ -196,17 +211,25 @@ pub(super) fn settle(wait: bool) -> (Vec<Note>, Vec<String>) {
 /// delivered; `wait_ms` in the result is how long this took.
 pub(super) fn finish_run() {
     let waited = std::time::Instant::now();
-    let (checks, learned) = settle(true);
-    if checks.is_empty() && learned.is_empty() {
+    let (checks, learned, failed) = settle(true);
+    if checks.is_empty() && learned.is_empty() && failed.is_empty() {
         return;
     }
-    super::output::after_checks(&checks, &learned, waited.elapsed().as_millis() as u64);
+    super::output::after_checks(
+        &checks,
+        &learned,
+        &failed,
+        waited.elapsed().as_millis() as u64,
+    );
     if !super::output::active() {
         for note in &checks {
             eprintln!("{}", note.line());
         }
         if !learned.is_empty() {
             eprintln!("{}", learned_line(&learned));
+        }
+        for reason in &failed {
+            eprintln!("behind the answer, failed: {reason}");
         }
     }
 }

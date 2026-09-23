@@ -400,7 +400,10 @@ fn telemetry_value(telemetry: &Telemetry) -> Value {
             .collect(),
     );
     json!({
-        "wall_time_ms": telemetry.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        // Time to the answer: the wait for the work behind it is its own
+        // figure (`after_answer.wait_ms`), not the task's.
+        "wall_time_ms": (telemetry.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+            .saturating_sub(telemetry.after_answer.as_ref().and_then(|a| a["wait_ms"].as_u64()).unwrap_or(0)),
         "cells": {"executed": telemetry.cells, "failed": telemetry.cell_failures},
         "tools": {"calls": telemetry.tool_calls, "failures": telemetry.tool_failures},
         "provider_requests": {
@@ -964,7 +967,12 @@ pub(super) fn completion_notes(notes: &[String]) {
 /// Records the checks that finished behind the answer.
 /// `wait_ms` is how long the exit waited for them: the answer was already
 /// out, so time-to-answer is the run's wall time less it.
-pub(super) fn after_checks(notes: &[super::after::Note], learned: &[String], wait_ms: u64) {
+pub(super) fn after_checks(
+    notes: &[super::after::Note],
+    learned: &[String],
+    failed: &[String],
+    wait_ms: u64,
+) {
     STATE.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
             let entry = state
@@ -973,6 +981,7 @@ pub(super) fn after_checks(notes: &[super::after::Note], learned: &[String], wai
                 .get_or_insert_with(|| json!({"notes": [], "checks": []}));
             entry["learned"] = json!(learned);
             entry["wait_ms"] = json!(wait_ms);
+            entry["failed"] = json!(failed);
             if let Some(list) = entry["checks"].as_array_mut() {
                 list.extend(notes.iter().map(|note| {
                     json!({

@@ -430,7 +430,6 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
         return resume::print_listing(&parsed.root);
     }
     let result = run(parsed);
-    after::finish_run();
     machine_output.finish(&result)?;
     result
 }
@@ -1003,7 +1002,7 @@ fn drive(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     if let Some(task) = &args.task {
-        return process_input(task, session, transcript, rollout);
+        return after::around(|| process_input(task, session, transcript, rollout));
     }
 
     if let Some(ui) = session.ui {

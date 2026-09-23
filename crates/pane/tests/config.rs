@@ -168,7 +168,7 @@ fn helper_effort_has_role_defaults_and_accepts_partial_hard_overrides() {
     let defaults = PaneConfig::default().helpers.effort;
     assert_eq!(defaults.find, Effort::Low);
     assert_eq!(defaults.reduce, Effort::Medium);
-    assert_eq!(defaults.check, Effort::High);
+    assert_eq!(defaults.check, Effort::Medium);
 
     let configured = PaneConfig::parse("[helpers.effort]\nfind = \"medium\"\ncheck = \"xhigh\"\n")
         .unwrap()
