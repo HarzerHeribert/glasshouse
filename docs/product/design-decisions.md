@@ -5663,3 +5663,18 @@ model conversation. Helpers and observed diffs belong to their actual cells.
 Subagents require explicit assignments; legacy automatic inheritance is refused.
 Earlier presentation entries are historical, not instructions to restore the old
 renderer. Provider/account pinning is not available until enforced by the gateway.
+
+## Subscriptions for the coding harness, API keys as the person's choice — the user, 2026-09-23
+
+Pane runs its coding model through the person's own Claude and ChatGPT
+subscriptions, via CLIProxyAPI, which presents each request as Claude Code or
+Codex would. The user's reasoning: a subscription bought for coding harnesses
+may be used in another harness by the same person; nothing is resold; neither
+provider's terms settle it in full; and API-key pricing for a coding harness
+is prohibitive. Keeping up with the providers' client checks is left to the
+CLIProxyAPI project — Glasshouse does not build its own broker, and ships
+upstream's releases pinned by checksum (`release/cliproxyapi.toml`,
+`broker-bump.yml`). **The gateway keeps serving both kinds of account side by
+side** — subscriptions and API keys — so the person chooses per account and
+per model. Jev and free models are API accounts and were never in question.
+The Gemini subscription stays excluded (2026-09-17, above).
