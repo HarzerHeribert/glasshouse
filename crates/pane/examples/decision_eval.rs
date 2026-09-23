@@ -17,6 +17,17 @@ use std::io::BufRead as _;
 use pane::decide;
 use serde_json::{Value, json};
 
+/// A case's optional `session` context, as `decide::TaskContext` sends it.
+#[derive(serde::Deserialize)]
+struct ContextCase {
+    #[serde(default)]
+    earlier_requests: u32,
+    #[serde(default)]
+    instructions: Vec<String>,
+    #[serde(default)]
+    instructions_name_commands: bool,
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args
@@ -34,7 +45,18 @@ fn main() {
         let mut case: Value = serde_json::from_str(&line).expect("one JSON case per line");
         let text = |key: &str| case[key].as_str().unwrap_or_default().to_string();
         let answer = match case["question"].as_str() {
-            Some("task") => match decide::task_questions(&model, &text("request")) {
+            Some("task") => match decide::task_questions_in(
+                &model,
+                &text("request"),
+                serde_json::from_value::<ContextCase>(case["session"].clone())
+                    .ok()
+                    .map(|c| decide::TaskContext {
+                        earlier_requests: c.earlier_requests,
+                        instructions: c.instructions,
+                        instructions_name_commands: c.instructions_name_commands,
+                    })
+                    .as_ref(),
+            ) {
                 Ok(d) => json!({
                     "intent": d.intent.choice, "intent_confidence": d.intent.confidence,
                     "complexity": d.complexity.choice, "complexity_confidence": d.complexity.confidence,

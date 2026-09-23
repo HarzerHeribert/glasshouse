@@ -430,8 +430,71 @@ fn kind_question() -> Question {
 /// and answers with what came back, or the reason it did not. Never
 /// surfaced as a task failure -- the caller records the error in a notice
 /// and proceeds exactly as if no decision model were configured.
+/// What the session already has when a request arrives: how much exploring
+/// a request needs depends on it (2026-09-23 -- the user: "does Jev know
+/// what's already in context?"). A follow-up to requests that already read
+/// the area, or a project whose instructions say how to build and test,
+/// needs less than the same words in a cold session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct TaskContext {
+    /// Earlier requests in this session; `0` is a cold start.
+    pub earlier_requests: u32,
+    /// The project's instruction files, as `NAME (N lines)`.
+    pub instructions: Vec<String>,
+    /// Whether those instructions name a build or test command.
+    pub instructions_name_commands: bool,
+}
+
+impl TaskContext {
+    /// The context of a request in a project with these instruction files,
+    /// after `earlier_requests` requests in this session.
+    #[must_use]
+    pub fn of(earlier_requests: u32, instructions: &[(std::path::PathBuf, String)]) -> Self {
+        const COMMANDS: [&str; 9] = [
+            "cargo test",
+            "cargo build",
+            "pytest",
+            "npm test",
+            "npm run",
+            "make ",
+            "go test",
+            "pnpm ",
+            "just ",
+        ];
+        Self {
+            earlier_requests,
+            instructions: instructions
+                .iter()
+                .map(|(path, text)| {
+                    format!(
+                        "{} ({} lines)",
+                        path.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                        text.lines().count()
+                    )
+                })
+                .collect(),
+            instructions_name_commands: instructions
+                .iter()
+                .any(|(_, text)| COMMANDS.iter().any(|command| text.contains(command))),
+        }
+    }
+}
+
 pub fn task_questions(model: &str, request: &str) -> Result<TaskDecision, DecideError> {
-    let state = serde_json::json!({ "request": request });
+    task_questions_in(model, request, None)
+}
+
+/// [`task_questions`] with what the session already has beside the request.
+pub fn task_questions_in(
+    model: &str,
+    request: &str,
+    context: Option<&TaskContext>,
+) -> Result<TaskDecision, DecideError> {
+    let state = match context {
+        Some(context) => serde_json::json!({ "request": request, "session": context }),
+        None => serde_json::json!({ "request": request }),
+    };
     let questions = [
         (INTENT_KEY.to_string(), intent_question()),
         (COMPLEXITY_KEY.to_string(), complexity_question()),

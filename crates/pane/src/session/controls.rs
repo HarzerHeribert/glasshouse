@@ -1322,6 +1322,7 @@ mod tests {
             rollbacks: RefCell::new(Vec::new()),
             rollback_pending: Cell::new(None),
             plan: RefCell::new(None),
+            requests: std::cell::Cell::new(0),
         };
         permissions(&session, Some("allow Read(**)")).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
@@ -1397,6 +1398,7 @@ mod tests {
             rollbacks: RefCell::new(Vec::new()),
             rollback_pending: Cell::new(None),
             plan: RefCell::new(None),
+            requests: std::cell::Cell::new(0),
         };
         body(&session);
     }

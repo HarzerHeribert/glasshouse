@@ -352,7 +352,11 @@ fn apply_drift_hold(
 pub(super) fn task_decision(
     task: &str,
     session: &Session<'_>,
+    has_history: bool,
 ) -> (Option<crate::decide::TaskDecision>, u32) {
+    // A resumed conversation already holds at least one earlier request.
+    let earlier_requests = session.requests.get().max(u32::from(has_history));
+    session.requests.set(earlier_requests.saturating_add(1));
     let decisions = session.config().decisions.clone();
     let Some(model) = decisions.model else {
         return (None, 0);
@@ -361,7 +365,10 @@ pub(super) fn task_decision(
         return (None, 0);
     }
     let request = task.to_string();
-    let handle = std::thread::spawn(move || crate::decide::task_questions(&model, &request));
+    let context = crate::decide::TaskContext::of(earlier_requests, &session.project.instructions);
+    let handle = std::thread::spawn(move || {
+        crate::decide::task_questions_in(&model, &request, Some(&context))
+    });
     match handle.join() {
         Ok(Ok(decision)) => {
             session_println!(

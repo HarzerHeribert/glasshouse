@@ -858,6 +858,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         rollbacks: RefCell::new(Vec::new()),
         rollback_pending: Cell::new(None),
         plan: RefCell::new(None),
+        requests: std::cell::Cell::new(0),
     };
     output::interface(session.interface.get(), session.dialect());
     controls::announce_missing_credential(&session, _serving.is_some());
@@ -955,6 +956,8 @@ struct Session<'a> {
     /// The plan the last `plan` request wrote, handed to the next request
     /// that is not `plan` and forgotten there.
     plan: RefCell<Option<String>>,
+    /// Requests this session has started, for the decision model's context.
+    requests: std::cell::Cell<u32>,
 }
 
 impl Session<'_> {
@@ -1256,7 +1259,8 @@ fn run_task_inner(
     // the model's first turn, so the block is paid for as one cache write
     // against the read turns it removes — and it appends nothing at all when
     // no scout ran or none answered.
-    let (decision, decision_failures) = task_decision(task, session);
+    let has_history = !transcript.conversation.messages.is_empty();
+    let (decision, decision_failures) = task_decision(task, session, has_history);
     let effort_lease = system::EffortLease::for_kind(session, decision.as_ref());
     let proposal = mode_proposal::propose(session, decision.as_ref());
     // The acceptance lister runs beside the Scout: two independent reads of
@@ -3192,6 +3196,7 @@ mod tests {
             rollbacks: RefCell::new(Vec::new()),
             rollback_pending: Cell::new(None),
             plan: RefCell::new(None),
+            requests: std::cell::Cell::new(0),
         };
         let mut task_state = TaskState::new("admit", profile, &config.borrow());
         act_on(
