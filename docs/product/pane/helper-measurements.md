@@ -117,3 +117,23 @@ mattered: 1–15 cents per task.
   much a label can assume that the question does not carry.
 - Runs after ~11:30 on the ChatGPT subscription hit its weekly limit; those
   attempts are `errored`, never counted as failures.
+
+## 6. The lanes design, end to end (gpt-6-sol parent, gpt-6-luna helpers, n = 3)
+
+After commit 2689171a (checker behind the answer while the gateway serves,
+`helper.find` starting from the file listing). Time is to the answer; the
+work behind it (checker, learned notes) took another 35–80 s the person
+does not wait for.
+
+| task | arm | passed | time to answer | parent tokens | cells |
+|---|---|---|---|---|---|
+| F1 fix | bare | 3/3 | 95 s | 406k | 8.3 |
+| F1 fix | lanes | 3/3 | 121 s (100 s without the one `find`) | 284k | 7.0 |
+| X1 explore | bare | 3/3 · 7.7/8 facts | 69 s | 283k | 7.3 |
+| X1 explore | lanes | 3/3 · 8.0/8 facts | 67 s | 250k | 6.3 |
+
+The model called `helper.find` once in six attempts; it served seven
+verified excerpts and cost 146k Luna tokens and about 60 s — the tool loop
+is the slow part. Parent tokens are lower in both tasks (−12 %, −30 %), but
+at n = 3 with this spread that is a direction, not a result. Both runs
+together used 2 % of the ChatGPT week.
