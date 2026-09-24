@@ -118,7 +118,9 @@ the only interesting thing the run found.
 a fresh `git worktree` at the task's parent commit, removed afterwards; a
 harness never sees another attempt's tree.
 
-It prints two rows per task per harness, and one block per tier:
+It prints two rows per task per harness, and one block per tier. **The
+numbers below are an invented illustration of the layout, not a measurement**
+— no such run exists; measured results live in `helper-measurements.md`:
 
     task  harness      outcome  tokens/completed  wall     turns  tokens(failed)
     ----------------------------------------------------------------------------
