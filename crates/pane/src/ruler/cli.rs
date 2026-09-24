@@ -122,7 +122,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub parent_model: Option<String>,
     /// Expands the `pane` row into one `pane:feedback-<arm>` arm per listed
-    /// arm of [`attempt::FEEDBACK_ARMS`] (`bare,shadow,scout,dissect,lanes,working,outline,turns,oneshot,reduce,prefetch,all`),
+    /// arm of [`attempt::FEEDBACK_ARMS`] (`bare,shadow,scout,dissect,lanes,working,outline,turns,guided,nudge,low,oneshot,reduce,prefetch,all`),
     /// each attempt's `.pane/config.toml` carrying the decision mode and the
     /// `[helpers]` switches of its arm. The decision model is
     /// `--decisions-model`, or Jev's default. Refused beside the other two

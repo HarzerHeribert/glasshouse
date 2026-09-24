@@ -1583,6 +1583,9 @@ fn run_task_inner(
         task_state.previous_failed = step.view.error.is_some();
         let mut notice_lines = runtime.take_handler_notices();
         notice_lines.extend(observed.notices);
+        if session.config().limits.batch_nudge {
+            notice_lines.push(prompt::BATCH_NUDGE.to_string());
+        }
         let notices = notice_lines.join("\n");
         if !notices.is_empty() {
             if let Some(answer) = &mut step.answer {

@@ -51,6 +51,13 @@ pub struct Limits {
     /// Tell the model what a turn costs (`prompt::TURN_ECONOMY`), so it
     /// plans the task in fewer, whole-step cells. Off until measured.
     pub turn_economy: bool,
+    /// `prompt::AUTONOMY_BLOCK` in the system prompt. Off until measured.
+    pub autonomy_block: bool,
+    /// `prompt::SCOPE_BLOCK` in the system prompt. Off until measured.
+    pub scope_block: bool,
+    /// `prompt::BATCH_NUDGE` at the end of every cell result. Off until
+    /// measured.
+    pub batch_nudge: bool,
 }
 
 impl Default for Limits {
@@ -67,13 +74,16 @@ impl Default for Limits {
             // 800k in Claude code." A fraction carries that across models:
             // 85% of a 922k window is 784k, and 85% of a small one is small.
             compact_above_percent: 85,
-            // Two since 2026-09-23: end to end it cut the parent's tokens
-            // 38 % on a fix at equal outcomes (n = 3, the steadiest arm).
+            // Off since 2026-09-24: a collapse rewrites earlier turns, and
+            // history is append-only except for compaction.
             keep_results: 0,
             // Measured and dropped the same day: with only headings the
             // model reread the document 30-47 times and found fewer facts.
             instructions_outline: false,
             turn_economy: false,
+            autonomy_block: false,
+            scope_block: false,
+            batch_nudge: false,
         }
     }
 }
@@ -836,6 +846,9 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             "keep_results",
             "instructions_outline",
             "turn_economy",
+            "autonomy_block",
+            "scope_block",
+            "batch_nudge",
         ]
         .contains(&key.as_str())
         {
@@ -891,9 +904,23 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
             .as_bool()
             .ok_or_else(|| "pane.toml: `turn_economy` must be true or false".to_string())?,
     };
+    let switch = |key: &str, default: bool| -> Result<bool, String> {
+        match table.get(key) {
+            None => Ok(default),
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("pane.toml: `{key}` must be true or false")),
+        }
+    };
+    let autonomy_block = switch("autonomy_block", defaults.autonomy_block)?;
+    let scope_block = switch("scope_block", defaults.scope_block)?;
+    let batch_nudge = switch("batch_nudge", defaults.batch_nudge)?;
 
     Ok(Limits {
         turn_economy,
+        autonomy_block,
+        scope_block,
+        batch_nudge,
         cell_wall_clock_s,
         response_bytes,
         cells,

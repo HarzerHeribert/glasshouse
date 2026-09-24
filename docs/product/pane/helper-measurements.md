@@ -137,3 +137,30 @@ verified excerpts and cost 146k Luna tokens and about 60 s — the tool loop
 is the slow part. Parent tokens are lower in both tasks (−12 %, −30 %), but
 at n = 3 with this spread that is a direction, not a result. Both runs
 together used 2 % of the ChatGPT week.
+
+## 8. The prompting guides' candidates (2026-09-24, gpt-6-sol / gpt-6-luna, n = 3)
+
+Built on `559ddc5d` (append-only history, reasoning resent, sticky routing),
+each over `lanes`, every switch off by default: `guided` = `[limits]
+autonomy_block` + `scope_block` (Fable 5.1 / GPT-6 wording, system prompt);
+`nudge` = `batch_nudge` (one line ending every new result); `low` =
+`[session] effort = "low"`. Main-model tokens, mean (per attempt), time to
+answer, cells; X1 also facts of 8. Every attempt passed (21/21).
+
+| task | arm | tokens | time | cells | facts |
+|---|---|---|---|---|---|
+| F1 | lanes | 327k (247, 296, 437) | 120 s | 7.7 | |
+| F1 | guided | 411k (408, 324, 500) | 129 s | 8.3 | |
+| F1 | low | 330k (351, 335, 304) | 106 s | 7.7 | |
+| X1 | lanes | 366k (442, 347, 311) | 86 s | 8.0 | 7.0 |
+| X1 | guided | 302k (378, 252, 277) | 91 s | 6.7 | 8.0 |
+| X1 | low | 322k (285, 312, 370) | 80 s | 8.0 | 7.7 |
+| X1 | nudge | 332k (415, 322, 258) | 83 s | 7.3 | 7.3 |
+
+Within noise almost everywhere: the spread inside one arm (≈ 150–190k) is
+larger than any difference between arms. `guided` cost more on the fix and
+less on the explore task with the most facts; `low` was fastest on both and
+the steadiest (range 47k and 85k) at equal outcomes; `nudge` changed
+nothing measurable. The removal audit found nothing to remove: the preamble
+has no double-check, think-carefully, narrate-your-reasoning or
+anti-formatting lines. About 1.5–2 % of the ChatGPT week.

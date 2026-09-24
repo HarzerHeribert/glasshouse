@@ -418,6 +418,36 @@ pub const TURN_ECONOMY: &str = "\n\n## Turns are the expensive unit\n\nEvery tur
     result in the same program -- and yield only when the next decision needs evidence this \
     cell cannot produce.";
 
+/// The autonomy block (`[limits] autonomy_block`), after the Fable 5.1 and
+/// GPT-6 guides: carry a request through without asking leave for its
+/// reversible steps, and do not end a turn on a plan or a promise.
+pub const AUTONOMY_BLOCK: &str = "\n\n## Carrying the request through\n\nYou are working \
+    autonomously: the person is not watching in real time, so asking \"Shall I...?\" or \"Want me \
+    to...?\" in an answer blocks the work. For reversible steps that follow from the request, \
+    proceed without asking; use `ask` only for a destructive action or a change of scope the \
+    person must decide. When the person is describing a problem, asking a question or thinking \
+    aloud rather than asking for a change, your assessment is the deliverable: report it and \
+    stop. Before you answer, read your last paragraph: if it is a plan, a list of next steps or \
+    a promise about work not yet done, do that work now in another cell. Answer only when the \
+    request is complete or blocked on input only the person can give.";
+
+/// The scope block (`[limits] scope_block`), after the Fable 5.1 guide's
+/// "keep changes and tests to what the task asks for".
+pub const SCOPE_BLOCK: &str = "\n\n## Scope\n\nThe request sets the scope. If, while working \
+    or testing, you find a pre-existing bug, a performance concern or behaviour the request does \
+    not mention, do not fix, optimise or extend it in this change unless the requested behaviour \
+    cannot work without it; name it as a follow-up in your answer. Where the request is \
+    ambiguous, implement the reading its wording and the surrounding code most directly \
+    support, and say which reading you took. Verify however you like; scratch checks need not be \
+    kept. Add permanent tests only where the request asks for them or the repository keeps tests \
+    for this kind of change. This is about extras only: do every part the request asks for.";
+
+/// The batching nudge (`[limits] batch_nudge`), after the Fable 5.1 guide:
+/// one line at the end of each new result -- never an edit of an earlier
+/// one -- so it is read at the moment the next cell is planned.
+pub const BATCH_NUDGE: &str = "First privately list what you need next; then fetch every item \
+    that does not depend on another's result in the next cell.";
+
 /// How many results the collapse boundary advances at a time.
 pub const COLLAPSE_STEP: usize = 3;
 /// What a collapsed result says in place of its output.

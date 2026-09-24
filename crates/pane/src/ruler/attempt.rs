@@ -176,7 +176,7 @@ pub struct FeedbackArm {
 /// documents outlined. Their lines open a `[limits]` table, so they come
 /// last: every line after it lands in that table. `turns` is `lanes` plus
 /// the turn-economy line (D).
-pub const FEEDBACK_ARMS: [FeedbackArm; 12] = [
+pub const FEEDBACK_ARMS: [FeedbackArm; 15] = [
     FeedbackArm {
         name: "bare",
         mode: "off",
@@ -252,6 +252,50 @@ pub const FEEDBACK_ARMS: [FeedbackArm; 12] = [
             "learn = true",
             "[limits]",
             "turn_economy = true",
+        ],
+    },
+    // The prompting guides' candidates (2026-09-24), each over `lanes`.
+    FeedbackArm {
+        name: "guided",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[limits]",
+            "autonomy_block = true",
+            "scope_block = true",
+        ],
+    },
+    FeedbackArm {
+        name: "nudge",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[limits]",
+            "batch_nudge = true",
+        ],
+    },
+    FeedbackArm {
+        name: "low",
+        mode: "shadow",
+        helpers: &[
+            "preflight = false",
+            "acceptance_list = false",
+            "completion_check = true",
+            "reduce_returns = true",
+            "prefetch_returns = false",
+            "learn = true",
+            "[session]",
+            "effort = \"low\"",
         ],
     },
     FeedbackArm {

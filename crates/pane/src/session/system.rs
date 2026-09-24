@@ -67,6 +67,12 @@ pub(super) fn build_system_prompt(
     if limits.turn_economy {
         system.push_str(prompt::TURN_ECONOMY);
     }
+    if limits.autonomy_block {
+        system.push_str(prompt::AUTONOMY_BLOCK);
+    }
+    if limits.scope_block {
+        system.push_str(prompt::SCOPE_BLOCK);
+    }
     // Last, so a note written behind one answer changes only the tail of
     // the next task's prompt and the cached prefix before it survives.
     system.push_str(&crate::learned::section(profile));

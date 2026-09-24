@@ -814,6 +814,33 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "limits.autonomy_block",
+        label: "Autonomy block",
+        description: "Tell the model to carry the request through without asking leave for reversible steps, and not to end on a plan or a promise.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "limits.scope_block",
+        label: "Scope block",
+        description: "Tell the model to keep changes to what the request needs and report anything else as a follow-up.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
+        key: "limits.batch_nudge",
+        label: "Batching nudge",
+        description: "End every cell result with one line asking the model to fetch every independent item in its next cell.",
+        kind: Kind::Bool,
+        choices: &[],
+        basic: false,
+        restart: true,
+    },
+    SettingSpec {
         key: "limits.turn_economy",
         label: "Turn economy",
         description: "Tell the model that every turn re-sends the whole conversation, so it plans the task in fewer, whole-step cells.",
@@ -1245,6 +1272,9 @@ pub fn shown_default(key: &str) -> Option<String> {
         "limits.evidence_gate" => crate::config::Limits::default().evidence_gate.to_string(),
         "limits.keep_results" => crate::config::Limits::default().keep_results.to_string(),
         "limits.turn_economy" => crate::config::Limits::default().turn_economy.to_string(),
+        "limits.autonomy_block" => crate::config::Limits::default().autonomy_block.to_string(),
+        "limits.scope_block" => crate::config::Limits::default().scope_block.to_string(),
+        "limits.batch_nudge" => crate::config::Limits::default().batch_nudge.to_string(),
         "limits.instructions_outline" => crate::config::Limits::default()
             .instructions_outline
             .to_string(),
