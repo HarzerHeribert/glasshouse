@@ -6,7 +6,13 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { instrumentRenderer } from './render-metrics.js';
 
 gsap.registerPlugin(ScrollTrigger);
-const PAPER = 0xf3f5f4;
+// The page's own paper colour, so a scene sits on the theme it is shown in.
+const isDark = () => getComputedStyle(document.documentElement).getPropertyValue('--paper').trim().toLowerCase() !== '#f3f5f4';
+function paperRGB() {
+  const value = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim() || '#f3f5f4';
+  const n = parseInt(value.replace('#', ''), 16);
+  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+}
 const specimenFragment = `
 precision highp float;
 uniform sampler2D specimen;
@@ -15,13 +21,15 @@ uniform vec2 pointer;
 uniform float time;
 uniform float phase;
 uniform float crop;
+uniform vec3 paper;
+uniform float dark;
 varying vec2 vUv;
 mat2 rot(float a){return mat2(cos(a),-sin(a),sin(a),cos(a));}
 float sdBox(vec2 p){vec2 q=abs(p)-vec2(.265,.31)+.035;return length(max(q,0.))+min(max(q.x,q.y),0.)-.035;}
 vec3 sampleField(vec2 p){
   p=rot(sin(time*.16)*.065)*p;
   vec2 uv=p*vec2(1.3,.975)+.5;
-  if(any(lessThan(uv,vec2(0.)))||any(greaterThan(uv,vec2(1.)))) return vec3(.953,.961,.957);
+  if(any(lessThan(uv,vec2(0.)))||any(greaterThan(uv,vec2(1.)))) return paper;
   vec2 cells=vec2(92.,120.);
   vec2 quantized=(floor(uv*cells)+.5)/cells;
   vec2 readUV=mix(uv,quantized,phase);
@@ -30,8 +38,8 @@ vec3 sampleField(vec2 p){
   vec2 sub=fract(uv*cells);
   float dots=step(length((sub-.5)*vec2(1.,.75)),.34);
   signal=mix(signal,step(.16,signal)*dots,phase);
-  vec3 ink=mix(vec3(.045,.075,.055),vec3(.25,.34,.015),phase);
-  return mix(vec3(.953,.961,.957),ink,signal);
+  vec3 ink=mix(mix(vec3(.045,.075,.055),vec3(.86,.9,.87),dark),mix(vec3(.25,.34,.015),vec3(.87,1.,0.),dark),phase);
+  return mix(paper,ink,signal);
 }
 void main(){
   vec2 p=vUv-.5;p.x*=resolution.x/resolution.y;
@@ -61,7 +69,7 @@ void main(){
 function makeSpecimen(renderer, host, texture) {
   const scene=new THREE.Scene();
   const camera=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
-  const uniforms={specimen:{value:texture},resolution:{value:new THREE.Vector2(1,1)},pointer:{value:new THREE.Vector2()},time:{value:3},phase:{value:0},crop:{value:host.dataset.scene==='shell'?.5:0}};
+  const uniforms={specimen:{value:texture},resolution:{value:new THREE.Vector2(1,1)},pointer:{value:new THREE.Vector2()},time:{value:3},phase:{value:0},crop:{value:host.dataset.scene==='shell'?.5:0},paper:{value:new THREE.Vector3(...paperRGB())},dark:{value:isDark()?1:0}};
   const material=new THREE.ShaderMaterial({uniforms,vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}',fragmentShader:specimenFragment});
   scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),material));
   const timeline=gsap.timeline({paused:true,repeat:-1,repeatDelay:2});
@@ -70,7 +78,7 @@ function makeSpecimen(renderer, host, texture) {
 }
 
 function makeHouse(renderer) {
-  const scene=new THREE.Scene();scene.background=new THREE.Color(PAPER);
+  const scene=new THREE.Scene();scene.background=new THREE.Color().setRGB(...paperRGB(),THREE.SRGBColorSpace);
   const camera=new THREE.PerspectiveCamera(34,1,.1,100);
   camera.position.set(5,3.1,6.5);camera.lookAt(0,.3,0);
   const pmrem=new THREE.PMREMGenerator(renderer);

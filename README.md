@@ -54,8 +54,9 @@ By default the model sees one tool: a **cell**, a TypeScript program run in an
 embedded V8 isolate. Inside it `read`, `grep`, `edit`, `bash`, `web.fetch` and
 the rest are functions, and what they return stays in the isolate as a named
 handle. The model gets a bounded preview and acts on the handle in the next
-cell. Measured in a test that runs on every commit: **275,020 bytes of grep
-output cost 205 tokens**, and the handle is still filterable afterwards.
+cell. A test that runs on every commit greps a fixture and holds the result
+**under 300 tokens: 275,020 bytes of grep output render as 209 today**, and
+the handle is still filterable afterwards.
 
 What follows from that:
 

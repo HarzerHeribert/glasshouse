@@ -1,52 +1,66 @@
-export const products = {
-  glasshouse: {
-    name: 'Glasshouse', role: 'The orchestrator', action: 'Get the orchestrator',
-    title: 'MANY AGENTS.<br>ONE <span class="outline">CLEAR</span><br>VIEW.',
-    intro: 'Every session visible. Every worker within reach. You stay in control.',
-    description: 'Run the harnesses you already use in sessions you can see and manage. Follow the work, talk to a worker, interrupt it, or pick up where it left off.',
-    features: [
-      ['Real, visible workers', 'Run Claude Code, Codex, OpenCode, and other installed harnesses in native terminal sessions. Watch, type, interrupt, and resume.'],
-      ['Routing that remembers context', 'Choose destinations using measured performance, remaining capacity, and the value of an already-warm session.'],
-      ['Memory belongs to the project', 'Keep decisions and their rationale across sessions, with provenance and validity instead of treating every old note as a permanent rule.'],
-      ['One project. Hard boundaries.', 'Keep session state and memory scoped to a single project. Isolation is part of the storage and runtime design.'],
-      ['A leaner context window', 'Compact tool output before it crosses into the conversation through the context firewall.'],
-      ['A single Rust binary', 'Glasshouse itself is one executable. A launch starts the inference-gateway process beside it — Pane is the third, separate binary.'],
-    ],
-    status: 'Active implementation. See the capability map for remaining gates.',
-    link: 'https://github.com/HarzerHeribert/glasshouse#build', cta: 'Source & build instructions',
-  },
-  pane: {
-    name: 'Pane', role: 'The code-mode harness', action: 'Get the harness',
-    title: 'REASON.<br>RUN.<br><span class="outline">CONTINUE.</span>',
-    intro: 'A coding harness that keeps tool results out of the context window.<br><br>Pane lets the model write TypeScript over live tool results instead of reading every grep, file, test log, and API response as conversation text. The runtime executes the predictable work. The model comes back when judgment is actually needed.',
-    description: 'Stop making the model read every tool result. Let it program over them instead.',
-    compare: {
-      title: 'The model should not be your JSON parser.',
-      diagram: `Traditional tool calling            Pane
+// Every claim here is true of the shipped code or was measured; the source of
+// each is named beside it so a later edit can re-check it rather than trust it.
 
-grep                                grep ─────► live result
- ↓                                                 │
-30,000 tokens of results                    filter/map/query
- ↓                                                 │
-model                                              ▼
- ↓                                           small preview
-filter the results                                 │
- ↓                                               model
-another tool call
- ↓
-model`,
-      body: 'Tool calling turns every intermediate result into model input. Pane keeps those results in the runtime and lets the model write code against them instead.',
-    },
-    features: [
-      ['Tool results stay out of context', 'Large grep results, files, test logs, and API responses stay inside Pane. The model sees small previews and works over the full results through named live objects.', 'In development'],
-      ['Do more with each model call', 'One model turn can search, filter, inspect, test, branch on the result, and continue. Pane asks the model again only when the program reaches something that needs judgment.', 'Proposed extension'],
-      ['Finish without another inference', 'A program can return the final answer directly from the results it just verified. No extra model call just to say that the tests passed.', 'Proposed extension'],
-      ['Little helpers', 'A cheap model answers one narrow question from inside the program, and costs no turn: find the files a task actually touches, reduce a build log to its distinct failures, check a diff against what was asked. A helper holds only the tools its role names \u2014 it cannot write, edit, or run a command \u2014 and returns evidence rather than conclusions, so the program can act on it without the main model reading it.', 'In development'],
-      ['Events without the turn storm', 'Background jobs, worker messages, and other events arrive in bounded batches. Predictable events can be handled by code instead of waking the model for every update.', 'In development'],
-      ['Works with the project you already have', 'Pane loads your existing project instructions, hooks, permissions, commands, skills, and MCP configuration instead of inventing another project format.', 'Implemented foundation'],
-      ['Standalone or orchestrated', 'Run Pane directly as its own coding harness, or let Glasshouse provide routing, capacity management, and multi-agent coordination.', 'Implemented foundation'],
-    ],
-    status: 'Pane is under active development. Runtime features and extensions are labeled below.',
-    link: 'https://github.com/HarzerHeribert/glasshouse/tree/main/crates/pane', cta: 'Explore Pane source',
+export const repo = 'https://github.com/HarzerHeribert/glasshouse';
+export const installCommand = 'curl -fsSL https://harzerheribert.github.io/glasshouse/install.sh | sh';
+
+// The braille songbird from crates/pane/src/workbench/voice.rs (IDLE, FLAP).
+export const bird = ['    ⡔⠩⠉⠢⣀⣀', '⡠⠒⢤⠎ ⣀⣀⡀⠑⡄', '⠑⢤⠊⡰⠉  ⠈⡢⠃', '  ⠑⠣⡄⡀⡤⠊  '];
+export const flap = ['⠑⠤⠊', '⠢⠤⠔', '⠤⠤⠤', '⠔⠒⠢'];
+
+export const pane = {
+  compare: {
+    title: 'The model should not be your JSON parser.',
+    diagram: `Tool calling          Pane
+
+grep                  grep
+ ↓                     │
+every match, as text  one live result
+ ↓                     │
+model reads it all    filter / map / count
+ ↓                     │
+another tool call     a small preview
+ ↓                     ↓
+model reads it again  model`,
+    body: 'A tool-calling agent turns every intermediate result into conversation text, and pays for it again on every later turn. In Pane a result is a named object in a V8 runtime: the model gets a bounded preview and a handle, and writes TypeScript that works over the whole thing.',
   },
+  // tests/handles.rs::a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield;
+  // the gateway's per-request records for a live F1 session, 2026-09-24 (355,328 of 394,961).
+  facts: [
+    ['209', 'tokens to show the model 275 KB of grep output. A test regenerates the tree on every run and fails above 300.'],
+    ['90%', 'of the main model’s input came from the provider’s prompt cache in a measured session: history only grows, so each request extends the last one byte for byte.'],
+    ['1', 'line to install. No daemon, no Node, no Python: native binaries, checked against the release’s checksums.'],
+  ],
+  features: [
+    ['A terminal workbench', 'Cells, results and the model’s reasoning stream in as they happen, with context and cache use in the status line. Resume any session with --continue or --resume.', 'tests/tui_live.rs'],
+    ['Works with the project you have', 'Reads AGENTS.md and CLAUDE.md (root, nested and global), the permissions and hooks in .claude/settings.json, and the MCP servers in .mcp.json. Nothing to convert.', 'tests/scoped_instructions.rs'],
+    ['Plan, then build', 'Three working modes: build edits and runs commands, explore only reads, plan reads and writes the plan file alone. Start with --plan, or switch with /mode.', 'tests/request_modes.rs'],
+    ['Asks as often as you want', 'Four permission rungs — manual, accept-edits, auto and full. Shift-Tab cycles them; a rung changes how often you are asked, never what may be granted. --full-access is one flag for a trusted machine.', 'tests/approval_boundary.rs'],
+    ['Subagents and background jobs', 'agent.run hands a goal to a separate turn loop and returns at once; bg.run keeps a build or a watcher going. Results arrive as one batched event, not a turn each.', 'tests/subagent.rs'],
+    ['Survives a full context', 'When the conversation stops fitting, redundant parts go first and then a checkpoint replaces it — while the runtime keeps running, so a result from turn three is still addressable.', 'tests/prompt_bytes.rs'],
+    ['Undo that respects your edits', '/rollback previews what the session changed and restores it, leaving edits you made yourself in place.', 'crates/pane/src/changes.rs'],
+    ['An OS sandbox under the code', 'Model-written code runs under Seatbelt on macOS and Landlock with seccomp on Linux, with grants compiled from your .claude/settings.json.', 'tests/sandbox_apply.rs'],
+    ['Your subscription or your key', 'An API key, or a ChatGPT or Claude subscription connected with /login. Switch models mid-session with /models.', 'crates/pane/src/session/controls.rs'],
+    ['Keeps itself current', 'A release install checks for a newer release once a day and installs it beside the running one. pane update does it on demand.', 'crates/pane/src/update.rs'],
+  ],
+  limits: [
+    ['Pre-release', 'Version 0.1.0 pre-releases. Expect rough edges and say so in an issue.'],
+    ['macOS and Linux', 'Apple silicon Macs, and Linux on x86_64 and arm64. Windows archives are published with each release; a Windows installer is not written yet.'],
+    ['Web search needs an endpoint', 'web.fetch works out of the box. web.search needs a SearXNG-compatible endpoint you configure.'],
+    ['No IDE integration', 'Pane lives in the terminal. There is no editor plugin.'],
+    ['Source available', 'The source is public to read and review. It is not open source: all rights are reserved.'],
+  ],
+};
+
+export const glasshouse = {
+  intro: 'Glasshouse runs several coding-agent sessions side by side — Pane, Claude Code, Codex, OpenCode — as real terminal sessions you can watch and type into, and gives them one view: memory that belongs to the project, delegation between sessions, and a warning when two sessions head for the same file.',
+  status: 'Preview. Glasshouse runs, and it is where Pane came from, but it is not at Pane’s readiness: several of its parts are still moving and its setup is for people who read the source. If you want one agent that works today, use Pane.',
+  features: [
+    ['Real, visible sessions', 'Each session is the real installed harness, launched in its own profile and driven over a terminal. You can watch it, type into it, interrupt it and resume it.', 'Preview'],
+    ['Memory that belongs to the project', 'Decisions and their reasons carry across sessions with their provenance and age, instead of every old note becoming a permanent rule.', 'Preview'],
+    ['Delegation between sessions', 'An orchestrating session hands work to other first-class sessions and hears back from them. Every one of them stays a session you can see.', 'Preview'],
+    ['File coordination', 'Sessions announce what they are about to edit; when two head for the same file, the orchestrating session hears about it and re-plans only that part.', 'Preview'],
+    ['One project, hard boundaries', 'Sessions, memory, logs and runtime state are scoped to one project root. Cross-project access is disabled by construction.', 'Preview'],
+    ['Built on the same gateway', 'The inference gateway that serves Pane — keys, subscriptions, protocol translation — is the one Glasshouse sessions use.', 'Shared with Pane'],
+  ],
 };
