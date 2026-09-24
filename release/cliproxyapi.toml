@@ -3,12 +3,12 @@
 # broker-bump workflow); the installer and `pane update` download the named
 # upstream asset and refuse it unless its SHA-256 matches the one pinned here.
 repository = "router-for-me/CLIProxyAPI"
-version = "7.3.15"
+version = "7.3.16"
 
 [assets]
-aarch64-apple-darwin = { name = "CLIProxyAPI_7.3.15_darwin_aarch64.tar.gz", sha256 = "c1e49c148a94c476dc43a6a0eed28bca34239d5153ebb7792048d8c18f3b92f0" }
-x86_64-apple-darwin = { name = "CLIProxyAPI_7.3.15_darwin_amd64.tar.gz", sha256 = "1dd2f2f5d57c2c9172eb51837d07f1f014d02ab1093215401a00c61d942bb972" }
-x86_64-unknown-linux-gnu = { name = "CLIProxyAPI_7.3.15_linux_amd64.tar.gz", sha256 = "801c3a23061d57a830e67fcd033fda26e96c2bfe93e1b2e34e4428ed7defc7e5" }
-aarch64-unknown-linux-gnu = { name = "CLIProxyAPI_7.3.15_linux_aarch64.tar.gz", sha256 = "0b147342517b2f0f0cb80a4630e4f863cdd531fa0e90986f30a437c81ba82e75" }
-x86_64-pc-windows-msvc = { name = "CLIProxyAPI_7.3.15_windows_amd64.zip", sha256 = "2722eccdabdbca935cfbd41e99b00a8017e91e45296e34b30004932c176b01b2" }
-aarch64-pc-windows-msvc = { name = "CLIProxyAPI_7.3.15_windows_aarch64.zip", sha256 = "de4db7058bf4f9fcbf2097ed693a1c28a2e9364949ee16a57cccac0fd0a6a12f" }
+aarch64-apple-darwin = { name = "CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz", sha256 = "b6d478cc16c608abfec9343ee97d3a850403604f12e237952bcfdbad2a03e234" }
+x86_64-apple-darwin = { name = "CLIProxyAPI_7.3.16_darwin_amd64.tar.gz", sha256 = "f5dd942200a05687d2132d572ff63c635f3d7b154f34a5d737dadeddd718b828" }
+x86_64-unknown-linux-gnu = { name = "CLIProxyAPI_7.3.16_linux_amd64.tar.gz", sha256 = "64f84d7a08570f8e5310707857bc9edfb032292a9753b5f840da6c8caa325a72" }
+aarch64-unknown-linux-gnu = { name = "CLIProxyAPI_7.3.16_linux_aarch64.tar.gz", sha256 = "5af23cdc4c5fc61d260ed6f7cd207fdeee893e174f6866bc5ac6d7d1dddae111" }
+x86_64-pc-windows-msvc = { name = "CLIProxyAPI_7.3.16_windows_amd64.zip", sha256 = "7a17261b6389d52a641454cfb3d3c947ffdc80f59c50267c0e90af994e4e5f63" }
+aarch64-pc-windows-msvc = { name = "CLIProxyAPI_7.3.16_windows_aarch64.zip", sha256 = "4c16487d73c210aa708b737b594979397dbd6114ff313b5170fa97a16c126ff7" }
