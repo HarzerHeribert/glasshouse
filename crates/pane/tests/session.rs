@@ -5335,6 +5335,39 @@ fn task_orientation_and_instructions_refresh_without_widening_live_permissions()
     assert!(!resumed.system.contains("GUIDANCE_VERSION_ONE"));
 }
 
+/// A later task in the same session re-sends the earlier conversation as an
+/// exact prefix -- the system block included, though the clock moved on --
+/// under one cache key, so the provider reads it from its cache.
+#[test]
+fn a_second_task_resends_the_first_as_an_unchanged_prefix() {
+    let root = scratch_dir("stable-session-prefix");
+    fs::write(root.join("CLAUDE.md"), "STABLE_GUIDANCE").unwrap();
+    let (base, bodies) = start_answering_provider(2, move |body| {
+        if last_user_text(body) == "first task" {
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        ending_reply()
+    });
+    let output = run_session_stdin(
+        &root,
+        &root.join("rollout.jsonl"),
+        "stable-prefix",
+        &["first task", "second task"],
+        &base,
+        Some(&root.join("absent")),
+        false,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let bodies = bodies.lock().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(first["system"], second["system"]);
+    let (earlier, later) = (first["messages"].as_array().unwrap(), second["messages"].as_array().unwrap());
+    assert_eq!(earlier[..], later[..earlier.len()], "the first task's messages are not a prefix of the second's");
+    assert_eq!(first["metadata"]["user_id"], "stable-prefix");
+    assert_eq!(second["metadata"], first["metadata"]);
+}
+
 #[test]
 fn resumed_tasks_use_current_instructions_instead_of_the_saved_system_prompt() {
     let root = scratch_dir("resumed-guidance");
@@ -5609,6 +5642,23 @@ fn request_system(body: &str) -> String {
     request["system"][0]["text"].as_str().unwrap().to_string()
 }
 
+/// The task's own message as sent: the request, then the task context Pane
+/// carries after it (mode, plan, preflight, acceptance), which the system
+/// prompt no longer holds so it stays the same from task to task.
+fn request_task_message(body: &str) -> String {
+    let request: serde_json::Value = serde_json::from_str(body).unwrap();
+    let task = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|message| message["role"] == "user")
+        .unwrap();
+    task["content"]
+        .as_array()
+        .map(|blocks| blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n\n"))
+        .unwrap_or_else(|| task["content"].as_str().unwrap_or_default().to_string())
+}
+
 /// **With helpers unconfigured nothing changes at all.** No request is sent
 /// on the user's behalf and the system block is the one
 /// `the_system_block_is_render_systems_own_bytes` pins, byte for byte up to
@@ -5748,7 +5798,7 @@ fn preflight_serves_the_scouts_files_under_the_verbatim_request() {
         "the first request must be the scout's, carrying its preamble"
     );
 
-    let system = request_system(&bodies[1]);
+    let system = request_task_message(&bodies[1]);
     assert!(
         system.contains(&format!("## Request (verbatim, authoritative)\n{task}")),
         "the request must appear unmodified and first: {system}"
@@ -5801,7 +5851,7 @@ fn a_failed_preflight_still_runs_the_task() {
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2, "the scout tried once, the task ran once");
-    let system = request_system(&bodies[1]);
+    let system = request_task_message(&bodies[1]);
     assert!(
         !system.contains("## Request (verbatim"),
         "a failed preflight appends nothing: {system}"

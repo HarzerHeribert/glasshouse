@@ -41,8 +41,9 @@ pub struct Limits {
     pub compact_above_percent: u64,
     /// Keep this many of the newest cell results in full and collapse every
     /// older one to its first line (`prompt::keep_recent_results`); `0`
-    /// keeps them all. The values stay bound in the runtime, so nothing is
-    /// lost that one expression cannot bring back.
+    /// keeps them all, and is the default: a collapse rewrites earlier turns,
+    /// which restarts the provider's cache from that point, and history is
+    /// append-only except for compaction (user, 2026-09-24).
     pub keep_results: usize,
     /// Show a long instruction document as its headings and their lines
     /// (`project::instructions::root_outlined`). Off: measured worse.
@@ -68,7 +69,7 @@ impl Default for Limits {
             compact_above_percent: 85,
             // Two since 2026-09-23: end to end it cut the parent's tokens
             // 38 % on a fix at equal outcomes (n = 3, the steadiest arm).
-            keep_results: 2,
+            keep_results: 0,
             // Measured and dropped the same day: with only headings the
             // model reread the document 30-47 times and found fewer facts.
             instructions_outline: false,

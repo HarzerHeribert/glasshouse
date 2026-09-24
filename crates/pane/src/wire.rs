@@ -166,6 +166,24 @@ struct RequestBody<'a> {
     /// byte in every ordinary turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// `{"user_id": <this session's id>}` once [`set_cache_key`] ran: the
+    /// gateway carries it to the Responses API as `prompt_cache_key`, which
+    /// keeps one session's requests on one cache. Absent before that.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<Metadata>,
+}
+
+#[derive(Serialize)]
+struct Metadata {
+    user_id: &'static str,
+}
+
+static CACHE_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Names the process's session as the prompt-cache key every later request
+/// carries. The first call wins; one process is one session.
+pub fn set_cache_key(session: &str) {
+    let _ = CACHE_KEY.set(session.to_string());
 }
 
 /// Cache only the session's system prompt, before volatile conversation state.
@@ -206,6 +224,7 @@ impl<'a> RequestBody<'a> {
             messages: conversation.messages.iter().map(to_wire_message).collect(),
             tools: (!tools.is_empty()).then_some(tools),
             stream: None,
+            metadata: CACHE_KEY.get().map(|key| Metadata { user_id: key.as_str() }),
         }
     }
 }

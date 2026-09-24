@@ -944,11 +944,18 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     app.contains("Mode: plan");
     app.send(b"plan this\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The mode line is task context: it rides in the task's own message.
     assert!(
-        request["system"][0]["text"]
-            .as_str()
+        request["messages"]
+            .as_array()
             .unwrap()
-            .contains("Request mode: plan")
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .unwrap()
+            .to_string()
+            .contains("Request mode: plan"),
+        "{request}"
     );
     // Plan runs cells under the plan narrowing (map line 2638): a cell that
     // changes nothing runs, and writes are refused by the profile.

@@ -474,8 +474,11 @@ fn a_written_plan_reaches_the_next_request_once() {
         "the next request did not carry the plan once: {stdout}"
     );
     assert!(bodies[1].contains("step one"));
-    assert!(
-        !bodies[2].contains(PLAN_SECTION),
+    // The plan rides in the next task's own message, so a later request
+    // still holds it once, as history -- never as a fresh copy.
+    assert_eq!(
+        bodies[2].matches(PLAN_SECTION).count(),
+        1,
         "the plan was carried past the next request"
     );
 }

@@ -288,7 +288,7 @@ fn a_timeout_leaves_todays_order() {
         "unused",
         SystemOne {
             answers: BTreeMap::new(),
-            delay: Some(Duration::from_secs(3)),
+            delay: Some(pane::decide::DECISION_TIMEOUT + Duration::from_secs(1)),
         },
     );
     unsafe {

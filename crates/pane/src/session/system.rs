@@ -72,6 +72,61 @@ pub(super) fn build_system_prompt(
     system.push_str(&crate::learned::section(profile));
     system
 }
+/// Keeps the system prompt byte-stable from task to task, so a task after the
+/// first reads the whole earlier conversation from the provider's cache.
+///
+/// It is replaced only when what it says changed -- the instructions, the
+/// grants, the model, the interface -- never for its orientation timestamp or
+/// a note `learned.md` gained behind the last answer: those reach the next
+/// session. Whatever differs per task rides in the task's own message
+/// ([`task_lines`], [`carry_task_context`]).
+pub(super) fn keep_session_system(session: &Session<'_>, transcript: &mut Transcript) {
+    let mut fresh = system_prompt_for(session);
+    if session.config().web.enabled {
+        fresh.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
+        fresh.push_str(if session.config().web.search_endpoint.is_some() {
+            "web.search is configured. Cite the source URLs returned by web tools.\n"
+        } else {
+            "web.search has no configured search endpoint and will refuse.\n"
+        });
+    }
+    let current = &transcript.conversation.system;
+    if current.is_empty() || lasting_part(current) != lasting_part(&fresh) {
+        transcript.conversation.system = fresh;
+    }
+}
+
+/// A system prompt without the two parts that change on their own between
+/// tasks and do not warrant a new cache.
+fn lasting_part(system: &str) -> String {
+    let body = system.split("\n\n## Learned about this project").next().unwrap_or(system);
+    body.lines()
+        .filter(|line| !line.starts_with("task-start UTC:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// This task's request-mode line and the approved plan, if any: task
+/// context, carried in the task's message rather than the system prompt.
+pub(super) fn task_lines(session: &Session<'_>) -> String {
+    let mut lines = prompt::request_mode_line(session.mode.get(), &session.overlay).unwrap_or_default();
+    if session.mode.get() != RequestMode::Plan
+        && let Some(plan) = session.plan.take()
+    {
+        lines.push_str(&prompt::plan_section(&plan));
+    }
+    lines
+}
+
+/// Appends the task's context -- mode, plan, preflight, acceptance -- to the
+/// task's own message, after the request itself, which stays the first block.
+pub(super) fn carry_task_context(message: &mut Message, context: String) {
+    let context = context.trim_start();
+    if !context.is_empty() {
+        message.content.push(Block::Text(context.to_string()));
+    }
+}
+
 /// [`build_system_prompt`] for a session that is already running: the same
 /// block, from what the session holds.
 pub(super) fn system_prompt_for(session: &Session<'_>) -> String {
@@ -452,13 +507,13 @@ impl PendingDecision {
 pub(super) fn append_acceptance(
     session: &Session<'_>,
     record: Option<crate::helpers::HelperRecord>,
-    transcript: &mut Transcript,
+    task_context: &mut String,
     budget: &mut TaskSpend,
 ) -> Vec<crate::acceptance::Item> {
     let Some((block, items, record)) = finish_acceptance(session, record) else {
         return Vec::new();
     };
-    transcript.conversation.system.push_str(&block);
+    task_context.push_str(&block);
     budget.add_helpers(std::slice::from_ref(&record));
     items
 }

@@ -528,6 +528,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // too: a crash or a closed pane never reaches `/exit`.
     let (session_id, rollout_path) = resume::resolve_session(&args)?;
     output::session(session_id.as_str());
+    wire::set_cache_key(session_id.as_str());
     let terminal = args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
     // Notes said before the terminal UI exists open its conversation rather
     // than flashing on the screen the UI replaces.
@@ -1224,26 +1225,8 @@ fn run_task_inner(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
-    transcript.conversation.system = system::system_prompt_for(session);
-    if let Some(line) = prompt::request_mode_line(session.mode.get(), &session.overlay) {
-        transcript.conversation.system.push_str(&line);
-    }
-    if session.mode.get() != RequestMode::Plan
-        && let Some(plan) = session.plan.take()
-    {
-        let section = prompt::plan_section(&plan);
-        transcript.conversation.system.push_str(&section);
-    }
-    if session.config().web.enabled {
-        transcript.conversation.system.push_str("\nHost web broker: web.fetch is enabled under the configured domain policy. Shell network access is separate. ");
-        transcript.conversation.system.push_str(
-            if session.config().web.search_endpoint.is_some() {
-                "web.search is configured. Cite the source URLs returned by web tools.\n"
-            } else {
-                "web.search has no configured search endpoint and will refuse.\n"
-            },
-        );
-    }
+    system::keep_session_system(session, transcript);
+    let mut task_context = system::task_lines(session);
     // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
     // the static orientation already has. It fires **once per task**, before
     // the model's first turn, so the block is paid for as one cache write
@@ -1265,12 +1248,12 @@ fn run_task_inner(
         )
     });
     if let Some(block) = &preflight_outcome.block {
-        transcript.conversation.system.push_str(block);
+        task_context.push_str(block);
     }
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
-    let acceptance_items = append_acceptance(session, acceptance_record, transcript, &mut budget);
+    let acceptance_items = append_acceptance(session, acceptance_record, &mut task_context, &mut budget);
     {
         let _line = session.interrupt.writing();
         rollout
@@ -1296,6 +1279,7 @@ fn run_task_inner(
     );
 
     let mut user_message = Message::text(Role::User, task);
+    system::carry_task_context(&mut user_message, task_context);
     user_message
         .content
         .extend(session.pending_images.borrow_mut().drain(..));

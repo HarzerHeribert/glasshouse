@@ -314,11 +314,6 @@ fn a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield() {
     }
     std::fs::write(&adapter, &adapter_body).unwrap();
 
-    // `Profile::check` hands the child the *resolved* path, so the paths
-    // grep prints are the canonical ones and the test's own prefix must be
-    // too -- on macOS `/var/folders/...` is a symlink to `/private/var/...`.
-    let real_root = std::fs::canonicalize(&root).unwrap();
-
     let profile = Profile::compile(&root, Some(r#"{"permissions":{"allow":[]}}"#));
     let glasshouse = Glasshouse::None;
     let session = SessionId::new("acceptance-122kb");
@@ -405,7 +400,8 @@ fn a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield() {
          const inTests = hits.filter(isTest);\n\
          const prodFiles = new Set(hits.filter(m => !isTest(m)).map(m => m.path));\n\
          return {{ total: hits.length, in_tests: inTests.length, prod_files: prodFiles.size }};\n",
-        tests = real_root.join("tests").to_string_lossy()
+        // Hit paths are root-relative (`bindings/search.rs`).
+        tests = "tests/"
     );
     let second = runtime.run_cell(&cell_two);
     assert!(
