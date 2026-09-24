@@ -2535,7 +2535,7 @@ fn send_task_turn(
         wire::send_turn_streaming_cancellable(
             conversation.clone(),
             model.clone(),
-            session.effort.get(),
+            system::turn_effort(session.effort.get(), &model),
             surface,
             Some(session.routing.clone()),
             &|| session.interrupt.pending.load(Ordering::SeqCst),
@@ -2552,7 +2552,7 @@ fn send_task_turn(
         wire::send_turn_bounded_routed(
             conversation,
             &model,
-            session.effort.get(),
+            system::turn_effort(session.effort.get(), &model),
             None,
             None,
             surface,

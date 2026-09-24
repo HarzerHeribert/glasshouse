@@ -1388,7 +1388,7 @@ pub(crate) fn render_screen_with_geometry(
         "{} · {} · effort {}",
         state.mode.name(),
         state.permissions.rung().name(),
-        state.effort.name()
+        state.effort.sent_for(model).name()
     );
     let identity = format!(" {} · {}", abbreviate(model, 28), abbreviate(project, 24));
     // The third fact, and the width it needs. `3p/1c YOLO unconfined` is 21

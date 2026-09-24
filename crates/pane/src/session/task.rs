@@ -433,7 +433,8 @@ impl TaskState {
             previous_frame: None,
             previous_failed: false,
             evidence_gate: config.limits.evidence_gate,
-            completion_check: config.helpers.completion_check,
+            completion_check: config.helpers.completion_check
+                && super::after::may_start(config.helpers.completion_check_set),
             checker_ran: false,
             opened: std::collections::BTreeMap::new(),
             learn_asked: false,
@@ -1064,6 +1065,7 @@ impl TaskState {
         }
         let helpers = session.config().helpers.clone();
         if helpers.learn
+            && super::after::may_start(helpers.learn_set)
             && helpers.enabled
             && !self.learn_asked
             && let Some(model) = helpers.model.clone()

@@ -53,6 +53,22 @@ pub enum Effort {
     Max,
 }
 impl Effort {
+    /// What a main-model turn asks for: one the person chose is sent as
+    /// chosen; `default` on an OpenAI-family model is `low`
+    /// ([`crate::session`]'s `turn_effort` states why). The screen shows this,
+    /// so the effort it names is the one sent.
+    pub fn sent_for(self, model: &str) -> Effort {
+        let openai = matches!(
+            crate::abi::Dialect::for_model(model),
+            crate::abi::Dialect::OpenAi
+        );
+        if self == Effort::Default && openai {
+            Effort::Low
+        } else {
+            self
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             // Compatibility: `auto` was the original public spelling.

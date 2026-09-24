@@ -11,6 +11,7 @@
 //! facts alone ([`crate::completion::FindingKind::holds`]).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 
@@ -67,6 +68,20 @@ enum Done {
 }
 
 static PENDING: Mutex<Vec<JoinHandle<Done>>> = Mutex::new(Vec::new());
+
+/// True for the length of a one-task run ([`around`]).
+static ONE_TASK: AtomicBool = AtomicBool::new(false);
+
+/// Whether a piece of work behind the answer may start. **A one-task run
+/// (`--task`, `-p`, `exec`) starts it only when the person wrote its switch
+/// themselves (`chosen`)**: the run exits when the task is done, so the work
+/// would either hold the exit or die with its request already paid for.
+/// Measured 2026-09-24: in 24 ruler attempts the check held each exit
+/// 15–60 s and changed no outcome. A terminal session always may -- nobody
+/// waits for it there.
+pub(super) fn may_start(chosen: bool) -> bool {
+    chosen || !ONE_TASK.load(Ordering::Relaxed)
+}
 
 /// Runs `work` on its own thread, and tells a terminal session when the
 /// lane starts and ends, so the screen shows it working behind the answer.
@@ -224,8 +239,10 @@ pub(super) fn settle(wait: bool) -> (Vec<Note>, Vec<String>, Vec<String>) {
 /// gateway still serves: the work behind the answer asks it too, and it
 /// stops when `run` returns (measured: `Connection reset by peer`).
 pub(super) fn around<T>(task: impl FnOnce() -> T) -> T {
+    ONE_TASK.store(true, Ordering::Relaxed);
     let result = task();
     finish_run();
+    ONE_TASK.store(false, Ordering::Relaxed);
     result
 }
 

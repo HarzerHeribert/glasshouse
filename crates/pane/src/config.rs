@@ -371,6 +371,11 @@ pub struct HelpersConfig {
     /// Write `.pane/learned.md` behind the answer of a task that had to
     /// search (`learned.rs`), and read it into the next task's prompt.
     pub learn: bool,
+    /// Whether a settings file names `completion_check` / `learn` itself.
+    /// A one-task run starts the work behind its answer only when it does
+    /// (`session/after.rs::may_start`).
+    pub completion_check_set: bool,
+    pub learn_set: bool,
 }
 
 /// `[helpers] preflight_scope` -- which tasks the Scout runs for when
@@ -504,6 +509,8 @@ impl Default for HelpersConfig {
             prefetch_returns: false,
             scout_oneshot: false,
             learn: true,
+            completion_check_set: false,
+            learn_set: false,
         }
     }
 }
@@ -1515,6 +1522,8 @@ fn parse_helpers(value: &toml::Value) -> Result<HelpersConfig, String> {
         prefetch_returns,
         scout_oneshot,
         learn,
+        completion_check_set: table.contains_key("completion_check"),
+        learn_set: table.contains_key("learn"),
     })
 }
 

@@ -883,7 +883,7 @@ fn session_card(
         (
             format!(
                 "effort {} · helpers {}",
-                s.effort.name(),
+                s.effort.sent_for(s.model.as_deref().unwrap_or("")).name(),
                 if s.helpers_on { "on" } else { "off" }
             ),
             Tone::Muted,
@@ -1148,7 +1148,13 @@ fn dock_bottom(
     let mut x = a.x + 3;
     if s.status_line != StatusLine::Hidden {
         let items = [
-            (format!("effort {}", s.effort.name()), Action::Effort),
+            (
+                format!(
+                    "effort {}",
+                    s.effort.sent_for(s.model.as_deref().unwrap_or("")).name()
+                ),
+                Action::Effort,
+            ),
             (
                 format!("◇ helpers {}", if s.helpers_on { "on" } else { "off" }),
                 Action::SettingsAt(2),

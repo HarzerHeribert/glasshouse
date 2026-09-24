@@ -560,6 +560,17 @@ pub(super) struct EffortLease<'s, 'a> {
     pub(super) would_set: Option<wire::Effort>,
 }
 
+/// The effort a main-model turn asks for. One the person chose -- in
+/// settings, a flag or `/effort` -- is sent as chosen. Left at `default`, an
+/// OpenAI-family model asks for `low`, exactly what the ruler's `low` arm
+/// set: on gpt-6-sol it was faster on every task of two rounds at equal
+/// results and equal or fewer tokens (2026-09-24, helper-measurements §8 and
+/// the Pane-vs-Codex head-to-head). Other families keep the provider's own
+/// setting; nothing measured argues for changing theirs.
+pub(super) fn turn_effort(chosen: wire::Effort, model: &str) -> wire::Effort {
+    chosen.sent_for(model)
+}
+
 impl<'s, 'a> EffortLease<'s, 'a> {
     pub(super) fn for_kind(
         session: &'a Session<'s>,

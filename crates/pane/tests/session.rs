@@ -7584,3 +7584,91 @@ fn the_event_stream_announces_a_cell_before_it_runs() {
         "the stream's cell number is the rollout's"
     );
 }
+
+/// The main model's effort, as one task's first request asks for it.
+fn first_request_effort(config: Option<&str>, model_flag: bool) -> serde_json::Value {
+    let root = scratch_dir("turn-effort");
+    if let Some(config) = config {
+        fs::create_dir_all(root.join(".pane")).unwrap();
+        fs::write(root.join(".pane/config.toml"), config).unwrap();
+    }
+    let (base, bodies) = start_answering_provider(1, |_| ending_reply());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
+    command
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--task")
+        .arg("go")
+        .env("ANTHROPIC_BASE_URL", &base)
+        .env("XDG_CONFIG_HOME", root.join("global-config"))
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .arg("--glasshouse")
+        .arg(root.join("absent"));
+    if model_flag {
+        command.arg("--model").arg(pane::wire::MODEL);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    first["output_config"]["effort"].clone()
+}
+
+/// Left at `default`, a GPT main model asks for `low` -- what the ruler's
+/// `low` arm measured faster at equal results; a chosen effort is sent as
+/// chosen, and a Claude model keeps the provider's own setting.
+#[test]
+fn a_gpt_main_model_left_at_default_effort_asks_for_low() {
+    let gpt = "[model]\nparent = \"gpt-6-sol\"\n";
+    assert_eq!(first_request_effort(Some(gpt), false), "low");
+    let chosen = format!("{gpt}[session]\neffort = \"high\"\n");
+    assert_eq!(first_request_effort(Some(&chosen), false), "high");
+    assert!(first_request_effort(None, true).is_null());
+}
+
+/// How many requests of one task went to the helper model.
+fn helper_requests(helpers: &str) -> usize {
+    let root = scratch_dir("one-task-behind");
+    fs::create_dir_all(root.join(".pane")).unwrap();
+    fs::write(
+        root.join(".pane/config.toml"),
+        format!("[helpers]\nacceptance_list = false\nmodel = \"helper-tier\"\n{helpers}"),
+    )
+    .unwrap();
+    let (base, bodies) = start_answering_provider(2, |_| ending_reply());
+    let output = run_session(
+        &root,
+        &root.join("rollout.jsonl"),
+        "one-task-behind",
+        "go",
+        &base,
+        Some(&root.join("absent")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    bodies
+        .iter()
+        .filter(|body| {
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["model"] == "helper-tier"
+        })
+        .count()
+}
+
+/// A one-task run exits when its task is done, so work behind the answer
+/// would hold the exit: the completion check starts only when the person
+/// wrote `completion_check` themselves.
+#[test]
+fn a_one_task_run_starts_the_completion_check_only_when_the_person_set_it() {
+    assert_eq!(helper_requests(""), 0, "an unset check held a one-task run");
+    assert_eq!(helper_requests("completion_check = true\n"), 1);
+}

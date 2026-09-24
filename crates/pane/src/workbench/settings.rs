@@ -98,6 +98,7 @@ impl Preferences {
                         "helpers.completion",
                         "helpers.preflight",
                         "helpers.completion_check",
+                        "helpers.learn",
                         "helpers.effort.find",
                         "helpers.effort.reduce",
                         "helpers.effort.check",

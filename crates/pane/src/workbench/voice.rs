@@ -326,9 +326,11 @@ pub fn quip(n: usize) -> &'static str {
 /// checker, `learn` the notes writer. The answer above it stands either way.
 pub fn behind(voice: Voice, lane: &str) -> String {
     match (voice.playful(), lane) {
-        (true, "check") => "a second bird is checking the answer…".into(),
+        (true, "check") => {
+            "a second bird is checking the answer… · turn it off in /settings".into()
+        }
         (true, "learn") => "noting what this task taught me…".into(),
-        (false, "check") => "checking the answer · it stands as given".into(),
+        (false, "check") => "checking the answer · it stands as given · off in /settings".into(),
         (false, "learn") => "writing learned notes · .pane/learned.md".into(),
         (_, other) => format!("{other} · behind the answer"),
     }

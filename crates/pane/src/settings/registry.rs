@@ -211,7 +211,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "session.effort",
         label: "Reasoning effort",
-        description: "How hard the model thinks before answering. Higher is slower and costs more. `default` leaves the provider's own setting alone, which is not the same as clearing an override you saved.",
+        description: "How hard the model thinks before answering. Higher is slower and costs more. `default` asks GPT models for low effort (measured faster at equal results) and leaves every other provider's own setting alone, which is not the same as clearing an override you saved.",
         kind: Kind::Choice,
         choices: EFFORT,
         basic: true,
@@ -483,7 +483,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "helpers.completion_check",
         label: "Fresh completion check",
-        description: "Run the independent checker on the terminal candidate with the original request, the diff and exact evidence only.",
+        description: "After the answer, a second model checks it against the original request, the diff and exact evidence only. It never holds the answer and never reaches the model; the verdict is a note for you. A one-task run (pane -p, exec) runs it only when you set this yourself.",
         kind: Kind::Bool,
         choices: &[],
         basic: false,
@@ -510,7 +510,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "helpers.learn",
         label: "Learned notes",
-        description: "After a task that had to search, note where things live in .pane/learned.md, and read those notes into the next task.",
+        description: "After a task that had to search, note where things live in .pane/learned.md, and read those notes into the next task. Written behind the answer; a one-task run (pane -p, exec) writes them only when you set this yourself.",
         kind: Kind::Bool,
         choices: &[],
         basic: false,
