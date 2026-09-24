@@ -165,12 +165,8 @@ impl Capsule {
                     }
                 }
             }
-            // A command handed on as a job has not passed or failed
-            // anything yet; `bg.wait` records the same call again, with its
-            // real exit code, when it is collected.
             if let Some(command) = verification_command(&call.tool, &call.args)
                 && !matches!(call.ended, Ended::Denied { .. })
-                && !call.args.contains_key("yielded")
             {
                 let exit_code = call.exit_code;
                 self.last_verification = Some(Verification {
@@ -385,48 +381,6 @@ mod tests {
             handles: Vec::new(),
             calls,
         }
-    }
-
-    #[test]
-    fn a_test_run_handed_on_as_a_job_verifies_only_once_it_is_collected() {
-        let mut capsule = Capsule::new("fix the parser");
-        let command = ("command", "cargo test -p parser");
-        capsule.observe_cell(
-            &cell(
-                1,
-                vec![call(
-                    "bash",
-                    &[command, ("yielded", "job1")],
-                    Ended::Ok,
-                    None,
-                )],
-            ),
-            None,
-            &[],
-            None,
-        );
-        assert!(
-            capsule.last_verification().is_none(),
-            "a test run still going counted as a verification"
-        );
-        capsule.observe_cell(
-            &cell(
-                2,
-                vec![call(
-                    "bash",
-                    &[command, ("collected", "job1")],
-                    Ended::Ok,
-                    Some(0),
-                )],
-            ),
-            None,
-            &[],
-            None,
-        );
-        let verification = capsule
-            .last_verification()
-            .expect("the collected run verifies");
-        assert_eq!((verification.cell, verification.exit_code), (2, Some(0)));
     }
 
     #[test]

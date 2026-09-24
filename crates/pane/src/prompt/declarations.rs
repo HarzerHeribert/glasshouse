@@ -49,9 +49,9 @@ pub struct Entry {
 /// told about this tool is that its exit code is part of its result, and a
 /// platform note may be added to that sentence but never at its expense.
 #[cfg(not(windows))]
-const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful. A command still running after the hand-off bound (10 s by default) returns `{running: true, job}` and goes on in the background: do the next piece of work, then `await bg.wait(r.job)` for the result this call would have returned. Pass `wait: true` to wait to the end instead.";
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful.";
 #[cfg(windows)]
-const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; on this host it runs under `cmd.exe`, so write cmd syntax (`findstr`, `dir`, `&&`) rather than POSIX shell, and inspect `exit_code` before treating it as successful. A command still running after the hand-off bound (10 s by default) returns `{running: true, job}` and goes on in the background: do the next piece of work, then `await bg.wait(r.job)` for the result this call would have returned. Pass `wait: true` to wait to the end instead.";
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; on this host it runs under `cmd.exe`, so write cmd syntax (`findstr`, `dir`, `&&`) rather than POSIX shell, and inspect `exit_code` before treating it as successful.";
 
 pub const ENTRIES: &[Entry] = &[
     Entry {
@@ -91,7 +91,7 @@ pub const ENTRIES: &[Entry] = &[
     },
     Entry {
         name: "bash",
-        return_type: "{stdout: string; stderr: string; exit_code: number | null; running?: true; job?: Job}",
+        return_type: "{stdout: string; stderr: string; exit_code: number | null}",
         summary: BASH_SUMMARY,
     },
     Entry {
@@ -538,8 +538,7 @@ pub const RUNTIME: &[Binding] = &[
         declaration: "declare const bg: {\n  \
                       run(command: string, options?: {cwd?: string; env?: string; timeout?: number}): Job;\n  \
                       watch(command: string, options?: {every?: number; until?: string; timeout?: number}): Job;\n  \
-                      cancel(job: Job | string): void;\n  \
-                      wait(job: Job | string, options?: {timeout?: number}): {stdout: string; stderr: string; exit_code: number | null} | {running: true; id: string};\n\
+                      cancel(job: Job | string): void;\n\
                       };\n\
                       type Job = {id: string; source: string};\n\
                       // Run a command in the background. `bg.run` returns a handle at once and\n\
@@ -549,9 +548,7 @@ pub const RUNTIME: &[Binding] = &[
                       // 1000) and emits one `bg.done` per match until `until` matches or you\n\
                       // cancel. Both refuse a command outside the sandbox grant with\n\
                       // PermissionDenied, before any handle exists. Use background work only\n\
-                      // when separable from the next decision; do not poll or sleep for it.\n\
-                      // `bg.wait` collects one job's exit when the next step needs it (up to\n\
-                      // `timeout` ms, default 600000), and that exit is then not delivered again.",
+                      // when separable from the next decision; do not poll or sleep for it.",
     },
     Binding {
         global: "batch",

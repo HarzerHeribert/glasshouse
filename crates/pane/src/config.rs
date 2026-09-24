@@ -13,13 +13,6 @@ use crate::tools::registry;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub cell_wall_clock_s: u64,
-    /// Seconds a `bash` call in a cell waits for its command before handing
-    /// it to the background and returning a job the program collects with
-    /// `bg.wait` (`0`: never — every call waits to the end). Codex's own
-    /// `exec_command` yields after 10 s; measured 2026-09-24, the whole of
-    /// Pane's time gap to Codex on multi-step edits was cells waiting on
-    /// builds and tests while the model could have gone on.
-    pub command_yield_s: u64,
     pub response_bytes: usize,
     /// A ceiling on cells **only when this person set one**, and `0` in the
     /// file means the same as absent (the user, 2026-09-17: "Limits are dumb
@@ -71,7 +64,6 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             cell_wall_clock_s: 30,
-            command_yield_s: 10,
             response_bytes: 16 * 1024,
             // No ceiling unless this person asks for one.
             cells: None,
@@ -568,11 +560,6 @@ const CELL_WALL_CLOCK_S: Range = Range {
     min: 1,
     max: 600,
 };
-const COMMAND_YIELD_S: Range = Range {
-    key: "command_yield_s",
-    min: 0,
-    max: 600,
-};
 const RESPONSE_BYTES: Range = Range {
     key: "response_bytes",
     min: 1024,
@@ -855,7 +842,6 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
     for key in table.keys() {
         if ![
             "cell_wall_clock_s",
-            "command_yield_s",
             "response_bytes",
             // Accepted as a no-op so an existing project does not stop
             // starting when token caps are removed. New sessions account for
@@ -886,10 +872,6 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
     let cell_wall_clock_s = match int_field(table, "cell_wall_clock_s")? {
         Some(v) => u64::try_from(CELL_WALL_CLOCK_S.check(v)?).expect("range is non-negative"),
         None => defaults.cell_wall_clock_s,
-    };
-    let command_yield_s = match int_field(table, "command_yield_s")? {
-        Some(v) => u64::try_from(COMMAND_YIELD_S.check(v)?).expect("range is non-negative"),
-        None => defaults.command_yield_s,
     };
     let response_bytes = match int_field(table, "response_bytes")? {
         Some(v) => usize::try_from(RESPONSE_BYTES.check(v)?).expect("range is non-negative"),
@@ -947,7 +929,6 @@ fn parse_limits(value: &toml::Value) -> Result<Limits, String> {
         scope_block,
         batch_nudge,
         cell_wall_clock_s,
-        command_yield_s,
         response_bytes,
         cells,
         evidence_gate,

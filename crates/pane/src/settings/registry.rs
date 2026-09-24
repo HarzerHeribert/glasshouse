@@ -760,15 +760,6 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
-        key: "limits.command_yield_s",
-        label: "Command hand-off",
-        description: "Seconds a command in a cell runs before it keeps going in the background and the cell moves on; `bg.wait` collects it. 0 waits every command to the end.",
-        kind: Kind::Integer,
-        choices: &[],
-        basic: false,
-        restart: true,
-    },
-    SettingSpec {
         key: "limits.response_bytes",
         label: "Response limit",
         description: "Bytes of tool response a cell may return.",

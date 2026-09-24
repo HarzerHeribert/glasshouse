@@ -26,17 +26,7 @@ use crate::runtime::observation::ReductionStats;
 use crate::runtime::outcome::{PlanItem, SourceEvidence};
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::{Access, Profile};
-use crate::tools::invoke::{CancellationToken, CheckedArgs, Confinement, ExecGrant};
-
-/// One `bash` call handed on as a job: its arguments as checked and the
-/// grant and confinement it ran under, so its collected result is the
-/// result the call would have returned.
-#[derive(Debug, Clone)]
-pub(crate) struct YieldedCall {
-    pub(crate) checked: CheckedArgs,
-    pub(crate) grant: ExecGrant,
-    pub(crate) confinement: Confinement,
-}
+use crate::tools::invoke::CancellationToken;
 
 /// Told when a helper call starts and again when it ends, with every call
 /// this cell has made so far.
@@ -256,10 +246,6 @@ pub(crate) struct RuntimeState {
     plan: RefCell<Vec<PlanItem>>,
     /// Whether this runtime belongs to a subagent, which may not start one.
     pub(crate) subagent: std::cell::Cell<bool>,
-    /// `bash` calls whose command outlived the cell's bound and went on as a
-    /// job, by job id: what `bg.wait` needs to answer with the result the
-    /// call itself would have, and to record it as that call. Task-scoped.
-    pub(crate) yielded: RefCell<HashMap<String, YieldedCall>>,
     /// What the parent task has left to spend, in tokens, refreshed each turn.
     /// `0` means unknown rather than exhausted -- a runtime nobody told is not
     /// a runtime that must refuse.
@@ -422,7 +408,6 @@ impl RuntimeState {
             next_call: std::cell::Cell::new(0),
             plan: RefCell::new(Vec::new()),
             subagent: std::cell::Cell::new(false),
-            yielded: RefCell::new(HashMap::new()),
             budget_remaining: std::cell::Cell::new(0),
             model: RefCell::new(crate::wire::MODEL.to_string()),
             instructions: RefCell::new(InstructionContext::default()),
@@ -827,21 +812,6 @@ impl RuntimeState {
         id
     }
 
-    /// How long a `bash` call waits for its command before handing it on
-    /// (`[limits] command_yield_s`), or `None` when every call waits to the
-    /// end: the setting is `0`, or this runtime is a subagent's, whose turn
-    /// loop reads no batch a `bg.done` could arrive in.
-    pub(crate) fn command_yield(&self) -> Option<std::time::Duration> {
-        if self.subagent.get() {
-            return None;
-        }
-        let seconds = self.effective_config.borrow().as_ref().map_or_else(
-            || crate::config::Limits::default().command_yield_s,
-            |config| config.limits.command_yield_s,
-        );
-        (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
-    }
-
     pub(crate) fn recorded(&self, id: u64) -> Option<RecordedCall> {
         self.calls.borrow().get(&id).cloned()
     }
@@ -855,9 +825,6 @@ impl RuntimeState {
         // it: a next task inheriting the last one's checklist would be
         // reporting work it never did.
         self.plan.borrow_mut().clear();
-        // A yielded command is a job of the task that just ended, and
-        // `bg::shutdown` has already stopped it.
-        self.yielded.borrow_mut().clear();
         // Reductions describe results that were held behind the handles this
         // just dropped, so they end with them.
         self.reductions.borrow_mut().clear();

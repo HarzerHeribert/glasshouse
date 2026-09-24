@@ -39,7 +39,6 @@ mod ask;
 mod console;
 mod decide;
 pub(super) mod helper;
-mod jobs;
 use helper::helper_callback;
 mod search;
 use search::{build_glob, build_grep};
@@ -475,9 +474,6 @@ pub(crate) fn install(scope: &mut v8::PinScope, globals: HostGlobals) {
         if let Some(function) = v8::Function::builder(bg_cancel_callback).build(scope) {
             set_fixed_key(scope, background, "cancel", function.into());
         }
-        if let Some(function) = v8::Function::builder(jobs::bg_wait_callback).build(scope) {
-            set_fixed_key(scope, background, "wait", function.into());
-        }
         set_fixed_key(scope, global, "bg", background.into());
     }
 
@@ -784,11 +780,7 @@ fn tool_callback(
         return;
     };
 
-    // `wait: true` is how long the cell waits, not an argument of the tool.
-    let is_bash = name == "bash";
-    let wait_to_end = is_bash && jobs::wait_to_end(scope, args.get(0));
-    let skipped: &[&str] = if is_bash { &["wait"] } else { &[] };
-    let mut call_args = match read_arguments(scope, args.get(0), skipped) {
+    let mut call_args = match read_arguments(scope, args.get(0)) {
         Ok(call_args) => call_args,
         Err(refusal) => {
             throw_tool_error(scope, &refusal);
@@ -893,12 +885,6 @@ fn tool_callback(
     // thing this crate does, and a `RefCell` borrow held across it would
     // outlive every reason to hold it. Every clone names the same flag.
     let token = state.token.borrow().clone();
-    // A command -- never a lifted read -- that is still running at the
-    // cell's bound goes on as a job, and the cell moves on (`jobs`).
-    let bound = (requested_tool.name() == "bash" && lifted_from.is_none() && !wait_to_end)
-        .then(|| state.command_yield())
-        .flatten();
-    let yielding = bound.map(invoke::Yielding::after);
     let traced = {
         let context = ToolContext {
             profile: &state.profile,
@@ -918,7 +904,7 @@ fn tool_callback(
         // the wait itself — not here. A hook (`glasshouse::run`) is also a
         // child of this call and has no bound of its own, so it must stay on
         // the cell's clock; that clock is all that ends a hook that hangs.
-        invoke::run_traced_yielding(
+        invoke::run_traced_pausing(
             &context,
             &token,
             tool.name(),
@@ -932,21 +918,19 @@ fn tool_callback(
                     || isolate.is_execution_terminating()
             },
             Some(&state.host_clock),
-            yielding.as_ref(),
         )
     };
 
     // The lift's exact range is applied before anything reads the result,
     // so the trajectory, the repeat check and the handle all see the bytes
     // the program was actually given.
-    let mut traced = invoke::Traced {
+    let traced = invoke::Traced {
         outcome: traced.outcome.map(|result| match projection {
             Some(projection) => project(result, projection),
             None => result,
         }),
         checked: traced.checked,
     };
-    let yielded_job = jobs::hand_on(&state, &mut traced, yielding.as_ref(), bound);
 
     // §9.4: recorded here because this is where every call funnels, and
     // recorded with the arguments `invoke` checked rather than the ones the
@@ -954,7 +938,6 @@ fn tool_callback(
     // constructs, so the line says what the program could have caught, and
     // `error` is the message that throw carries.
     let (ended, error) = match &traced.outcome {
-        Ok(_) if yielded_job.is_some() => (Ended::Ok, None),
         Ok(result) => match call_failure(tool.name(), result) {
             Some(message) => (
                 Ended::Threw {
@@ -1085,16 +1068,12 @@ fn tool_callback(
                 &result,
                 &state,
                 repeat.as_ref(),
-                yielded_job.is_some(),
             );
             if let (Some(digest), Some(_)) = (&digest, call) {
                 state.note_observation(tool.name(), &traced.checked, digest, call);
             }
             if call.is_some() {
                 note_mutation(&state, tool.name(), &traced.checked, &result);
-            }
-            if let Some(job) = &yielded_job {
-                jobs::mark_running(scope, value, job);
             }
             // The canonical typed result, captured as the model sees it, for a
             // frame lowered from direct provider calls. Stringifying the value
@@ -1153,11 +1132,7 @@ fn context_ranges(packed: &crate::project::source_context::SourceContext) -> Vec
 /// spell a JavaScript value the tool cannot use: a handle passed as `content`
 /// wrote the nine characters `[object Object]` into a real file, with no
 /// error anywhere.
-fn read_arguments(
-    scope: &mut v8::PinScope,
-    value: v8::Local<v8::Value>,
-    skipped: &[&str],
-) -> Result<Args, String> {
+fn read_arguments(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Args, String> {
     let mut args = Args::new();
     if !value.is_object() {
         return Ok(args);
@@ -1180,9 +1155,6 @@ fn read_arguments(
             continue;
         }
         let key = key.to_rust_string_lossy(scope);
-        if skipped.contains(&key.as_str()) {
-            continue;
-        }
         if given.is_array() {
             let Ok(array) = v8::Local::<v8::Array>::try_from(given) else {
                 return Err(format!(
@@ -1286,15 +1258,12 @@ fn typed_result<'s>(
     result: &ToolResult,
     state: &Rc<RuntimeState>,
     repeat: Option<&crate::runtime::state::Repeat>,
-    handed_on: bool,
 ) -> (v8::Local<'s, v8::Value>, Option<u64>) {
     // Before the builders, because every one of them reads `stdout` and none
     // of them reads the exit code: a `read` of a missing file produced a
     // `File` handle of 0 bytes carrying the SHA-256 of the empty string, and
-    // a model quoted it as the task's answer. A command handed on as a job
-    // (`jobs`) has no exit code because it has not exited, which is not a
-    // failure; its collected result is checked here like any other.
-    if let Some(message) = call_failure(tool.name(), result).filter(|_| !handed_on) {
+    // a model quoted it as the task's answer.
+    if let Some(message) = call_failure(tool.name(), result) {
         throw_tool_error(scope, &message);
         // The exception is what the callback answers with; V8 discards a
         // return value once one is pending, and nothing below has run, so no
