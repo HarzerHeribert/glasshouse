@@ -101,3 +101,7 @@ pre.bird{background:none;color:var(--ink);font:17px/1 Menlo,'DejaVu Sans Mono','
 }
 :root[data-theme="dark"]{--paper:#0e1210;--ink:#e6ece8;--line:#2d3632;--muted:#aab6ae;--muted-2:#8f9b93;--surface:#1b221e;--code-bg:#050706;--code-fg:#e6ece8;--accent-ink:#dfff00}
 @media(min-width:901px){.hero:not(.detail-hero) h1{font-size:clamp(80px,8.6vw,150px)}}
+
+.table th{text-align:left;font:12px var(--mono);letter-spacing:.04em;color:var(--muted-2);padding:0 14px 10px 0}
+.bench-notes{margin-top:22px;font-size:14px;line-height:1.6;color:var(--muted-2);max-width:760px}
+@media(max-width:600px){.table thead{display:none}.bench .table td[data-label]:not(:first-child)::before{content:attr(data-label) ' — ';color:var(--muted-2);font:12px var(--mono)}}

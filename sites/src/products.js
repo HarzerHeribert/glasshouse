@@ -52,6 +52,35 @@ model reads it again  model`,
   ],
 };
 
+// Every measured run of Pane, in order, setbacks included. Sources: the
+// benchmark-history compilation of 2026-09-24 (.agent-runtime/benchmarks,
+// ~/projects/pane-benchmarks, docs/product/pane/helper-measurements.md,
+// docs/process/dogfooding.md). n is small everywhere; say so.
+export const history = [
+  ['Sep 6', 'Pane vs Claude Code · 3 script repairs · 1 attempt each · DeepSeek V4 Flash', 'Claude Code as good or better wherever anything worked; neither fixed 2 of the 3.'],
+  ['Sep 7', 'Pane vs Claude Code · same prompt, fixture and checker · 2 trials · Claude Sonnet 4.6', 'Claude Code 2 of 2. Pane 0 of 2 on its own; it passed only after a hint.'],
+  ['Sep 12 → 13', 'Terminal-Bench 2.0 · 4 tasks × 3 · GPT-5.6', '9 of 12 → 12 of 12 after the interface change — at about 40 % more tokens.'],
+  ['Sep 14', 'Terminal-Bench 2.0 · full suite · 1 attempt each', 'Paused after 37 of 89 tasks: 18 of 37 passed.'],
+  ['Sep 17', 'A hard task (build an ssh tool) · 1 attempt, twice', 'The first run did not compile; the second compiled and passed its tests but was not finished — at 20.2M tokens, up from 11.8M.'],
+  ['Sep 23 → 24', 'Ruler fix and explore tasks · 3 attempts each · GPT-6', 'Every attempt passed. Token use moved within the noise: the spread inside one setup (150–190k) is larger than any change between setups.'],
+  ['Sep 24', 'Prompt cache fixed', 'The main model’s cache reads went from 9–35 % to 90 %. Every GPT token figure above predates this.'],
+];
+
+// Pane vs Codex, 2026-09-24, pane ruler: same tasks, gpt-6-sol medium, 3
+// attempts each (scratchpad h2h-pane, h2h-codex, codexbase attempts.jsonl;
+// Codex tokens from its own session logs, cached included).
+export const benchmark = {
+  verdict: 'Same results. Pane used fewer tokens on three of the four tasks. Codex was faster on all four.',
+  head: ['Task', 'Pane', 'Pane, low effort', 'Codex'],
+  rows: [
+    ['Fix a failing test', '3/3 · 191 s · 367k', '3/3 · 172 s · 377k', '3/3 · 77 s · 563k'],
+    ['Explore and explain', '3/3 · 137 s · 330k · 7.3 of 8 facts', '3/3 · 136 s · 331k · 7.7 of 8', '3/3 · 73 s · 398k · 7.3 of 8'],
+    ['Implement a small feature', '3/3 · 90 s · 164k', '3/3 · 57 s · 105k', '3/3 · 55 s · 239k'],
+    ['Rename across files', '3/3 · 381 s · 1.81M', '3/3 · 313 s · 1.05M', '3/3 · 164 s · 1.21M'],
+  ],
+  notes: 'Passed · mean time from launch to exit, including the task’s test run · mean tokens, cached included (Pane’s main model; its helpers add about 12 %). Pane waits for its own completion check after answering, 15–60 s of each time. Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
+};
+
 export const glasshouse = {
   intro: 'Glasshouse runs several coding-agent sessions side by side — Pane, Claude Code, Codex, OpenCode — as real terminal sessions you can watch and type into, and gives them one view: memory that belongs to the project, delegation between sessions, and a warning when two sessions head for the same file.',
   status: 'Preview. Glasshouse runs, and it is where Pane came from, but it is not at Pane’s readiness: several of its parts are still moving and its setup is for people who read the source. If you want one agent that works today, use Pane.',

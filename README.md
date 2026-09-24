@@ -81,12 +81,34 @@ It also has what you would expect: plan mode, subagents and custom agents,
 background jobs, a to-do list, web search and fetch, image input, rollback of
 the agent's changes, and resume.
 
-<!-- benchmark: pending — Pane vs Codex on the ruler tasks, same model and effort -->
+## Measured against Codex
+
+Same four tasks, same model (GPT-6 Sol) and effort, three attempts each,
+2026-09-24. **Same results. Pane used fewer tokens on three of the four tasks.
+Codex was faster on all four.**
+
+| Task | Pane | Pane, low effort | Codex |
+|---|---|---|---|
+| Fix a failing test | 3/3 · 191 s · 367k | 3/3 · 172 s · 377k | 3/3 · 77 s · 563k |
+| Explore and explain (facts of 8) | 3/3 · 137 s · 330k · 7.3 | 3/3 · 136 s · 331k · 7.7 | 3/3 · 73 s · 398k · 7.3 |
+| Implement a small feature | 3/3 · 90 s · 164k | 3/3 · 57 s · 105k | 3/3 · 55 s · 239k |
+| Rename across files | 3/3 · 381 s · 1.81M | 3/3 · 313 s · 1.05M | 3/3 · 164 s · 1.21M |
+
+Passed · mean time from launch to exit, including the task's test run · mean
+tokens with cached ones included (Pane's main model; its helpers add about
+12 %). Part of Pane's time, 15–60 s, is its own completion check after it has
+answered. Codex ran in its workspace-write sandbox, Pane with full access.
+Three attempts per cell is direction, not proof.
+
+Earlier measurements, setbacks included: Claude Code beat Pane in both
+comparisons of 2026-09-06 and 09-07; on a four-task Terminal-Bench slice Pane
+went from 9 of 12 to 12 of 12 (09-12 → 09-13) at about 40 % more tokens; the
+full Terminal-Bench suite was paused at 18 of 37. Before 2026-09-24 Pane's GPT
+prompt cache was broken, so every earlier GPT token figure overstates its cost.
 
 ## Where it stands
 
-Measured today on the ruler's tasks, Pane passes the fix and explore tasks it
-is given. **Not yet built:** a way to escalate a command outside the sandbox,
+**Not yet built:** a way to escalate a command outside the sandbox,
 untrusted-repository handling, and IDE integration. An interactive
 cross-session picker belongs to Glasshouse, below; Pane keeps `--resume` and
 `--sessions`. The full comparison against Claude Code and Codex, row by row,

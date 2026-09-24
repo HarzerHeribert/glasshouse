@@ -1,7 +1,7 @@
 import '@fontsource/barlow-condensed/latin-600.css';
 import '@fontsource/ibm-plex-mono/latin-400.css';
 import './style.css';
-import { repo, installCommand, bird, flap, pane, glasshouse } from './products.js';
+import { repo, installCommand, bird, flap, pane, glasshouse, history as paneHistory, benchmark as paneBench } from './products.js';
 
 const page = document.body.dataset.page || 'home';
 const root = page === 'home' ? './' : '../';
@@ -30,11 +30,11 @@ const featureSection = `<section id="features" class="section detail-section"><d
 
 // The Pane-vs-Codex comparison is still running; its numbers go in this
 // section once measured. Until then it says so, and invents nothing.
-const benchmark = `<section id="benchmark" class="section bench"><!-- benchmark: pending --><div class="relationship-copy"><h2>MEASURED,<br>NOT CLAIMED.</h2><p>Pane and Codex are running the same tasks on the same model and effort. The results — wins and losses, with every attempt’s record — will be published here when the runs finish.</p></div></section>`;
+const benchmark = `<section id="benchmark" class="section bench"><div class="relationship-copy"><h2>MEASURED,<br>NOT CLAIMED.</h2><p>Pane against Codex on the same four tasks, the same model (GPT-6 Sol) and the same effort. ${paneBench.verdict}</p></div><table class="table"><thead><tr>${paneBench.head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${paneBench.rows.map((row) => `<tr>${row.map((cell, i) => `<td data-label="${paneBench.head[i]}">${cell}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="bench-notes">${paneBench.notes}</p></section>`;
 
 // How Pane's measured numbers have moved over time, setbacks included; filled
 // with sourced figures by whoever publishes them, never invented here.
-const history = `<section id="history" class="section history"><!-- history: pending --><div class="relationship-copy"><h2>HOW IT HAS<br>BEEN MEASURED.</h2><p>Every measurement of Pane over time will be listed here with its date and its source — including the ones that went the wrong way.</p></div></section>`;
+const history = `<section id="history" class="section history"><div class="relationship-copy"><h2>HOW IT HAS<br>BEEN MEASURED.</h2><p>Every measured run, in order — including the ones that went the wrong way. Small samples throughout; read them as direction, not proof.</p></div><table class="table"><tbody>${paneHistory.map(([when, what, result]) => `<tr><td>${when}</td><td>${what}</td><td>${result}</td></tr>`).join('')}</tbody></table></section>`;
 
 const limits = `<section id="limits" class="section limits"><div class="relationship-copy"><h2>WHERE IT<br>STANDS.</h2><p>A pre-release, said plainly. What it does not do yet is as much a part of the product as what it does.</p></div><dl class="limit-list">${pane.limits.map(([term, text]) => `<div><dt>${term}</dt><dd>${text}</dd></div>`).join('')}</dl></section>`;
 
