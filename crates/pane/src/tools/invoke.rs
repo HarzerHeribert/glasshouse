@@ -38,6 +38,9 @@
 /// output filter for the one that cannot be stepped over by name.
 mod broad;
 mod process;
+mod running;
+pub(crate) use running::{Running, Yielding};
+use running::{Waited, drained, wait_child};
 /// `read` and `grep` performed inside this process. Used where the registry
 /// declares both in-process — Windows — and compiled under `test` on every
 /// host so the ordinary gate asserts the matcher and the walker.
@@ -587,6 +590,8 @@ struct Watching<'a> {
     /// this path delivers have no bound of their own and must stay on the
     /// caller's clock.
     waiting: Option<&'a std::sync::Arc<crate::approval::WaitClock>>,
+    /// When a shell command still running at its bound is handed back.
+    yielding: Option<&'a Yielding>,
 }
 
 pub(crate) fn run_traced_with_gate(
@@ -615,6 +620,24 @@ pub(crate) fn run_traced_pausing(
     gate: Option<&crate::approval::Gate>,
     stopped: &dyn Fn() -> bool,
     waiting: Option<&std::sync::Arc<crate::approval::WaitClock>>,
+) -> Traced {
+    run_traced_yielding(ctx, token, name, args, gate, stopped, waiting, None)
+}
+
+/// [`run_traced_pausing`] that hands a shell command still running after
+/// `yielding.after` back to the caller instead of waiting it out
+/// ([`Yielding`]). Everything before the spawn -- the argument check, the
+/// gate, the hooks, the confinement -- is the call's own and unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_traced_yielding(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    name: &str,
+    args: &Args,
+    gate: Option<&crate::approval::Gate>,
+    stopped: &dyn Fn() -> bool,
+    waiting: Option<&std::sync::Arc<crate::approval::WaitClock>>,
+    yielding: Option<&Yielding>,
 ) -> Traced {
     let mut checked = CheckedArgs::new();
     let Some(tool) = registry::lookup(name) else {
@@ -646,6 +669,7 @@ pub(crate) fn run_traced_pausing(
                     gate,
                     stopped,
                     waiting,
+                    yielding,
                 },
             )
         },
@@ -830,6 +854,7 @@ fn checked_call(
         gate,
         stopped,
         waiting,
+        yielding,
     } = watching;
     let stop = || token.is_cancelled() || stopped();
     if stop() {
@@ -938,7 +963,8 @@ fn checked_call(
                 argv.insert(1, format!("--exclude-dir={name}").into());
             }
         }
-        spawn_confined(ctx.profile, &stop, tool, &argv, waiting)?
+        let yielding = yielding.filter(|_| tool.argv() == Argv::ShellCommand);
+        spawn_confined(ctx.profile, &stop, tool, &argv, waiting, yielding)?
     };
     if requested == "grep" && broad_search {
         result.stdout = filter_grep_artifacts(ctx.profile.root(), &result.stdout);
@@ -1751,6 +1777,7 @@ fn spawn_confined(
     tool: &Tool,
     argv: &[std::ffi::OsString],
     waiting: Option<&std::sync::Arc<crate::approval::WaitClock>>,
+    yielding: Option<&Yielding>,
 ) -> Result<ToolResult, ToolError> {
     let cancelled = || ToolError::Cancelled {
         tool: tool.name().to_string(),
@@ -1913,33 +1940,42 @@ fn spawn_confined(
     // stopping the task still kills this child on the next poll.
     let _waiting = waiting.map(|clock| clock.pause());
 
-    let status = loop {
-        if stopped() {
-            kill_and_reap(&mut child);
-            return Err(cancelled());
-        }
-        match process::try_complete(&mut child) {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(CANCEL_POLL),
-            // The wait itself failing leaves a running child nothing here
-            // can observe again, so it is killed on the way out. Reporting
-            // it as `Spawn` is not new lumping: `output()` raised the same
-            // variant for its own wait and read failures.
-            Err(error) => {
-                kill_and_reap(&mut child);
-                return Err(spawn_failed(error));
+    let due = yielding.map(|yielding| std::time::Instant::now() + yielding.after);
+    let status = match wait_child(&mut child, stopped, due) {
+        Waited::Exited(status) => status,
+        Waited::Cancelled => return Err(cancelled()),
+        // The wait itself failing leaves a running child nothing here can
+        // observe again, so `wait_child` killed it on the way out. Reporting
+        // it as `Spawn` is not new lumping: `output()` raised the same
+        // variant for its own wait and read failures.
+        Waited::Failed(error) => return Err(spawn_failed(error)),
+        // Still running at the caller's bound: the child goes back to the
+        // caller whole, and this call answers with nothing it did not see.
+        Waited::Due => {
+            if let Some(yielding) = yielding {
+                *yielding.handed.borrow_mut() = Some(Running {
+                    child,
+                    stdout,
+                    stderr,
+                });
             }
+            return Ok(ToolResult {
+                modified: None,
+                tool: tool.name().to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                grant: grant.clone(),
+                confinement,
+            });
         }
     };
 
     // Descendants in the owned group have now been stopped. Keep the final
     // pipe drain cancellable too; a process that deliberately escaped the
     // group must not hold this host callback indefinitely through its pipe.
-    while !stdout.is_finished() || !stderr.is_finished() {
-        if stopped() {
-            return Err(cancelled());
-        }
-        std::thread::sleep(CANCEL_POLL);
+    if !drained(&stdout, &stderr, stopped) {
+        return Err(cancelled());
     }
     Ok(ToolResult {
         modified: None,

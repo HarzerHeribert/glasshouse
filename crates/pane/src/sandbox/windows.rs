@@ -1695,6 +1695,15 @@ mod platform {
         pub stderr: Option<File>,
     }
 
+    // SAFETY: `process` and `job` are Win32 kernel-object handles, which are
+    // process-wide and may be waited on, terminated and closed from any
+    // thread; nothing here is thread-affine (no window, no COM apartment).
+    // The pipes are `File`s, already `Send`. A command handed to the
+    // background after its bound (`invoke::Running`) moves to the job's
+    // thread with this value, exactly as the child of a `bg.run` job is
+    // created on that thread in the first place.
+    unsafe impl Send for ContainedChild {}
+
     impl ContainedChild {
         pub fn id(&self) -> u32 {
             self.pid

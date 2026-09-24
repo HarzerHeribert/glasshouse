@@ -284,6 +284,108 @@ pub fn run(
     ))
 }
 
+/// A `bash` call from a cell whose command outlived the cell's bound
+/// (`invoke::Yielding`), taken onto the board as a command job.
+///
+/// **It is a `bg.run` job in everything but its start**: the same token,
+/// the same `bg.done` with the same payload, the same kill at [`cancel`] and
+/// [`shutdown`] -- only the process already exists, started and confined by
+/// the foreground call, whose grant, gate and hooks it already passed.
+pub(crate) fn adopt(session: &SessionId, command: &str, running: invoke::Running) -> String {
+    let token = CancellationToken::new();
+    let handle = with_board(session, |board| {
+        board.next += 1;
+        let handle = format!("job{}", board.next);
+        board.jobs.insert(
+            handle.clone(),
+            JobEntry {
+                token: token.clone(),
+                cancelled: false,
+                finished: false,
+                thread: None,
+                started: Instant::now(),
+                progress: None,
+                inbox: None,
+                record: None,
+            },
+        );
+        handle
+    });
+    let work = Work::Command(command.to_string());
+    let (thread_session, thread_handle) = (session.clone(), handle.clone());
+    let thread = std::thread::spawn(move || {
+        let result = running
+            .finish(&|| token.is_cancelled())
+            .map(|(code, stdout, stderr)| JobResult {
+                stdout,
+                stderr,
+                status: code.map_or_else(|| "signal".to_string(), |code| code.to_string()),
+            });
+        publish(&thread_session, &thread_handle, &work, "exit", result);
+        with_board(&thread_session, |board| {
+            if let Some(entry) = board.jobs.get_mut(&thread_handle) {
+                entry.finished = true;
+            }
+        });
+    });
+    with_board(session, |board| {
+        if let Some(entry) = board.jobs.get_mut(&handle) {
+            entry.thread = Some(thread);
+        }
+    });
+    handle
+}
+
+/// What one [`wait`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobWait {
+    /// The job exited; its result, as its `bg.done` payload holds it.
+    Done(JobResult),
+    /// Still running when the bound passed, or the caller was stopped.
+    Running,
+    /// No command job of that name on this session's board.
+    Unknown,
+}
+
+/// Waits for one command job to exit, at most `bound`, and answers with its
+/// result.
+///
+/// **Collecting a result consumes its `bg.done`.** The program holds the
+/// output now; delivering the same exit again in the next batch would hand
+/// the model a second copy of work it has already read.
+pub fn wait(
+    session: &SessionId,
+    handle: &str,
+    bound: Duration,
+    stopped: &dyn Fn() -> bool,
+) -> JobWait {
+    let deadline = Instant::now() + bound;
+    let exists = with_board(session, |board| board.jobs.contains_key(handle));
+    if !exists {
+        return JobWait::Unknown;
+    }
+    while !finished(session, handle) {
+        if stopped() || Instant::now() >= deadline {
+            return JobWait::Running;
+        }
+        std::thread::sleep(DEADLINE_SLICE);
+    }
+    let payload = format!("{handle}#exit");
+    with_board(session, |board| {
+        match board.payloads.get(&payload).cloned() {
+            Some(result) => {
+                board
+                    .pending
+                    .retain(|event| event.payload.as_str() != payload.as_str());
+                JobWait::Done(result)
+            }
+            // A watch emits per match, never an `exit`; a finished job with no
+            // exit payload is not one `wait` can answer for.
+            None => JobWait::Unknown,
+        }
+    })
+}
+
 /// §5's `bg.watch(cmd, {every, until})`, built on [`run`]'s machinery rather
 /// than a second spawn path: the same thread, the same call, in a loop.
 ///
@@ -713,6 +815,21 @@ impl JobThread {
     /// A cancelled or timed-out job emits one too, with `status:
     /// "cancelled"` — §5's "nothing waits for a dead result".
     fn emit(&self, emission: &str, result: Result<JobResult, ToolError>) {
+        publish(&self.session, &self.handle, &self.work, emission, result);
+    }
+}
+
+/// Records one emission's payload and raises its `bg.done` (or `agent.done`)
+/// on `session`'s board. A cancelled or failed call still emits one, with
+/// its status -- §5's "nothing waits for a dead result".
+fn publish(
+    session: &SessionId,
+    handle: &str,
+    work: &Work,
+    emission: &str,
+    result: Result<JobResult, ToolError>,
+) {
+    {
         let job = match result {
             Ok(job) => job,
             Err(ToolError::Cancelled { .. }) => JobResult {
@@ -726,17 +843,17 @@ impl JobThread {
                 status: "failed".to_string(),
             },
         };
-        let payload = format!("{}#{emission}", self.handle);
+        let payload = format!("{handle}#{emission}");
         let line = summary(&format!(
             "{} → {} ({} B out)",
-            self.work.summary_subject(),
+            work.summary_subject(),
             job.status,
             job.stdout.len()
         ));
-        with_board(&self.session, |board| {
+        with_board(session, |board| {
             board.payloads.insert(payload.clone(), job);
             board.pending.push(Event::pending(
-                match &self.work {
+                match work {
                     Work::Command(_) => Kind::BgDone {
                         emission: emission.to_string(),
                     },
@@ -744,9 +861,9 @@ impl JobThread {
                         emission: emission.to_string(),
                     },
                 },
-                match &self.work {
-                    Work::Command(_) => format!("bg/{}", self.handle),
-                    Work::Agent { .. } => format!("agent/{}", self.handle),
+                match work {
+                    Work::Command(_) => format!("bg/{handle}"),
+                    Work::Agent { .. } => format!("agent/{handle}"),
                 },
                 now(),
                 PayloadRef::new(payload.clone()),
