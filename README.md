@@ -83,31 +83,36 @@ the agent's changes, and resume.
 
 ## Measured against Codex
 
-Same four tasks, same model (GPT-6 Sol) and effort, three attempts each,
-2026-09-24. **Same results. Pane used fewer tokens on three of the four tasks.
-Codex was faster on all four.**
+Same four tasks, same model (GPT-6 Sol), three attempts each, 2026-09-24,
+Pane at its shipped defaults (6fc97dc7). **Same results. Pane used 18 %
+fewer tokens overall and as many uncached ones. Codex was 1.28× faster
+overall: Pane was faster on the two small tasks and slower on the two larger
+edits.**
 
-| Task | Pane | Pane, low effort | Codex |
-|---|---|---|---|
-| Fix a failing test | 3/3 · 191 s · 367k | 3/3 · 172 s · 377k | 3/3 · 77 s · 563k |
-| Explore and explain (facts of 8) | 3/3 · 137 s · 330k · 7.3 | 3/3 · 136 s · 331k · 7.7 | 3/3 · 73 s · 398k · 7.3 |
-| Implement a small feature | 3/3 · 90 s · 164k | 3/3 · 57 s · 105k | 3/3 · 55 s · 239k |
-| Rename across files | 3/3 · 381 s · 1.81M | 3/3 · 313 s · 1.05M | 3/3 · 164 s · 1.21M |
+| Task | Pane | Codex |
+|---|---|---|
+| Fix a failing test | 3/3 · 134 s · 452k (49k uncached) | 3/3 · 77 s · 563k (43k) |
+| Explore and explain | 3/3 · 71 s · 312k (45k) · 8.0 of 8 facts | 3/3 · 73 s · 398k (68k) · 7.3 of 8 |
+| Implement a small feature | 3/3 · 53 s · 124k (23k) | 3/3 · 55 s · 239k (25k) |
+| Rename across files | 3/3 · 215 s · 1.09M (97k) | 3/3 · 164 s · 1.21M (76k) |
 
 Passed · mean time from launch to exit, including the task's test run · mean
-tokens with cached ones included (Pane's main model; its helpers add about
-12 %). Codex ran in its workspace-write sandbox, Pane with full access. Three
-attempts per cell is direction, not proof.
+tokens per attempt, cached included, everything Pane's gateway served (main
+model, helpers, the Jev classifier) against Codex's own session logs. Codex
+ran in its workspace-write sandbox, Pane with full access. Three attempts per
+cell is direction, not proof.
 
-**15–60 s of every Pane time is its completion check**: after answering, a
-second model reviews the result, and the process waits for its verdict. In
-these 24 attempts it changed nothing — 23 passed clean, one finding was not
-acted on and that attempt passed its tests — and in earlier runs its findings
-were false alarms. Without it (time to the answer plus the same test run),
-Pane took 119 / 124 s on the fix, 80 / 69 s on the explore, 78 / 42 s on the
-feature and 341 / 286 s on the rename (default / low effort), against Codex's
-77, 73, 55 and 164 s: level or ahead on the two small tasks, still slower on
-the two larger edits.
+Where Pane's time goes: its model time per turn is equal or lower than
+Codex's; the gap is commands. Codex's long commands keep running in the
+background while the model goes on; a Pane cell waits for each one. Pane also
+followed this repository's own `CLAUDE.md` gate script, which Codex mostly
+skipped. That is the next thing being built.
+
+An hour earlier the same comparison ran with Pane holding each one-task run
+open for its completion check (15–60 s, and it changed no outcome) and at the
+provider's default effort: 191 / 137 / 90 / 381 s. Both are now defaults of
+the past — the check no longer holds a one-task run, and GPT models run at
+low effort unless you choose otherwise.
 
 Earlier measurements, setbacks included: Claude Code beat Pane in both
 comparisons of 2026-09-06 and 09-07; on a four-task Terminal-Bench slice Pane

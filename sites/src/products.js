@@ -64,22 +64,23 @@ export const history = [
   ['Sep 17', 'A hard task (build an ssh tool) · 1 attempt, twice', 'The first run did not compile; the second compiled and passed its tests but was not finished — at 20.2M tokens, up from 11.8M.'],
   ['Sep 23 → 24', 'Ruler fix and explore tasks · 3 attempts each · GPT-6', 'Every attempt passed. Token use moved within the noise: the spread inside one setup (150–190k) is larger than any change between setups.'],
   ['Sep 24', 'Prompt cache fixed', 'The main model’s cache reads went from 9–35 % to 90 %. Every GPT token figure above predates this.'],
+  ['Sep 24', 'Pane vs Codex · 4 tasks × 3 · GPT-6 · Pane holding each run open for its completion check, provider-default effort', 'Same results; Pane fewer tokens on three of four; Codex faster on all four (191 / 137 / 90 / 381 s against 77 / 73 / 55 / 164). The check changed no outcome, so it no longer holds a one-task run, and GPT now runs at low effort by default.'],
 ];
 
 // Pane vs Codex, 2026-09-24, pane ruler: same tasks, gpt-6-sol medium, 3
 // attempts each (scratchpad h2h-pane, h2h-codex, codexbase attempts.jsonl;
 // Codex tokens from its own session logs, cached included).
 export const benchmark = {
-  verdict: 'Same results. Pane used fewer tokens on three of the four tasks. Codex was faster on all four.',
-  head: ['Task', 'Pane', 'Pane, low effort', 'Codex'],
+  verdict: 'Same results. Pane used 18 % fewer tokens overall and as many uncached ones. Codex was 1.28× faster overall: Pane was faster on the two small tasks and slower on the two larger edits.',
+  head: ['Task', 'Pane', 'Codex'],
   rows: [
-    ['Fix a failing test', '3/3 · 191 s · 367k', '3/3 · 172 s · 377k', '3/3 · 77 s · 563k'],
-    ['Explore and explain', '3/3 · 137 s · 330k · 7.3 of 8 facts', '3/3 · 136 s · 331k · 7.7 of 8', '3/3 · 73 s · 398k · 7.3 of 8'],
-    ['Implement a small feature', '3/3 · 90 s · 164k', '3/3 · 57 s · 105k', '3/3 · 55 s · 239k'],
-    ['Rename across files', '3/3 · 381 s · 1.81M', '3/3 · 313 s · 1.05M', '3/3 · 164 s · 1.21M'],
+    ['Fix a failing test', '3/3 · 134 s · 452k (49k uncached)', '3/3 · 77 s · 563k (43k)'],
+    ['Explore and explain', '3/3 · 71 s · 312k (45k) · 8.0 of 8 facts', '3/3 · 73 s · 398k (68k) · 7.3 of 8'],
+    ['Implement a small feature', '3/3 · 53 s · 124k (23k)', '3/3 · 55 s · 239k (25k)'],
+    ['Rename across files', '3/3 · 215 s · 1.09M (97k)', '3/3 · 164 s · 1.21M (76k)'],
   ],
-  notes: 'Passed · mean time from launch to exit, including the task’s test run · mean tokens, cached included (Pane’s main model; its helpers add about 12 %). Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
-  check: '15–60 s of every Pane time is its completion check: a second model reviews the answer and the process waits for the verdict. In these 24 attempts it changed nothing, and in earlier runs its findings were false alarms. Without it, Pane took 119 / 124 s on the fix, 80 / 69 s on the explore, 78 / 42 s on the feature and 341 / 286 s on the rename (default / low effort) against Codex’s 77, 73, 55 and 164 s — level or ahead on the two small tasks, still slower on the two larger edits.',
+  notes: 'Pane at its shipped defaults. Passed · mean time from launch to exit, including the task’s test run · mean tokens per attempt, cached included — everything Pane’s gateway served (main model, helpers, the Jev classifier) against Codex’s own session logs. Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
+  check: 'Where Pane’s time goes: its model time per turn is equal or lower than Codex’s; the gap is commands. Codex’s long commands keep running while its model goes on; a Pane cell waits for each one. That is the next thing being built.',
 };
 
 export const glasshouse = {
