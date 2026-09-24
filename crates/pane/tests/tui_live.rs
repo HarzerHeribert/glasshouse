@@ -388,64 +388,76 @@ impl Drop for App {
     }
 }
 
+/// Answers every request in turn, each after 700 ms, and hands each to the
+/// channel -- so the first request a test reads is the first the session
+/// sent. It used to answer one connection and drop the listener: a second
+/// turn (the Windows paste branch of
+/// `live_composition_completion_model_selection_busy_input_resize_and_exit`)
+/// then found no server, and Windows does not refuse a closed loopback port
+/// promptly (`approval_provider` has the measurement).
 fn provider() -> (String, mpsc::Receiver<serde_json::Value>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (sender, requests) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut len = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    len = value.trim().parse().unwrap();
+                }
             }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                len = value.trim().parse().unwrap();
+            let mut body = vec![0; len];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
             }
-        }
-        let mut body = vec![0; len];
-        reader.read_exact(&mut body).unwrap();
-        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let streaming = request["stream"] == true;
-        sender.send(request).unwrap();
-        thread::sleep(Duration::from_millis(700));
-        let body=serde_json::json!({"role":"assistant","content":[{"type":"text","text":"```pane\nanswer(\"LIVE RESULT INTACT\");\n```"}],"usage":{"input_tokens":123,"output_tokens":12}}).to_string();
-        // The client is allowed to be gone by now: every test kills pane in
-        // `App::drop`, and this thread is still inside its 700 ms sleep when
-        // that happens. Windows spells the resulting write `ConnectionReset`
-        // rather than `BrokenPipe`, and unwrapping it panicked a detached
-        // thread mid-run for no defect at all. The request was already
-        // delivered above, so a test that needed it is unaffected, and one
-        // that does not gets a quiet exit instead of a panic in the log.
-        if streaming {
-            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let response = body["content"][0]["text"].as_str().unwrap();
-            let events = [
-                serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":123}}}),
-                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":response}}),
-                serde_json::json!({"type":"message_delta","usage":{"output_tokens":12}}),
-                serde_json::json!({"type":"message_stop"}),
-            ];
-            let body = events
-                .iter()
-                .map(|e| format!("data: {e}\n\n"))
-                .collect::<String>();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        } else {
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            let Ok(request) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let streaming = request["stream"] == true;
+            let _ = sender.send(request);
+            thread::sleep(Duration::from_millis(700));
+            let body=serde_json::json!({"role":"assistant","content":[{"type":"text","text":"```pane\nanswer(\"LIVE RESULT INTACT\");\n```"}],"usage":{"input_tokens":123,"output_tokens":12}}).to_string();
+            // The client is allowed to be gone by now: every test kills pane in
+            // `App::drop`, and this thread is still inside its 700 ms sleep when
+            // that happens. Windows spells the resulting write `ConnectionReset`
+            // rather than `BrokenPipe`, and unwrapping it panicked a detached
+            // thread mid-run for no defect at all. The request was already
+            // delivered above, so a test that needed it is unaffected, and one
+            // that does not gets a quiet exit instead of a panic in the log.
+            if streaming {
+                let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let response = body["content"][0]["text"].as_str().unwrap();
+                let events = [
+                    serde_json::json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":123}}}),
+                    serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":response}}),
+                    serde_json::json!({"type":"message_delta","usage":{"output_tokens":12}}),
+                    serde_json::json!({"type":"message_stop"}),
+                ];
+                let body = events
+                    .iter()
+                    .map(|e| format!("data: {e}\n\n"))
+                    .collect::<String>();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            } else {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
         }
     });
     (base, requests)
@@ -824,6 +836,9 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     app.send(b"\x1b[200~first line\nsecond line\x1b[201~");
     app.contains("second line");
     let screen = app.screen.screen().contents();
+    // How many turns this session ends up running: one, or two where the
+    // paste branch below submitted the first line as a turn of its own.
+    let mut turns = 1;
     let a_turn_is_running = screen.contains("thinking") || screen.contains("LIVE RESULT INTACT");
     if !screen.contains("first line") && a_turn_is_running {
         // The console stripped the markers and the pasted newline submitted
@@ -839,6 +854,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
         );
         requests.recv_timeout(Duration::from_secs(5)).unwrap();
         app.contains_line("LIVE RESULT INTACT");
+        turns = 2;
     } else {
         assert!(
             screen.contains("first line"),
@@ -853,7 +869,15 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     app.contains("thinking");
     app.send(b"next draft");
     app.contains("next draft");
-    app.contains("complete");
+    // This turn's own ending, not the first turn's: where the paste branch
+    // ran, "complete" and the result are already on screen from the turn
+    // before, and a `/exit` sent while this one still runs is an Enter a
+    // running turn ignores.
+    app.wait("this turn completes", |screen| {
+        // The transcript's line ends in a full stop; the composer's border
+        // says "✓ complete" too, without one, and must not be counted.
+        screen.contents().matches("✓ complete.").count() >= turns
+    });
     app.contains_line("LIVE RESULT INTACT");
     assert!(app.screen.screen().contents().contains("next draft"));
     for width in [60, 80, 120, 200] {
@@ -965,11 +989,20 @@ fn slash_mode_walks_into_a_plan_mode_that_reads_while_shift_tab_moves_the_rung()
     app.send(b"/context\r");
     app.contains("Next request:");
     app.send(b"\x1b");
+    // Closed means the panel's frame is gone, not only its text: a redraw
+    // caught halfway has already cleared "Next request:" while the frame
+    // is still drawn (measured locally, 2026-09-25), and an open text panel
+    // swallows every plain key, Enter included -- so `/statusline compact`
+    // and `/exit` sent into that gap never reach the composer, which is the
+    // macOS and Windows cells' "session did not exit" with the frame still
+    // on screen. The statusline's own note is the outcome waited for next;
+    // `fixture-model` was on screen all along and waited for nothing.
     app.wait("context panel closes", |screen| {
-        !screen.contents().contains("Next request:")
+        let screen = screen.contents();
+        !screen.contains("Next request:") && !screen.contains("Esc closes")
     });
     app.send(b"/statusline compact\r");
-    app.contains("fixture-model");
+    app.contains("Status line");
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
@@ -1660,9 +1693,9 @@ fn typed_newlines_compose_one_message_and_a_lone_enter_still_sends_it() {
         screen.contains("first line") && screen.contains("second line"),
         "a typed newline submitted part of the payload:\n{screen}"
     );
-    // The fixture provider accepts exactly one connection, so the request
-    // read below is the first thing this session ever sent -- proof that
-    // neither newline sent anything on its own.
+    // The fixture provider hands every request to the channel in order, so
+    // the request read below is the first thing this session ever sent --
+    // proof that neither newline sent anything on its own.
     app.send(b"\r");
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     let sent = serde_json::to_string(&request["messages"]).unwrap();

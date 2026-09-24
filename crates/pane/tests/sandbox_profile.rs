@@ -2560,13 +2560,18 @@ fn a_configured_command_pattern_is_read_only_in_explore() {
     assert!(explore.admits_command("cargo build").is_err());
 }
 
+/// On Windows a plain `cmd.exe` line goes to the same reader POSIX uses
+/// (6a74d933), so an unlisted command is refused as not read-only; a line
+/// carrying a construct only `cmd.exe` has is refused naming `cmd.exe`.
 #[cfg(windows)]
 #[test]
 fn explore_refuses_the_cmd_tail_by_name_on_windows() {
     let fixture = Fixture::new("explore-windows");
     let explore = open_profile(&fixture).narrowed_to(RequestMode::Explore, &ModeOverlay::default());
-    let denied = refusal(explore.admits_command("dir"));
-    assert!(denied.rule.contains("cmd.exe"), "{denied}");
+    let plain = refusal(explore.admits_command("dir"));
+    assert!(plain.rule.contains("is not a read-only command"), "{plain}");
+    let cmd_only = refusal(explore.admits_command("dir %USERPROFILE%"));
+    assert!(cmd_only.rule.contains("cmd.exe"), "{cmd_only}");
 }
 
 /// §1.5's hard-link rule: a grant judges a name, and a write through a hard

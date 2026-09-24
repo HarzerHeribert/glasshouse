@@ -2434,6 +2434,10 @@ mod tests {
     /// suite. What it guards is the other machine, where `grep` is BRE and
     /// `|` is a literal pipe, and the declaration promises a regular
     /// expression on both.
+    // Windows performs `grep` in process (`registry.rs`, `GREP` on
+    // Windows), so no argv is built there; its dialect is held by
+    // `search::tests::extended_groups_alternation_intervals_and_the_gnu_escapes`.
+    #[cfg(not(windows))]
     #[test]
     fn the_spawned_grep_is_given_the_extended_dialect_the_declaration_promises() {
         let tool = crate::tools::registry::lookup("grep").expect("grep is in the roster");
