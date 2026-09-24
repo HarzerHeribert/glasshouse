@@ -30,7 +30,7 @@ const featureSection = `<section id="features" class="section detail-section"><d
 
 // The Pane-vs-Codex comparison is still running; its numbers go in this
 // section once measured. Until then it says so, and invents nothing.
-const benchmark = `<section id="benchmark" class="section bench"><div class="relationship-copy"><h2>MEASURED,<br>NOT CLAIMED.</h2><p>Pane against Codex on the same four tasks, the same model (GPT-6 Sol) and the same effort. ${paneBench.verdict}</p></div><table class="table"><thead><tr>${paneBench.head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${paneBench.rows.map((row) => `<tr>${row.map((cell, i) => `<td data-label="${paneBench.head[i]}">${cell}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="bench-notes">${paneBench.notes}</p></section>`;
+const benchmark = `<section id="benchmark" class="section bench"><div class="relationship-copy"><h2>MEASURED,<br>NOT CLAIMED.</h2><p>Pane against Codex on the same four tasks, the same model (GPT-6 Sol) and the same effort. ${paneBench.verdict}</p></div><table class="table"><thead><tr>${paneBench.head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${paneBench.rows.map((row) => `<tr>${row.map((cell, i) => `<td data-label="${paneBench.head[i]}">${cell}</td>`).join('')}</tr>`).join('')}</tbody></table><p class="bench-notes">${paneBench.notes}</p><p class="bench-notes">${paneBench.check}</p></section>`;
 
 // How Pane's measured numbers have moved over time, setbacks included; filled
 // with sourced figures by whoever publishes them, never invented here.

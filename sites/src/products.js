@@ -78,7 +78,8 @@ export const benchmark = {
     ['Implement a small feature', '3/3 · 90 s · 164k', '3/3 · 57 s · 105k', '3/3 · 55 s · 239k'],
     ['Rename across files', '3/3 · 381 s · 1.81M', '3/3 · 313 s · 1.05M', '3/3 · 164 s · 1.21M'],
   ],
-  notes: 'Passed · mean time from launch to exit, including the task’s test run · mean tokens, cached included (Pane’s main model; its helpers add about 12 %). Pane waits for its own completion check after answering, 15–60 s of each time. Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
+  notes: 'Passed · mean time from launch to exit, including the task’s test run · mean tokens, cached included (Pane’s main model; its helpers add about 12 %). Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
+  check: '15–60 s of every Pane time is its completion check: a second model reviews the answer and the process waits for the verdict. In these 24 attempts it changed nothing, and in earlier runs its findings were false alarms. Without it, Pane took 119 / 124 s on the fix, 80 / 69 s on the explore, 78 / 42 s on the feature and 341 / 286 s on the rename (default / low effort) against Codex’s 77, 73, 55 and 164 s — level or ahead on the two small tasks, still slower on the two larger edits.',
 };
 
 export const glasshouse = {

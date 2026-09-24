@@ -96,9 +96,18 @@ Codex was faster on all four.**
 
 Passed · mean time from launch to exit, including the task's test run · mean
 tokens with cached ones included (Pane's main model; its helpers add about
-12 %). Part of Pane's time, 15–60 s, is its own completion check after it has
-answered. Codex ran in its workspace-write sandbox, Pane with full access.
-Three attempts per cell is direction, not proof.
+12 %). Codex ran in its workspace-write sandbox, Pane with full access. Three
+attempts per cell is direction, not proof.
+
+**15–60 s of every Pane time is its completion check**: after answering, a
+second model reviews the result, and the process waits for its verdict. In
+these 24 attempts it changed nothing — 23 passed clean, one finding was not
+acted on and that attempt passed its tests — and in earlier runs its findings
+were false alarms. Without it (time to the answer plus the same test run),
+Pane took 119 / 124 s on the fix, 80 / 69 s on the explore, 78 / 42 s on the
+feature and 341 / 286 s on the rename (default / low effort), against Codex's
+77, 73, 55 and 164 s: level or ahead on the two small tasks, still slower on
+the two larger edits.
 
 Earlier measurements, setbacks included: Claude Code beat Pane in both
 comparisons of 2026-09-06 and 09-07; on a four-task Terminal-Bench slice Pane
