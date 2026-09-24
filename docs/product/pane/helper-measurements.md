@@ -164,3 +164,31 @@ the steadiest (range 47k and 85k) at equal outcomes; `nudge` changed
 nothing measurable. The removal audit found nothing to remove: the preamble
 has no double-check, think-carefully, narrate-your-reasoning or
 anti-formatting lines. About 1.5–2 % of the ChatGPT week.
+
+## 9. Pane vs Codex, and a command that yields (2026-09-24, gpt-6-sol, n = 3)
+
+Four ruler tasks, launch to exit including the task's test run; tokens are
+everything the gateway served for the attempt (main model, helpers, Jev),
+cached included, uncached in brackets; Codex tokens from its own session
+logs. Raw records: the session scratchpad's `h2h-pane`, `h2h2-pane`,
+`h2h3-pane`, `h2h-codex`, `codexbase`.
+
+| task | Pane, check holding the exit, provider effort | Pane at 6fc97dc7 defaults | + command yield (64bc5bff) | Codex |
+|---|---|---|---|---|
+| F1 | 191 s | 134 s · 452k (49k) | 111 s · ~447k | 77 s · 563k (43k) |
+| X1 | 137 s · 7.3 facts | 71 s · 312k (45k) · 8.0 | 74 s · 286k · 8.0 | 73 s · 398k (68k) · 7.3 |
+| I1 | 90 s | 53 s · 124k (23k) | 67 s · 212k | 55 s · 239k (25k) |
+| E1 | 381 s | 215 s · 1.09M (97k) | 253 s · 1.72M | 164 s · 1.21M (76k) |
+
+Every attempt of every column passed. Where the time goes (events: model =
+from the last cell's end to the next submit; commands = submit to end): Pane's
+model time per turn is equal or lower than Codex's; the gap was commands a
+cell waits on, and Pane also ran the repository's `CLAUDE.md` gate script
+that Codex mostly skipped. Handing a command still running at 10 s to a
+background job cut E1's command wait 134 → 65 s but raised its model time
+133 → 179 s and its cells 53 → 72: the model spent turns collecting jobs.
+Reverted (a8a29c96). A successor would have to keep a command inside its cell
+when the program has nothing else to do, and be measured before it ships.
+
+The completion check held each one-task exit 15–60 s and changed no outcome
+in 24 attempts; it no longer holds a one-task run (6fc97dc7).
