@@ -333,6 +333,18 @@ impl Drop for Serving {
                 Err(_) => break,
             }
         }
+        // The whole process group, not just the gateway: it was started as
+        // the leader of its own group, so every subscription sidecar it
+        // spawned is in it too. Killing only the gateway left each sidecar
+        // running with parent 1 whenever the gateway's own shutdown outlasted
+        // the grace (measured 2026-09-24: sixteen CLIProxyAPI processes left
+        // from one evening's ruler runs).
+        #[cfg(unix)]
+        {
+            // SAFETY: `killpg` takes two integers; the id is the group this
+            // child leads (`process_group(0)` in `serve`).
+            unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
