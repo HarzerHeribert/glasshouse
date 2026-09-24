@@ -348,6 +348,29 @@ fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
     );
 }
 
+/// A request without its message-level cache breakpoint: the marker moves to
+/// the newest message every turn and is not part of the cached content, so a
+/// prefix is compared without it.
+fn without_cache_marks(request: &serde_json::Value) -> serde_json::Value {
+    let mut request = request.clone();
+    for message in request["messages"].as_array_mut().unwrap() {
+        if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks {
+                if let Some(block) = block.as_object_mut() {
+                    block.remove("cache_control");
+                }
+            }
+        }
+    }
+    request
+}
+
+/// The last block of a request's newest message.
+fn newest_block(request: &serde_json::Value) -> &serde_json::Value {
+    let message = request["messages"].as_array().unwrap().last().unwrap();
+    message["content"].as_array().unwrap().last().unwrap()
+}
+
 fn reasoning_cell_reply(id: &str, code: &str) -> String {
     serde_json::json!({
         "role": "assistant",
@@ -390,6 +413,8 @@ fn each_request_resends_the_last_one_unchanged_with_its_reasoning() {
         let earlier: serde_json::Value = serde_json::from_str(&pair[0]).unwrap();
         let later: serde_json::Value = serde_json::from_str(&pair[1]).unwrap();
         assert_eq!(earlier["system"], later["system"]);
+        assert_eq!(newest_block(&later)["cache_control"]["type"], "ephemeral");
+        let (earlier, later) = (without_cache_marks(&earlier), without_cache_marks(&later));
         let (earlier, later) = (
             earlier["messages"].as_array().unwrap(),
             later["messages"].as_array().unwrap(),
@@ -5503,9 +5528,10 @@ fn a_second_task_resends_the_first_as_an_unchanged_prefix() {
     let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
     assert_eq!(first["system"], second["system"]);
+    let (earlier, later) = (without_cache_marks(&first), without_cache_marks(&second));
     let (earlier, later) = (
-        first["messages"].as_array().unwrap(),
-        second["messages"].as_array().unwrap(),
+        earlier["messages"].as_array().unwrap(),
+        later["messages"].as_array().unwrap(),
     );
     assert_eq!(
         earlier[..],

@@ -208,6 +208,39 @@ fn with_reasoning_summary(body: Vec<u8>, model: &str) -> Vec<u8> {
     serde_json::to_vec(&value).expect("serialized request")
 }
 
+/// The main model's Claude request marks its history for the prompt cache.
+///
+/// Without it only the system block and the tool list carry `cache_control`,
+/// so every turn re-sent the whole conversation uncached. Claude Code's shape:
+/// one ephemeral breakpoint on the newest message's last block that can carry
+/// one (never a reasoning block), moving forward each turn -- the marker is
+/// not part of the cached content, so the earlier turn's prefix still matches.
+/// That makes three breakpoints of the four allowed. Other models are left
+/// as they are.
+fn with_history_breakpoint(body: Vec<u8>, model: &str) -> Vec<u8> {
+    if !model.contains("claude") {
+        return body;
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&body).expect("serialized request");
+    let block = value["messages"]
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message["content"].as_array_mut())
+        .and_then(|blocks| {
+            blocks.iter_mut().rev().find(|block| {
+                !matches!(
+                    block["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                )
+            })
+        });
+    match block {
+        Some(block) => block["cache_control"] = serde_json::json!({"type": "ephemeral"}),
+        None => return body,
+    }
+    serde_json::to_vec(&value).expect("serialized request")
+}
+
 /// The ChatGPT backend's sticky-routing token for one task's requests.
 pub const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
@@ -967,7 +1000,7 @@ pub fn send_turn_bounded_routed(
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let mut body = request_body_for_surface(conversation, model, effort, surface);
     if routing.is_some() {
-        body = with_reasoning_summary(body, model);
+        body = with_history_breakpoint(with_reasoning_summary(body, model), model);
     }
 
     let mut builder = ureq::post(&url).config().http_status_as_error(false);
@@ -2015,7 +2048,7 @@ fn send_turn_streaming_while(
         Allowance::Model(max_tokens),
     );
     let body = if routing.is_some() {
-        with_reasoning_summary(body, model)
+        with_history_breakpoint(with_reasoning_summary(body, model), model)
     } else {
         body
     };
@@ -2392,6 +2425,56 @@ mod tests {
             matches!(error, WireError::Stream(_)),
             "expected a stream error, got {error:?}"
         );
+    }
+
+    /// Claude Code's history breakpoint: the newest message's last block
+    /// that can carry one is marked, never a reasoning block, and only on a
+    /// Claude model; the rest of the body is untouched.
+    #[test]
+    fn a_claude_request_marks_its_newest_message_for_the_cache() {
+        let conversation = Conversation {
+            system: "s".into(),
+            messages: vec![
+                Message::text(Role::User, "first"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Block::Text("ok".into())],
+                    historical: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        Block::Text("second".into()),
+                        Block::Thinking {
+                            thinking: String::new(),
+                            signature: "sig".into(),
+                        },
+                    ],
+                    historical: None,
+                },
+            ],
+        };
+        let body = request_body(&conversation);
+        let marked: serde_json::Value =
+            serde_json::from_slice(&with_history_breakpoint(body.clone(), "claude-opus-5-5"))
+                .unwrap();
+        let messages = marked["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(messages[2]["content"][1].get("cache_control").is_none());
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        let mut unmarked = marked.clone();
+        unmarked["messages"][2]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        assert_eq!(
+            unmarked,
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        );
+        assert_eq!(with_history_breakpoint(body.clone(), "gpt-6-sol"), body);
     }
 
     /// The main model asks for readable reasoning on a GPT route, at the
