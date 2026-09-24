@@ -1,139 +1,138 @@
-# Glasshouse
+# Pane
 
-See [`docs/product/architecture.md`](docs/product/architecture.md) for the
-full three-component picture.
+**A coding agent for your terminal whose tool results never become text in the
+conversation.** You give it a task in a project; it works the task in turns,
+the way Claude Code or Codex does. What differs is where the work lives: every
+result stays a named object in a runtime the model addresses from code, so a
+large grep costs a preview and a handle, not its bytes on every later turn.
 
-**Three things that belong together, and each one works alone.**
+Pane is in public pre-release on macOS and Linux. Windows builds exist; the
+Windows installer does not yet.
 
-- **`pane`** is a coding harness. You give it a task in a project and it works
-  the task in turns. It needs an API key and nothing else — no Glasshouse, no
-  daemon, no configuration.
-- **`glasshouse`** is a control plane for coding harnesses — `pane`, Claude
-  Code, Codex, whatever you already have installed. It starts them as real
-  sessions you can see and type into, routes their requests across your
-  subscriptions and keys, and remembers what the project learned.
-
-You do not have to adopt both. Most of the value arrives before you do.
-
-## Start where you like
-
-Three steps. Each one is useful on its own, and **most people should stop at the
-second.**
-
-**1 — Just the harness.** An API key in the environment, and go:
+## Install
 
 ```sh
-pane session --root .
+curl -fsSL https://harzerheribert.github.io/glasshouse/install.sh | sh -s -- --pane-only
 ```
 
-That is a complete coding agent. Nothing above it, nothing beside it.
+The installer verifies the release archive against its `SHA256SUMS`, unpacks
+it into `~/.local/lib/glasshouse/versions/<tag>` and links `pane` and
+`inference-gateway` into `~/.local/bin`. It installs no other harness, touches
+no credential and edits no shell profile. Drop `--pane-only` to link
+`glasshouse` too. A release install checks for a newer release at most once a
+day and says so; `pane update` installs one on demand.
 
-**2 — Add routing, memory and cost.** Point the same binary at Glasshouse:
+## Start
 
 ```sh
-glasshouse launch --harness pane
+cd your-project
+pane
 ```
 
-Same harness, same behaviour, one extra network hop. Now your requests are
-routed across every subscription and key you have configured, the project's
-memory is injected and extracted, and you can see what each turn cost and which
-account paid. Still one session. No orchestrator, nothing to coordinate.
+That opens the terminal UI in the current project. The first time, Pane says
+no credential is stored yet: type `/login` to connect a **Claude or ChatGPT
+subscription** in the browser, or `/key anthropic` (or `openai`, …) to store an
+API key. `/models` chooses which model answers and at what effort.
 
-**3 — Run several at once.** Only if you want it. Sessions become a list, one
-can delegate to another, and Glasshouse tells you when two of them are heading
-for the same file. This is the part that takes a change in how you work, and it
-is the part you can ignore indefinitely.
+```sh
+pane -p "fix the failing test in crates/foo"   # one task, non-interactive
+pane --continue                              # pick up the last session
+pane --resume [id] | pane --sessions         # an earlier one
+pane doctor                                  # what Pane found and what is missing
+```
 
-## What makes `pane` different
+Pane reads what your project already has, unedited: `CLAUDE.md` and
+`AGENTS.md` (root, nested and your global one), `.claude/settings.json`
+permissions and hooks, `.claude/commands`, skills, and the MCP servers
+`.mcp.json` names.
 
-Every shipping harness turns a tool result into text in the conversation. A grep
-over a large repository is paid for when it arrives, and paid for again on every
-turn that carries it afterwards.
+## What makes it different
 
 > A tool result never becomes text in the conversation.
 
-It becomes a **named object in a runtime the model addresses from code**. The
-model gets a bounded preview and a handle; the object stays where it is, and the
-model acts by writing a TypeScript program that calls tools by name on those
-objects. Measured, in a test that runs on every commit: **275,020 bytes of grep
-output cost 205 tokens**, and the handle is still filterable in the next cell.
+By default the model sees one tool: a **cell**, a TypeScript program run in an
+embedded V8 isolate. Inside it `read`, `grep`, `edit`, `bash`, `web.fetch` and
+the rest are functions, and what they return stays in the isolate as a named
+handle. The model gets a bounded preview and acts on the handle in the next
+cell. Measured in a test that runs on every commit: **275,020 bytes of grep
+output cost 205 tokens**, and the handle is still filterable afterwards.
 
-Two consequences fall out of that one decision:
+What follows from that:
 
-- **There is no edit tool, and there will not be one.** The model already holds
-  the file as an object, so an edit is `text.replace(a, b)` in the cell followed
-  by one `write`. A second tool with its own matching rules would be a worse
-  version of the language.
-- **Running out of context is survivable.** When the conversation stops fitting,
-  the redundant parts are dropped first — losslessly, because every handle table
-  is re-rendered whole each turn — and if that is not enough the conversation is
-  replaced by a checkpoint **while the isolate keeps running**. A grep from turn
-  three is still addressable afterwards. A harness whose results *are* its
-  transcript cannot do that.
+- **Edits are code.** The model already holds the file as an object, so an
+  edit is `text.replace(a, b)` and one `write`, in the same cell that checked
+  it.
+- **Running out of context is survivable.** When the conversation stops
+  fitting it is compacted into a checkpoint **while the isolate keeps
+  running** — a grep from turn three is still addressable afterwards.
+- **The prompt cache holds.** History is append-only except at compaction, the
+  system prompt does not change between tasks, and the model's own reasoning is
+  kept and sent back. On a live fix task the main model read **90 %** of its
+  input from cache (2026-09-24).
+- **You see the model think.** A reasoning line shows its size and newest
+  sentence as it streams, and a cheaper supervisor model watches for loops.
+- **It runs in a sandbox.** Commands run under the OS's own confinement —
+  Seatbelt on macOS, Landlock and seccomp on Linux, AppContainer on Windows —
+  with project containment and never-grantable paths such as `~/.ssh`.
+  `--ask-approval` shows each write or edit before it runs.
 
-`pane` runs model-authored code, so it does it under an OS sandbox — seatbelt,
-Landlock, Windows job objects — whose grants come from the `.claude/settings.json`
-your project already has. No model-authored code ran before that sandbox existed,
-and that ordering was not negotiable.
+It also has what you would expect: plan mode, subagents and custom agents,
+background jobs, a to-do list, web search and fetch, image input, rollback of
+the agent's changes, and resume.
 
-## What Glasshouse adds
+<!-- benchmark: pending — Pane vs Codex on the ruler tasks, same model and effort -->
 
-Nothing in this list requires a second session.
+## Where it stands
 
-- **Routes on evidence, and can explain it.** The router picks a destination
-  from what it has measured — latency, reliability, prompt-cache temperature,
-  remaining capacity and burn rate across several subscriptions and providers at
-  once — and records the reasoning behind every choice.
-- **Remembers the project.** Durable memory with authority classes, decision
-  provenance and age decay, extracted from real sessions and injected into new
-  ones as memory rather than as instruction.
-- **Keeps context from filling up in the harnesses that need it.** A context
-  firewall sits between the harness and the model and compacts tool output
-  before it crosses. `pane` does not need it — its results never cross — which
-  is exactly why the firewall stays: every other harness does.
-- **Runs the real thing.** Every interactive session is backed by a real
-  installed harness, launched through an isolated profile and driven over a PTY.
-  Nothing is emulated, and nothing is wrapped in a loop you cannot see.
-- **One project, hard boundaries.** Memory, sessions, logs and runtime state are
-  scoped to a single project root, and cross-project access is disabled
-  structurally rather than by convention.
-- **Three binaries, one boundary.** `glasshouse`, `pane` and `inference-gateway`
-  are each a single binary — no daemon, no Node, no Python. The gateway is
-  its own process; `pane` or `glasshouse` starts it when a launch needs one,
-  and it stops with the process that started it.
+Measured today on the ruler's tasks, Pane passes the fix and explore tasks it
+is given. **Not yet built:** a way to escalate a command outside the sandbox,
+untrusted-repository handling, and IDE integration. An interactive
+cross-session picker belongs to Glasshouse, below; Pane keeps `--resume` and
+`--sessions`. The full comparison against Claude Code and Codex, row by row,
+is [`docs/product/pane/competitive-capability-checklist.md`](docs/product/pane/competitive-capability-checklist.md).
 
-## When you run more than one
+## Accounts and models
 
-Coding agents are excellent, and every one of them is a silo. Claude Code,
-Codex, Antigravity, OpenCode — each owns its own sessions, its own memory, its
-own credentials, its own idea of what the project is. Run two of them, or two
-sessions of one, and nothing above them knows what is already warm, which
-subscription is paying for the current turn, what one session learned an hour
-ago that the next will re-derive from scratch, or that two of them are about to
-edit the same file.
+Pane talks to models through `inference-gateway`, a local process it starts
+when a session needs it and stops with the session. The gateway serves API keys
+and signed-in subscriptions (Claude, ChatGPT) and pools several accounts of one
+kind. `/login` inside Pane is the usual way in; from the command line:
 
-Glasshouse is the layer that knows. It lets an orchestrator session delegate
-work to other first-class sessions, and it coordinates them: soft,
-project-scoped, turn-scoped file claims and structured edit intent, so that when
-two sessions are heading for the same file Glasshouse says so and the
-orchestrator re-plans only the conflicting part.
+```sh
+inference-gateway subscriptions usage    # each subscription's limits used, and when they reset
+inference-gateway subscriptions --help   # connect, logout, pool, verify
+```
 
-It does not replace those products, and it does not hide them behind a
-proprietary agent loop.
+## Glasshouse (preview)
 
-> Glasshouse orchestrates agents without hiding them.
+This repository also holds **Glasshouse**, a control plane for running several
+coding harnesses — Pane, Claude Code, Codex — side by side: sessions you can
+see and type into, routing across subscriptions and keys, memory a project
+keeps across sessions, and warnings when two sessions head for the same file.
+It is not yet at Pane's readiness, and Pane does not need it: Pane is one
+session and works alone. [`docs/product/architecture.md`](docs/product/architecture.md)
+has the three-component picture.
 
-**Where the line falls between the two.** Anything that happens inside one turn
-or one session belongs to `pane` — its plan, its handles, its sandbox, its
-supervisor, its subagents. Anything that spans sessions, projects, providers or
-machines belongs to Glasshouse — routing, entitlements, cross-session memory,
-delegation, file coordination. `pane` is one session and can never own the
-second list; Glasshouse does not own a turn and should not reach into one.
+## Build from source
 
-## Status
+```sh
+cargo build --release -p pane -p inference-gateway
+cargo build --release                               # glasshouse
+scripts/install-local.sh                            # build, install into a new version directory, make it current
+scripts/install-local.sh --rollback                 # point `current` at the previous version
+```
 
-Under active implementation. `docs/product/capability-map.md` is
-the authoritative specification and tracks what is done.
+Each binary is self-contained — no daemon, Node or Python. `pane` embeds V8,
+which is why it is not in the workspace's `default-members`.
+
+## How this is developed
+
+Most of the code is written by coding agents under a spec-to-evidence process:
+every behaviour change states its contract, lands with a regression test, and
+the decisive branch gets a mutation that the test must kill. The process lives
+in [`docs/process/agent-sdlc.md`](docs/process/agent-sdlc.md); the Glasshouse
+specification is [`docs/product/capability-map.md`](docs/product/capability-map.md),
+whose progress follows.
 
 <!-- progress:start -->
 ## Progress
@@ -302,157 +301,6 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 
 </details>
 <!-- progress:end -->
-
-## Where `pane` stands
-
-`pane` is a second crate with its own binary, joined to Glasshouse by protocol
-rather than by linkage. Neither side depends on the other at compile time.
-Glasshouse reaches it exactly as it reaches Claude Code — a declared executable,
-declared arguments, a PTY. `pane` reaches Glasshouse the way any harness does: a
-gateway base URL, an MCP endpoint, a hook command, each one optional. Standalone
-is simply the mode where nobody answers on the socket.
-
-It runs. It reads your `CLAUDE.md`, `AGENTS.md`, `.claude/settings.json` hooks
-and permissions, `.claude/commands` and skills with nothing edited. It works a
-real task to a real result, keeps a plan it writes itself, runs background jobs
-and monitors whose completions arrive as one batched event rather than one turn
-each, resumes from a rollout file, and is watched by a cheaper model that catches
-a planted three-turn loop within two turns. It runs subagents — `pane`'s own,
-spawned by a session and returning into it, which is inside-a-session work and a
-different thing from Glasshouse's delegation between peer sessions you can see. It
-calls the MCP servers your `.mcp.json` names, under the same sandbox profile
-those permission patterns compile into. Standing handlers run against the
-batched events, and a session inbox delivers what other sessions send it.
-
-**What is not built, stated plainly:**
-
-- **The comparison that would justify the whole thing.** A first matched run
-  against Claude Code — same frozen prompt, same fixture, same model and
-  entitlement, an external oracle scoring correctness before efficiency — has
-  happened, and its findings are driving the current work. What has not happened
-  is the repetition a claim needs: several tasks, several models, repeated
-  trials. Until that exists, every performance claim here except the 205-token
-  one is architecture, not evidence.
-- **The terminal interface.** Turn blocks, a persistent input area, slash-command
-  completion and a status line are being built now.
-
-The success criterion is deliberately narrow: *on at least one workload tier,
-measured over completed tasks rather than turns, `pane` beats the adapter path on
-tokens or wall-clock without losing on outcome.* One tier is enough. A head-on
-comparison against harnesses better resourced and better tuned against their own
-models is a bet lost slowly, and it is not the bet being made.
-
-## Agent development process
-
-Agent-assisted implementation follows a spec-to-evidence SDLC rather than
-accepting generated code as proof of completion:
-
-- [`docs/process/agent-sdlc.md`](docs/process/agent-sdlc.md) — implementation and
-  verification lifecycle;
-- [`docs/process/worker-capabilities.md`](docs/process/worker-capabilities.md) —
-  Opus, Sonnet, and Ox responsibilities and limits;
-- [`docs/process/harness-hook-protocol.md`](docs/process/harness-hook-protocol.md)
-  — safe Claude Code/OpenCode completion reporting;
-- [`docs/product/evidence/README.md`](docs/product/evidence/README.md) —
-  behavioral contracts mapped to production and regression evidence;
-- [`docs/process/orchestrator-prompt.md`](docs/process/orchestrator-prompt.md) —
-  reusable phase-independent Opus prompt;
-- [`CLAUDE_CODE_START_PROMPT.md`](CLAUDE_CODE_START_PROMPT.md) — short prompt
-  for starting a new primary Claude Code session.
-
-## Build
-
-```sh
-cargo build --release                          # glasshouse
-cargo build --release -p pane                  # pane, which is not in default-members
-cargo build --release -p inference-gateway     # inference-gateway, also not in default-members
-```
-
-Three executables (`glasshouse`, `pane`, `inference-gateway`) with no daemon,
-background service, Node, or Python requirement. `pane` is excluded from
-`default-members` deliberately — it carries an embedded V8 and a tokio stack
-that `glasshouse` does not want on a bare `cargo build`.
-
-## Install
-
-```sh
-scripts/install-local.sh             # build release, install, make current
-scripts/install-local.sh --list      # what is installed, and which is live
-scripts/install-local.sh --rollback  # point `current` at the previous version
-```
-
-Installs into `~/.local/lib/glasshouse/versions/<git describe>/` and links both
-`~/.local/bin/glasshouse` and `~/.local/bin/pane` through a `current` symlink,
-so an update is a pointer flip and a rollback is the same flip backwards. Each
-version carries a `manifest.json` naming its commit, toolchain and binary
-hashes; a build that cannot print its own version is refused before `current`
-moves, and a dirty tree is refused outright, so an installed binary always maps
-to a commit. Override the location with `GLASSHOUSE_PREFIX`.
-
-Once installed, `glasshouse doctor` discovers `pane` on `PATH` like any other
-harness, and no invocation needs an explicit binary path.
-
-`glasshouse-dev` is also linked, for the one thing an installed binary cannot
-do: inside a Glasshouse checkout it runs *that* checkout's build rather than
-the installed one. Everywhere else it execs the install.
-
-No code-signing certificate is involved in any of this. The linker ad-hoc signs
-what it produces and nothing carries `com.apple.quarantine`, because nothing was
-downloaded — certificates buy Gatekeeper and SmartScreen trust for binaries
-*other people* download, which is a distribution question, not an installation
-one.
-
-### Cross-platform checks
-
-Glasshouse targets macOS, Linux, and native Windows. CI builds and tests on all
-three, but most portability breakage (`cfg`-gated dead code, platform-only
-imports) is catchable locally without leaving Linux:
-
-```sh
-rustup target add x86_64-apple-darwin x86_64-pc-windows-msvc
-cargo check --workspace --all-targets --target x86_64-apple-darwin
-cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
-```
-
-## Usage
-
-The harness, on its own — an API key in the environment is the only requirement:
-
-```sh
-pane session --root .              # work tasks from stdin in this project
-pane session --root . --task "…"   # one scripted task, non-interactive
-pane session --root . --yolo       # grant the project root and every command
-```
-
-The control plane, when you want routing, memory and cost:
-
-```sh
-glasshouse                    # operate on the current project
-glasshouse launch             # start a harness session, gateway and all
-glasshouse --scope <path>     # select a project root explicitly
-glasshouse --help
-```
-
-Glasshouse operates on exactly one project root — the containing Git repository
-when there is one, otherwise the current directory. All state, sessions, and
-memory are isolated per project root.
-
-### Environment
-
-| Variable | Purpose |
-| --- | --- |
-| `GLASSHOUSE_DATA_DIR` | Override the per-user application-data directory |
-| `GLASSHOUSE_CONFIG_DIR` | Override the per-user configuration directory |
-| `GLASSHOUSE_LOG` | Enable logging with a tracing filter, e.g. `debug` |
-
-#### Provider keys
-
-A provider key is filed, not exported. `glasshouse credentials store <VAR>`
-prompts for the value — never on the command line — and puts it in the operating
-system's own secure store, where the harness and its hooks can read it. A key
-exported only in your shell reaches the launcher and stops there.
-`glasshouse credentials list` shows where each configured variable resolves
-from, and reads no value to do it.
 
 ## License
 
