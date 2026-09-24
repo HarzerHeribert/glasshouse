@@ -99,7 +99,10 @@ pub(super) fn keep_session_system(session: &Session<'_>, transcript: &mut Transc
 /// A system prompt without the two parts that change on their own between
 /// tasks and do not warrant a new cache.
 fn lasting_part(system: &str) -> String {
-    let body = system.split("\n\n## Learned about this project").next().unwrap_or(system);
+    let body = system
+        .split("\n\n## Learned about this project")
+        .next()
+        .unwrap_or(system);
     body.lines()
         .filter(|line| !line.starts_with("task-start UTC:"))
         .collect::<Vec<_>>()
@@ -109,7 +112,8 @@ fn lasting_part(system: &str) -> String {
 /// This task's request-mode line and the approved plan, if any: task
 /// context, carried in the task's message rather than the system prompt.
 pub(super) fn task_lines(session: &Session<'_>) -> String {
-    let mut lines = prompt::request_mode_line(session.mode.get(), &session.overlay).unwrap_or_default();
+    let mut lines =
+        prompt::request_mode_line(session.mode.get(), &session.overlay).unwrap_or_default();
     if session.mode.get() != RequestMode::Plan
         && let Some(plan) = session.plan.take()
     {

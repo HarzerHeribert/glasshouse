@@ -560,7 +560,7 @@ fn streams_from_a_real_gateway() {
     let turn = wire::send_turn_streaming(&conversation, wire::MODEL, &mut |text| {
         let text = match text {
             wire::StreamDelta::Text(text) | wire::StreamDelta::ToolInput(text) => text,
-            wire::StreamDelta::ToolReady(_) => return,
+            wire::StreamDelta::ToolReady(_) | wire::StreamDelta::Reasoning(_) => return,
         };
         chunks += 1;
         print!("{text}");

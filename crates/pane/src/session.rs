@@ -844,6 +844,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         mode_pinned: Cell::new(initial_mode_pinned),
         overlay,
         effort: Cell::new(initial_effort),
+        routing: Default::default(),
         interface: Cell::new(args.interface.unwrap_or_default()),
         manifest,
         rollbacks: RefCell::new(Vec::new()),
@@ -912,6 +913,8 @@ struct Session<'a> {
     /// this session compiles reuses it rather than rebuilding it per request.
     overlay: ModeOverlay,
     effort: Cell<wire::Effort>,
+    /// This task's sticky routing to the provider's cache (cleared per task).
+    routing: std::sync::Arc<wire::TurnRouting>,
     /// The entry points this session shows the parent model.
     interface: Cell<crate::abi::Interface>,
     /// The environment manifest collected once at session start from the
@@ -1225,6 +1228,7 @@ fn run_task_inner(
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     let mut budget = TaskSpend::new(session.config().limits.cells);
+    session.routing.clear();
     system::keep_session_system(session, transcript);
     let mut task_context = system::task_lines(session);
     // Preflight: `little-helpers.md`'s *Pushed* hook, and the same consumer
@@ -1253,7 +1257,8 @@ fn run_task_inner(
     if let Some(preflight) = transcript.notebook.preflight.as_ref() {
         budget.add_helpers(std::slice::from_ref(preflight));
     }
-    let acceptance_items = append_acceptance(session, acceptance_record, &mut task_context, &mut budget);
+    let acceptance_items =
+        append_acceptance(session, acceptance_record, &mut task_context, &mut budget);
     {
         let _line = session.interrupt.writing();
         rollout
@@ -2529,6 +2534,7 @@ fn send_task_turn(
             model.clone(),
             session.effort.get(),
             surface,
+            Some(session.routing.clone()),
             &|| session.interrupt.pending.load(Ordering::SeqCst),
             &mut |delta| match delta {
                 wire::StreamDelta::Text(text) => ui.append_delta(&text),
@@ -2536,16 +2542,18 @@ fn send_task_turn(
                 // `tool_delta`; neither fragment belongs in conversation.
                 wire::StreamDelta::ToolInput(fragment) => ui.tool_delta(&fragment),
                 wire::StreamDelta::ToolReady(_) => {}
+                wire::StreamDelta::Reasoning(text) => ui.reasoning_delta(&text),
             },
         )
     } else {
-        wire::send_turn_bounded_on(
+        wire::send_turn_bounded_routed(
             conversation,
             &model,
             session.effort.get(),
             None,
             None,
             surface,
+            Some(&session.routing),
         )
     }
 }
@@ -3164,6 +3172,7 @@ mod tests {
             mode_pinned: Cell::new(false),
             overlay: ModeOverlay::default(),
             effort: Cell::new(wire::Effort::Default),
+            routing: Default::default(),
             project: &project,
             config: &config,
             interrupt: &interrupt,

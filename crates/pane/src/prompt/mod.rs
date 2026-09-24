@@ -1207,9 +1207,12 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
 /// the model reasons afresh, as it did before reasoning was kept at all.
 pub fn drop_reasoning(conversation: &mut Conversation) {
     for message in &mut conversation.messages {
-        message
-            .content
-            .retain(|block| !matches!(block, Block::Thinking { .. } | Block::RedactedThinking { .. }));
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                Block::Thinking { .. } | Block::RedactedThinking { .. }
+            )
+        });
     }
 }
 

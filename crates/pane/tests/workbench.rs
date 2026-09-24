@@ -1555,6 +1555,29 @@ fn arriving_prose_carries_a_rail_and_a_moving_caret() {
     assert_eq!(a, text(&draw(&c, &n, &s, &mut u, 100, 40)));
 }
 
+/// Reasoning while it arrives is one muted line: how much has come and its
+/// newest sentence, the rest of it never printed.
+#[test]
+fn arriving_reasoning_shows_its_size_and_newest_sentence_on_one_line() {
+    let (c, n, mut s) = fixture();
+    s.activity = Activity::Thinking;
+    s.streaming_reasoning = Some(format!(
+        "**Checking the guard**\n\n{}. Then the mode proposal is wrong.",
+        "The four tests call propose ".repeat(20)
+    ));
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    let line = screen
+        .lines()
+        .find(|l| l.contains("reasoning ·"))
+        .unwrap_or_else(|| panic!("{screen}"))
+        .to_string();
+    assert!(line.contains("~1") && line.contains("tok ·"), "{line}");
+    assert!(line.contains("Then the mode proposal is wrong"), "{line}");
+    assert!(!screen.contains("Checking the guard"), "{screen}");
+    assert_eq!(screen.matches("The four tests call").count(), 0, "{screen}");
+}
+
 /// A check behind the answer shows while it runs, then its verdict lands
 /// emphasised for a few frames and settles to its own colour.
 #[test]

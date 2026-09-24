@@ -186,6 +186,60 @@ pub fn set_cache_key(session: &str) {
     let _ = CACHE_KEY.set(session.to_string());
 }
 
+/// The main model's request asks for a readable summary of its reasoning.
+///
+/// Behind the subscription broker a GPT model's reasoning otherwise arrives
+/// encrypted only; `thinking.display = "summarized"` is what CLIProxyAPI turns
+/// into `reasoning.summary`. A request with no thinking object (the default
+/// effort) gets `medium`'s, which is GPT-6's own default, so the effort the
+/// provider applies does not change. Claude routes are left as they are.
+fn with_reasoning_summary(body: Vec<u8>, model: &str) -> Vec<u8> {
+    if model.contains("claude") {
+        return body;
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&body).expect("serialized request");
+    if value.get("thinking").is_none() {
+        let budget = effort_budget(Effort::Medium);
+        let max_tokens = value["max_tokens"].as_u64().unwrap_or(0);
+        value["max_tokens"] = serde_json::json!(max_tokens + u64::from(budget));
+        value["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": budget});
+    }
+    value["thinking"]["display"] = serde_json::json!("summarized");
+    serde_json::to_vec(&value).expect("serialized request")
+}
+
+/// The ChatGPT backend's sticky-routing token for one task's requests.
+pub const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+
+/// One task's sticky routing: the token the backend hands out on the task's
+/// first response, echoed on every later request of that task so they reach
+/// the machine holding their cached prefix -- without it each request is
+/// routed alone and mostly misses the cache (measured 2026-09-24: 4 of 10
+/// hits). Codex's contract, which this follows: keep the first token for the
+/// whole turn and never carry it into the next one ([`TurnRouting::clear`]
+/// at each task start). Only the main model's requests carry it.
+#[derive(Debug, Default)]
+pub struct TurnRouting(std::sync::Mutex<Option<String>>);
+
+impl TurnRouting {
+    pub fn clear(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub fn token(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn observe(&self, headers: &ureq::http::HeaderMap) {
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none()
+            && let Some(value) = headers.get(TURN_STATE_HEADER).and_then(|v| v.to_str().ok())
+        {
+            *held = Some(value.to_string());
+        }
+    }
+}
+
 /// Cache only the session's system prompt, before volatile conversation state.
 /// A separate tools breakpoint lets changed project instructions reuse tools.
 #[derive(Serialize)]
@@ -224,7 +278,9 @@ impl<'a> RequestBody<'a> {
             messages: conversation.messages.iter().map(to_wire_message).collect(),
             tools: (!tools.is_empty()).then_some(tools),
             stream: None,
-            metadata: CACHE_KEY.get().map(|key| Metadata { user_id: key.as_str() }),
+            metadata: CACHE_KEY.get().map(|key| Metadata {
+                user_id: key.as_str(),
+            }),
         }
     }
 }
@@ -886,8 +942,33 @@ pub fn send_turn_bounded_on(
     extra_header: Option<(&str, &str)>,
     surface: Surface,
 ) -> Result<Turn, WireError> {
+    send_turn_bounded_routed(
+        conversation,
+        model,
+        effort,
+        timeout,
+        extra_header,
+        surface,
+        None,
+    )
+}
+
+/// [`send_turn_bounded_on`] for the main model's own task requests, which
+/// carry and keep the task's [`TurnRouting`].
+pub fn send_turn_bounded_routed(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    timeout: Option<std::time::Duration>,
+    extra_header: Option<(&str, &str)>,
+    surface: Surface,
+    routing: Option<&TurnRouting>,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = request_body_for_surface(conversation, model, effort, surface);
+    let mut body = request_body_for_surface(conversation, model, effort, surface);
+    if routing.is_some() {
+        body = with_reasoning_summary(body, model);
+    }
 
     let mut builder = ureq::post(&url).config().http_status_as_error(false);
     if let Some(timeout) = timeout {
@@ -904,10 +985,16 @@ pub fn send_turn_bounded_on(
     if let Some((name, value)) = extra_header {
         request = request.header(name, value);
     }
+    if let Some(token) = routing.and_then(TurnRouting::token) {
+        request = request.header(TURN_STATE_HEADER, token);
+    }
 
     let mut response = request
         .send(body.as_slice())
         .map_err(|err| WireError::Http(Box::new(err)))?;
+    if let Some(routing) = routing {
+        routing.observe(response.headers());
+    }
     let status = response.status().as_u16();
     let text = response
         .body_mut()
@@ -1402,6 +1489,10 @@ pub enum StreamDelta {
     ToolInput(String),
     /// Complete decoded source after the provider closed valid tool input.
     ToolReady(String),
+    /// The model's readable reasoning (a summary behind the subscription
+    /// broker) as it arrives. Shown live, never appended as text; the block
+    /// itself goes back with the next request.
+    Reasoning(String),
 }
 
 impl StreamAccumulator {
@@ -1511,6 +1602,9 @@ impl StreamAccumulator {
                             signature.push_str(fragment);
                         } else {
                             thinking.push_str(fragment);
+                            if !fragment.is_empty() {
+                                return Ok(Some(StreamDelta::Reasoning(fragment.to_string())));
+                            }
                         }
                     }
                     return Ok(None);
@@ -1776,7 +1870,9 @@ fn reasoning(block: &PendingBlock) -> Option<Block> {
             thinking: thinking.clone(),
             signature: signature.clone(),
         }),
-        PendingBlock::RedactedThinking(data) => Some(Block::RedactedThinking { data: data.clone() }),
+        PendingBlock::RedactedThinking(data) => {
+            Some(Block::RedactedThinking { data: data.clone() })
+        }
         _ => None,
     }
 }
@@ -1816,7 +1912,15 @@ pub fn send_turn_streaming_on(
     surface: Surface,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
-    send_turn_streaming_while(conversation, model, effort, surface, &mut || true, on_delta)
+    send_turn_streaming_while(
+        conversation,
+        model,
+        effort,
+        surface,
+        None,
+        &mut || true,
+        on_delta,
+    )
 }
 
 /// What a turn the person cancelled ends with.
@@ -1837,6 +1941,7 @@ pub fn send_turn_streaming_cancellable(
     model: String,
     effort: Effort,
     surface: Surface,
+    routing: Option<std::sync::Arc<TurnRouting>>,
     cancelled: &dyn Fn() -> bool,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
@@ -1854,6 +1959,7 @@ pub fn send_turn_streaming_cancellable(
             &model,
             effort,
             surface,
+            routing.as_deref(),
             &mut || !reader_abandoned.load(std::sync::atomic::Ordering::SeqCst),
             &mut |delta| {
                 let _ = deltas.send(Event::Delta(delta));
@@ -1888,6 +1994,7 @@ fn send_turn_streaming_while(
     model: &str,
     effort: Effort,
     surface: Surface,
+    routing: Option<&TurnRouting>,
     keep_reading: &mut dyn FnMut() -> bool,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<Turn, WireError> {
@@ -1907,6 +2014,11 @@ fn send_turn_streaming_while(
         effort,
         Allowance::Model(max_tokens),
     );
+    let body = if routing.is_some() {
+        with_reasoning_summary(body, model)
+    } else {
+        body
+    };
 
     let mut request = ureq::post(&url)
         .config()
@@ -1919,10 +2031,16 @@ fn send_turn_streaming_while(
     if let Some((name, value)) = credential_header() {
         request = request.header(name, value);
     }
+    if let Some(token) = routing.and_then(TurnRouting::token) {
+        request = request.header(TURN_STATE_HEADER, token);
+    }
 
     let mut response = request
         .send(body.as_slice())
         .map_err(|err| WireError::Http(Box::new(err)))?;
+    if let Some(routing) = routing {
+        routing.observe(response.headers());
+    }
     let status = response.status().as_u16();
     if !response.status().is_success() {
         let text = response
@@ -2274,6 +2392,33 @@ mod tests {
             matches!(error, WireError::Stream(_)),
             "expected a stream error, got {error:?}"
         );
+    }
+
+    /// The main model asks for readable reasoning on a GPT route, at the
+    /// effort GPT-6 applies anyway when none is named; Claude routes and every
+    /// other caller's requests are left as they were.
+    #[test]
+    fn the_main_models_gpt_request_asks_for_a_reasoning_summary() {
+        let body = |model: &str| {
+            serde_json::to_vec(&serde_json::json!({"model": model, "max_tokens": 1000})).unwrap()
+        };
+        let gpt: serde_json::Value =
+            serde_json::from_slice(&with_reasoning_summary(body("gpt-6-sol"), "gpt-6-sol"))
+                .unwrap();
+        assert_eq!(gpt["thinking"]["display"], "summarized");
+        assert_eq!(
+            gpt["thinking"]["budget_tokens"],
+            effort_budget(Effort::Medium)
+        );
+        assert_eq!(gpt["max_tokens"], 1000 + effort_budget(Effort::Medium));
+        let claude = with_reasoning_summary(body("claude-opus-5-5"), "claude-opus-5-5");
+        assert_eq!(claude, body("claude-opus-5-5"));
+        let mut acc = StreamAccumulator::new();
+        acc.event(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#).unwrap();
+        let delta = acc
+            .event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan"}}"#)
+            .unwrap();
+        assert_eq!(delta, Some(StreamDelta::Reasoning("Plan".into())));
     }
 
     /// Reasoning arrives as deltas and is kept whole, signature included,

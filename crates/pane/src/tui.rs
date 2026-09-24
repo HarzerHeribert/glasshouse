@@ -215,6 +215,10 @@ pub struct ScreenState {
     pub streaming_text: Option<String>,
     /// Raw native tool-input fragments, presentation-only; never executed or shown as results.
     pub streaming_tool_input: Option<String>,
+    /// The model's readable reasoning for the response in flight, shown live
+    /// and cleared with the rest of the stream; the conversation keeps the
+    /// block itself.
+    pub streaming_reasoning: Option<String>,
     pub animation_frame: usize,
     /// A keystroke landed while the opening was playing, so it shows its
     /// settled frame from here on.

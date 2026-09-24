@@ -181,6 +181,8 @@ pub(super) enum Update {
     Model(String),
     Delta(String),
     ToolDelta(String),
+    /// Readable reasoning as it arrives (`wire::StreamDelta::Reasoning`).
+    Reasoning(String),
     Mode(tui::Mode),
     Effort(crate::wire::Effort),
     Panel(Box<tui::Panel>),
@@ -410,6 +412,9 @@ impl LiveUi {
     }
     pub(super) fn tool_delta(&self, fragment: &str) {
         let _ = self.updates.send(Update::ToolDelta(fragment.into()));
+    }
+    pub(super) fn reasoning_delta(&self, text: &str) {
+        let _ = self.updates.send(Update::Reasoning(text.into()));
     }
     pub(super) fn effort(&self, effort: crate::wire::Effort) {
         let _ = self.updates.send(Update::Effort(effort));
@@ -914,6 +919,7 @@ fn run(
                     state.activity = activity;
                     state.streaming_text = None;
                     state.streaming_tool_input = None;
+                    state.streaming_reasoning = None;
                     if served.is_known() {
                         state.connected = Some(true);
                     }
@@ -948,6 +954,14 @@ fn run(
                         .get_or_insert_with(String::new)
                         .push_str(&text);
                     state.activity = Activity::Streaming;
+                    busy = true;
+                }
+                Update::Reasoning(text) => {
+                    state.pulse.receive(text.len());
+                    state
+                        .streaming_reasoning
+                        .get_or_insert_with(String::new)
+                        .push_str(&text);
                     busy = true;
                 }
                 Update::ToolDelta(fragment) => {

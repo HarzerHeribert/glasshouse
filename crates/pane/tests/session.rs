@@ -279,6 +279,75 @@ fn native_cell_reply(id: &str, code: &str) -> String {
     .to_string()
 }
 
+/// The ChatGPT backend's sticky routing (`x-codex-turn-state`): the token a
+/// task's first response hands out goes back on every later request of that
+/// task, and never into the next task, which gets its own.
+#[test]
+fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
+    let root = scratch_dir("turn-routing");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let seen_thread = Arc::clone(&seen);
+    thread::spawn(move || {
+        let replies = [
+            (native_cell_reply("a", "const x = 1; return x;"), Some("T1")),
+            (ending_reply(), None),
+            (native_cell_reply("b", "const y = 2; return y;"), Some("T2")),
+            (ending_reply(), None),
+        ];
+        for (reply, token) in replies {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut length, mut routing) = (0usize, None);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(rest) = lower.strip_prefix("content-length:") {
+                    length = rest.trim().parse().unwrap_or(0);
+                }
+                if lower.starts_with("x-codex-turn-state:") {
+                    routing = Some(line.split_once(':').unwrap().1.trim().to_string());
+                }
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            seen_thread.lock().unwrap().push(routing);
+            let header = token
+                .map(|t| format!("x-codex-turn-state: {t}\r\n"))
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{header}connection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let output = run_session_stdin(
+        &root,
+        &root.join("rollout.jsonl"),
+        "turn-routing",
+        &["first task", "second task"],
+        &base,
+        Some(&root.join("absent")),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![None, Some("T1".to_string()), None, Some("T2".to_string())]
+    );
+}
+
 fn reasoning_cell_reply(id: &str, code: &str) -> String {
     serde_json::json!({
         "role": "assistant",
@@ -310,16 +379,27 @@ fn each_request_resends_the_last_one_unchanged_with_its_reasoning() {
         &url,
         Some(&root.join("absent")),
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 3);
     for pair in bodies.windows(2) {
         let earlier: serde_json::Value = serde_json::from_str(&pair[0]).unwrap();
         let later: serde_json::Value = serde_json::from_str(&pair[1]).unwrap();
         assert_eq!(earlier["system"], later["system"]);
-        let (earlier, later) = (earlier["messages"].as_array().unwrap(), later["messages"].as_array().unwrap());
+        let (earlier, later) = (
+            earlier["messages"].as_array().unwrap(),
+            later["messages"].as_array().unwrap(),
+        );
         assert!(later.len() > earlier.len());
-        assert_eq!(earlier[..], later[..earlier.len()], "a request edited what the one before it sent");
+        assert_eq!(
+            earlier[..],
+            later[..earlier.len()],
+            "a request edited what the one before it sent"
+        );
     }
     let last: serde_json::Value = serde_json::from_str(&bodies[2]).unwrap();
     let reasoning: Vec<&serde_json::Value> = last["messages"]
@@ -329,7 +409,11 @@ fn each_request_resends_the_last_one_unchanged_with_its_reasoning() {
         .flat_map(|message| message["content"].as_array().into_iter().flatten())
         .filter(|block| block["type"] == "thinking")
         .collect();
-    assert_eq!(reasoning.len(), 2, "both earlier turns' reasoning goes back: {last}");
+    assert_eq!(
+        reasoning.len(),
+        2,
+        "both earlier turns' reasoning goes back: {last}"
+    );
     assert_eq!(reasoning[0]["signature"], "enc-first");
     assert_eq!(reasoning[1]["thinking"], "plan for second");
 }
@@ -5410,13 +5494,24 @@ fn a_second_task_resends_the_first_as_an_unchanged_prefix() {
         Some(&root.join("absent")),
         false,
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bodies = bodies.lock().unwrap();
     let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
     assert_eq!(first["system"], second["system"]);
-    let (earlier, later) = (first["messages"].as_array().unwrap(), second["messages"].as_array().unwrap());
-    assert_eq!(earlier[..], later[..earlier.len()], "the first task's messages are not a prefix of the second's");
+    let (earlier, later) = (
+        first["messages"].as_array().unwrap(),
+        second["messages"].as_array().unwrap(),
+    );
+    assert_eq!(
+        earlier[..],
+        later[..earlier.len()],
+        "the first task's messages are not a prefix of the second's"
+    );
     assert_eq!(first["metadata"]["user_id"], "stable-prefix");
     assert_eq!(second["metadata"], first["metadata"]);
 }
@@ -5708,7 +5803,13 @@ fn request_task_message(body: &str) -> String {
         .unwrap();
     task["content"]
         .as_array()
-        .map(|blocks| blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n\n"))
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
         .unwrap_or_else(|| task["content"].as_str().unwrap_or_default().to_string())
 }
 

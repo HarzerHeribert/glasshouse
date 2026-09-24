@@ -506,6 +506,10 @@ impl Document {
                 5,
             );
         }
+        if let Some(reasoning) = &s.streaming_reasoning {
+            d.turn_pane(usize::MAX - 4);
+            d.reasoning(reasoning, s, width);
+        }
         if let Some(fragment) = &s.streaming_tool_input {
             d.turn_pane(usize::MAX - 3);
             d.streaming(fragment, n.cells.len() + 1, s, width);
@@ -521,6 +525,42 @@ impl Document {
             d.opening(s, width);
         }
         d
+    }
+    /// The model's reasoning while it arrives, on one muted line: roughly
+    /// how much has come (a summary behind the subscription broker, so the
+    /// count is of what is readable, hence `~`) and the newest sentence of it.
+    /// The mark in front is the moving cell.
+    fn reasoning(&mut self, text: &str, s: &ScreenState, width: usize) {
+        let tokens = text.chars().count().div_ceil(4);
+        let count = if tokens >= 1000 {
+            format!("~{:.1}k tok", tokens as f64 / 1000.0)
+        } else {
+            format!("~{tokens} tok")
+        };
+        let latest = text
+            .trim_end()
+            .rsplit(['\n', '.'])
+            .map(str::trim)
+            .find(|part| !part.is_empty())
+            .unwrap_or("")
+            .replace("**", "");
+        let head = format!("{} reasoning · {count} · ", super::motion::caret(s));
+        let room = width.saturating_sub(head.chars().count() + 1);
+        let latest: String = if latest.chars().count() > room {
+            latest
+                .chars()
+                .take(room.saturating_sub(1))
+                .chain(['…'])
+                .collect()
+        } else {
+            latest
+        };
+        self.kinded(
+            vec![(head, Tone::Accent), (latest, Tone::Muted)],
+            None,
+            usize::MAX - 4,
+            RowKind::Plain,
+        );
     }
     /// Prose the model is still writing -- its thinking, before any cell --
     /// under a rail in the accent, with a caret where the next words land.

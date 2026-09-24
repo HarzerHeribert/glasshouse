@@ -471,6 +471,12 @@ fn random_hex(bytes: usize) -> Result<String> {
     Ok(hex::encode(random))
 }
 
+/// The sidecar's configuration. `passthrough-headers` is on so the ChatGPT
+/// backend's `x-codex-turn-state` sticky-routing token reaches the harness,
+/// which echoes it for the rest of its turn -- without it every request is
+/// routed alone and mostly misses the provider's cache. CLIProxyAPI's own
+/// filter (`FilterUpstreamHeaders`) still drops `Set-Cookie`, framing and
+/// encoding headers.
 fn render_config(port: u16, auth_dir: &Path, internal_key: &str) -> Result<String> {
     let auth_dir = auth_dir
         .to_str()
@@ -516,7 +522,7 @@ fn render_config(port: u16, auth_dir: &Path, internal_key: &str) -> Result<Strin
             "routing:\n",
             "  strategy: \"fill-first\"\n",
             "  session-affinity: false\n",
-            "passthrough-headers: false\n",
+            "passthrough-headers: true\n",
             "save-cooldown-status: false\n",
             "ws-auth: true\n",
             "nonstream-keepalive-interval: 0\n",
