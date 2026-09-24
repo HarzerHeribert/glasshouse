@@ -289,6 +289,8 @@ fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let seen_thread = Arc::clone(&seen);
+    let sessions = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let sessions_thread = Arc::clone(&sessions);
     thread::spawn(move || {
         let replies = [
             (native_cell_reply("a", "const x = 1; return x;"), Some("T1")),
@@ -301,7 +303,7 @@ fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
                 return;
             };
             let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let (mut length, mut routing) = (0usize, None);
+            let (mut length, mut routing, mut session) = (0usize, None, None);
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
@@ -314,10 +316,14 @@ fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
                 if lower.starts_with("x-codex-turn-state:") {
                     routing = Some(line.split_once(':').unwrap().1.trim().to_string());
                 }
+                if lower.starts_with("x-claude-code-session-id:") {
+                    session = Some(line.split_once(':').unwrap().1.trim().to_string());
+                }
             }
             let mut body = vec![0u8; length];
             let _ = reader.read_exact(&mut body);
             seen_thread.lock().unwrap().push(routing);
+            sessions_thread.lock().unwrap().push(session);
             let header = token
                 .map(|t| format!("x-codex-turn-state: {t}\r\n"))
                 .unwrap_or_default();
@@ -345,6 +351,12 @@ fn a_tasks_requests_echo_the_routing_token_its_first_response_gave() {
     assert_eq!(
         *seen.lock().unwrap(),
         vec![None, Some("T1".to_string()), None, Some("T2".to_string())]
+    );
+    // The proxy keys its upstream prompt cache on this header; every request
+    // names the one session so each lands where its prefix is cached.
+    assert_eq!(
+        *sessions.lock().unwrap(),
+        vec![Some("turn-routing".to_string()); 4]
     );
 }
 

@@ -180,8 +180,15 @@ struct Metadata {
 
 static CACHE_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// The header CLIProxyAPI derives a Codex `prompt_cache_key` from for a
+/// Claude-format request; without it the key is unstable and consecutive
+/// requests land on machines that do not hold their prefix (measured
+/// 2026-09-24: 0 of 4 replayed requests hit without it, 3 of 3 with it).
+pub const SESSION_HEADER: &str = "x-claude-code-session-id";
+
 /// Names the process's session as the prompt-cache key every later request
-/// carries. The first call wins; one process is one session.
+/// carries, in the body's metadata and in [`SESSION_HEADER`]. The first call
+/// wins; one process is one session.
 pub fn set_cache_key(session: &str) {
     let _ = CACHE_KEY.set(session.to_string());
 }
@@ -1012,6 +1019,9 @@ pub fn send_turn_bounded_routed(
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header(MODEL_HEADER, model);
+    if let Some(key) = CACHE_KEY.get() {
+        request = request.header(SESSION_HEADER, key.as_str());
+    }
     if let Some((name, value)) = credential_header() {
         request = request.header(name, value);
     }
@@ -1238,6 +1248,9 @@ fn send_errand_within(
             .header("accept", "text/event-stream")
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header(MODEL_HEADER, &model);
+        if let Some(key) = CACHE_KEY.get() {
+            request = request.header(SESSION_HEADER, key.as_str());
+        }
         if let Some((name, value)) = &extra_header {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -1342,6 +1355,9 @@ pub fn send_turn_with_usage_configured(
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header(MODEL_HEADER, model);
+    if let Some(key) = CACHE_KEY.get() {
+        request = request.header(SESSION_HEADER, key.as_str());
+    }
     if let Some((name, value)) = extra_header {
         request = request.header(name, value);
     }
@@ -2061,6 +2077,9 @@ fn send_turn_streaming_while(
         .header("accept", "text/event-stream")
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header(MODEL_HEADER, model);
+    if let Some(key) = CACHE_KEY.get() {
+        request = request.header(SESSION_HEADER, key.as_str());
+    }
     if let Some((name, value)) = credential_header() {
         request = request.header(name, value);
     }
