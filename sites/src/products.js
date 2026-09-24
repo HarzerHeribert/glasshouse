@@ -97,7 +97,7 @@ export const benchmark = {
     { key: 'passed', label: 'Passed', unit: ' of 3', lower: false, note: 'Attempts whose test (or, for the explore task, eight-fact rubric) passed. Every attempt of both passed.' },
   ],
   notes: 'Pane at its shipped defaults, Codex CLI at medium effort, same model (GPT-6 Sol). Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
-  check: 'Where Pane’s time goes: its model time per turn is equal or lower than Codex’s; the gap is commands. Codex’s long commands keep running while its model goes on; a Pane cell waits for each one. That is what is being built next.',
+  check: 'Where Pane’s time goes: its model time per turn is equal or lower than Codex’s; the gap is commands. Codex’s long commands keep running while its model goes on; a Pane cell waits for each one. Handing long commands to background jobs was built and measured: the rename got slower (215 → 253 s) because the model spent turns collecting its jobs, so it was reverted.',
 };
 
 export const glasshouse = {

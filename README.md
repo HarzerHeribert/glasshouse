@@ -6,6 +6,28 @@ the way Claude Code or Codex does. What differs is where the work lives: every
 result stays a named object in a runtime the model addresses from code, so a
 large grep costs a preview and a handle, not its bytes on every later turn.
 
+![Pane mid-task in the terminal: cell 002 open with the program the model wrote and the preview it got back, the reasoning line, and cell 003 streaming in with an edit call](docs/images/readme/pane-mid-task.svg)
+
+<sub>Captured 2026-09-24 from a live session (gpt-6-sol, a scratch project with one failing test), rendered from the terminal's own screen.</sub>
+
+## At a glance
+
+Measured 2026-09-24 against the Codex CLI on four tasks, same model (GPT-6
+Sol), three attempts each — [measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3):
+
+| | Pane | Codex |
+|---|---|---|
+| Tasks passed | 12 of 12 | 12 of 12 |
+| Facts found on the explore task, of 8 | 8.0 | 7.3 |
+| Tokens, cached included | 1.98M | 2.41M |
+| Uncached tokens | 214k | 212k |
+| Time for all four tasks | 473 s | 369 s — Codex is 1.28× faster |
+
+- 81–91 % of each task's input came from the provider's prompt cache (from
+  the uncached figures in the [same measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3)).
+- 209 tokens show the model 275 KB of grep output; a
+  [test](crates/pane/tests/handles.rs#L260) on every commit fails above 300.
+
 Pane is in public pre-release on macOS and Linux. Windows builds exist; the
 Windows installer does not yet.
 
@@ -77,6 +99,10 @@ What follows from that:
   with project containment and never-grantable paths such as `~/.ssh`.
   `--ask-approval` shows each write or edit before it runs.
 
+![Pane after the answer: three executed cells, the answer naming the cause and the fix, and the completion check that ran behind it](docs/images/readme/pane-answered.svg)
+
+<sub>The same session, answered: three cells, the fix, and the check that ran behind the answer. Captured 2026-09-24.</sub>
+
 It also has what you would expect: plan mode, subagents and custom agents,
 background jobs, a to-do list, web search and fetch, image input, rollback of
 the agent's changes, and resume.
@@ -106,7 +132,9 @@ Where Pane's time goes: its model time per turn is equal or lower than
 Codex's; the gap is commands. Codex's long commands keep running in the
 background while the model goes on; a Pane cell waits for each one. Pane also
 followed this repository's own `CLAUDE.md` gate script, which Codex mostly
-skipped. That is the next thing being built.
+skipped. Handing long commands to background jobs was built and measured: the
+rename got slower (215 → 253 s) because the model spent turns collecting its
+jobs, so it was reverted ([measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3)).
 
 An hour earlier the same comparison ran with Pane holding each one-task run
 open for its completion check (15–60 s, and it changed no outcome) and at the
