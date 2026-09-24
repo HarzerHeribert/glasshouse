@@ -30,6 +30,7 @@ missing outcome remains a gap, not a design exception.
 | ❌ | Missing |
 | ⬜ | Not yet verified |
 | 🛠 | Implementation and tests written; consolidated checks pending |
+| ➖ | Not planned for Pane; the note names the reason or the owner |
 
 ## Sandbox, network, and platform capabilities
 
@@ -61,7 +62,7 @@ recorded even when a lower-level building block is implemented.
 | Start with plain `pane` in repo | ✅ | ✅ | ✅ | **P0** | Bare pane starts current-root TUI; top-level options now default --root to dot. [entrypoint](../../../crates/pane/tests/entrypoint.rs), [cli_workflows](../../../crates/pane/tests/cli_workflows.rs), [tui_live](../../../crates/pane/tests/tui_live.rs). |
 | One-shot/headless invocation | ✅ `-p` | ✅ CLI/noninteractive | ✅ | **P0** | pane -p TASK / pane exec TASK use the existing --task loop and exit status. [cli_workflows](../../../crates/pane/tests/cli_workflows.rs), [session_output](../../../crates/pane/tests/session_output.rs). |
 | Resume previous session | ✅ `--continue`, `--resume` | ✅ threads/sessions | ✅ | **P0** | --resume [ID], --continue, persisted rollout/checkpoint and refreshed instructions. [session](../../../crates/pane/tests/session.rs), [cli_workflows](../../../crates/pane/tests/cli_workflows.rs). |
-| Session picker/history | ✅ | ✅ | 🟡 | **P0** | --sessions lists history and --resume selects it. No interactive history picker or retention/delete workflow. [session](../../../crates/pane/tests/session.rs), [cli_workflows](../../../crates/pane/tests/cli_workflows.rs). |
+| Session picker/history | ✅ | ✅ | ➖ | **P0** | --sessions lists history and --resume selects it; that stays. An interactive picker, retention and delete across sessions are Glasshouse's (user, 2026-09-24): session management is orchestration. [session](../../../crates/pane/tests/session.rs), [cli_workflows](../../../crates/pane/tests/cli_workflows.rs). |
 | Persistent project instructions | ✅ `CLAUDE.md` | ✅ `AGENTS.md` / instructions | ✅ | **P0** | Root AGENTS.md/CLAUDE.md are delivered and refreshed. [scoped_instructions](../../../crates/pane/tests/scoped_instructions.rs), [session](../../../crates/pane/tests/session.rs). |
 | Global user instructions | ✅ | ✅ | ✅ | **P0** | Host-owned XDG_CONFIG_HOME/pane/AGENTS.md or ~/.config/pane/AGENTS.md, loaded whole within bounds. [competitive_project_workflows](../../../crates/pane/tests/competitive_project_workflows.rs). |
 | Nested/per-directory instructions | ✅ | ✅ | ✅ | **P1** | Applicable directory instructions are delivered before tool access, including writes/renames. [instruction_boundary](../../../crates/pane/tests/instruction_boundary.rs), [scoped_instructions](../../../crates/pane/tests/scoped_instructions.rs). |
@@ -74,7 +75,7 @@ recorded even when a lower-level building block is implemented.
 | Commit changes when asked | ✅ | ✅ | ✅ | **P0** | Uses admitted Git commands; new regression covers local identity, staging, commit, and clean status. No separate Git API. [competitive_git](../../../crates/pane/tests/competitive_git.rs). |
 | Create PR / GitHub workflow | ✅ via `gh`/MCP | ✅ via tools/plugins | 🟡 | **P1** | Can use an explicitly configured remote GitHub MCP server through Streamable HTTP. No built-in gh network/auth workflow or tested GitHub PR acceptance yet. |
 | Show clean diffs in UI | ✅ | ✅ strong diff UI | ✅ | **P0** | Bounded unified changes in compact/expanded notebook views. [tui_look](../../../crates/pane/tests/tui_look.rs); changes.rs snapshot/diff tests. |
-| Review proposed edits before accepting | ✅ | ✅ | 🟡 | **P0** | --ask-approval shows complete checked write/edit arguments before execution; no dedicated before/after diff selector. [competitive_approvals](../../../crates/pane/tests/competitive_approvals.rs), [tui_live](../../../crates/pane/tests/tui_live.rs). |
+| Review proposed edits before accepting | ✅ | ✅ | ➖ | **P0** | --ask-approval shows complete checked write/edit arguments before execution. No before/after diff selector will be built (user, 2026-09-24): the commit is the diff people review. [competitive_approvals](../../../crates/pane/tests/competitive_approvals.rs), [tui_live](../../../crates/pane/tests/tui_live.rs). |
 | Undo/revert agent changes | ✅ workflows/checkpoints | ✅ diff/revert workflows | ✅ | **P0** | changes.rs snapshots and guarded rollback_plan/apply preserve later user edits; /rollback previews then confirms. Rollback is session-local. |
 | Plan/read-only mode | ✅ `permission-mode plan` | ✅ read-only / plan workflows | ✅ | **P0** | Existing /mode/Shift-Tab plan executes no code; --plan now selects it at startup. [tui_live](../../../crates/pane/tests/tui_live.rs). |
 | Effort/reasoning control | ✅ | ✅ | ✅ | **P0** | Parent effort and per-helper defaults are configurable; the UI labels inherited provider behavior as `default`. |
@@ -112,7 +113,7 @@ recorded even when a lower-level building block is implemented.
 | Open current changes in IDE | ✅ integration-dependent | ✅ | ❌ | **P2** | No dedicated editor/open-diff workflow implemented. |
 | CI/GitHub Actions usage | ✅ | ✅ | 🟡 | **P1** | Headless invocation, explicit model/auth and machine result contracts now exist; usage in [competitive-workflows.md](competitive-workflows.md). No dedicated Actions package or live CI benchmark yet. |
 | Git worktree support | usable | ✅ important workflow | 🟡 | **P1** | Existing worktrees work as independent --root sessions. No Pane-native create/switch/merge workflow or automatic per-agent isolation. |
-| Automatic update mechanism | ✅ | ✅ | ❌ | **P2** | No automatic updater implemented; installation remains external. |
+| Automatic update mechanism | ✅ | ✅ | 🛠 | **P2** | `pane update [--check]` and a daily background check for release installs (8c196595); dev version dirs never update. Live only once a release is cut. |
 | `doctor`/diagnostics command | ✅ | ✅ `codex doctor` | ✅ | **P1** | pane doctor [--json] checks local config, PATH and compiled/available sandbox support without contacting providers. [cli_workflows](../../../crates/pane/tests/cli_workflows.rs). |
 | Config profiles | ✅ settings scopes | ✅ TOML/profiles | ✅ | **P1** | --profile NAME overlays [profiles.NAME] recursively; --model still wins. Unknown profiles fail. [competitive_profiles](../../../crates/pane/tests/competitive_profiles.rs). |
 | Repo trust / untrusted repo handling | ✅ permissions | ✅ trust level | ❌ | **P1** | No repository-trust store or first-run trust prompt. Project configuration is consumed at session startup; sandbox policy does not substitute for a trust workflow. |
