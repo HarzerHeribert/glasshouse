@@ -72,6 +72,13 @@ enum PersistedBlock {
         content: String,
         is_error: bool,
     },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 impl PersistedBlock {
@@ -96,6 +103,14 @@ impl PersistedBlock {
                 content: content.clone(),
                 is_error: *is_error,
             },
+            Block::Thinking {
+                thinking,
+                signature,
+            } => Self::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+            },
+            Block::RedactedThinking { data } => Self::RedactedThinking { data: data.clone() },
         }
     }
 
@@ -113,6 +128,14 @@ impl PersistedBlock {
                 content,
                 is_error,
             },
+            Self::Thinking {
+                thinking,
+                signature,
+            } => Block::Thinking {
+                thinking,
+                signature,
+            },
+            Self::RedactedThinking { data } => Block::RedactedThinking { data },
         }
     }
 }

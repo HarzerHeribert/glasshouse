@@ -279,6 +279,61 @@ fn native_cell_reply(id: &str, code: &str) -> String {
     .to_string()
 }
 
+fn reasoning_cell_reply(id: &str, code: &str) -> String {
+    serde_json::json!({
+        "role": "assistant",
+        "content": [
+            {"type":"thinking","thinking":format!("plan for {id}"),"signature":format!("enc-{id}")},
+            {"type":"tool_use","id":id,"name":"execute_cell","input":{"code":code}}
+        ],
+    })
+    .to_string()
+}
+
+/// History is append-only (user, 2026-09-24): every request re-sends the one
+/// before it byte for byte -- the model's signed reasoning included -- and
+/// only appends. That is what the provider's cache and the reasoning's own
+/// validity both depend on.
+#[test]
+fn each_request_resends_the_last_one_unchanged_with_its_reasoning() {
+    let root = scratch_dir("append-only-reasoning");
+    let (url, bodies) = start_fake_provider(vec![
+        reasoning_cell_reply("first", "const x = 1; return x;"),
+        reasoning_cell_reply("second", "const y = 2; return y;"),
+        reasoning_cell_reply("third", "answer(`done`);"),
+    ]);
+    let output = run_session(
+        &root,
+        &root.join("rollout.jsonl"),
+        "append-only",
+        "work",
+        &url,
+        Some(&root.join("absent")),
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    for pair in bodies.windows(2) {
+        let earlier: serde_json::Value = serde_json::from_str(&pair[0]).unwrap();
+        let later: serde_json::Value = serde_json::from_str(&pair[1]).unwrap();
+        assert_eq!(earlier["system"], later["system"]);
+        let (earlier, later) = (earlier["messages"].as_array().unwrap(), later["messages"].as_array().unwrap());
+        assert!(later.len() > earlier.len());
+        assert_eq!(earlier[..], later[..earlier.len()], "a request edited what the one before it sent");
+    }
+    let last: serde_json::Value = serde_json::from_str(&bodies[2]).unwrap();
+    let reasoning: Vec<&serde_json::Value> = last["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter(|block| block["type"] == "thinking")
+        .collect();
+    assert_eq!(reasoning.len(), 2, "both earlier turns' reasoning goes back: {last}");
+    assert_eq!(reasoning[0]["signature"], "enc-first");
+    assert_eq!(reasoning[1]["thinking"], "plan for second");
+}
+
 #[test]
 fn native_cell_result_is_correlated_before_the_next_request() {
     let root = scratch_dir("native-handoff");
@@ -5226,7 +5281,7 @@ fn explicit_prose_completion_is_displayed_naturally_without_a_cell_or_marker() {
 }
 
 #[test]
-fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
+fn outgoing_history_sends_each_result_as_the_model_read_it() {
     let root = scratch_dir("state-history");
     let rollout = root.join("rollout.jsonl");
     let (base, bodies) = start_fake_provider(vec![
@@ -5257,11 +5312,9 @@ fn outgoing_history_keeps_errors_and_stdout_but_only_the_latest_handle_table() {
         .unwrap();
     assert!(old.contains("preserved failure"));
     assert!(old.contains("observation\n\n## Handles\nliteral stdout heading"));
-    assert!(!old.contains("## Usage"));
-    assert_eq!(
-        old.matches("## Handles").count(),
-        1,
-        "only the literal stdout heading remains"
+    assert!(
+        old.contains("## Usage"),
+        "an earlier result goes back as the model read it: {old}"
     );
     assert!(last_user_text(&requests[2]).contains("fresh"));
     let evidence = fs::read_to_string(rollout).unwrap();

@@ -793,6 +793,8 @@ pub(super) fn message(message: &Message) {
         Block::Image { media_type, .. } => json!({"type": "image", "media_type": media_type}),
         Block::ToolUse { id, name, input } => json!({"type": "tool_use", "id": id, "name": name, "input": input}),
         Block::ToolResult { tool_use_id, content, is_error } => json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}),
+        Block::Thinking { thinking, .. } => json!({"type": "thinking", "thinking": thinking}),
+        Block::RedactedThinking { .. } => json!({"type": "redacted_thinking"}),
     }).collect();
     if message.role == Role::Assistant {
         STATE.with(|state| {

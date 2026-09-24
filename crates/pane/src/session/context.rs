@@ -216,10 +216,12 @@ pub(super) fn send_task_turn_recovering(
             let mut messages = vec![checkpoint_message];
             messages
                 .extend_from_slice(&transcript.conversation.messages[transcript.provider_start..]);
-            Conversation {
+            let mut view = Conversation {
                 system: transcript.conversation.system.clone(),
                 messages,
-            }
+            };
+            prompt::drop_reasoning(&mut view);
+            view
         } else {
             transcript.conversation.clone()
         }

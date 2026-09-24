@@ -208,7 +208,9 @@ pub(super) fn message_text(message: &Message) -> String {
             ContentBlock::Text(text) | ContentBlock::ToolResult { content: text, .. } => {
                 Some(text.as_str())
             }
-            ContentBlock::ToolUse { .. } => None,
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => None,
             ContentBlock::Image { .. } => Some("\n[image attachment]\n"),
         })
         .collect::<Vec<_>>()

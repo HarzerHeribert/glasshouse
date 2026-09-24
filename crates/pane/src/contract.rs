@@ -47,6 +47,18 @@ pub enum Block {
         content: String,
         is_error: bool,
     },
+    /// The model's own reasoning, kept exactly as the provider returned it
+    /// and sent back unchanged: the signature is what makes it valid again
+    /// (for a GPT model behind the subscription broker it is the encrypted
+    /// reasoning item). Dropping it loses the reasoning and the provider's
+    /// cache for everything after it.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 impl Block {
@@ -56,6 +68,7 @@ impl Block {
     pub fn text(&self) -> &str {
         match self {
             Block::Image { .. } => "[image attachment]",
+            Block::Thinking { .. } | Block::RedactedThinking { .. } => "",
             Block::Text(text) | Block::ToolResult { content: text, .. } => text,
             Block::ToolUse { input, .. } => input
                 .get("code")

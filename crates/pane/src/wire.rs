@@ -255,6 +255,14 @@ enum WireBlock {
         #[serde(default)]
         is_error: bool,
     },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     /// A response block type this module does not send and does not act
     /// on -- 61D's sandbox does not exist, so a `tool_use` block here is
     /// data to ignore, never something to run.
@@ -546,6 +554,14 @@ fn to_wire_block(block: &Block) -> WireBlock {
             content: content.clone(),
             is_error: *is_error,
         },
+        Block::Thinking {
+            thinking,
+            signature,
+        } => WireBlock::Thinking {
+            thinking: thinking.clone(),
+            signature: signature.clone(),
+        },
+        Block::RedactedThinking { data } => WireBlock::RedactedThinking { data: data.clone() },
     }
 }
 
@@ -1324,7 +1340,18 @@ fn deliver<'a>(blocks: impl Iterator<Item = &'a WireBlock>) -> Result<Vec<Block>
                     "assistant response contained a user-only tool_result block".into(),
                 ));
             }
-            WireBlock::Other => {}
+            // Unsigned reasoning cannot be sent back, so it is not kept.
+            WireBlock::Thinking {
+                thinking,
+                signature,
+            } if !signature.is_empty() => content.push(Block::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+            }),
+            WireBlock::RedactedThinking { data } => {
+                content.push(Block::RedactedThinking { data: data.clone() })
+            }
+            WireBlock::Thinking { .. } | WireBlock::Other => {}
         }
     }
     Ok(content)
@@ -1357,6 +1384,11 @@ enum PendingBlock {
         saw_delta: bool,
         stopped: bool,
     },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking(String),
     Ignored,
 }
 
@@ -1427,6 +1459,25 @@ impl StreamAccumulator {
                             "assistant stream contained a user-only tool_result block".into(),
                         ));
                     }
+                    Some("thinking") => PendingBlock::Thinking {
+                        thinking: block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                        signature: block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                    Some("redacted_thinking") => PendingBlock::RedactedThinking(
+                        block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    ),
                     _ => PendingBlock::Ignored,
                 };
                 if self.blocks.insert(index, pending).is_some() {
@@ -1437,11 +1488,33 @@ impl StreamAccumulator {
                 Ok(None)
             }
             Some("content_block_delta") => {
-                // Only `text_delta`: a `signature_delta` or a
-                // `thinking_delta` is part of a block this harness does not
-                // put in the conversation, exactly as `WireBlock::Other`
-                // drops it on the whole-response path.
+                // Reasoning is kept whole for the next request and never
+                // shown as text: its deltas return no presentation progress.
                 let delta = value.get("delta");
+                let kind = delta.and_then(|d| d.get("type")).and_then(Value::as_str);
+                if let Some((field, is_signature)) = match kind {
+                    Some("thinking_delta") => Some(("thinking", false)),
+                    Some("signature_delta") => Some(("signature", true)),
+                    _ => None,
+                } {
+                    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let fragment = delta
+                        .and_then(|d| d.get(field))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if let Some(PendingBlock::Thinking {
+                        thinking,
+                        signature,
+                    }) = self.blocks.get_mut(&index)
+                    {
+                        if is_signature {
+                            signature.push_str(fragment);
+                        } else {
+                            thinking.push_str(fragment);
+                        }
+                    }
+                    return Ok(None);
+                }
                 let is_text = delta
                     .and_then(|d| d.get("type"))
                     .and_then(|t| t.as_str())
@@ -1631,7 +1704,7 @@ impl StreamAccumulator {
                         name: name.clone(),
                         input: input.clone(),
                     }),
-                    _ => {}
+                    other => salvaged.extend(reasoning(other)),
                 }
             }
             if !salvaged
@@ -1676,7 +1749,7 @@ impl StreamAccumulator {
                         "tool_use block {index} never completed"
                     )));
                 }
-                _ => {}
+                other => content.extend(reasoning(&other)),
             }
         }
         Ok(Turn {
@@ -1688,6 +1761,23 @@ impl StreamAccumulator {
             usage: to_usage(self.usage),
             truncated: false,
         })
+    }
+}
+
+/// A finished stream block as the reasoning the next request sends back:
+/// signed thinking or redacted thinking, nothing else. Unsigned reasoning
+/// cannot be sent back, so it is not kept.
+fn reasoning(block: &PendingBlock) -> Option<Block> {
+    match block {
+        PendingBlock::Thinking {
+            thinking,
+            signature,
+        } if !signature.is_empty() => Some(Block::Thinking {
+            thinking: thinking.clone(),
+            signature: signature.clone(),
+        }),
+        PendingBlock::RedactedThinking(data) => Some(Block::RedactedThinking { data: data.clone() }),
+        _ => None,
     }
 }
 
@@ -2120,7 +2210,8 @@ mod tests {
 
     /// The real event sequence a Messages stream sends, captured from the
     /// gateway on 2026-09-06 — including the `thinking` block that arrives
-    /// ahead of the text and must not become conversation.
+    /// ahead of the text: its text is omitted, its signature is not, and it
+    /// is kept to go back with the next request, never shown as text.
     #[test]
     fn a_stream_of_deltas_becomes_the_same_turn_a_whole_response_would() {
         let mut acc = StreamAccumulator::new();
@@ -2155,7 +2246,13 @@ mod tests {
         assert_eq!(turn.message.role, Role::Assistant);
         assert_eq!(
             turn.message.content,
-            vec![Block::Text("1, 2, 3".to_string())]
+            vec![
+                Block::Thinking {
+                    thinking: String::new(),
+                    signature: "EpAC".to_string(),
+                },
+                Block::Text("1, 2, 3".to_string())
+            ]
         );
         let usage = turn.usage.expect("the stream reported usage");
         assert_eq!(usage.input_tokens, 13);
@@ -2176,6 +2273,43 @@ mod tests {
         assert!(
             matches!(error, WireError::Stream(_)),
             "expected a stream error, got {error:?}"
+        );
+    }
+
+    /// Reasoning arrives as deltas and is kept whole, signature included,
+    /// so the next request can send it back; it is never shown as text, and
+    /// reasoning that never got a signature is not kept.
+    #[test]
+    fn streamed_reasoning_is_kept_whole_with_its_signature() {
+        let mut acc = StreamAccumulator::new();
+        for event in [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":1}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"look at "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"the tests"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"enc-"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"unsigned"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":"done"}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            let delta = acc.event(event).unwrap();
+            assert!(!matches!(delta, Some(StreamDelta::Text(ref t)) if t.contains("tests")));
+        }
+        let turn = acc.finish().unwrap();
+        assert_eq!(
+            turn.message.content,
+            vec![
+                Block::Thinking {
+                    thinking: "look at the tests".into(),
+                    signature: "enc-abc".into(),
+                },
+                Block::Text("done".into()),
+            ]
         );
     }
 

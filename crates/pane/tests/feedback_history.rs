@@ -122,8 +122,11 @@ fn runtime(result: &CellResult) -> Message {
     )
 }
 
+/// History is append-only (user, 2026-09-24): an earlier result goes back
+/// exactly as the model read it, live sections and all, because the model's
+/// reasoning after it is bound to those bytes.
 #[test]
-fn request_keeps_latest_state_and_all_historical_observations_without_rewriting_evidence() {
+fn a_request_sends_every_earlier_result_as_the_model_read_it() {
     let old = result(1, "old live preview");
     let new = result(2, "new live preview");
     let conversation = Conversation {
@@ -136,8 +139,9 @@ fn request_keeps_latest_state_and_all_historical_observations_without_rewriting_
     };
     let original = conversation.clone();
     let request = prompt::with_task_context(&conversation, "model", "task");
+    assert_eq!(request.messages, conversation.messages);
     let past = request.messages[1].content[0].text();
-    assert!(!past.contains("old live preview"));
+    assert!(past.contains("old live preview"));
     assert!(past.contains("keep this error"));
     assert!(past.contains("line 2, column 3"));
     assert!(past.contains(old.stdout_tail.as_ref().unwrap()));
@@ -175,31 +179,7 @@ fn user_and_assistant_text_cannot_be_mistaken_for_generated_snapshots() {
 }
 
 #[test]
-fn a_new_task_does_not_present_old_runtime_state_as_current() {
-    let conversation = Conversation {
-        system: String::new(),
-        messages: vec![
-            Message::text(Role::User, "old task"),
-            runtime(&result(1, "stale handle")),
-            Message::text(Role::User, "new task"),
-        ],
-    };
-    let request = prompt::with_task_context(&conversation, "model", "new task");
-    assert!(
-        !request.messages[1].content[0]
-            .text()
-            .contains("stale handle")
-    );
-    assert!(
-        request.messages[1].content[0]
-            .text()
-            .contains("keep this error")
-    );
-    assert_eq!(request.messages[2].content[0].text(), "new task");
-}
-
-#[test]
-fn resume_preserves_projection_provenance_and_leaves_user_text_and_full_log_intact() {
+fn resume_keeps_the_projection_on_record_and_resends_what_was_sent() {
     let path = std::env::temp_dir().join(format!(
         "pane-history-{}-{}.jsonl",
         std::process::id(),
@@ -230,7 +210,7 @@ fn resume_preserves_projection_provenance_and_leaves_user_text_and_full_log_inta
         .push(Message::text(Role::User, "new request"));
     let projected = prompt::with_task_context(&resumed, "model", "new request");
     assert_eq!(projected.messages[0].content[0].text(), user);
-    assert_eq!(projected.messages[1].content[0].text(), history);
+    assert_eq!(projected.messages[1].content[0].text(), full);
     let text = std::fs::read_to_string(&path).unwrap();
     let row: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert_eq!(row["text"], full);

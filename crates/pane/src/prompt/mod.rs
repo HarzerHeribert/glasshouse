@@ -321,19 +321,16 @@ pub fn preamble_for(interface: abi::Interface) -> String {
 /// duplicate that costs the whole cache is not worth its bytes, so it is
 /// gone; `the_request_never_edits_a_message_it_already_sent` pins the
 /// guarantee that replaced it.
-pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
+///
+/// **Nor, since 2026-09-24, does it project the previous result to its
+/// historical form**: the result goes back exactly as the model read it,
+/// because the model's reasoning after it is bound to those bytes (a changed
+/// prefix makes Claude refuse the thinking block) and history is append-only
+/// except for compaction (the user's ruling). The stale `## Handles` and
+/// `## Task` sections that stay behind are what the proactive sweep
+/// ([`compact_conversation`]) trims once the context is large enough to care.
+pub fn with_task_context(conversation: &Conversation, model: &str, _task: &str) -> Conversation {
     let mut request = conversation.clone();
-    let task_index = request.messages.iter().rposition(|message| {
-        message.role == crate::contract::Role::User
-            && message.historical.is_none()
-            && matches!(message.content.first(), Some(Block::Text(text)) if text == task)
-            && message
-                .content
-                .iter()
-                .skip(1)
-                .all(|block| matches!(block, Block::Image { .. }))
-    });
-    project_runtime_history(&mut request, task_index.unwrap_or(0));
     request.system.push_str(&format!(
         "\n\nYou are Pane, a coding assistant. Configured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
         serde_json::to_string(model).expect("model name serializes")
@@ -370,7 +367,10 @@ pub fn project_runtime_history(conversation: &mut Conversation, active_from: usi
                     Block::Text(text) | Block::ToolResult { content: text, .. } => {
                         *text = history.clone()
                     }
-                    Block::ToolUse { .. } | Block::Image { .. } => {}
+                    Block::ToolUse { .. }
+                    | Block::Image { .. }
+                    | Block::Thinking { .. }
+                    | Block::RedactedThinking { .. } => {}
                 }
             }
         }
@@ -1161,7 +1161,10 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
         message.content.iter().any(|block| match block {
             Block::Text(text) => is_rendered_result(text),
             Block::ToolResult { content, .. } => is_rendered_result(content),
-            Block::ToolUse { .. } | Block::Image { .. } => false,
+            Block::ToolUse { .. }
+            | Block::Image { .. }
+            | Block::Thinking { .. }
+            | Block::RedactedThinking { .. } => false,
         })
     });
     let Some(last_rendered) = last_rendered else {
@@ -1176,7 +1179,10 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
         for block in message.content.iter_mut() {
             let text = match block {
                 Block::Text(text) | Block::ToolResult { content: text, .. } => text,
-                Block::ToolUse { .. } | Block::Image { .. } => continue,
+                Block::ToolUse { .. }
+                | Block::Image { .. }
+                | Block::Thinking { .. }
+                | Block::RedactedThinking { .. } => continue,
             };
             if !is_rendered_result(text) {
                 continue;
@@ -1189,7 +1195,22 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
             }
         }
     }
+    if report.messages > 0 {
+        drop_reasoning(conversation);
+    }
     report
+}
+
+/// Removes every reasoning block. Compaction rewrote earlier turns, and
+/// reasoning is valid only after the exact bytes it was produced on: sent
+/// back after an edit it is refused (Claude) or wasted, so after compaction
+/// the model reasons afresh, as it did before reasoning was kept at all.
+pub fn drop_reasoning(conversation: &mut Conversation) {
+    for message in &mut conversation.messages {
+        message
+            .content
+            .retain(|block| !matches!(block, Block::Thinking { .. } | Block::RedactedThinking { .. }));
+    }
 }
 
 /// The second rung: what one task hands itself when its conversation has to

@@ -429,8 +429,9 @@ pub(crate) fn run_narrowed_metered(
         }
         journal.write(&conversation);
         note_progress(progress, turn, &trajectory);
-        let mut request = conversation.clone();
-        prompt::project_runtime_history(&mut request, 0);
+        // Sent exactly as the subagent read it: append-only, like the
+        // session's own requests (`prompt::with_task_context`).
+        let request = conversation.clone();
         // A narrowed loop is a helper: its provider request can outlive the
         // caller that stopped waiting, so it keeps a hard bound on the wire.
         //
