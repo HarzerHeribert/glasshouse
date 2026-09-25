@@ -140,6 +140,18 @@ pub struct Loaded {
     pub notices: Vec<String>,
     /// The named profile applied, if any.
     pub profile: Option<String>,
+    /// Saved choices this version no longer offers -- what an upgrade leaves
+    /// behind in a file. They were read as unset; a session removes them
+    /// from the file it found them in.
+    pub retired: Vec<Retired>,
+}
+
+/// One saved choice that is no longer a choice: where, which key, the word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retired {
+    pub scope: Scope,
+    pub key: String,
+    pub word: String,
 }
 
 /// The two files, the project they belong to, and every verb over them.
@@ -228,6 +240,39 @@ impl Store {
     pub fn load(&self, profile: Option<&str>) -> Result<Loaded, String> {
         let sources = self.read_sources()?;
         self.assemble(&sources, profile)
+    }
+
+    /// Takes every retired choice out of the file it was found in, so the
+    /// next start is quiet and the file says what runs, and returns one
+    /// sentence each for the person.
+    pub fn remove_retired(&self, loaded: &Loaded) -> Vec<String> {
+        loaded
+            .retired
+            .iter()
+            .map(|retired| {
+                let removed = self.read(retired.scope).and_then(|snapshot| {
+                    self.save(retired.scope, &snapshot, &[(retired.key.clone(), None)])
+                });
+                let now = retired
+                    .key
+                    .split('.')
+                    .try_fold(&loaded.values, |value, part| value.get(part))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| shown_default(&retired.key))
+                    .unwrap_or_else(|| "its default".into());
+                format!(
+                    "`{} = {}` is no longer a choice{}; Pane uses `{now}`. /settings changes it.",
+                    retired.key,
+                    retired.word,
+                    if removed.is_ok() {
+                        ", so it was removed from your settings"
+                    } else {
+                        ""
+                    },
+                )
+            })
+            .collect()
     }
 
     /// One scope's file, exactly as it is on disk. A missing file is an empty
@@ -629,12 +674,23 @@ impl Store {
             }
         }
 
+        let retired: Vec<Retired> = [(Scope::Global, &global), (Scope::Local, &local)]
+            .into_iter()
+            .flat_map(|(scope, parsed)| {
+                parsed.retired.iter().map(move |(key, word)| Retired {
+                    scope,
+                    key: key.clone(),
+                    word: word.clone(),
+                })
+            })
+            .collect();
         Ok(Loaded {
             config,
             values: nest(map.iter()),
             origins,
             notices,
             profile: profile.map(str::to_string),
+            retired,
         })
     }
 
@@ -1066,6 +1122,8 @@ struct Sources {
 struct Parsed {
     flat: BTreeMap<String, toml::Value>,
     profiles: BTreeMap<String, BTreeMap<String, toml::Value>>,
+    /// Keys whose saved word is a choice this version no longer has, with it.
+    retired: Vec<(String, String)>,
 }
 
 fn parse_document(path: &Path, text: &str, scope: Scope) -> Result<Parsed, String> {
@@ -1114,6 +1172,25 @@ fn parse_document(path: &Path, text: &str, scope: Scope) -> Result<Parsed, Strin
         }
         flatten(key, value, &mut parsed.flat);
     }
+    // **A choice an upgrade retired does not stop Pane.** The file said
+    // something that was true of the version that wrote it; refusing to
+    // start over it punishes the person for updating. It is read as unset
+    // and reported. Every other invalid value still refuses -- a malformed
+    // permission must never quietly become the default.
+    let retired: Vec<(String, String)> = parsed
+        .flat
+        .iter()
+        .filter_map(|(key, value)| {
+            let spec = registry::spec(key)?;
+            let word = value.as_str()?;
+            (spec.kind == registry::Kind::Choice && !spec.choices.contains(&word))
+                .then(|| (key.clone(), word.to_string()))
+        })
+        .collect();
+    for (key, _) in &retired {
+        parsed.flat.remove(key);
+    }
+    parsed.retired = retired;
     for (key, value) in &parsed.flat {
         registry::check_value(key, value)
             .map_err(|error| format!("{error} ({})", path.display()))?;

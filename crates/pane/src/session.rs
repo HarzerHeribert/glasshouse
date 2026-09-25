@@ -547,6 +547,9 @@ fn run(args: SessionArgs) -> Result<(), String> {
     for notice in &loaded_settings.notices {
         session_println!("settings: {notice}");
     }
+    for notice in settings_store.remove_retired(&loaded_settings) {
+        session_println!("settings: {notice}");
+    }
     if project.settings.is_some() {
         session_println!(
             "settings: Claude permissions are not used implicitly. /config import claude previews an explicit import; the original file is never changed."

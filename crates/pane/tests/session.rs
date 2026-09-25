@@ -7675,3 +7675,43 @@ fn a_one_task_run_starts_the_completion_check_only_when_the_person_set_it() {
     assert_eq!(helper_requests(""), 0, "an unset check held a one-task run");
     assert_eq!(helper_requests("completion_check = true\n"), 1);
 }
+
+/// An upgrade retired `ui.stream = "quiet"`, and a pane that refused to start
+/// over it punished the person for updating. It starts, says what changed,
+/// and takes the word out of the file so the next start is quiet.
+#[test]
+fn a_choice_an_upgrade_retired_is_removed_and_pane_starts() {
+    let root = scratch_dir("retired-choice");
+    fs::create_dir_all(root.join(".pane")).unwrap();
+    let config = root.join(".pane/config.toml");
+    fs::write(&config, "[ui]\nstream = \"quiet\"\ntheme = \"amber\"\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pane"))
+        .arg("session")
+        .arg("--root")
+        .arg(&root)
+        .arg("--rollout")
+        .arg(root.join("rollout.jsonl"))
+        .arg("--model")
+        .arg(pane::wire::MODEL)
+        .env("ANTHROPIC_BASE_URL", refused_base_url())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a retired choice stopped pane:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("`ui.stream = quiet` is no longer a choice")
+            && stdout.contains("Pane uses `actions`"),
+        "{stdout}"
+    );
+    let saved = fs::read_to_string(&config).unwrap();
+    assert!(!saved.contains("quiet"), "{saved}");
+    assert!(
+        saved.contains("amber"),
+        "the rest of the file is kept: {saved}"
+    );
+}
