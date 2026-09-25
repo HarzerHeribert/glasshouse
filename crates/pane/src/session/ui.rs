@@ -2047,21 +2047,7 @@ fn run(
                             }
                             None => {
                                 state.notice = None;
-                                state.panel = Some(tui::Panel {
-                                    title: "Themes".into(),
-                                    selected: tui::Theme::ALL
-                                        .iter()
-                                        .position(|theme| *theme == state.theme)
-                                        .unwrap_or(0),
-                                    rows: tui::Theme::ALL
-                                        .iter()
-                                        .map(|theme| tui::PanelRow {
-                                            text: format!("██  {}", theme.name()),
-                                            command: Some(format!("/theme {}", theme.name())),
-                                        })
-                                        .collect(),
-                                    ..tui::Panel::default()
-                                });
+                                state.panel = Some(tui::Theme::picker(state.theme));
                             }
                         }
                         continue;

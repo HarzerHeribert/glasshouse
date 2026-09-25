@@ -123,21 +123,7 @@ impl Workbench {
             ["/theme"] => {
                 self.close();
                 s.notice = None;
-                s.panel = Some(crate::tui::Panel {
-                    title: "Themes".into(),
-                    selected: crate::tui::Theme::ALL
-                        .iter()
-                        .position(|t| *t == s.theme)
-                        .unwrap_or(0),
-                    rows: crate::tui::Theme::ALL
-                        .iter()
-                        .map(|t| crate::tui::PanelRow {
-                            text: format!("██  {}", t.name()),
-                            command: Some(format!("/theme {}", t.name())),
-                        })
-                        .collect(),
-                    ..crate::tui::Panel::default()
-                });
+                s.panel = Some(crate::tui::Theme::picker(s.theme));
                 true
             }
             ["/theme", name] => {

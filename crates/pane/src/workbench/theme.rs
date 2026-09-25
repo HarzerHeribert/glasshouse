@@ -23,6 +23,7 @@ pub(super) fn accent(theme: Theme) -> Color {
         Theme::Cobalt => Color::Rgb(0x9e, 0xc9, 0xff),
         Theme::Mint => Color::Rgb(0x86, 0xf1, 0xd0),
         Theme::Rose => Color::Rgb(0xff, 0xb3, 0xd4),
+        Theme::Bird(bird) => crate::tui::theme::rgb(bird.plumage().accent),
     }
 }
 /// `--muted`: technical detail that must stay readable, never decoration.
@@ -49,6 +50,11 @@ pub(super) fn style(tone: Tone, theme: Theme) -> Style {
         Tone::Muted => base.fg(MUTED),
         Tone::Line => base.fg(LINE),
         Tone::You => base.fg(YOU).add_modifier(Modifier::BOLD),
+        // A sprite's pixel is the one place a background is painted: the
+        // lower half of a half block is its colour.
+        Tone::Pixel(fg, bg) => Style::default()
+            .fg(fg.map_or(Color::Reset, crate::tui::theme::rgb))
+            .bg(bg.map_or(Color::Reset, crate::tui::theme::rgb)),
     }
 }
 /// `--you`: the person's own turn, one hue no other role uses.

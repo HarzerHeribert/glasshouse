@@ -25,7 +25,9 @@ mod inspection;
 pub use inspection::Inspection;
 mod lane;
 mod look;
+pub(crate) mod theme;
 pub use look::{Look, Motion};
+pub use theme::Theme;
 mod markdown;
 mod ribbon;
 mod scroll;
@@ -271,6 +273,8 @@ pub struct ScreenState {
     pub telemetry_open: bool,
     pub telemetry_selected: Option<usize>,
     pub reduced_motion: bool,
+    /// The terminal shows 24-bit colour, so a bird theme's sprite can be drawn.
+    pub truecolor: bool,
     pub pulse: Pulse,
     /// How many of the notes in [`ScreenState::history`] are the session's
     /// own opening, and therefore belong to the card at the top rather than
@@ -460,94 +464,6 @@ impl Voice {
         self == Self::Playful
     }
 }
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Theme {
-    #[default]
-    Neon,
-    Amber,
-    Ice,
-    Mono,
-    Violet,
-    Cobalt,
-    Mint,
-    Rose,
-}
-impl Theme {
-    pub const ALL: [Self; 8] = [
-        Self::Neon,
-        Self::Amber,
-        Self::Ice,
-        Self::Mono,
-        Self::Violet,
-        Self::Cobalt,
-        Self::Mint,
-        Self::Rose,
-    ];
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "neon" => Some(Self::Neon),
-            "amber" => Some(Self::Amber),
-            "ice" => Some(Self::Ice),
-            "mono" => Some(Self::Mono),
-            "violet" => Some(Self::Violet),
-            "cobalt" => Some(Self::Cobalt),
-            "mint" => Some(Self::Mint),
-            "rose" => Some(Self::Rose),
-            _ => None,
-        }
-    }
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Neon => "neon",
-            Self::Amber => "amber",
-            Self::Ice => "ice",
-            Self::Mono => "mono",
-            Self::Violet => "violet",
-            Self::Cobalt => "cobalt",
-            Self::Mint => "mint",
-            Self::Rose => "rose",
-        }
-    }
-    fn backlight(self) -> Color {
-        Color::Reset
-    }
-    fn dock(self) -> Color {
-        match self {
-            Self::Neon => Color::Rgb(20, 32, 26),
-            Self::Amber => Color::Rgb(38, 29, 19),
-            Self::Ice => Color::Rgb(17, 30, 39),
-            Self::Mono => Color::Rgb(27, 29, 30),
-            Self::Violet => Color::Rgb(30, 23, 43),
-            Self::Cobalt => Color::Rgb(18, 26, 44),
-            Self::Mint => Color::Rgb(16, 34, 30),
-            Self::Rose => Color::Rgb(38, 22, 34),
-        }
-    }
-    /// The answer's own ground: the theme's dock, darkened, so the model's
-    /// reply reads as one block without competing with a cell header for
-    /// attention. Deliberately near the terminal's own background — a
-    /// highlight the eye finds and does not have to look past.
-    fn hush(self) -> Color {
-        match self.dock() {
-            Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
-            other => other,
-        }
-    }
-
-    pub fn accent(self) -> Color {
-        match self {
-            Self::Neon => Color::Rgb(223, 255, 0),
-            Self::Amber => Color::LightYellow,
-            Self::Ice => Color::LightCyan,
-            Self::Mono => Color::White,
-            Self::Violet => Color::Rgb(191, 154, 255),
-            Self::Cobalt => Color::Rgb(114, 155, 255),
-            Self::Mint => Color::Rgb(100, 231, 187),
-            Self::Rose => Color::Rgb(242, 156, 218),
-        }
-    }
-}
-
 /// Auto needs a comfortable reading column; Shown can use a tighter one.
 /// Below 80 columns even an explicit request collapses to preserve the editor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -44,8 +44,13 @@ for the last dock change; its bottom edge carries the three everyday chips, one
 rotating hint and the context reading. Pane's character is a small braille bird
 with six states read off the session's activity, and `ui.voice = playful | plain`
 chooses between its first-person copy and the plain statement of the same
-facts; structure never changes with the voice. The opening greets by project and
-local hour and offers chips read from the repository (last commit, uncommitted
+facts; structure never changes with the voice. Eight of the sixteen
+`ui.theme` palettes are parrots -- `amazon`, `sun-conure`, `hyacinth`, `scarlet`,
+`blue-gold`, `green-wing`, `military`, `cockatoo` -- whose plumage is the
+palette; on a terminal that shows true colour the chosen bird perches on the
+opening card as an 18×24 half-block sprite in the bird's six moods
+(`workbench/plumage.rs`), and `/theme` lists every palette beside a preview of
+the chosen one. The opening greets by local hour and offers chips read from the repository (last commit, uncommitted
 changes, a test command), each of which types a message. Inside an open cell
 the program's acting calls are lit and the chain of calls the cell actually
 made is listed from its record with how each ended; a cell still being

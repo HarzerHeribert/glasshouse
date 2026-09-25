@@ -1603,6 +1603,8 @@ fn surface(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui: &W
             ui,
             t,
         );
+    } else if let Some(panel) = s.panel.as_ref().filter(|panel| panel.title == "Themes") {
+        draw_themes(f, g, inner, panel, s, t);
     } else if let Some(panel) = &s.panel {
         let start = panel
             .selected
@@ -1619,6 +1621,118 @@ fn surface(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui: &W
                 t,
             );
         }
+    }
+}
+
+/// `/theme`: the palettes on the left, each by a swatch of its accent, and
+/// the chosen one on the right as the screen will wear it -- a bird theme's
+/// bird, its name and its three colours.
+fn draw_themes(
+    f: &mut Frame<'_>,
+    g: &mut Geometry,
+    inner: Rect,
+    panel: &crate::tui::Panel,
+    s: &ScreenState,
+    t: Theme,
+) {
+    use super::plumage::{Mood, ROWS, WIDTH, sprite};
+    let theme_of = |row: &crate::tui::PanelRow| {
+        row.command
+            .as_deref()
+            .and_then(|command| command.strip_prefix("/theme "))
+            .and_then(Theme::parse)
+    };
+    let list = (inner.width / 2).clamp(24, 40);
+    let rows = inner.height.saturating_sub(4) as usize;
+    let start = panel.selected.saturating_sub(rows.saturating_sub(1));
+    for (i, r) in panel.rows.iter().enumerate().skip(start).take(rows) {
+        let y = inner.y + 2 + (i - start) as u16;
+        let Some(theme) = theme_of(r) else { continue };
+        let name = match theme {
+            Theme::Bird(bird) => bird.plumage().title,
+            other => other.name(),
+        };
+        let swatch = match super::theme::accent(theme) {
+            ratatui::style::Color::Rgb(r, g, b) => {
+                Tone::Pixel(Some(u32::from_be_bytes([0, r, g, b])), None)
+            }
+            _ => Tone::Strong,
+        };
+        row(f, Rect::new(inner.x + 2, y, 2, 1), "██", swatch, t);
+        add(
+            f,
+            g,
+            Rect::new(inner.x + 5, inner.y, list.saturating_sub(5), inner.height),
+            y,
+            &format!("{} {name}", if i == panel.selected { "›" } else { " " }),
+            Action::PanelRow(i),
+            i == panel.selected,
+            t,
+        );
+    }
+    let Some(chosen) = panel.rows.get(panel.selected).and_then(theme_of) else {
+        return;
+    };
+    let x = inner.x + list + 3;
+    let area = Rect::new(
+        x,
+        inner.y + 2,
+        inner.right().saturating_sub(x),
+        inner.height.saturating_sub(4),
+    );
+    let Theme::Bird(bird) = chosen else {
+        label(f, area, area.y, chosen.name(), Tone::Strong, t);
+        label(
+            f,
+            area,
+            area.y + 1,
+            "no bird · the palette alone",
+            Tone::Muted,
+            t,
+        );
+        return;
+    };
+    let plumage = bird.plumage();
+    let mut y = area.y;
+    if s.truecolor && area.width as usize >= WIDTH && area.height as usize >= ROWS + 5 {
+        for cells in sprite(bird, Mood::Done) {
+            for (dx, (glyph, fg, bg)) in cells.into_iter().enumerate() {
+                row(
+                    f,
+                    Rect::new(area.x + dx as u16, y, 1, 1),
+                    &glyph.to_string(),
+                    Tone::Pixel(fg, bg),
+                    t,
+                );
+            }
+            y += 1;
+        }
+        y += 1;
+    }
+    label(f, area, y, plumage.title, Tone::Strong, t);
+    label(f, area, y + 1, plumage.latin, Tone::Muted, t);
+    label(f, area, y + 2, plumage.nest, Tone::Muted, t);
+    for (i, colour) in [plumage.accent, plumage.second, plumage.highlight]
+        .into_iter()
+        .enumerate()
+    {
+        row(
+            f,
+            Rect::new(area.x + i as u16 * 3, y + 4, 2, 1),
+            "██",
+            Tone::Pixel(Some(colour), None),
+            t,
+        );
+    }
+    if !s.truecolor {
+        label(
+            f,
+            area,
+            y + 6,
+            "This terminal shows no true colour: the outline bird stands in.",
+            Tone::Muted,
+            t,
+        );
     }
 }
 

@@ -51,6 +51,7 @@ pub(crate) fn presentation(state: &mut tui::ScreenState, values: &toml::Value) {
     state.stream = word("ui.stream")
         .and_then(tui::Stream::parse)
         .unwrap_or_default();
+    state.truecolor = crate::workbench::plumage::truecolor();
 }
 pub(crate) struct Editor {
     pub panel: SettingsPanel,

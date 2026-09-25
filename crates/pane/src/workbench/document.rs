@@ -28,6 +28,8 @@ pub enum Tone {
     Line,
     /// The person's own turn: its gutter and its label.
     You,
+    /// One cell of a bird sprite: its upper and lower pixel's colours.
+    Pixel(Option<u32>, Option<u32>),
 }
 /// What shape the view gives a row.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1114,6 +1116,13 @@ impl Document {
         let asking = false;
         let still = !s.motion_live();
         let face = voice::Face::of(s.activity, asking);
+        if let crate::tui::Theme::Bird(species) = s.theme
+            && s.truecolor
+            && c.messages.is_empty()
+        {
+            self.perched(species, face, s, &startup, width);
+            return;
+        }
         let bird = s.look == crate::tui::Look::Bird;
         // The instrument's card is one still mark and the facts; the bird's
         // is its face. Either way the card is chrome and holds still.
@@ -1159,6 +1168,59 @@ impl Document {
                 bird.then_some(Action::Quip),
                 0,
             );
+        }
+        self.rule(width, 0);
+        self.blank(0);
+    }
+    /// The opening card of a bird theme: the bird itself, in colour, with the
+    /// greeting and what happened at start beside it.
+    fn perched(
+        &mut self,
+        species: super::plumage::Bird,
+        face: voice::Face,
+        s: &ScreenState,
+        startup: &[&str],
+        width: usize,
+    ) {
+        use super::plumage::{Mood, WIDTH, sprite};
+        let mood = match face {
+            voice::Face::Idle if s.motion_live() && s.animation_frame % 24 == 23 => Mood::Blink,
+            voice::Face::Idle => Mood::Idle,
+            voice::Face::Thinking | voice::Face::Asking => Mood::Think,
+            voice::Face::Working => Mood::Work,
+            voice::Face::Done => Mood::Done,
+            voice::Face::Oops => Mood::Oops,
+        };
+        let plumage = species.plumage();
+        let room = width.saturating_sub(WIDTH + 6);
+        let mut facts = vec![
+            (voice::greeting(s.speaking(), s.local_hour), Tone::Strong),
+            (format!("{} · {}", plumage.title, plumage.nest), Tone::Muted),
+        ];
+        facts.extend(
+            startup
+                .iter()
+                .take(2)
+                .map(|note| (note.to_string(), Tone::Muted)),
+        );
+        if startup.len() > 2 {
+            facts.push((
+                format!("+{} more · /activity", startup.len() - 2),
+                Tone::Line,
+            ));
+        }
+        let top = 4usize.min(super::plumage::ROWS.saturating_sub(facts.len()));
+        for (y, row) in sprite(species, mood).into_iter().enumerate() {
+            let mut spans = vec![(" ".to_string(), Tone::Normal)];
+            spans.extend(
+                row.into_iter()
+                    .map(|(glyph, fg, bg)| (glyph.to_string(), Tone::Pixel(fg, bg))),
+            );
+            if let Some((text, tone)) = y.checked_sub(top).and_then(|i| facts.get(i)) {
+                spans.push(("    ".to_string(), Tone::Normal));
+                spans.push((clip(text, room), *tone));
+            }
+            self.line(spans, Some(Action::Quip), 0);
         }
         self.rule(width, 0);
         self.blank(0);

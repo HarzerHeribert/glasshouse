@@ -64,7 +64,22 @@ const HARD_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// asserts the two lists stay identical, so a new theme cannot appear in the
 /// picker and be unsavable.
 const THEMES: &[&str] = &[
-    "neon", "amber", "ice", "mono", "violet", "cobalt", "mint", "rose",
+    "neon",
+    "amber",
+    "ice",
+    "mono",
+    "violet",
+    "cobalt",
+    "mint",
+    "rose",
+    "amazon",
+    "sun-conure",
+    "hyacinth",
+    "scarlet",
+    "blue-gold",
+    "green-wing",
+    "military",
+    "cockatoo",
 ];
 const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];

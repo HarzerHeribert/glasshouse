@@ -542,6 +542,10 @@ fn theme_accent(theme: Theme) -> Color {
         Theme::Cobalt => Color::Rgb(0x9e, 0xc9, 0xff),
         Theme::Mint => Color::Rgb(0x86, 0xf1, 0xd0),
         Theme::Rose => Color::Rgb(0xff, 0xb3, 0xd4),
+        Theme::Bird(bird) => {
+            let rgb = bird.plumage().accent;
+            Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+        }
     }
 }
 #[test]
@@ -1769,4 +1773,56 @@ fn a_failure_notice_does_not_ride_the_dock() {
     let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
     let dock = screen.lines().find(|l| l.starts_with("╭─")).unwrap();
     assert!(!dock.contains("Stopped before"), "{dock}");
+}
+
+/// A bird theme perches its bird on the opening card, in its own colours,
+/// where the terminal shows true colour; elsewhere the outline bird stands in.
+#[test]
+fn a_bird_theme_perches_its_bird_in_colour_on_the_opening_card() {
+    use pane::workbench::plumage::Bird;
+    let (_, n, mut s) = fixture();
+    let empty = Conversation::default();
+    s.theme = Theme::Bird(Bird::Cockatoo);
+    s.truecolor = true;
+    let mut u = Workbench::default();
+    let screen = draw(&empty, &n, &s, &mut u, 100, 40);
+    let crest = Color::Rgb(0xf7, 0xd2, 0x3a);
+    let painted = (0..screen.area.height)
+        .flat_map(|y| (0..screen.area.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| screen[(x, y)].fg == crest && screen[(x, y)].symbol() != " ")
+        .count();
+    assert!(
+        painted >= 5,
+        "the cockatoo's crest is not on the card: {painted} cells"
+    );
+    assert!(
+        text(&screen).contains("Sulphur-crested Cockatoo"),
+        "{}",
+        text(&screen)
+    );
+    // Without true colour: no sprite, and the name is not claimed beside one.
+    s.truecolor = false;
+    let screen = draw(&empty, &n, &s, &mut u, 100, 40);
+    assert!(!text(&screen).contains("▀▀▀▀"), "{}", text(&screen));
+}
+
+/// `/theme` is a sheet: every palette listed, the chosen bird previewed by
+/// its name and its Latin one.
+#[test]
+fn the_theme_sheet_previews_the_chosen_bird() {
+    use pane::workbench::plumage::Bird;
+    let (c, n, mut s) = fixture();
+    s.truecolor = true;
+    s.panel = Some(Theme::picker(Theme::Bird(Bird::Hyacinth)));
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    for shown in [
+        "neon",
+        "Sun Conure",
+        "Sulphur-crested Cockatoo",
+        "Anodorhynchus hyacinthinus",
+        "cracks the hard ones",
+    ] {
+        assert!(screen.contains(shown), "{shown} is missing:\n{screen}");
+    }
 }

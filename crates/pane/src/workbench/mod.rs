@@ -7,6 +7,7 @@ mod document;
 mod input;
 mod models;
 mod motion;
+pub mod plumage;
 mod settings;
 mod theme;
 mod view;
