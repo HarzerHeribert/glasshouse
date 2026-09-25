@@ -670,6 +670,10 @@ fn models(data_dir: &Path, json: bool, filter: Option<&str>, import: Option<&Pat
             // reader can always tell a measurement from a prior -- which is
             // what lets a context meter say whether its percentage is one.
             "observed": inference_gateway::models::observed(data_dir),
+            // What each subscription account's own provider says it is
+            // served with -- per plan, so beside the published figures
+            // rather than merged into them.
+            "served": inference_gateway::models::served(data_dir),
         }))?;
         writeln!(stdout, "{document}")?;
         return Ok(());

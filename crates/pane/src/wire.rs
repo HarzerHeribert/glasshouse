@@ -3162,6 +3162,7 @@ mod effort_tests {
             max_tokens_from(ModelLimits {
                 context_window_tokens: Some(400_000),
                 observed_context_window_tokens: None,
+                served_context_window_tokens: None,
                 max_output_tokens: Some(64_000),
             }),
             64_000,
@@ -3171,6 +3172,7 @@ mod effort_tests {
             max_tokens_from(ModelLimits {
                 context_window_tokens: None,
                 observed_context_window_tokens: None,
+                served_context_window_tokens: None,
                 max_output_tokens: Some(u64::from(u32::MAX) + 1),
             }),
             u32::MAX,

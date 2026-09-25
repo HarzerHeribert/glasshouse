@@ -203,9 +203,17 @@ pub fn pool_from_catalogue(
     let mut notes = Vec::new();
     for (name, entry) in accounts {
         if entry.subscription_broker().is_some() {
-            match RunningSubscriptionBroker::start(&broker_paths(name), name) {
+            let paths = broker_paths(name);
+            match RunningSubscriptionBroker::start(&paths, name) {
                 Ok(broker) => match subscription_backend(broker) {
-                    Ok(backend) => backends.push(backend.with_account(name)),
+                    Ok(backend) => {
+                        crate::provider::subscription_models::refresh_in_background(
+                            paths.entitlement_dir.clone(),
+                            paths.auth_dir.clone(),
+                            name.clone(),
+                        );
+                        backends.push(backend.with_account(name));
+                    }
                     Err(error) => notes.push(format!("account `{name}`: {error}")),
                 },
                 Err(error) => {

@@ -23,6 +23,7 @@ pub mod fixture;
 pub mod pool_state;
 pub mod quota;
 pub mod registry;
+pub mod subscription_models;
 pub mod subscription_usage;
 pub mod telemetry;
 

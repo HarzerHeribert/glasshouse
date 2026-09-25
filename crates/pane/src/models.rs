@@ -45,6 +45,18 @@ struct Document {
     /// gateway, which is why it defaults rather than being required.
     #[serde(default)]
     observed: BTreeMap<String, ObservedFacts>,
+    /// What each subscription account's own provider says it is served
+    /// with, per plan. Absent from an older gateway.
+    #[serde(default)]
+    served: BTreeMap<String, ServedFacts>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ServedFacts {
+    #[serde(default)]
+    context_window_tokens: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -124,7 +136,10 @@ pub struct MeasuredFacts {
     /// provider has refused an over-long request and said so. Outranks the
     /// published figure because it is a measurement of the thing itself.
     pub observed_context_window_tokens: Option<u64>,
-    /// The most it may produce in one response, when the gateway knows it.
+    /// The window the account's own provider says this plan is served with.
+    pub served_context_window_tokens: Option<u64>,
+    /// The most it may produce in one response, when the gateway knows it --
+    /// the account's own figure where there is one.
     pub max_output_tokens: Option<u64>,
 }
 
@@ -141,6 +156,8 @@ pub struct ModelLimits {
     pub context_window_tokens: Option<u64>,
     /// How much the route in use was watched accepting.
     pub observed_context_window_tokens: Option<u64>,
+    /// What the account's own provider says this plan is served with.
+    pub served_context_window_tokens: Option<u64>,
     /// The most it may produce in one response.
     pub max_output_tokens: Option<u64>,
 }
@@ -167,6 +184,7 @@ pub fn remember(published: &BTreeMap<String, MeasuredFacts>) {
                     ModelLimits {
                         context_window_tokens: facts.context_window_tokens,
                         observed_context_window_tokens: facts.observed_context_window_tokens,
+                        served_context_window_tokens: facts.served_context_window_tokens,
                         max_output_tokens: facts.max_output_tokens,
                     },
                 )
@@ -191,6 +209,9 @@ pub enum WindowSource {
     /// A provider refused an over-long request on this route and named the
     /// limit. Trusted: the route answering for itself.
     Observed,
+    /// The subscription account's own provider listed it for this plan.
+    /// Trusted: the provider describing what it serves this login.
+    Served,
     /// A catalogue published it for the model. An estimate: a re-host caps
     /// what it resells, and a subscription tier can narrow it again.
     Published,
@@ -204,7 +225,7 @@ impl WindowSource {
     /// than a guess.
     #[must_use]
     pub fn is_trusted(self) -> bool {
-        matches!(self, Self::Configured | Self::Observed)
+        matches!(self, Self::Configured | Self::Observed | Self::Served)
     }
 }
 
@@ -212,7 +233,8 @@ impl WindowSource {
 ///
 /// Precedence, most authoritative first: what the person configured with
 /// `--context-window-tokens`; then what a provider was watched enforcing on
-/// this route; then what a catalogue published for the model; then nothing,
+/// this route; then what the subscription account's provider lists for its
+/// plan; then what a catalogue published for the model; then nothing,
 /// which is printed as `window ?` rather than filled in.
 ///
 /// The person's own figure wins because they may be running behind a proxy
@@ -230,6 +252,9 @@ pub fn window_with_source(
     }
     if let Some(observed) = published.observed_context_window_tokens {
         return (Some(observed), WindowSource::Observed);
+    }
+    if let Some(served) = published.served_context_window_tokens {
+        return (Some(served), WindowSource::Served);
     }
     match published.context_window_tokens {
         Some(published) => (Some(published), WindowSource::Published),
@@ -278,6 +303,7 @@ pub fn published(gateway: &Gateway) -> BTreeMap<String, MeasuredFacts> {
         return BTreeMap::new();
     };
     let observed = document.observed;
+    let served = document.served;
     let mut measured: BTreeMap<String, MeasuredFacts> = document
         .models
         .into_iter()
@@ -293,6 +319,7 @@ pub fn published(gateway: &Gateway) -> BTreeMap<String, MeasuredFacts> {
                     coding: facts.coding,
                     context_window_tokens: facts.context_window_tokens,
                     observed_context_window_tokens: seen,
+                    served_context_window_tokens: None,
                     max_output_tokens: facts.max_output_tokens,
                 },
             )
@@ -309,6 +336,15 @@ pub fn published(gateway: &Gateway) -> BTreeMap<String, MeasuredFacts> {
             .entry(normalise(&id))
             .or_default()
             .observed_context_window_tokens = Some(tokens);
+    }
+    // The account's own figures, for models the index measured and for the
+    // many it has not caught up with yet.
+    for (id, facts) in served {
+        let entry = measured.entry(normalise(&id)).or_default();
+        entry.served_context_window_tokens = facts.context_window_tokens;
+        if facts.max_output_tokens.is_some() {
+            entry.max_output_tokens = facts.max_output_tokens;
+        }
     }
     measured
 }
@@ -397,6 +433,7 @@ mod tests {
         let limits = ModelLimits {
             context_window_tokens: Some(1_000_000),
             observed_context_window_tokens: Some(200_000),
+            served_context_window_tokens: None,
             max_output_tokens: None,
         };
         assert_eq!(
@@ -409,6 +446,41 @@ mod tests {
             (Some(64_000), WindowSource::Configured),
             "the person may be behind a proxy narrower than either"
         );
+    }
+
+    #[test]
+    fn the_window_an_accounts_provider_lists_for_its_plan_outranks_the_published_one() {
+        // The published index predates gpt-6-sol and says nothing; a Max and
+        // a Pro login see different windows for one model. The account's own
+        // list is the plan describing itself -- only a refusal outranks it.
+        let document = br#"{"models":{"claude-opus-5-5":{"context_window_tokens":200000,"max_output_tokens":64000}},"served":{"claude-opus-5-5":{"context_window_tokens":1000000,"max_output_tokens":128000,"account":"claude-max","fetched_at_unix":1789000000},"gpt-6-sol":{"context_window_tokens":272000,"account":"chatgpt","fetched_at_unix":1789000000}}}"#;
+        let parsed: Document = serde_json::from_slice(document).unwrap();
+        assert_eq!(
+            parsed.served["gpt-6-sol"].context_window_tokens,
+            Some(272_000)
+        );
+        let limits = ModelLimits {
+            context_window_tokens: Some(200_000),
+            observed_context_window_tokens: None,
+            served_context_window_tokens: Some(1_000_000),
+            max_output_tokens: None,
+        };
+        assert_eq!(
+            window_with_source(None, limits),
+            (Some(1_000_000), WindowSource::Served)
+        );
+        assert_eq!(
+            window_with_source(
+                None,
+                ModelLimits {
+                    observed_context_window_tokens: Some(900_000),
+                    ..limits
+                }
+            ),
+            (Some(900_000), WindowSource::Observed),
+            "a refusal is the route answering for itself"
+        );
+        assert!(WindowSource::Served.is_trusted());
     }
 
     #[test]
@@ -444,6 +516,7 @@ mod tests {
         let published = ModelLimits {
             context_window_tokens: Some(400_000),
             observed_context_window_tokens: None,
+            served_context_window_tokens: None,
             max_output_tokens: None,
         };
         assert_eq!(window_from(None, published), Some(400_000));

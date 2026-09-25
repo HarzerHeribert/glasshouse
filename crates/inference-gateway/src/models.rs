@@ -284,9 +284,71 @@ pub fn observed(data_dir: &Path) -> BTreeMap<String, ObservedLimit> {
     folded
 }
 
+/// What a subscription account is **served with** for a model, as the
+/// provider told that account's own login
+/// (`crate::provider::subscription_models`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServedWindow {
+    pub context_window_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    /// The account whose provider said so.
+    pub account: String,
+    pub fetched_at_unix: i64,
+}
+
+/// Every served window this installation holds, keyed by [`normalise`]d
+/// model name. Where two accounts serve one model the smaller figure is
+/// kept: a session can land on either.
+#[must_use]
+pub fn served(data_dir: &Path) -> BTreeMap<String, ServedWindow> {
+    let mut folded: BTreeMap<String, ServedWindow> = BTreeMap::new();
+    let brokers = data_dir.join("subscription-brokers");
+    for reading in crate::provider::subscription_models::load_all(&brokers) {
+        for (model, limit) in reading.models {
+            let candidate = ServedWindow {
+                context_window_tokens: limit.context_window_tokens,
+                max_output_tokens: limit.max_output_tokens,
+                account: reading.account.clone(),
+                fetched_at_unix: reading.fetched_at_unix,
+            };
+            folded
+                .entry(normalise(&model))
+                .and_modify(|held| {
+                    if candidate.context_window_tokens < held.context_window_tokens {
+                        *held = candidate.clone();
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    folded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_accounts_serving_one_model_report_the_smaller_window_and_whose_it_is() {
+        use crate::provider::subscription_models::{ServedLimit, store};
+        let dir = tempfile::tempdir().unwrap();
+        for (account, window) in [("max", 1_000_000), ("pro", 200_000)] {
+            let entitlement = dir.path().join("subscription-brokers").join(account);
+            std::fs::create_dir_all(&entitlement).unwrap();
+            let models = BTreeMap::from([(
+                "claude-opus-5.5".to_string(),
+                ServedLimit {
+                    context_window_tokens: window,
+                    max_output_tokens: None,
+                },
+            )]);
+            store(&entitlement, account, models, 1_789_000_000).unwrap();
+        }
+        let seen = &served(dir.path())["claude-opus-5-5"];
+        assert_eq!(seen.context_window_tokens, 200_000);
+        assert_eq!(seen.account, "pro");
+    }
 
     #[test]
     fn an_observed_window_is_folded_to_one_answer_per_model_carrying_its_route() {

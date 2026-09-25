@@ -91,7 +91,7 @@ fn read_login(account: &str, login: &Value) -> AccountUsage {
     usage
 }
 
-fn logins(auth_dir: &Path) -> Vec<Value> {
+pub(super) fn logins(auth_dir: &Path) -> Vec<Value> {
     let Ok(entries) = std::fs::read_dir(auth_dir) else {
         return Vec::new();
     };
@@ -108,7 +108,7 @@ fn logins(auth_dir: &Path) -> Vec<Value> {
         .collect()
 }
 
-fn get(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+pub(super) fn get(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .http_status_as_error(false)
