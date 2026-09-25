@@ -177,3 +177,20 @@ fn a_release_is_verified_installed_beside_the_running_one_and_its_broker_adopted
         root.join("versions/v0.1.0-pre.9")
     );
 }
+
+#[test]
+fn the_newest_release_is_chosen_by_version_not_by_the_lists_order() {
+    let site = scratch("order");
+    std::fs::write(
+        site.join("api"),
+        r#"[{"tag_name":"v0.1.0-pre.9"},{"tag_name":"v0.1.0-pre.10"},{"tag_name":"v0.1.0-pre.1-204-gabc"}]"#,
+    )
+    .unwrap();
+    let base = serve(site);
+    let source = Source {
+        releases_api: format!("{base}/api"),
+        downloads: format!("{base}/dl"),
+        broker_downloads: None,
+    };
+    assert_eq!(update::latest_tag(&source).unwrap(), "v0.1.0-pre.10");
+}

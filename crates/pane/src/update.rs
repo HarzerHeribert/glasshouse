@@ -145,7 +145,7 @@ impl Source {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         Self {
             releases_api: var("PANE_UPDATE_API").unwrap_or_else(|| {
-                format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=1")
+                format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=30")
             }),
             downloads: var("PANE_UPDATE_DOWNLOADS")
                 .unwrap_or_else(|| format!("https://github.com/{REPOSITORY}/releases/download")),
@@ -189,15 +189,19 @@ fn sha256_of(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-/// The newest release's tag, pre-releases included.
+/// The newest release's tag, pre-releases included, chosen by version: the
+/// list's own order puts `pre.9` above `pre.10`, so its first entry is not it.
 pub fn latest_tag(source: &Source) -> Result<String, String> {
     let text = get_text(&source.releases_api)?;
     let releases: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("the release list did not parse: {e}"))?;
     releases
         .as_array()
-        .and_then(|list| list.first())
-        .and_then(|release| release["tag_name"].as_str())
+        .into_iter()
+        .flatten()
+        .filter_map(|release| release["tag_name"].as_str())
+        .filter(|tag| parse_tag(tag).is_some())
+        .reduce(|best, tag| if newer(tag, best) { tag } else { best })
         .map(str::to_string)
         .ok_or_else(|| "the release list named no release".to_string())
 }

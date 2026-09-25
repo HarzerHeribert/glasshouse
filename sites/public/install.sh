@@ -21,7 +21,7 @@ set -eu
 
 REPO="${GLASSHOUSE_REPO:-HarzerHeribert/glasshouse}"
 # Test seams: where releases are listed and downloaded from.
-API="${GLASSHOUSE_RELEASES_API:-https://api.github.com/repos/$REPO/releases?per_page=1}"
+API="${GLASSHOUSE_RELEASES_API:-https://api.github.com/repos/$REPO/releases?per_page=30}"
 DOWNLOADS="${GLASSHOUSE_RELEASE_DOWNLOADS:-https://github.com/$REPO/releases/download}"
 BROKER_DOWNLOADS="${GLASSHOUSE_BROKER_DOWNLOADS:-}"
 ROOT="${GLASSHOUSE_HOME:-$HOME/.local/lib/glasshouse}"
@@ -68,7 +68,15 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 TAG="${GLASSHOUSE_VERSION:-}"
 if [ -z "$TAG" ]; then
   fetch "$API" "$TMP/releases.json"
-  TAG="$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$TMP/releases.json" | head -n1)"
+  # The list's own order puts pre.9 above pre.10: rank the tags by version,
+  # a release above its own pre-releases.
+  TAG="$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$TMP/releases.json" |
+    grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-pre\.[0-9]+)?$' |
+    awk '{ s = substr($0, 2); pre = -1
+           if (split(s, a, "-pre.") == 2) { s = a[1]; pre = a[2] }
+           split(s, v, ".")
+           print v[1], v[2], v[3], (pre < 0), (pre < 0 ? 0 : pre), $0 }' |
+    sort -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | tail -n1 | cut -d' ' -f6)"
   [ -n "$TAG" ] || die "could not read the newest release of $REPO"
 fi
 VERSION="${TAG#v}"
