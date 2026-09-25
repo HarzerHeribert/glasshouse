@@ -85,7 +85,7 @@ export function homePage({ install, bird, repo, root, arrow }) {
 
 <section class="h-proof" aria-label="Measured against Codex">
   <strong>18 %</strong>
-  <div><p class="h-proof-claim">fewer tokens for the same finished work.</p><p class="h-proof-note">Measured on real coding tasks against the Codex CLI, same model, same results. <a class="inline-link" href="${measurements}">How it was measured</a>.</p></div>
+  <div><p class="h-proof-claim">fewer tokens for the same finished work.</p><p class="h-proof-note">Measured on real coding tasks against the Codex CLI, same model, same results, and re-measured on this release. <a class="inline-link" href="${measurements}">How it was measured</a>.</p></div>
 </section>
 
 <section id="gains" class="h-gains">
