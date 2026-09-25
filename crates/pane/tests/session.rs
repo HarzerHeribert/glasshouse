@@ -6669,7 +6669,8 @@ fn the_login_panel_lists_api_key_rows_after_the_accounts() {
         &root,
         &rollout,
         "sess-key-panel",
-        &["/login"],
+        // The wizard's two steps: the subscription accounts, then the keys.
+        &["/login subscription", "/login key"],
         None,
         &gateway,
     );
@@ -6710,7 +6711,7 @@ fn a_hosted_session_enters_a_key_through_the_gateway_binary() {
         &root,
         &rollout,
         "sess-hosted-key",
-        &["/login", "/key anthropic", KEY],
+        &["/login key", "/key anthropic", KEY],
         &base_url,
         None,
         &gateway,
@@ -6985,7 +6986,7 @@ fn a_hosted_session_prefers_the_gateway_beside_the_binary_to_the_one_on_path() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        writeln!(child.stdin.as_mut().unwrap(), "/login").unwrap();
+        writeln!(child.stdin.as_mut().unwrap(), "/login subscription").unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),

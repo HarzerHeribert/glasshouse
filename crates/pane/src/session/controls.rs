@@ -235,9 +235,18 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
     };
 
     let Some(account) = account else {
-        show(session, connectable_panel(&catalogue, &api_keys(session)));
+        show(session, sign_in_panel(&catalogue, &api_keys(session)));
         return;
     };
+    // The wizard's second steps: which subscription, which provider's key.
+    if account == "subscription" {
+        show(session, subscription_panel(&catalogue));
+        return;
+    }
+    if account == "key" {
+        show(session, key_panel(&api_keys(session)));
+        return;
+    }
     // The three doors a person names by what they have, not by an account
     // table: a subscription is connected whether or not the gateway had it
     // declared -- the gateway declares it on the way in.
@@ -479,15 +488,66 @@ fn key_rows(keys: &[crate::gateway::CredentialRow]) -> Vec<tui::PanelRow> {
         .collect()
 }
 
-/// `/login`'s three ways in, in the order a person reaches for them: a
-/// subscription they already pay for, a provider's API key, then any
-/// endpoint of their own. A subscription row is offered whether or not the
-/// gateway has an account declared for it -- signing in declares it.
-fn connectable_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
-    let row = |text: String, command: Option<String>| tui::PanelRow { text, command };
-    let mut rows = vec![row("Sign in with a subscription".into(), None)];
-    // Declared accounts by name under their subscription; the generic row
-    // only where none is declared yet -- signing in declares it.
+/// `/login`, the wizard's first step: three ways in, in the order a person
+/// reaches for them. Each row opens the next step; nothing asks for a file.
+fn sign_in_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
+    let row = |text: String, command: &str| tui::PanelRow {
+        text,
+        command: Some(command.to_string()),
+    };
+    let connected: Vec<&str> = catalogue
+        .accounts
+        .iter()
+        .filter(|entry| entry.connect_with.is_some() && entry.authenticated == Some(true))
+        .map(|entry| match entry.connect_with.as_deref() {
+            Some("openai") => "ChatGPT",
+            Some("anthropic") => "Claude",
+            _ => entry.account.as_str(),
+        })
+        .collect();
+    let stored = keys.iter().filter(|key| key.source.is_some()).count();
+    let subscription = if connected.is_empty() {
+        "Sign in with a subscription · ChatGPT, Claude".to_string()
+    } else {
+        format!(
+            "Sign in with a subscription · {} connected",
+            connected.join(", ")
+        )
+    };
+    let key = match stored {
+        0 => "Sign in with an API key · Anthropic, OpenAI, OpenRouter …".to_string(),
+        1 => "Sign in with an API key · 1 key stored".to_string(),
+        n => format!("Sign in with an API key · {n} keys stored"),
+    };
+    Panel::rows(
+        "Sign in",
+        vec![
+            row(subscription, "/login subscription"),
+            row(key, "/login key"),
+            row(
+                "Custom endpoint · any OpenAI- or Anthropic-compatible URL".into(),
+                "/login custom",
+            ),
+        ],
+    )
+}
+
+/// The subscription step: ChatGPT and Claude always, whether or not an
+/// account is declared -- signing in declares it -- with each declared
+/// account listed by name, and any other account a login flow connects.
+fn subscription_panel(catalogue: &Catalogue) -> Panel {
+    let row = |text: String, command: String| tui::PanelRow {
+        text,
+        command: Some(command),
+    };
+    let state = |entry: &Account| {
+        if entry.authenticated == Some(true) {
+            "connected"
+        } else {
+            "sign in"
+        }
+    };
+    let mut rows = Vec::new();
     for (label, plans, provider, word) in [
         ("ChatGPT", "Plus, Pro", "openai", "chatgpt"),
         ("Claude", "Pro, Max", "anthropic", "claude"),
@@ -498,54 +558,44 @@ fn connectable_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRo
             .filter(|entry| entry.connect_with.as_deref() == Some(provider))
             .collect();
         if declared.is_empty() {
-            rows.push(row(
-                format!("  {label} · {plans} · sign in"),
-                Some(format!("/login {word}")),
-            ));
+            rows.push(row(format!("{label} · {plans}"), format!("/login {word}")));
         }
         for entry in declared {
-            let state = if entry.authenticated == Some(true) {
-                "connected"
-            } else {
-                "sign in"
-            };
             rows.push(row(
-                format!("  {label} · {} · {} · {state}", entry.account, entry.scope),
-                Some(format!("/login {}", entry.account)),
+                format!(
+                    "{label} · {} · {} · {}",
+                    entry.account,
+                    entry.scope,
+                    state(entry)
+                ),
+                format!("/login {}", entry.account),
             ));
         }
     }
-    // Any other account a login flow connects, as the gateway names it.
     for entry in catalogue.accounts.iter().filter(|entry| {
         entry
             .connect_with
             .as_deref()
             .is_some_and(|provider| !matches!(provider, "openai" | "anthropic"))
     }) {
-        let state = if entry.authenticated == Some(true) {
-            "connected"
-        } else {
-            "sign in"
-        };
         rows.push(row(
-            format!("  {} · {} · {state}", entry.account, entry.scope),
-            Some(format!("/login {}", entry.account)),
+            format!("{} · {} · {}", entry.account, entry.scope, state(entry)),
+            format!("/login {}", entry.account),
         ));
     }
-    let keys = key_rows(keys);
-    if !keys.is_empty() {
-        rows.push(row("Sign in with a provider API key".into(), None));
-        rows.extend(keys.into_iter().map(|key| tui::PanelRow {
-            text: format!("  {}", key.text),
-            ..key
-        }));
+    Panel::rows("Sign in › Subscription", rows)
+}
+
+/// The API-key step: every provider the gateway knows a key for.
+fn key_panel(keys: &[crate::gateway::CredentialRow]) -> Panel {
+    let mut rows = key_rows(keys);
+    if rows.is_empty() {
+        rows.push(tui::PanelRow {
+            text: "The gateway names no provider that takes a key.".into(),
+            command: None,
+        });
     }
-    rows.push(row("Custom endpoint".into(), None));
-    rows.push(row(
-        "  Any OpenAI- or Anthropic-compatible URL and key".into(),
-        Some("/login custom".into()),
-    ));
-    Panel::rows("Sign in", rows)
+    Panel::rows("Sign in › API key", rows)
 }
 
 /// `/key <provider>`: takes an API key without echoing it and hands it to the
@@ -1339,19 +1389,23 @@ mod tests {
     fn a_fresh_install_offers_both_subscriptions_keys_and_a_custom_endpoint() {
         // What a new machine's gateway answers: no account declared at all.
         let catalogue: Catalogue = serde_json::from_str(r#"{"version":1,"accounts":[]}"#).unwrap();
-        let panel = connectable_panel(&catalogue, &[]);
-        let commands: Vec<&str> = panel
-            .rows
-            .iter()
-            .filter_map(|row| row.command.as_deref())
-            .collect();
+        let commands = |panel: &Panel| -> Vec<String> {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| row.command.clone())
+                .collect()
+        };
+        // Step one: three ways in.
         assert_eq!(
-            commands,
-            ["/login chatgpt", "/login claude", "/login custom"]
+            commands(&sign_in_panel(&catalogue, &[])),
+            ["/login subscription", "/login key", "/login custom"]
         );
-        let texts: Vec<&str> = panel.rows.iter().map(|row| row.text.as_str()).collect();
-        assert_eq!(texts[0], "Sign in with a subscription");
-        assert!(texts.contains(&"Custom endpoint"));
+        // Step two: both subscriptions, though nothing is declared.
+        assert_eq!(
+            commands(&subscription_panel(&catalogue)),
+            ["/login chatgpt", "/login claude"]
+        );
         assert_eq!(subscription_provider("chatgpt"), Some("openai"));
         assert_eq!(subscription_provider("claude"), Some("anthropic"));
     }
