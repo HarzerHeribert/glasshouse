@@ -40,38 +40,33 @@ const terminal = `<figure class="term" aria-label="A Pane session fixing a faili
   <span class="callout c3" aria-hidden="true">Knows your plan’s real window</span>
 </figure>`;
 
-const proof = [
-  ['12 / 12', 'tasks finished', 'The same as Codex, on the same model.'],
-  ['18 %', 'fewer tokens', 'For the same finished work.'],
-  ['8 of 8', 'facts found', 'Exploring a codebase. Codex found 7.3.'],
-  ['4 of 6', 'edits checked', 'The way the repo asks. Codex: 1 of 6.'],
-];
 
 // Benefit rows: a heading, the gain in two sentences, and a small picture
 // of it. The pictures are markup, so they theme and scale with the page.
 const grepBars = `<div class="viz-bars" aria-hidden="true">
-  <div><span>What the search printed</span><i style="--w:100%"></i><b>275 KB</b></div>
-  <div><span>What the model read</span><i class="acid" style="--w:1.2%"></i><b>209 tokens</b></div>
+  <div><span>What your tools print</span><i style="--w:100%"></i><b>all of it</b></div>
+  <div><span>What the model reads</span><i class="acid" style="--w:3%"></i><b>what matters</b></div>
 </div>`;
-const checks = `<table class="viz-checks"><thead><tr><th></th><th>Pane</th><th>Codex</th></tr></thead><tbody>
-  <tr><td>Tests pass</td><td>12 / 12</td><td>12 / 12</td></tr>
-  <tr><td>Repo’s required check on edits</td><td class="hi">4 / 6</td><td>1 / 6</td></tr>
-  <tr><td>Model time, all tasks</td><td>975 s</td><td>976 s</td></tr>
-</tbody></table>`;
+const checks = `<div class="viz-rules" aria-hidden="true">
+  <div class="rule-file"><b>AGENTS.md</b><span>Before a change is done, run the tests and the linter.</span></div>
+  <div class="rule-run"><span class="ok">✓</span> tests <em>passed</em></div>
+  <div class="rule-run"><span class="ok">✓</span> linter <em>passed</em></div>
+  <div class="rule-done">Then it answers.</div>
+</div>`;
 const plans = `<div class="viz-plans" aria-hidden="true">
-  <div><span class="plan">ChatGPT · Pro Lite</span><span class="model">gpt-6-sol</span><i style="--w:27.2%"></i><b>272k context</b></div>
-  <div><span class="plan">Claude · Max</span><span class="model">claude-opus-5-5</span><i style="--w:100%"></i><b>1M context</b></div>
+  <div><span class="plan">ChatGPT</span><span class="model">your plan</span><i style="--w:45%"></i><b>the context your plan really has</b></div>
+  <div><span class="plan">Claude</span><span class="model">your plan</span><i style="--w:100%"></i><b>the context your plan really has</b></div>
 </div>`;
 const sessions = `<div class="viz-sessions" aria-hidden="true">
-  <div><b>tlw1zh</b><span>fix the failing tally test</span><em>resume</em></div>
-  <div><b>tlw19t</b><span>rename /usage to /limits</span><em>resume</em></div>
-  <div class="undo"><b>/rollback</b><span>2 files the session changed · your edits kept</span><em>undo</em></div>
+  <div><b>yesterday</b><span>fix the failing test</span><em>resume</em></div>
+  <div><b>this morning</b><span>rename a command everywhere</span><em>resume</em></div>
+  <div class="undo"><b>/rollback</b><span>what the session changed · your edits kept</span><em>undo</em></div>
 </div>`;
 
 const gains = [
-  ['01', 'The same work.<br>Fewer tokens.', 'A search that prints 275 KB reaches the model as 209 tokens: a summary it can open further, not a wall of text it has to read. Across four real tasks Pane finished everything Codex did on 18 % fewer tokens.', grepBars],
-  ['02', 'Done the way<br>your repo says.', 'Pane reads your AGENTS.md and CLAUDE.md and does what they ask — including the checks a change needs before it is done. That takes a little longer on edits; on work with nothing to check, it is as fast as Codex.', checks],
-  ['03', 'Both subscriptions.<br>One agent.', 'Sign in with ChatGPT and Claude, and switch models in the middle of a task. Pane asks each plan what it actually serves, so it works to your real context window instead of a guess.', plans],
+  ['01', 'The same work.<br>Fewer tokens.', 'Search results, logs and test runs reach the model as a short summary it can open further, not a wall of text it has to read. Less noise in every step: the same work on fewer tokens.', grepBars],
+  ['02', 'Done the way<br>your repo says.', 'Pane reads your AGENTS.md and CLAUDE.md and does what they ask — including the checks a change needs before it is done. It finishes a change the way your team would, not just until the code compiles.', checks],
+  ['03', 'Both subscriptions.<br>One agent.', 'Sign in with ChatGPT and Claude, and switch models in the middle of a task. Pane asks each plan what it really serves, so it works to your actual limits instead of a guess.', plans],
   ['04', 'Nothing gets<br>away from you.', 'Pick any session up where it stopped. Undo what a session changed while your own edits stay. Your keys and logins stay out of the conversation, the transcript and the logs.', sessions],
 ];
 
@@ -89,8 +84,8 @@ export function homePage({ install, bird, repo, root, arrow }) {
 </section>
 
 <section class="h-proof" aria-label="Measured against Codex">
-  ${proof.map(([n, label, note]) => `<div><strong>${n}</strong><span>${label}</span><p>${note}</p></div>`).join('')}
-  <p class="h-proof-note">Four real tasks against the Codex CLI on GPT-6 Sol, three attempts each. <a class="inline-link" href="${measurements}">Method and raw numbers on GitHub</a>.</p>
+  <strong>18 %</strong>
+  <div><p class="h-proof-claim">fewer tokens for the same finished work.</p><p class="h-proof-note">Measured on real coding tasks against the Codex CLI, same model, same results. <a class="inline-link" href="${measurements}">How it was measured</a>.</p></div>
 </section>
 
 <section id="gains" class="h-gains">

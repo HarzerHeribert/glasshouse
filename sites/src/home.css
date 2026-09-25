@@ -57,15 +57,11 @@
 .c3{bottom:-50px;right:40px}.c3:before{top:-19px;left:auto;right:24px}
 .term.shown .c2{transition-delay:.15s}.term.shown .c3{transition-delay:.3s}
 
-/* ---- proof strip ---- */
-.h-proof{margin:0 4%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
-.h-proof>div{padding:34px 28px 36px 0;border-right:1px solid var(--line);min-width:0}
-.h-proof>div+div{padding-left:28px}
-.h-proof>div:nth-child(4){border-right:0}
-.h-proof strong{display:block;font:600 clamp(58px,6.2vw,104px)/.9 var(--display);letter-spacing:-.02em}
-.h-proof span{display:block;font:12px var(--mono);letter-spacing:.06em;text-transform:uppercase;margin-top:14px}
-.h-proof p{font-size:15px;line-height:1.55;color:var(--muted);margin-top:8px}
-.h-proof-note{grid-column:1/-1;border-top:1px solid var(--line);padding:16px 0;font:12px/1.6 var(--mono);color:var(--muted-2)}
+/* ---- proof band: one number ---- */
+.h-proof{margin:0 4%;display:grid;grid-template-columns:auto minmax(0,1fr);gap:48px;align-items:center;padding:56px 0;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
+.h-proof strong{font:600 clamp(120px,15vw,240px)/.8 var(--display);letter-spacing:-.03em;background:var(--acid);color:var(--on-acid);padding:18px 28px 6px}
+.h-proof-claim{font:600 clamp(40px,4.4vw,72px)/.95 var(--display);text-transform:uppercase;letter-spacing:-.01em;max-width:760px}
+.h-proof-note{margin-top:22px;font:13px/1.6 var(--mono);color:var(--muted-2)}
 
 /* ---- gains ---- */
 .h-gains{margin:0 4%;padding:40px 0 30px}
@@ -83,6 +79,13 @@
 .viz-bars i.acid{background:var(--acid);border:1px solid var(--ink)}
 .viz-bars b{grid-row:1;grid-column:2;font:600 30px/1 var(--display)}
 
+.viz-rules{display:grid;gap:14px;font:14px/1.5 var(--mono)}
+.rule-file{border:1px solid var(--ink);background:var(--paper);padding:14px 16px}
+.rule-file b{display:block;font-weight:400;color:var(--muted-2);font-size:12px;margin-bottom:6px}
+.rule-run{padding-left:18px}
+.rule-run .ok{background:var(--acid);color:var(--on-acid);padding:0 5px;margin-right:8px}
+.rule-run em{font-style:normal;color:var(--muted)}
+.rule-done{padding-left:18px;color:var(--muted)}
 .viz-checks{width:100%;border-collapse:collapse;font-size:15px}
 .viz-checks th{font:12px var(--mono);letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:0 0 12px;color:var(--muted-2)}
 .viz-checks td{border-top:1px solid var(--line);padding:16px 12px 16px 0;color:var(--muted)}
@@ -123,10 +126,7 @@
   .h-hero h1{font-size:clamp(72px,12vw,140px)}
 }
 @media(max-width:900px){
-  .h-proof{grid-template-columns:1fr 1fr}
-  .h-proof>div:nth-child(2){border-right:0}
-  .h-proof>div:nth-child(3){padding-left:0}
-  .h-proof>div:nth-child(n+3){border-top:1px solid var(--line)}
+  .h-proof{grid-template-columns:1fr;gap:28px}
   .h-gain{grid-template-columns:1fr;gap:40px;padding:60px 0}
   .h-gain:nth-child(even) .h-gain-copy{order:0}
   .h-start ol{grid-template-columns:1fr;gap:30px}
@@ -143,11 +143,9 @@
   .t-result{margin-left:6px}
   .term-status>span:first-child{display:none}
   .callout{display:none}
-  .h-proof>div{padding:24px 12px 26px 0}
-  .h-proof>div+div{padding-left:12px}
-  .h-proof>div:nth-child(3){padding-left:0}
-  .h-proof strong{font-size:52px}
-  .h-proof p{font-size:14px}
+  .h-proof{padding:40px 0}
+  .h-proof strong{font-size:120px;justify-self:start}
+  .h-proof-claim{font-size:40px}
   .h-gain h2{font-size:50px}
   .h-gain p{font-size:16px}
   .h-gain-viz{padding:20px}
