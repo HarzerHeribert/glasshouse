@@ -530,6 +530,15 @@ pub struct PaneConfig {
     pub decisions: DecisionsConfig,
     pub modes: ModesConfig,
     pub ask: AskConfig,
+    pub wizard: WizardConfig,
+}
+
+/// `[wizard]` -- which version of Pane's recommended settings the person
+/// last saw, so an update that changes them shows the difference once
+/// (`session/setup.rs`). Global only: it is about the person, not a project.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WizardConfig {
+    pub seen: u32,
 }
 
 /// `[model]` -- the parent tier, the one the person talks to.
@@ -697,12 +706,13 @@ impl PaneConfig {
                 "decisions",
                 "modes",
                 "ask",
+                "wizard",
             ]
             .contains(&key.as_str())
             {
                 return Err(format!(
                     "pane.toml: unknown table `[{key}]`; only [limits], [supervisor], [helpers], \
-                     [agents], [model], [web], [decisions], [modes] and [ask] are recognised"
+                     [agents], [model], [web], [decisions], [modes], [ask] and [wizard] are recognised"
                 ));
             }
         }
@@ -754,6 +764,23 @@ impl PaneConfig {
             Some(value) => parse_ask(value)?,
             None => AskConfig::default(),
         };
+        let wizard = match table.get("wizard") {
+            Some(value) => {
+                let table = table_of(value, "wizard")?;
+                if let Some(key) = table.keys().find(|key| key.as_str() != "seen") {
+                    return Err(format!("pane.toml: unknown key `{key}` in [wizard]"));
+                }
+                let seen = match table.get("seen") {
+                    None => 0,
+                    Some(value) => value
+                        .as_integer()
+                        .and_then(|seen| u32::try_from(seen).ok())
+                        .ok_or("pane.toml: `[wizard] seen` must be a whole number")?,
+                };
+                WizardConfig { seen }
+            }
+            None => WizardConfig::default(),
+        };
 
         // The fallback above, applied once so every reader -- the session's
         // own switch, `/supervisor`, the sidebar -- sees one effective model.
@@ -772,6 +799,7 @@ impl PaneConfig {
             decisions,
             modes,
             ask,
+            wizard,
         })
     }
 }

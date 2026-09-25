@@ -35,7 +35,7 @@ pub(super) fn show(session: &Session<'_>, panel: Panel) {
 }
 
 #[derive(serde::Deserialize)]
-struct Catalogue {
+pub(super) struct Catalogue {
     version: u32,
     accounts: Vec<Account>,
 }
@@ -534,7 +534,7 @@ fn entered_text(session: &Session<'_>, title: &str) -> Option<String> {
 /// credentials belong to the gateway whoever started it, so a session
 /// Glasshouse handed a gateway to sees and enters the same keys as one that
 /// started its own. Empty is what a gateway that could not be asked leaves.
-fn api_keys(session: &Session<'_>) -> Vec<crate::gateway::CredentialRow> {
+pub(super) fn api_keys(session: &Session<'_>) -> Vec<crate::gateway::CredentialRow> {
     crate::gateway::credentials(session.gateway).unwrap_or_default()
 }
 
@@ -603,14 +603,9 @@ fn key_rows(keys: &[crate::gateway::CredentialRow]) -> Vec<tui::PanelRow> {
         .collect()
 }
 
-/// `/login`, the wizard's first step: three ways in, in the order a person
-/// reaches for them. Each row opens the next step; nothing asks for a file.
-fn sign_in_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
-    let row = |text: String, command: &str| tui::PanelRow {
-        text,
-        command: Some(command.to_string()),
-    };
-    let connected: Vec<&str> = catalogue
+/// The subscriptions signed in, by the wizard's names for them.
+pub(super) fn connected_subscriptions(catalogue: &Catalogue) -> Vec<String> {
+    catalogue
         .accounts
         .iter()
         .filter(|entry| entry.connect_with.is_some() && entry.authenticated == Some(true))
@@ -618,9 +613,42 @@ fn sign_in_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) 
             SUBSCRIPTIONS
                 .iter()
                 .find(|subscription| entry.connect_with.as_deref() == Some(subscription.provider))
-                .map_or(entry.account.as_str(), |subscription| subscription.label)
+                .map_or(entry.account.clone(), |subscription| {
+                    subscription.label.to_string()
+                })
         })
-        .collect();
+        .collect()
+}
+
+/// The gateway's account catalogue, or `None` when it cannot be asked.
+pub(super) fn catalogue(session: &Session<'_>) -> Option<Catalogue> {
+    session
+        .gateway
+        .run(&["entitlements", "--json"], None)
+        .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok())
+}
+
+/// Saves settings edits to one scope's file (never a named profile: the
+/// wizard's settings are not runtime overlays), proved to load before the
+/// file is replaced.
+pub(super) fn save_settings(
+    session: &Session<'_>,
+    scope: crate::settings::Scope,
+    edits: &[(String, Option<String>)],
+) -> Result<crate::settings::Loaded, String> {
+    let store = crate::settings::Store::new(&session.project.root)?;
+    let snapshot = store.read(scope)?;
+    store.save_profile(scope, &snapshot, edits, None)
+}
+
+/// `/login`, the wizard's first step: three ways in, in the order a person
+/// reaches for them. Each row opens the next step; nothing asks for a file.
+fn sign_in_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
+    let row = |text: String, command: &str| tui::PanelRow {
+        text,
+        command: Some(command.to_string()),
+    };
+    let connected = connected_subscriptions(catalogue);
     let stored = keys.iter().filter(|key| key.source.is_some()).count();
     let subscription = if connected.is_empty() {
         "Sign in with a subscription · ChatGPT, Grok, Claude, Gemini …".to_string()
@@ -1338,6 +1366,7 @@ pub(super) fn command(
             models(session);
         }
         "login" => login(session, argument),
+        "wizard" | "setup" => super::setup::command(session, argument),
         "pool" => pool(session, argument),
         "usage" => {
             let now = std::time::SystemTime::now()

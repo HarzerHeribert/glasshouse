@@ -118,7 +118,7 @@ pub fn is_runtime(key: &str) -> bool {
 /// One entry, deliberately: this is a property of a key, not a dimension of
 /// every key, and a list of one is cheaper to read than a field on sixty
 /// specs. It grows if a second key ever earns it.
-const GLOBAL_ONLY: &[&str] = &["permissions.full_access"];
+const GLOBAL_ONLY: &[&str] = &["permissions.full_access", "wizard.seen"];
 
 /// Whether `key` may only be set in the global scope ([`GLOBAL_ONLY`]).
 #[must_use]
@@ -941,6 +941,15 @@ static SPECS: &[SettingSpec] = &[
         restart: true,
     },
     SettingSpec {
+        key: "wizard.seen",
+        label: "Recommended settings seen",
+        description: "The version of Pane's recommended settings last shown to you; an update that changes them shows the difference once. /wizard runs the setup again.",
+        kind: Kind::Integer,
+        choices: &[],
+        basic: false,
+        restart: false,
+    },
+    SettingSpec {
         key: "permissions.full_access",
         label: "Full access",
         description: "One setting for all three halves of `--full-access`: the project root and every command line admitted, no question asked, and no OS confinement of Pane's own. Global scope only. Removes questions; never widens the never-grantable set.",
@@ -1266,6 +1275,7 @@ pub fn shown_default(key: &str) -> Option<String> {
     Some(match key {
         "permissions.mode" => crate::permissions::Rung::default().name().to_string(),
         "permissions.full_access" => "false".into(),
+        "wizard.seen" => "0".into(),
         "permissions.allow" | "permissions.deny" => "none".into(),
         "modes.explore.writable" => ".pane/scratch/**".into(),
         "modes.explore.commands" => "none".into(),

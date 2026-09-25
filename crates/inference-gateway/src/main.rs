@@ -421,13 +421,22 @@ fn run() -> Result<()> {
                     provider,
                     variable,
                     json,
-                } => credentials_set(
-                    &config,
-                    &data_dir,
-                    provider.as_deref(),
-                    variable.as_deref(),
-                    *json,
-                ),
+                } => {
+                    credentials_set(
+                        &config,
+                        &data_dir,
+                        provider.as_deref(),
+                        variable.as_deref(),
+                        *json,
+                    )?;
+                    // A key is only served through an account once any
+                    // account is declared, so storing one declares its
+                    // provider's -- unless an account already uses it.
+                    if let Some(provider) = provider.as_deref() {
+                        declare_key_account(&cli, &config, provider)?;
+                    }
+                    Ok(())
+                }
                 CredentialsCommand::Remove {
                     provider,
                     variable,
@@ -507,6 +516,26 @@ fn declare_default_subscription(cli: &Cli, provider: SubscriptionProvider) -> Re
     };
     config::declare_table(&config_path(cli)?, &format!("accounts.{name}"), body)?;
     Ok(name.to_owned())
+}
+
+/// Declares `[accounts.<provider>]` for a provider whose key was just stored,
+/// when no account names that provider yet; a provider that is not known
+/// to this gateway declares nothing.
+fn declare_key_account(cli: &Cli, config: &GatewayConfig, provider: &str) -> Result<()> {
+    let known = config::providers(config).iter().any(|p| p.name == provider);
+    let used = config
+        .accounts
+        .values()
+        .any(|entry| entry.provider() == Some(provider));
+    if known && !used && !config.accounts.contains_key(provider) {
+        let quoted = toml::Value::String(provider.to_owned()).to_string();
+        config::declare_table(
+            &config_path(cli)?,
+            &format!("accounts.{provider}"),
+            &format!("provider = {quoted}\n"),
+        )?;
+    }
+    Ok(())
 }
 
 /// `providers add`: a custom endpoint and the account that uses it. The key
@@ -1892,6 +1921,30 @@ fn credential_present(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storing_a_key_declares_its_providers_account_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        std::fs::write(&path, "[accounts.work]\nprovider = \"groq\"\n").unwrap();
+        let cli = Cli::parse_from([
+            "inference-gateway",
+            "--config",
+            path.to_str().unwrap(),
+            "entitlements",
+        ]);
+        let config = config::load(Some(&path)).unwrap().config;
+        declare_key_account(&cli, &config, "typesafe").unwrap();
+        declare_key_account(&cli, &config, "groq").unwrap();
+        declare_key_account(&cli, &config, "no-such-provider").unwrap();
+        let after = config::load(Some(&path)).unwrap().config;
+        assert_eq!(after.accounts["typesafe"].provider(), Some("typesafe"));
+        assert!(
+            !after.accounts.contains_key("groq"),
+            "an account already uses groq"
+        );
+        assert!(!after.accounts.contains_key("no-such-provider"));
+    }
 
     #[test]
     fn signing_in_with_no_account_named_declares_the_providers_default_one() {

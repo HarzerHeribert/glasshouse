@@ -69,6 +69,7 @@ mod native;
 mod notices;
 mod resume;
 mod returned;
+mod setup;
 mod startup;
 mod system;
 use system::{estimate_request_tokens, estimate_task_request_tokens};
@@ -854,10 +855,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
     output::interface(session.interface.get(), session.dialect());
     controls::announce_missing_credential(&session, _serving.is_some());
-    if started_on.is_none() {
-        session_println!("No model selected yet: pick one, or type /model <id>.");
-        controls::models(&session);
-    }
+    setup::at_start(&session, started_on.is_none());
     let outcome = drive(&args, &session, &mut transcript, &mut rollout)
         .map_err(|message| startup::explain_failure(&message, &session));
     // §5 again, and this one is the promise `session::run` itself makes: an
