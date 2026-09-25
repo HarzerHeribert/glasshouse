@@ -840,11 +840,12 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     // paste branch below submitted the first line as a turn of its own.
     let mut turns = 1;
     let a_turn_is_running = screen.contains("thinking") || screen.contains("LIVE RESULT INTACT");
-    if !screen.contains("first line") && a_turn_is_running {
+    if a_turn_is_running {
         // The console stripped the markers and the pasted newline submitted
         // the first line as a turn (the once-session test has the trace):
         // the session is thinking on it while the composer holds the second
-        // line, and a running turn never rows its message while it runs.
+        // line. A turn running is the whole signal -- the sent line is shown
+        // at once now, so its absence from the screen no longer is.
         // The composition guard is not measurable here. Take that turn's
         // request and let it end, so the assertions below read the request
         // they were written for.
@@ -2022,14 +2023,17 @@ fn workbench_final_answer_survives_the_actual_provider_and_terminal_loop() {
 fn ctrl_c_over_a_selection_copies_and_interrupts_nothing() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("fixture-model");
-    app.send(b"select these words\r");
-    app.contains("select these words");
+    // A note to select, not a task: a turn in flight would make the `/exit`
+    // below an Enter a running turn ignores, and on Windows a refused
+    // connection is slow enough to still be in flight.
+    app.send(b"/theme amber\r");
+    app.contains("Theme: amber");
     app.settle(300);
     let y = app
         .screen
         .screen()
         .rows(0, 80)
-        .position(|row| row.contains("select these words"))
+        .position(|row| row.contains("Theme: amber"))
         .unwrap()
         + 1;
     app.send(format!("\x1b[<0;4;{y}M").as_bytes());
