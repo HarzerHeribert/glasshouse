@@ -21,7 +21,10 @@ Sol), three attempts each — [measurements](docs/product/pane/helper-measuremen
 | Facts found on the explore task, of 8 | 8.0 | 7.3 |
 | Tokens, cached included | 1.98M | 2.41M |
 | Uncached tokens | 214k | 212k |
+| Model time, all twelve attempts | 975 s | 976 s |
+| Ran the repository's required gate script on an edit | 4 of 6 | 1 of 6 |
 | Time for all four tasks | 473 s | 369 s — Codex is 1.28× faster |
+| … without that gate script | 406 s | 369 s — Codex is 1.10× faster |
 
 - 81–91 % of each task's input came from the provider's prompt cache (from
   the uncached figures in the [same measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3)).
@@ -110,10 +113,14 @@ the agent's changes, and resume.
 ## Measured against Codex
 
 Same four tasks, same model (GPT-6 Sol), three attempts each, 2026-09-24,
-Pane at its shipped defaults (6fc97dc7). **Same results. Pane used 18 %
-fewer tokens overall and as many uncached ones. Codex was 1.28× faster
-overall: Pane was faster on the two small tasks and slower on the two larger
-edits.**
+Pane at its shipped defaults (6fc97dc7). **Same results and the same model
+time. Pane used 18 % fewer tokens overall and as many uncached ones. Codex
+finished 1.28× faster, and most of that is verification: this repository's
+`CLAUDE.md` asks for its gate script before an edit is reported, and Pane
+ran it in 4 of 6 edit attempts, Codex — which read the same file — in 1.
+Without the script Codex is 1.10× faster; the rest is Pane's own extra
+checks (formatting, more test runs) on the two edit tasks. On the two tasks
+with nothing to verify, Pane was as fast or slightly faster.**
 
 | Task | Pane | Codex |
 |---|---|---|
@@ -128,13 +135,14 @@ model, helpers, the Jev classifier) against Codex's own session logs. Codex
 ran in its workspace-write sandbox, Pane with full access. Three attempts per
 cell is direction, not proof.
 
-Where Pane's time goes: its model time per turn is equal or lower than
-Codex's; the gap is commands. Codex's long commands keep running in the
-background while the model goes on; a Pane cell waits for each one. Pane also
-followed this repository's own `CLAUDE.md` gate script, which Codex mostly
-skipped. Handing long commands to background jobs was built and measured: the
-rename got slower (215 → 253 s) because the model spent turns collecting its
-jobs, so it was reverted ([measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3)).
+Where the time goes, from each attempt's events: the model worked 975 s in
+Pane and 976 s in Codex across all twelve attempts — Pane in fewer, larger
+requests (128 against 161), which is also why it reads fewer tokens. The
+difference is commands, 422 s against 118 s, and 200 s of that is the gate
+script. Handing every long command to a background job automatically was
+built and measured: the rename got slower (215 → 253 s) because the model
+spent turns collecting its jobs, so it was reverted; a cell can still start
+one itself with `bg.run` ([measurements](docs/product/pane/helper-measurements.md#9-pane-vs-codex-and-a-command-that-yields-2026-09-24-gpt-6-sol-n--3)).
 
 An hour earlier the same comparison ran with Pane holding each one-task run
 open for its completion check (15–60 s, and it changed no outcome) and at the

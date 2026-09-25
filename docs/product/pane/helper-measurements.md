@@ -190,5 +190,15 @@ background job cut E1's command wait 134 → 65 s but raised its model time
 Reverted (a8a29c96). A successor would have to keep a command inside its cell
 when the program has nothing else to do, and be measured before it ships.
 
+**The gap at shipped defaults, split** (2026-09-25, from the same events
+and Codex's session logs; time from task start to answer, all twelve
+attempts): model time Pane 975 s, Codex 976 s; requests 128 against 161;
+commands 422 s against 118 s. The repository's `CLAUDE.md` asks for
+`scripts/blast-radius.sh --targeted` before an edit is reported; Codex read
+the file (`cat CLAUDE.md` is its first call) and ran the script in 1 of the 6
+edit attempts, Pane in 4, for 200 s. Without it, Pane is 406 s against 369 s
+launch to exit (1.10×), the rest being Pane's own extra formatting and test
+runs on F1 and E1. On X1 and I1 Pane was as fast or faster.
+
 The completion check held each one-task exit 15–60 s and changed no outcome
 in 24 attempts; it no longer holds a one-task run (6fc97dc7).

@@ -83,7 +83,7 @@ export const history = [
 // time: mean seconds launch to exit, with the task's test run; tokens and
 // uncached: mean thousands per attempt, cached included in tokens.
 export const benchmark = {
-  verdict: 'Same results. Pane used 18 % fewer tokens overall and as many uncached ones. Codex was 1.28× faster overall: Pane was faster on the two small tasks and slower on the two larger edits.',
+  verdict: 'Same results and the same model time. Pane used 18 % fewer tokens overall and as many uncached ones. Codex finished 1.28× faster, mostly because it skipped verification the repository asks for: Pane ran the required gate script in 4 of 6 edits, Codex in 1. Without it Codex is 1.10× faster; on the tasks with nothing to verify, Pane was as fast or faster.',
   tasks: [
     { name: 'Fix a failing test', pane: { passed: 3, time: 134, tokens: 452, uncached: 49 }, codex: { passed: 3, time: 77, tokens: 563, uncached: 43 } },
     { name: 'Explore and explain', pane: { passed: 3, time: 71, tokens: 312, uncached: 45, facts: 8.0 }, codex: { passed: 3, time: 73, tokens: 398, uncached: 68, facts: 7.3 } },
@@ -97,7 +97,7 @@ export const benchmark = {
     { key: 'passed', label: 'Passed', unit: ' of 3', lower: false, note: 'Attempts whose test (or, for the explore task, eight-fact rubric) passed. Every attempt of both passed.' },
   ],
   notes: 'Pane at its shipped defaults, Codex CLI at medium effort, same model (GPT-6 Sol). Codex ran in its workspace-write sandbox, Pane with full access. Three attempts per cell: direction, not proof.',
-  check: 'Where Pane’s time goes: its model time per turn is equal or lower than Codex’s; the gap is commands. Codex’s long commands keep running while its model goes on; a Pane cell waits for each one. Handing long commands to background jobs was built and measured: the rename got slower (215 → 253 s) because the model spent turns collecting its jobs, so it was reverted.',
+  check: 'Where the time goes: the model worked 975 s in Pane and 976 s in Codex across all twelve attempts, Pane in fewer, larger requests (128 against 161). The difference is commands, 422 s against 118 s, and 200 s of it is the repository’s own gate script, which its CLAUDE.md asks for before an edit is reported and which Codex read and mostly skipped. Handing every long command to a background job automatically was measured slower and reverted.',
 };
 
 export const glasshouse = {
