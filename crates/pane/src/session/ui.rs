@@ -243,6 +243,13 @@ impl Steer {
         self.stop.swap(false, Ordering::SeqCst)
     }
 
+    /// Lowers both levers when a task starts: a lever pulled before it began
+    /// was meant for a turn that has already ended.
+    pub(super) fn clear(&self) {
+        self.stop.store(false, Ordering::SeqCst);
+        self.cancel.store(false, Ordering::SeqCst);
+    }
+
     /// Read by the interrupt watcher, which owns the cancellation token.
     pub(super) fn take_cancel(&self) -> bool {
         self.cancel.swap(false, Ordering::SeqCst)

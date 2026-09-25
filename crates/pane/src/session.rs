@@ -269,6 +269,13 @@ impl Interrupter {
         }
     }
 
+    /// A new task starts with nothing pending -- unless the session is
+    /// ending, for the same reason [`consumed`](Self::consumed) keeps it.
+    fn start_clean(&self) {
+        INTERRUPT.store(false, Ordering::SeqCst);
+        self.consumed();
+    }
+
     fn writing(&self) -> MutexGuard<'_, ()> {
         lock(&self.writing)
     }
@@ -1216,6 +1223,14 @@ fn run_task_inner(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
+    // A stop or an interrupt raised before this task began belongs to no
+    // task: an Escape whose turn ended before its cell boundary, a Ctrl-C at
+    // an idle prompt. Left raised, it ended the next task on its first
+    // check -- measured 56 ms after the person's message was sent.
+    session.interrupt.start_clean();
+    if let Some(ui) = session.ui {
+        ui.steer().clear();
+    }
     let mut budget = TaskSpend::new(session.config().limits.cells);
     session.routing.clear();
     system::keep_session_system(session, transcript);

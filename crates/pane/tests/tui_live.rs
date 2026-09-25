@@ -1832,6 +1832,33 @@ fn live_a_message_sent_while_working_is_queued_and_becomes_the_next_task() {
     assert_eq!(app.exited(), 130);
 }
 
+/// An Escape whose task answered before its cell boundary was never read,
+/// and it stopped the next task 56 ms after the person sent it -- before a
+/// single request left. The next task must start clean and reach the model.
+#[test]
+fn live_a_stop_left_over_from_a_finished_task_does_not_stop_the_next() {
+    let (base, requests, release) = serving_provider(ANSWERING);
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"first task\r");
+    let _ = requests.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.send(b"\x1b");
+    app.wait("the first Escape asks for the gentle stop", |screen| {
+        screen.contents().contains("Stopping after this cell")
+    });
+    let _ = release.send(());
+    app.settle(1500);
+    app.send(b"the next task\r");
+    let next = requests
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the next task never reached the model");
+    assert!(said(&next).contains("the next task"), "{next}");
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    assert_eq!(app.exited(), 130);
+}
+
 #[test]
 fn live_escape_ends_the_turn_at_the_cell_boundary_with_no_further_model_turn() {
     // A cell that answers nothing, so the task would keep taking turns for
