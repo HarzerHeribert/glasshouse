@@ -1066,14 +1066,14 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     app.send(b"/models\r");
     // The agent tabs make every tier directly accessible.
-    app.contains("[ Helper ]");
+    app.contains("⟨ Helper ⟩");
     app.contains("a-model");
     app.contains("z-model");
-    // The list's last line, so the snapshot is of a whole frame, not one
+    // The list's last header, so the snapshot is of a whole frame, not one
     // the pty is still delivering.
-    app.contains("z-account");
+    app.contains("Z-ACCOUNT");
     let content = app.screen.screen().contents();
-    assert!(content.find("a-account").unwrap() < content.find("z-account").unwrap());
+    assert!(content.find("A-ACCOUNT").unwrap() < content.find("Z-ACCOUNT").unwrap());
     assert!(content.find("a-model").unwrap() < content.find("b-model").unwrap());
     app.send(b"\r");
     app.contains("model changed to a-model");
@@ -1117,52 +1117,46 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.send(b"/model\r");
     // The default offers what this session can actually route to: the one
     // account that is pinned elsewhere is counted, not offered (workbench.md,
-    // *Model navigator*). F6 asks for every source, and only then is the
-    // locked row on screen to explain itself.
-    app.contains("307/308");
+    // *Model navigator*). Ctrl-A asks for every account, and only then is
+    // the locked row on screen to explain itself.
+    app.contains("307 of 308");
     app.contains("gemini/exact");
-    app.send(b"\x1b[17~");
-    app.contains("308/308");
+    app.send(b"\x01");
+    app.contains("308 of 308");
     app.contains("claude/exact");
-    // The row says LOCK where a usable one shows its account, and the line
-    // under the list still gives the reason in full.
-    app.contains("LOCK");
+    // The row says locked, and the line under the list gives the reason in
+    // full.
+    app.contains("locked");
     app.contains("Pinned to another entitlement");
     app.send(b"\r");
     assert!(requests.try_recv().is_err());
     // Back to the routes this session can actually use: the locked account
     // is counted in the catalogue and gone from the list.
-    app.send(b"\x1b[17~");
-    app.contains("307/308");
+    app.send(b"\x01");
+    app.contains("307 of 308");
     app.settle(120);
     assert!(!app.screen.screen().contents().contains("claude/exact"));
-    // The four providers all fit the one-row strip, so there is nothing
-    // offscreen and no `▶` to find. That the carousel *signals* an offscreen
-    // tab is driven directly, both directions, by
-    // `provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow`;
-    // what this live test still owes is that moving along it works.
-    app.contains("openrouter");
-    app.contains("‹ Connected accounts ›");
-    app.send(b"\x1b[C");
-    app.wait("the provider carousel moved", |screen| {
-        !screen.contents().contains("‹ Connected accounts ›")
-    });
-    app.send(b"\x1b[D");
-    app.contains("‹ Connected accounts ›");
+    // One list, each account under its own header: no carousel to step
+    // through to reach a provider.
+    app.contains("OPENROUTER");
     app.contains("gemini/exact");
     // `+` rather than a space: `Space` stages a choice for the active tier
     // now, so it no longer reaches the filter. Three terms still AND, and
     // they have to -- this fixture's `work` and `personal` accounts both
     // carry `vendor/model-303`, so one term cannot pick between them.
     app.send(b"OPENROUTER+work+303");
-    app.contains("1/308");
-    app.contains("openrouter · work");
+    app.contains("1 of 308");
+    app.contains("OPENROUTER · WORK");
     app.contains("vendor/model-303");
     // `contains` stops pumping the moment it is satisfied, so an absence is
     // only true of a screen that has been brought up to date first.
     app.settle(120);
     assert!(
-        !app.screen.screen().contents().contains("personal"),
+        !app.screen
+            .screen()
+            .contents()
+            .to_lowercase()
+            .contains("personal"),
         "{}",
         app.screen.screen().contents()
     );
@@ -1171,12 +1165,12 @@ fn model_picker_searches_a_large_catalogue_and_applies_the_filtered_selection() 
     app.send(b"\r");
     assert!(requests.try_recv().is_err());
     app.send(b"\x7f");
-    app.contains("1/308");
+    app.contains("1 of 308");
     app.send(b"\x15");
-    app.contains("307/308");
+    app.contains("307 of 308");
     app.send(b"\x1b[200~personal 302\x1b[201~");
     app.contains("vendor/model-302");
-    app.contains("1/308");
+    app.contains("1 of 308");
     app.resize(40);
     app.contains("vendor/model-302");
     app.send(b"\r");

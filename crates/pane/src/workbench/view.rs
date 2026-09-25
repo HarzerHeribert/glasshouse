@@ -8,10 +8,10 @@ use crate::contract::{Conversation, ServedBy};
 use crate::tui::{Activity, Notebook, ScreenState, StatusLine, Theme};
 use ratatui::{Frame, layout::Rect, text::Span, widgets::Clear};
 
-fn row(f: &mut Frame<'_>, r: Rect, text: &str, tone: Tone, theme: Theme) {
+pub(super) fn row(f: &mut Frame<'_>, r: Rect, text: &str, tone: Tone, theme: Theme) {
     chrome::text(f, r, text, tone, theme);
 }
-fn button(
+pub(super) fn button(
     f: &mut Frame<'_>,
     g: &mut Geometry,
     r: Rect,
@@ -32,17 +32,17 @@ fn button(
         g.hits.push((Rect::new(r.x, r.y, r.width, 1), action));
     }
 }
-fn full_row(area: Rect, y: u16) -> Rect {
+pub(super) fn full_row(area: Rect, y: u16) -> Rect {
     Rect::new(area.x, y, area.width, u16::from(y < area.bottom()))
 }
-fn label(f: &mut Frame<'_>, a: Rect, y: u16, text: &str, tone: Tone, t: Theme) {
+pub(super) fn label(f: &mut Frame<'_>, a: Rect, y: u16, text: &str, tone: Tone, t: Theme) {
     if y < a.bottom() {
         row(f, full_row(a, y), text, tone, t);
     }
 }
 // Keep drawing and the matching hit rectangle in one leaf helper.
 #[allow(clippy::too_many_arguments)]
-fn add(
+pub(super) fn add(
     f: &mut Frame<'_>,
     g: &mut Geometry,
     a: Rect,
@@ -535,7 +535,7 @@ pub fn render(
         );
     }
     g.hits.push((g.composer, Action::Composer));
-    if !ui.is_local() && s.panel.is_none() && s.secret_prompt.is_none() && visible > 0 {
+    if !ui.is_local() && s.panel.is_none() && s.form.is_none() && visible > 0 {
         let x = cursor_lines
             .last()
             .map(|l| Span::raw(l.as_str()).width())
@@ -1399,7 +1399,7 @@ fn surface(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui: &W
     if let Some(p) = &ui.preferences {
         draw_settings(f, g, inner, p, s, ui);
     } else if let Some(m) = &ui.models {
-        draw_models(f, g, inner, m, s);
+        super::sheets::draw_models(f, g, inner, m, s);
     } else if ui.work {
         for (i, (word, help, command)) in [
             (
@@ -1604,7 +1604,13 @@ fn surface(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui: &W
             t,
         );
     } else if let Some(panel) = s.panel.as_ref().filter(|panel| panel.title == "Themes") {
-        draw_themes(f, g, inner, panel, s, t);
+        super::sheets::draw_themes(f, g, inner, panel, s, t);
+    } else if let Some(panel) = s
+        .panel
+        .as_ref()
+        .filter(|panel| panel.title.starts_with("Setup"))
+    {
+        super::sheets::draw_wizard(f, g, inner, panel, t);
     } else if let Some(panel) = &s.panel {
         let start = panel
             .selected
@@ -1621,118 +1627,6 @@ fn surface(f: &mut Frame<'_>, g: &mut Geometry, a: Rect, s: &ScreenState, ui: &W
                 t,
             );
         }
-    }
-}
-
-/// `/theme`: the palettes on the left, each by a swatch of its accent, and
-/// the chosen one on the right as the screen will wear it -- a bird theme's
-/// bird, its name and its three colours.
-fn draw_themes(
-    f: &mut Frame<'_>,
-    g: &mut Geometry,
-    inner: Rect,
-    panel: &crate::tui::Panel,
-    s: &ScreenState,
-    t: Theme,
-) {
-    use super::plumage::{Mood, ROWS, WIDTH, sprite};
-    let theme_of = |row: &crate::tui::PanelRow| {
-        row.command
-            .as_deref()
-            .and_then(|command| command.strip_prefix("/theme "))
-            .and_then(Theme::parse)
-    };
-    let list = (inner.width / 2).clamp(24, 40);
-    let rows = inner.height.saturating_sub(4) as usize;
-    let start = panel.selected.saturating_sub(rows.saturating_sub(1));
-    for (i, r) in panel.rows.iter().enumerate().skip(start).take(rows) {
-        let y = inner.y + 2 + (i - start) as u16;
-        let Some(theme) = theme_of(r) else { continue };
-        let name = match theme {
-            Theme::Bird(bird) => bird.plumage().title,
-            other => other.name(),
-        };
-        let swatch = match super::theme::accent(theme) {
-            ratatui::style::Color::Rgb(r, g, b) => {
-                Tone::Pixel(Some(u32::from_be_bytes([0, r, g, b])), None)
-            }
-            _ => Tone::Strong,
-        };
-        row(f, Rect::new(inner.x + 2, y, 2, 1), "██", swatch, t);
-        add(
-            f,
-            g,
-            Rect::new(inner.x + 5, inner.y, list.saturating_sub(5), inner.height),
-            y,
-            &format!("{} {name}", if i == panel.selected { "›" } else { " " }),
-            Action::PanelRow(i),
-            i == panel.selected,
-            t,
-        );
-    }
-    let Some(chosen) = panel.rows.get(panel.selected).and_then(theme_of) else {
-        return;
-    };
-    let x = inner.x + list + 3;
-    let area = Rect::new(
-        x,
-        inner.y + 2,
-        inner.right().saturating_sub(x),
-        inner.height.saturating_sub(4),
-    );
-    let Theme::Bird(bird) = chosen else {
-        label(f, area, area.y, chosen.name(), Tone::Strong, t);
-        label(
-            f,
-            area,
-            area.y + 1,
-            "no bird · the palette alone",
-            Tone::Muted,
-            t,
-        );
-        return;
-    };
-    let plumage = bird.plumage();
-    let mut y = area.y;
-    if s.truecolor && area.width as usize >= WIDTH && area.height as usize >= ROWS + 5 {
-        for cells in sprite(bird, Mood::Done) {
-            for (dx, (glyph, fg, bg)) in cells.into_iter().enumerate() {
-                row(
-                    f,
-                    Rect::new(area.x + dx as u16, y, 1, 1),
-                    &glyph.to_string(),
-                    Tone::Pixel(fg, bg),
-                    t,
-                );
-            }
-            y += 1;
-        }
-        y += 1;
-    }
-    label(f, area, y, plumage.title, Tone::Strong, t);
-    label(f, area, y + 1, plumage.latin, Tone::Muted, t);
-    label(f, area, y + 2, plumage.nest, Tone::Muted, t);
-    for (i, colour) in [plumage.accent, plumage.second, plumage.highlight]
-        .into_iter()
-        .enumerate()
-    {
-        row(
-            f,
-            Rect::new(area.x + i as u16 * 3, y + 4, 2, 1),
-            "██",
-            Tone::Pixel(Some(colour), None),
-            t,
-        );
-    }
-    if !s.truecolor {
-        label(
-            f,
-            area,
-            y + 6,
-            "This terminal shows no true colour: the outline bird stands in.",
-            Tone::Muted,
-            t,
-        );
     }
 }
 
@@ -2034,7 +1928,7 @@ fn saved_in(path: &std::path::Path, scope: crate::settings::Scope) -> String {
 }
 
 /// Words laid into lines no wider than `width`.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -2052,327 +1946,8 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn draw_models(
-    f: &mut Frame<'_>,
-    g: &mut Geometry,
-    a: Rect,
-    m: &super::Navigator,
-    s: &ScreenState,
-) {
-    let roles = [
-        ("Main", m.current.parent.as_str()),
-        ("Helper", m.current.helper.as_deref().unwrap_or("off")),
-        (
-            "Subagent",
-            m.current
-                .subagent
-                .as_deref()
-                .unwrap_or("explicit model required"),
-        ),
-    ];
-    let width = a.width / 3;
-    for (i, (name, value)) in roles.into_iter().enumerate() {
-        let r = Rect::new(a.x + i as u16 * width, a.y + 2, width, 1);
-        let name = if i == m.role {
-            format!("[▸{name} ]")
-        } else {
-            format!("[ {name} ]")
-        };
-        if m.target_key.is_none() {
-            button(f, g, r, &name, Action::ModelRole(i), i == m.role, s.theme);
-        } else {
-            row(
-                f,
-                r,
-                &name,
-                if i == m.role {
-                    Tone::Accent
-                } else {
-                    Tone::Normal
-                },
-                s.theme,
-            );
-        }
-        row(
-            f,
-            Rect::new(r.x, r.y + 1, r.width, 1),
-            value,
-            Tone::Normal,
-            s.theme,
-        );
-    }
-    label(
-        f,
-        a,
-        a.y + 5,
-        &format!(
-            "{}/{}  Search: {}",
-            m.candidates().len(),
-            m.catalogue_len(),
-            if m.query.is_empty() {
-                "type model, provider or account"
-            } else {
-                &m.query
-            }
-        ),
-        Tone::Normal,
-        s.theme,
-    );
-    add(
-        f,
-        g,
-        a,
-        a.y + 6,
-        if m.all_sources {
-            "Sources: all · includes unavailable"
-        } else {
-            "Sources: connected only"
-        },
-        Action::Sources,
-        false,
-        s.theme,
-    );
-    add(
-        f,
-        g,
-        a,
-        a.y + 7,
-        if m.measured_order {
-            "Order: AA intelligence · missing ≠ zero"
-        } else {
-            "Order: account / model · Ctrl-O changes"
-        },
-        Action::Scores,
-        false,
-        s.theme,
-    );
-    let providers = m.providers();
-    let provider = providers
-        .get(m.provider)
-        .map(String::as_str)
-        .unwrap_or("Connected accounts");
-    add(
-        f,
-        g,
-        a,
-        a.y + 8,
-        &format!("‹ {provider} ›   ←→ provider · Tab role"),
-        Action::Provider((m.provider + 1) % providers.len()),
-        true,
-        s.theme,
-    );
-    let extra = if m.role == 2 && m.target_key.is_none() {
-        let names = [
-            None,
-            Some("quick"),
-            Some("balanced"),
-            Some("deep"),
-            Some("heavy"),
-        ];
-        let width = (a.width / 5).max(1);
-        for (i, slot) in names.into_iter().enumerate() {
-            let label = slot.unwrap_or("Pinned");
-            button(
-                f,
-                g,
-                Rect::new(a.x + i as u16 * width, a.y + 9, width, 1),
-                label,
-                Action::Slot(slot.map(str::to_owned)),
-                m.slot.as_deref() == slot,
-                s.theme,
-            );
-        }
-        let chosen = m.slot.as_ref().and_then(|s| m.assignment.slots.get(s));
-        let text = match (&m.slot, chosen) {
-            (Some(slot), Some(value)) => format!(
-                "{slot}: {} / {} effort · F7 changes slot",
-                value.model,
-                value.effort.name()
-            ),
-            (Some(slot), None) => format!("{slot}: not assigned · empty slots never inherit Main"),
-            _ => "Pinned: one concrete model · no inheritance".into(),
-        };
-        label(f, a, a.y + 10, &text, Tone::Normal, s.theme);
-        let enabled = m.assignment.mode == crate::config::AgentsMode::Roster;
-        add(
-            f,
-            g,
-            a,
-            a.y + 11,
-            if enabled {
-                "Favorites enabled · disable"
-            } else {
-                "Enable configured favorites (does not use Main)"
-            },
-            Action::Command(format!("/subagents {}", if enabled { "off" } else { "on" })),
-            false,
-            s.theme,
-        );
-        3
-    } else {
-        0
-    };
-    let rows = m.candidates();
-    // The selected row's account in full, and -- when it is locked -- why it
-    // cannot be chosen, in the catalogue's own words rather than a glyph.
-    if let Some(c) = rows.get(m.selected) {
-        label(
-            f,
-            a,
-            a.bottom().saturating_sub(2),
-            &format!(
-                "{}{}",
-                c.route,
-                c.reason
-                    .as_deref()
-                    .filter(|_| !c.available)
-                    .map(|r| format!(" · {r}"))
-                    .unwrap_or_default()
-            ),
-            if c.available {
-                Tone::Muted
-            } else {
-                Tone::Warning
-            },
-            s.theme,
-        );
-    }
-    if rows.is_empty() {
-        label(
-            f,
-            a,
-            a.y + 10 + extra,
-            "No models match this search. Backspace removes a term; Ctrl-U clears it.",
-            Tone::Warning,
-            s.theme,
-        );
-    }
-    let capacity = a.height.saturating_sub(18 + extra).max(1) as usize;
-    let start = m.selected.saturating_sub(capacity.saturating_sub(1));
-    for (i, c) in rows.iter().enumerate().skip(start).take(capacity) {
-        let score = c.score.map(|v| format!(" · AA {v:.1}")).unwrap_or_default();
-        add(
-            f,
-            g,
-            a,
-            a.y + 10 + extra + (i - start) as u16,
-            // The lock comes before the route: a narrow terminal may cut the
-            // account off the end, and *cannot be chosen* must never be what
-            // it cuts. The reason follows the row, in full, below.
-            &format!(
-                "{} {:<34}{}{}{}",
-                if m.selected == i { "›" } else { " " },
-                c.model,
-                if c.available { "" } else { "LOCK · " },
-                c.route,
-                score,
-            ),
-            Action::Model(i),
-            m.selected == i,
-            s.theme,
-        );
-    }
-    let y = a.bottom().saturating_sub(5);
-    if let Some(c) = rows.get(m.selected) {
-        label(f, a, y, &c.route, Tone::Normal, s.theme);
-    }
-    label(
-        f,
-        a,
-        y + 1,
-        if m.target_key.is_some() {
-            "Save to the selected settings scope; current runtime stays unchanged."
-        } else {
-            "Account shown is availability evidence; gateway chooses the route."
-        },
-        Tone::Normal,
-        s.theme,
-    );
-    add(
-        f,
-        g,
-        a,
-        y + 2,
-        if m.role == 2 && m.slot.is_some() {
-            "Enter · Save model to this favorite"
-        } else {
-            "Enter · Use selected model"
-        },
-        Action::ChooseModel,
-        true,
-        s.theme,
-    );
-    if m.target_key.is_some() {
-        add(
-            f,
-            g,
-            a,
-            y + 3,
-            "Use inherited value · remove this scoped override",
-            Action::UnsetModel,
-            false,
-            s.theme,
-        );
-    } else if m.role > 0 {
-        add(
-            f,
-            g,
-            a,
-            y + 3,
-            if m.role == 2 && m.slot.is_some() {
-                "Remove this favorite"
-            } else {
-                "Off · do not run this tier"
-            },
-            Action::Command(
-                if let Some(slot) = m.slot.as_ref().filter(|_| m.role == 2) {
-                    format!("/subagents {slot} off")
-                } else {
-                    format!(
-                        "/model {} off",
-                        if m.role == 1 { "helper" } else { "subagent" }
-                    )
-                },
-            ),
-            false,
-            s.theme,
-        );
-    }
-    label(f, a, y + 4, &m.notice, Tone::Warning, s.theme);
-}
 pub(super) fn wrap_input(text: &str, width: usize) -> Vec<String> {
     let mut d = Document::default();
     d.push(text, Tone::Normal, None, width, 0);
     d.rows.into_iter().map(|r| r.text).collect()
-}
-
-/// Credential display is mask-only; no plaintext reaches a render buffer.
-pub fn render_secret(f: &mut Frame<'_>, prompt: &crate::tui::SecretPrompt, theme: Theme) {
-    let a = f.area();
-    f.render_widget(Clear, a);
-    row(
-        f,
-        Rect::new(a.x, a.y, a.width, 1),
-        prompt.title(),
-        Tone::Accent,
-        theme,
-    );
-    if a.height > 2 {
-        row(
-            f,
-            Rect::new(a.x, a.y + 2, a.width, 1),
-            &prompt.mask(),
-            Tone::Normal,
-            theme,
-        );
-    }
-    if a.height > 4 {
-        row(
-            f,
-            Rect::new(a.x, a.y + 4, a.width, 1),
-            "Enter submits · Esc cancels · Ctrl-U clears",
-            Tone::Normal,
-            theme,
-        );
-    }
 }

@@ -8,7 +8,6 @@ pub struct Navigator {
     pub slot: Option<String>,
     pub target_key: Option<String>,
     pub assignment: crate::config::AgentsConfig,
-    pub provider: usize,
     pub selected: usize,
     pub query: String,
     pub all_sources: bool,
@@ -39,7 +38,6 @@ impl Navigator {
             slot: None,
             target_key: None,
             assignment: Default::default(),
-            provider: 0,
             selected: 0,
             query: String::new(),
             all_sources: false,
@@ -73,22 +71,12 @@ impl Navigator {
             .position(|c| Some(c.model.as_str()) == current)
             .unwrap_or(0);
     }
-    pub fn providers(&self) -> Vec<String> {
-        let mut out = vec!["Connected accounts".into()];
-        for g in &self.groups {
-            if (self.all_sources || g.selectable != Some(false)) && !out.contains(&g.provider) {
-                out.push(g.provider.clone());
-            }
-        }
-        out
-    }
     /// Every model this role could reach before the query narrowed it: the
     /// denominator a person reads a filter against.
     pub fn catalogue_len(&self) -> usize {
         self.groups.iter().map(|g| g.models.len()).sum()
     }
     pub fn candidates(&self) -> Vec<Candidate> {
-        let providers = self.providers();
         // `+` joins terms as well as a space does: Space stages a choice for
         // the active tier, so it never reaches this filter, and a person
         // narrowing by provider *and* account needs some separator that does.
@@ -102,9 +90,6 @@ impl Navigator {
         let mut out = Vec::new();
         for g in &self.groups {
             if !self.all_sources && g.selectable == Some(false) {
-                continue;
-            }
-            if self.provider > 0 && providers.get(self.provider) != Some(&g.provider) {
                 continue;
             }
             for id in &g.models {

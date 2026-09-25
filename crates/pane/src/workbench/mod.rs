@@ -9,6 +9,7 @@ mod models;
 mod motion;
 pub mod plumage;
 mod settings;
+mod sheets;
 mod theme;
 mod view;
 pub mod voice;
@@ -19,8 +20,9 @@ pub use input::Effect;
 pub use models::Navigator;
 use ratatui::layout::Rect;
 pub use settings::Preferences;
+pub use sheets::render_form;
 use std::collections::BTreeSet;
-pub use view::{layout, render, render_secret};
+pub use view::{layout, render};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellTab {
@@ -53,7 +55,6 @@ pub enum Action {
     Undo,
     ModelRole(usize),
     Slot(Option<String>),
-    Provider(usize),
     Model(usize),
     ChooseModel,
     UnsetModel,

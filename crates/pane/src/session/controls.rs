@@ -509,76 +509,112 @@ fn warning_panel(subscription: &Subscription, warning: &str) -> Panel {
 /// at a time. The gateway declares the endpoint and files the key; nothing
 /// here writes a configuration file or asks the person to.
 fn custom_endpoint(session: &Session<'_>) {
-    let title = "Custom endpoint";
-    let Some(url) = entered_text(
-        session,
-        "Endpoint base URL, such as https://api.example.com/v1 — Enter continues, Esc cancels",
-    )
-    .map(|url| url.trim().to_string())
-    .filter(|url| !url.is_empty()) else {
-        session_println!("no endpoint entered");
-        return;
-    };
-    let speaks = entered_text(
-        session,
-        "What it speaks — Enter for OpenAI-compatible, or type anthropic",
-    )
-    .unwrap_or_default();
-    let protocol = if speaks.trim().eq_ignore_ascii_case("anthropic") {
-        "anthropic-messages"
-    } else {
-        "openai-chat"
-    };
-    let name = endpoint_name(&url);
-    let added = session.gateway.run(
-        &[
-            "providers",
-            "add",
-            &name,
-            "--base-url",
-            &url,
-            "--protocol",
-            protocol,
-            "--json",
+    use crate::tui::form::{Field, Form, Kind, base_url, key_shape};
+    const SPEAKS: [&str; 2] = ["OpenAI-compatible", "Anthropic Messages"];
+    let mut form = Form::new(
+        "Sign in › Your own endpoint",
+        "Any OpenAI- or Anthropic-compatible URL: a local model, a company proxy, a new provider. Tab moves between the three.",
+        vec![
+            Field::new("Base URL", Kind::Text, "for example https://api.example.com/v1").checked(base_url),
+            Field::new(
+                "It speaks",
+                Kind::Choice(SPEAKS.iter().map(|word| word.to_string()).collect()),
+                "most endpoints are OpenAI-compatible",
+            ),
+            Field::new("API key", Kind::Secret, "paste it here, or leave it empty for a local model")
+                .optional()
+                .checked(key_shape),
         ],
-        None,
-    );
-    if added.is_none() {
+    )
+    .submit("connect");
+    loop {
+        let Some(answers) = fill(session, form.clone()) else {
+            return;
+        };
+        let [url, speaks, key] = <[String; 3]>::try_from(answers).unwrap_or_default();
+        let protocol = if speaks == SPEAKS[1] {
+            "anthropic-messages"
+        } else {
+            "openai-chat"
+        };
+        let name = endpoint_name(&url);
+        let added = session.gateway.run(
+            &[
+                "providers",
+                "add",
+                &name,
+                "--base-url",
+                &url,
+                "--protocol",
+                protocol,
+                "--json",
+            ],
+            None,
+        );
+        if added.is_none() {
+            form = form.with_error(0, format!("the gateway could not add {url}"));
+            continue;
+        }
+        if key.is_empty() {
+            show(
+                session,
+                Panel::text(
+                    "Your own endpoint",
+                    format!(
+                        "Connected {name} ({url}) with no key. Pick one of its models with /models."
+                    ),
+                ),
+            );
+            return;
+        }
+        if crate::gateway::store_credential(session.gateway, &name, &key).is_none() {
+            form = form.with_error(2, "the gateway did not store the key; try again");
+            continue;
+        }
         show(
             session,
             Panel::text(
-                title,
-                format!(
-                    "The gateway could not add {url}; check that it starts with https:// or http://."
-                ),
+                "Your own endpoint",
+                format!("Connected {name} ({url}). Pick one of its models with /models."),
             ),
         );
         return;
     }
-    let Some(key) = entered_secret(session, &name).filter(|key| !key.is_empty()) else {
-        show(
-            session,
-            Panel::text(
-                title,
-                format!("Added {name} ({url}) without a key. /key {name} stores one."),
-            ),
-        );
-        return;
-    };
-    let stored = crate::gateway::store_credential(session.gateway, &name, &key).is_some();
-    show(
-        session,
-        Panel::text(
-            title,
-            if stored {
-                format!("Connected {name} ({url}). Pick one of its models with /models.")
-            } else {
-                format!(
-                    "Added {name}, but the gateway did not store the key; /key {name} tries again."
-                )
-            },
+}
+
+/// Asks through a form sheet; headless, one line per field that takes text,
+/// and a choice takes its first word.
+fn fill(session: &Session<'_>, form: crate::tui::Form) -> Option<Vec<String>> {
+    if let Some(ui) = session.ui {
+        return ui.form(form);
+    }
+    let mut answers = Vec::new();
+    for field in &form.fields {
+        answers.push(match &field.kind {
+            crate::tui::form::Kind::Choice(words) => words.first().cloned().unwrap_or_default(),
+            _ => ui::read_line().ok().flatten()?.trim().to_string(),
+        });
+    }
+    Some(answers)
+}
+
+/// The form that takes one provider's API key.
+fn key_form(provider: &str) -> crate::tui::Form {
+    use crate::tui::form::{Field, Form, Kind, key_shape};
+    Form::new(
+        format!("Sign in › API key · {provider}"),
+        format!(
+            "Paste your {provider} key below. It goes straight to the gateway's key store: it is never shown, logged, or written to a file."
         ),
-    );
+        vec![
+            Field::new(
+                "API key",
+                Kind::Secret,
+                "paste here: Cmd+V, Ctrl+Shift+V or right-click · Ctrl-R shows it",
+            )
+            .checked(key_shape),
+        ],
+    )
 }
 
 /// A short name for an endpoint, from its host: `api.together.xyz` is
@@ -607,15 +643,6 @@ fn endpoint_name(url: &str) -> String {
         "custom".to_string()
     } else {
         name
-    }
-}
-
-/// A prompt whose answer is not a secret: shown as it is typed with a
-/// terminal, the next line of stdin without one.
-fn entered_text(session: &Session<'_>, title: &str) -> Option<String> {
-    match session.ui {
-        Some(ui) => ui.line(title),
-        None => ui::read_line().ok().flatten(),
     }
 }
 
@@ -855,7 +882,10 @@ pub(super) fn key(session: &Session<'_>, provider: Option<&str>) {
         );
         return;
     };
-    let Some(value) = entered_secret(session, provider).filter(|value| !value.is_empty()) else {
+    let Some(value) = fill(session, key_form(provider))
+        .and_then(|answers| answers.into_iter().next())
+        .filter(|value| !value.is_empty())
+    else {
         session_println!("no key entered");
         return;
     };
@@ -877,17 +907,6 @@ pub(super) fn key(session: &Session<'_>, provider: Option<&str>) {
                 ),
             ),
         ),
-    }
-}
-
-/// The key itself: a modal masked prompt with a terminal, the next line of
-/// stdin without one. Neither path echoes what it reads.
-fn entered_secret(session: &Session<'_>, provider: &str) -> Option<String> {
-    match session.ui {
-        Some(ui) => ui.secret(&format!(
-            "API key for {provider} — Enter stores it, Esc cancels"
-        )),
-        None => ui::read_line().ok().flatten(),
     }
 }
 

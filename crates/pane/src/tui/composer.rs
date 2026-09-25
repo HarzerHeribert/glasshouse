@@ -28,15 +28,12 @@ pub(super) fn composer_cursor(input: &str, offset: usize, width: u16) -> (usize,
 }
 
 pub(super) fn wrapped_input(state: &ScreenState, width: u16) -> Vec<Line<'static>> {
-    // The masked prompt's arm is the whole reason this function takes the
-    // state rather than the text: `mask()` is the only spelling of an entered
-    // secret that exists outside the prompt itself.
-    let text = match state.secret_prompt.as_ref() {
-        Some(prompt) if prompt.is_empty() => "the key is not shown as you type".to_string(),
-        Some(prompt) => prompt.mask(),
-        None if state.input.is_empty() => "message or / for commands".to_string(),
-        None if state.cursor == Some(state.input.len()) => format!("{} ", state.input),
-        None => state.input.clone(),
+    let text = if state.input.is_empty() {
+        "message or / for commands".to_string()
+    } else if state.cursor == Some(state.input.len()) {
+        format!("{} ", state.input)
+    } else {
+        state.input.clone()
     };
     wrap_lines(
         text.split('\n')

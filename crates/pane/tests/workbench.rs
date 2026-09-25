@@ -721,7 +721,11 @@ fn picker_never_offers_implicit_subagent_inheritance() {
     let mut m = navigator();
     m.role = 2;
     u.models = Some(m);
-    assert!(text(&draw(&c, &n, &s, &mut u, 100, 40)).contains("explicit model required"));
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    assert!(
+        screen.contains("PINNED") && screen.contains("QUICK"),
+        "{screen}"
+    );
     assert!(!u.geometry.hits.iter().any(
         |(_, a)| matches!(a,Action::Command(c) if c.contains("inherit")||c.ends_with(" auto"))
     ));
@@ -1112,13 +1116,9 @@ fn a_filtered_navigator_leaves_no_row_of_the_wider_list() {
     assert!(screen.contains("fixture-helper"), "{screen}");
     // The tab row still names the session's main model; the *list* holds
     // one row, and the model the query excluded is not among them.
-    let list: String = screen
-        .lines()
-        .filter(|l| l.contains("subscription") && l.contains('·'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(list.contains("fixture-helper"), "{screen}");
-    assert!(!list.contains("fixture-main"), "{screen}");
+    // `fixture-main` is on the sheet once, in the line saying what Main
+    // runs on now, and nowhere in the list.
+    assert_eq!(screen.matches("fixture-main").count(), 1, "{screen}");
     assert!(!screen.contains("unavailable-model"), "{screen}");
 }
 
@@ -1825,4 +1825,57 @@ fn the_theme_sheet_previews_the_chosen_bird() {
     ] {
         assert!(screen.contains(shown), "{shown} is missing:\n{screen}");
     }
+}
+
+/// **A key pasted into a form is bullets on the screen, never the key**, and
+/// the sheet says where the paste goes and what the key looks like.
+#[test]
+fn a_key_form_shows_bullets_where_the_paste_went_and_never_the_key() {
+    use pane::tui::form::{Field, Form, Kind, key_shape};
+    const KEY: &str = "sk-ant-api03-secret-value"; // glasshouse:not-a-secret
+    let mut form = Form::new(
+        "Sign in › API key · anthropic",
+        "Paste your anthropic key below.",
+        vec![Field::new("API key", Kind::Secret, "paste here").checked(key_shape)],
+    );
+    form.push(KEY);
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| workbench::render_form(f, &form, Theme::default()))
+        .unwrap();
+    let screen = text(t.backend().buffer());
+    assert!(
+        screen.contains(&"•".repeat(KEY.chars().count())),
+        "{screen}"
+    );
+    assert!(!screen.contains("sk-ant"), "the key rendered:\n{screen}");
+    assert!(
+        screen.contains("API KEY"),
+        "the field is labelled:\n{screen}"
+    );
+    assert!(screen.contains("looks like an Anthropic key"), "{screen}");
+    assert!(
+        screen.contains("Ctrl-R show"),
+        "the keys say how to see it:\n{screen}"
+    );
+}
+
+/// On the Subagents tab ←→ walks the favourite slots, wrapping, so choosing
+/// where a model goes needs no function key.
+#[test]
+fn arrows_walk_the_favourite_slots_on_the_subagents_tab() {
+    let (_, n, mut s) = fixture();
+    let mut u = Workbench::default();
+    let mut m = navigator();
+    m.role = 2;
+    u.models = Some(m);
+    key(&mut u, &mut s, &n, KeyCode::Right);
+    assert_eq!(u.models.as_ref().unwrap().slot.as_deref(), Some("quick"));
+    key(&mut u, &mut s, &n, KeyCode::Left);
+    assert_eq!(u.models.as_ref().unwrap().slot, None, "back to pinned");
+    key(&mut u, &mut s, &n, KeyCode::Left);
+    assert_eq!(
+        u.models.as_ref().unwrap().slot.as_deref(),
+        Some("heavy"),
+        "and it wraps"
+    );
 }

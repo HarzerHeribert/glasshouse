@@ -7715,3 +7715,51 @@ fn a_choice_an_upgrade_retired_is_removed_and_pane_starts() {
         "the rest of the file is kept: {saved}"
     );
 }
+
+/// `/login custom` is one form: the URL, what it speaks, and a key. The
+/// gateway is told to add the endpoint and is handed the key on stdin --
+/// never in argv, where any process could read it.
+#[cfg(unix)]
+#[test]
+fn a_custom_endpoint_is_one_form_and_its_key_goes_on_stdin() {
+    const KEY: &str = "sk-custom-secret-value";
+    let root = scratch_dir("custom-endpoint-root");
+    let rollout = root.join("rollout.jsonl");
+    let record = root.join("gateway-argv.txt");
+    let base_url = refused_base_url();
+    let gateway = write_fake_gateway(&root, "fake_gateway.sh", &record, &base_url, "unused");
+    let output = run_session_stdin_with_gateway(
+        &root,
+        &rollout,
+        "sess-custom-endpoint",
+        &["/login custom", "https://api.example.com/v1", KEY],
+        None,
+        &gateway,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen = fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.lines().any(|line| line
+            == "providers add example --base-url https://api.example.com/v1 --protocol openai-chat --json"),
+        "{seen}"
+    );
+    assert!(
+        seen.lines()
+            .any(|line| line == "credentials set example --json"),
+        "{seen}"
+    );
+    assert!(!seen.contains(KEY), "the key reached argv: {seen}");
+    assert_eq!(
+        fs::read_to_string(root.join("gateway-argv.txt.stdin")).unwrap(),
+        KEY
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Connected example"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

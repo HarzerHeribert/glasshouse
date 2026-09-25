@@ -20,9 +20,11 @@ pub(crate) use selection::draw as draw_selection;
 
 mod inspection;
 pub use inspection::Inspection;
+pub mod form;
 mod lane;
 mod look;
 pub(crate) mod theme;
+pub use form::Form;
 pub use look::{Look, Motion};
 pub use theme::Theme;
 mod markdown;
@@ -203,7 +205,9 @@ pub struct ScreenState {
     pub messages_seen: usize,
     /// A modal masked prompt, open over the composer. While it is set the
     /// composer is not what the keyboard reaches.
-    pub secret_prompt: Option<SecretPrompt>,
+    /// A form sheet that has the keyboard: a key, an endpoint, a pasted
+    /// sign-in address. Nothing typed into it reaches the editor.
+    pub form: Option<Form>,
     /// Fold long code and previews locally; never changes the model messages.
     pub compact: bool,
     pub pretty: bool,
@@ -311,85 +315,6 @@ pub struct ScreenState {
     /// What the opening offers to do, read from the project itself: each
     /// entry is the chip's label and the message it puts in the composer.
     pub suggestions: Vec<(String, String)>,
-}
-
-/// A modal masked prompt: the one place a session takes a secret from the
-/// keyboard.
-///
-/// **What was typed leaves this value only through [`Self::take`].** The
-/// renderer is given [`Self::mask`] -- one `•` per character -- and `Debug`
-/// redacts, so a screen state that is cloned, logged or dumped carries the
-/// bullets and never the key.
-#[derive(Clone, Default)]
-pub struct SecretPrompt {
-    title: String,
-    entered: String,
-    /// A prompt for something that is not a secret -- an endpoint's URL --
-    /// shows what is typed instead of bullets.
-    visible: bool,
-}
-
-impl std::fmt::Debug for SecretPrompt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SecretPrompt")
-            .field("title", &self.title)
-            .field("entered", &self.mask())
-            .finish()
-    }
-}
-
-impl SecretPrompt {
-    #[must_use]
-    pub fn new(title: impl Into<String>) -> Self {
-        Self {
-            title: title.into(),
-            entered: String::new(),
-            visible: false,
-        }
-    }
-    /// The same modal prompt, for an answer that is not a secret.
-    #[must_use]
-    pub fn visible(title: impl Into<String>) -> Self {
-        Self {
-            visible: true,
-            ..Self::new(title)
-        }
-    }
-    #[must_use]
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-    /// Typed or pasted text, control characters dropped: a pasted key carries
-    /// whatever line ending the place it was copied from used, and none of it
-    /// belongs in a credential.
-    pub fn push(&mut self, text: &str) {
-        self.entered
-            .extend(text.chars().filter(|c| !c.is_control()));
-    }
-    pub fn backspace(&mut self) {
-        self.entered.pop();
-    }
-    pub fn clear(&mut self) {
-        self.entered.clear();
-    }
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entered.is_empty()
-    }
-    /// All the renderer is ever given: one bullet per character, or the text
-    /// itself for a [`visible`](Self::visible) prompt.
-    #[must_use]
-    pub fn mask(&self) -> String {
-        if self.visible {
-            return self.entered.clone();
-        }
-        "•".repeat(self.entered.chars().count())
-    }
-    /// What was entered, consuming the prompt with it.
-    #[must_use]
-    pub fn take(self) -> String {
-        self.entered
-    }
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
@@ -654,7 +579,7 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
 /// The completions this screen is offering, which is none at all while a
 /// masked prompt has the keyboard.
 fn completions_shown(state: &ScreenState) -> Vec<(String, &'static str)> {
-    if state.secret_prompt.is_some() {
+    if state.form.is_some() {
         return Vec::new();
     }
     slash_matches(&state.input)
@@ -1206,21 +1131,9 @@ pub fn render_screen(
     frame.render_widget(Paragraph::new(matches), regions.completions);
     let input_lines = wrapped_input(state, regions.input.width);
     let visible = usize::from(regions.input.height.saturating_sub(2));
-    // A masked prompt puts the caret after the last bullet, from the mask
-    // alone: the entered text is not available to this function.
-    let cursor = match state.secret_prompt.as_ref() {
-        Some(prompt) => {
-            let mask = prompt.mask();
-            Some(composer_cursor(
-                &mask,
-                mask.len(),
-                regions.input.width.saturating_sub(2),
-            ))
-        }
-        None => state.cursor.map(|offset| {
-            composer_cursor(&state.input, offset, regions.input.width.saturating_sub(2))
-        }),
-    };
+    let cursor = state
+        .cursor
+        .map(|offset| composer_cursor(&state.input, offset, regions.input.width.saturating_sub(2)));
     let skip = cursor
         .map(|(row, _)| row.saturating_sub(visible.saturating_sub(1)))
         .unwrap_or_else(|| input_lines.len().saturating_sub(visible));
@@ -1230,17 +1143,7 @@ pub fn render_screen(
     );
     if regions.input.height > 0 {
         let width = usize::from(regions.input.width);
-        // The masked prompt's title rides the composer's own top rule: it is
-        // modal, so it belongs where the keyboard now goes rather than in the
-        // notice line a task could overwrite.
-        let top = match state.secret_prompt.as_ref() {
-            Some(prompt) => {
-                let title = format!("─ {} ", prompt.title());
-                let filled = title.chars().count();
-                format!("{title}{}", "─".repeat(width.saturating_sub(filled)))
-            }
-            None => "─".repeat(width),
-        };
+        let top = "─".repeat(width);
         for (y, rule) in [
             (regions.input.y, top),
             (regions.input.bottom() - 1, "─".repeat(width)),

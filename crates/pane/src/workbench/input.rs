@@ -574,36 +574,32 @@ impl Workbench {
                             m.role = (m.role + 1) % 3;
                             m.selected = 0;
                         }
-                        KeyCode::Left => {
-                            // A carousel wraps: stepping off one end and
-                            // back again has to return where it started.
-                            let n = m.providers().len().max(1);
-                            m.provider = (m.provider + n - 1) % n;
-                            m.selected = 0;
-                        }
-                        KeyCode::Right => {
-                            m.provider = (m.provider + 1) % m.providers().len().max(1);
-                            m.selected = 0;
+                        // ←→ steps through the favourite slots, wrapping, on
+                        // the Subagents tab; elsewhere the list is one list.
+                        KeyCode::Left | KeyCode::Right if m.role == 2 && m.target_key.is_none() => {
+                            let slots: Vec<Option<&str>> = std::iter::once(None)
+                                .chain(crate::config::SLOT_NAMES.iter().copied().map(Some))
+                                .collect();
+                            let at = slots
+                                .iter()
+                                .position(|slot| *slot == m.slot.as_deref())
+                                .unwrap_or(0);
+                            let n = slots.len();
+                            let next = if k.code == KeyCode::Right {
+                                (at + 1) % n
+                            } else {
+                                (at + n - 1) % n
+                            };
+                            m.slot = slots[next].map(str::to_owned);
+                            m.select_current();
                         }
                         KeyCode::Char('o') if ctrl => m.measured_order = !m.measured_order,
                         KeyCode::Char('u') if ctrl => {
                             m.query.clear();
                             m.selected = 0;
                         }
-                        KeyCode::F(7) if m.role == 2 && m.target_key.is_none() => {
-                            let names = crate::config::SLOT_NAMES;
-                            let next = m
-                                .slot
-                                .as_deref()
-                                .and_then(|s| names.iter().position(|n| *n == s))
-                                .map(|i| i + 1)
-                                .unwrap_or(0);
-                            m.slot = names.get(next).map(|s| s.to_string());
-                            m.select_current();
-                        }
-                        KeyCode::F(6) => {
+                        KeyCode::Char('a') if ctrl => {
                             m.all_sources = !m.all_sources;
-                            m.provider = 0;
                             m.selected = 0;
                         }
                         KeyCode::Enter => return self.activate(Action::ChooseModel, s, n, busy),
@@ -936,12 +932,6 @@ impl Workbench {
                     m.selected = 0;
                 }
             }
-            Action::Provider(i) => {
-                if let Some(m) = &mut self.models {
-                    m.provider = i.min(m.providers().len().saturating_sub(1));
-                    m.selected = 0;
-                }
-            }
             Action::Model(i) => {
                 if let Some(m) = &mut self.models {
                     m.selected = i;
@@ -991,7 +981,6 @@ impl Workbench {
             Action::Sources => {
                 if let Some(m) = &mut self.models {
                     m.all_sources = !m.all_sources;
-                    m.provider = 0;
                     m.selected = 0;
                 }
             }

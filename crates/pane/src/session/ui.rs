@@ -171,12 +171,9 @@ pub(super) enum Update {
     /// A question a cell put to the person, waiting on the session thread.
     Ask(crate::ask::Request),
     Snapshot(Box<(Conversation, Notebook, ServedBy, Activity)>),
-    /// Open a modal masked prompt with this title. The terminal thread
-    /// answers it on the secret channel and on nothing else.
-    SecretPrompt(String),
-    /// The same prompt for an answer that is not a secret; what is typed is
-    /// shown.
-    TextPrompt(String),
+    /// Open a form sheet. The terminal thread answers it on the form
+    /// channel and on nothing else.
+    Form(Box<tui::Form>),
     Model(String),
     /// Whether helpers run and what the subagents are, after a change.
     Tiers(bool, String),
@@ -258,7 +255,7 @@ impl Steer {
 /// has its own, so a secret cannot arrive where a message is expected.
 struct Answers<'a> {
     inputs: &'a mpsc::Sender<Input>,
-    secrets: &'a mpsc::Sender<Option<String>>,
+    secrets: &'a mpsc::Sender<Option<Vec<String>>>,
 }
 
 pub(super) struct LiveUi {
@@ -266,9 +263,9 @@ pub(super) struct LiveUi {
     steer: Arc<Steer>,
     updates: mpsc::Sender<Update>,
     inputs: mpsc::Receiver<Input>,
-    /// Answers to [`Update::SecretPrompt`], on their own channel: a secret
+    /// Answers to [`Update::Form`], on their own channel: a secret
     /// must not be able to arrive as an `Input` and be taken for a message.
-    secrets: mpsc::Receiver<Option<String>>,
+    secrets: mpsc::Receiver<Option<Vec<String>>>,
     thread: Option<JoinHandle<()>>,
 }
 impl LiveUi {
@@ -356,28 +353,21 @@ impl LiveUi {
             thread: Some(thread),
         })
     }
-    /// Opens the modal masked prompt and blocks until it is answered:
-    /// `Some` is what was entered, `None` an Esc or a terminal that went
-    /// away. **Nothing typed into it reaches the editor, the transcript or
-    /// the input history** -- it comes back here and nowhere else.
-    pub(super) fn secret(&self, title: &str) -> Option<String> {
+    /// Opens a form sheet and blocks until it is answered: `Some` is every
+    /// field's answer in order, `None` an Esc or a terminal that went away.
+    /// **Nothing typed into it reaches the editor, the transcript or the
+    /// input history** -- it comes back here and nowhere else.
+    pub(super) fn form(&self, form: tui::Form) -> Option<Vec<String>> {
         // A paste nobody collected (a sign-in that ended first) must never
-        // answer a prompt for a key.
+        // answer a form that asks for a key.
         while self.secrets.try_recv().is_ok() {}
-        self.updates.send(Update::SecretPrompt(title.into())).ok()?;
+        self.updates.send(Update::Form(Box::new(form))).ok()?;
         self.secrets.recv().ok().flatten()
     }
-    /// The same modal prompt for an answer that is not a secret: what is
-    /// typed is shown. It comes back here and goes nowhere else either.
-    pub(super) fn line(&self, title: &str) -> Option<String> {
-        while self.secrets.try_recv().is_ok() {}
-        self.updates.send(Update::TextPrompt(title.into())).ok()?;
-        self.secrets.recv().ok().flatten()
-    }
-    /// What the person entered in a prompt the terminal opened on its own,
+    /// What the person entered in a form the terminal opened on its own,
     /// such as a sign-in panel's paste row, if anything has arrived.
     pub(super) fn try_secret(&self) -> Option<String> {
-        self.secrets.try_recv().ok().flatten()
+        self.secrets.try_recv().ok().flatten()?.into_iter().next()
     }
     pub(super) fn handler_cancellations(&self) -> Vec<String> {
         std::mem::take(&mut *super::lock(&self.handler_cancellations))
@@ -997,15 +987,9 @@ fn run(
                     state.landed_note();
                 }
                 Update::Behind(lane, running) => state.lane(lane, running),
-                Update::TextPrompt(title) => {
-                    state.secret_prompt = Some(tui::SecretPrompt::visible(title));
-                    state.panel = None;
-                    state.inspection = None;
-                }
-                Update::SecretPrompt(title) => {
-                    state.secret_prompt = Some(tui::SecretPrompt::new(title));
-                    // A panel over a modal prompt would take the Enter that
-                    // submits it.
+                Update::Form(form) => {
+                    state.form = Some(*form);
+                    // A panel over a form would take the Enter that submits it.
                     state.panel = None;
                     state.inspection = None;
                 }
@@ -1110,8 +1094,8 @@ fn run(
                     &served,
                     &mut workbench,
                 );
-                if let Some(prompt) = state.secret_prompt.as_ref() {
-                    crate::workbench::render_secret(frame, prompt, state.theme);
+                if let Some(form) = state.form.as_ref() {
+                    crate::workbench::render_form(frame, form, state.theme);
                 }
                 if let Some((_, text)) = redirect.as_ref() {
                     tui::render_redirect(frame, text, state.theme);
@@ -1146,11 +1130,7 @@ fn run(
         }
         // Security prompts retain priority; no local control can answer them.
         // All ordinary pointer and local-panel events go to the new reducer.
-        if approvals.is_empty()
-            && asking.is_none()
-            && state.secret_prompt.is_none()
-            && redirect.is_none()
-        {
+        if approvals.is_empty() && asking.is_none() && state.form.is_none() && redirect.is_none() {
             state.input = editor.text.clone();
             state.cursor = Some(editor.cursor);
             if matches!(&input_event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown))
@@ -1205,9 +1185,16 @@ fn run(
                         links::copy(text);
                         workbench.notice = "Copied.".into();
                     } else if command == "/paste-callback" {
-                        state.secret_prompt = Some(tui::SecretPrompt::new(
-                            "Paste the callback address, then Enter",
-                        ));
+                        state.form = Some(tui::Form::new(
+                            "Finish signing in",
+                            "Signing in on another device? Paste the address your browser ended on after you signed in.",
+                            vec![tui::form::Field::new(
+                                "Callback address",
+                                tui::form::Kind::Text,
+                                "the whole address from the browser's bar, starting with http",
+                            )],
+                        )
+                        .submit("finish"));
                     } else if let Some(name) = command.strip_prefix("/handlers off ") {
                         super::lock(&handler_cancellations).push(name.to_string());
                         workbench.notice = format!("Handler {name}: cancellation requested.");
@@ -1276,8 +1263,8 @@ fn run(
                 }
                 // Pasting is how most keys are entered, so the masked prompt
                 // takes a paste before anything else can.
-                if let Some(prompt) = state.secret_prompt.as_mut() {
-                    prompt.push(&text);
+                if let Some(form) = state.form.as_mut() {
+                    form.push(&text);
                 } else if !state
                     .panel
                     .as_mut()
@@ -1418,28 +1405,32 @@ fn run(
                 // **Modal, and first.** While a masked prompt is open every
                 // key belongs to it: none reaches the editor, the panel, the
                 // inspector or the input history.
-                if let Some(prompt) = state.secret_prompt.as_mut() {
+                if let Some(form) = state.form.as_mut() {
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     match key.code {
                         KeyCode::Enter => {
-                            let entered = state.secret_prompt.take().map(tui::SecretPrompt::take);
-                            let _ = answers.secrets.send(entered);
+                            if form.enter() {
+                                let answers_given = state.form.take().map(tui::Form::take);
+                                let _ = answers.secrets.send(answers_given);
+                            }
                         }
                         KeyCode::Esc => {
-                            state.secret_prompt = None;
+                            state.form = None;
                             let _ = answers.secrets.send(None);
                         }
-                        KeyCode::Char('c' | 'u')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            prompt.clear();
-                        }
-                        KeyCode::Backspace => prompt.backspace(),
+                        KeyCode::Tab | KeyCode::Down => form.move_focus(true),
+                        KeyCode::BackTab | KeyCode::Up => form.move_focus(false),
+                        KeyCode::Left => form.choose(false),
+                        KeyCode::Right => form.choose(true),
+                        KeyCode::Char('u') if ctrl => form.clear(),
+                        KeyCode::Char('r') if ctrl => form.reveal(),
+                        KeyCode::Backspace => form.backspace(),
                         KeyCode::Char(c)
                             if !key
                                 .modifiers
                                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                         {
-                            prompt.push(&c.to_string());
+                            form.push(&c.to_string());
                         }
                         _ => {}
                     }
@@ -1625,9 +1616,16 @@ fn run(
                                     links::copy(text);
                                     state.note("Copied to the clipboard through the terminal.");
                                 } else if command == "/paste-callback" {
-                                    state.secret_prompt = Some(tui::SecretPrompt::new(
-                                        "Paste the address your browser ended on after signing in, then Enter",
-                                    ));
+                                    state.form = Some(tui::Form::new(
+                            "Finish signing in",
+                            "Signing in on another device? Paste the address your browser ended on after you signed in.",
+                            vec![tui::form::Field::new(
+                                "Callback address",
+                                tui::form::Kind::Text,
+                                "the whole address from the browser's bar, starting with http",
+                            )],
+                        )
+                        .submit("finish"));
                                 } else if let Some(name) = command.strip_prefix("/handlers off ") {
                                     super::lock(&handler_cancellations).push(name.to_string());
                                     state.panel = None;
