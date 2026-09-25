@@ -762,17 +762,8 @@ fn run(args: SessionArgs) -> Result<(), String> {
                             profile.command_pattern_count(),
                         )),
                         full_access: yolo,
-                        helpers_on: config.borrow().helpers.enabled
-                            && config.borrow().helpers.model.is_some(),
-                        subagents: Some(
-                            match config.borrow().agents.mode {
-                                crate::config::AgentsMode::Off => "off",
-                                crate::config::AgentsMode::Auto => "inherits",
-                                crate::config::AgentsMode::Pinned => "pinned",
-                                crate::config::AgentsMode::Roster => "favourites",
-                            }
-                            .to_string(),
-                        ),
+                        helpers_on: controls::tier_status(&config.borrow()).0,
+                        subagents: Some(controls::tier_status(&config.borrow()).1),
                         // The third half, which until 2026-09-19 no surface
                         // carried: a rung and a grant are two choices, and
                         // whether Pane confines what it spawns is the one

@@ -350,6 +350,8 @@ fn apply_recommended(session: &Session<'_>, jev: bool) {
                 let mut live = session.config.borrow_mut();
                 live.helpers.enabled = loaded.config.helpers.enabled;
                 live.decisions.mode = loaded.config.decisions.mode;
+                drop(live);
+                controls::publish_tiers(session);
             }
             Err(error) => session_println!("ERROR: {error}"),
         }

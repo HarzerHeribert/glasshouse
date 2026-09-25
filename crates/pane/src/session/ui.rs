@@ -182,6 +182,8 @@ pub(super) enum Update {
     /// shown.
     TextPrompt(String),
     Model(String),
+    /// Whether helpers run and what the subagents are, after a change.
+    Tiers(bool, String),
     Delta(String),
     ToolDelta(String),
     /// Readable reasoning as it arrives (`wire::StreamDelta::Reasoning`).
@@ -437,6 +439,11 @@ impl LiveUi {
     }
     pub(super) fn model(&self, model: &str) {
         let _ = self.updates.send(Update::Model(model.into()));
+    }
+    pub(super) fn tiers(&self, helpers_on: bool, subagents: &str) {
+        let _ = self
+            .updates
+            .send(Update::Tiers(helpers_on, subagents.into()));
     }
 }
 /// Publishes a snapshot while holding no borrow of the [`LiveUi`] it came from.
@@ -984,6 +991,10 @@ fn run(
                     busy = true;
                 }
                 Update::Model(model) => state.model = Some(model),
+                Update::Tiers(helpers_on, subagents) => {
+                    state.helpers_on = helpers_on;
+                    state.subagents = Some(subagents);
+                }
                 Update::Mode(mode) => state.mode = mode,
                 Update::Effort(effort) => state.effort = effort,
                 Update::Panel(panel) => {

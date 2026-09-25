@@ -128,6 +128,28 @@ fn tier_models(session: &Session<'_>) -> TierModels {
     }
 }
 
+/// What the status line says of the helper and subagent tiers: helpers run
+/// only when switched on **and** given a model, so `enabled` alone reads off.
+pub(super) fn tier_status(config: &crate::config::PaneConfig) -> (bool, String) {
+    let helpers_on = config.helpers.enabled && config.helpers.model.is_some();
+    let subagents = match config.agents.mode {
+        AgentsMode::Off => "off",
+        AgentsMode::Auto => "inherits",
+        AgentsMode::Pinned => "pinned",
+        AgentsMode::Roster => "favourites",
+    };
+    (helpers_on, subagents.to_string())
+}
+
+/// Tells the screen the tiers changed, so the status line stops showing
+/// what the session started with.
+pub(super) fn publish_tiers(session: &Session<'_>) {
+    if let Some(ui) = session.ui {
+        let (helpers_on, subagents) = tier_status(&session.config());
+        ui.tiers(helpers_on, &subagents);
+    }
+}
+
 /// Assigns a model to one tier, and persists the two that outlive the session.
 ///
 /// All three are written to `.pane/config.toml`, under the active named
@@ -197,6 +219,8 @@ pub(super) fn assign_model(
             live.agents.mode = loaded.config.agents.mode;
         }
     }
+    drop(live);
+    publish_tiers(session);
     Ok(match (tier, value) {
         (Tier::Helpers, "off") => "helpers off; no helper will run".to_string(),
         (Tier::Subagents, "off") => "subagents off; no subagent will run".to_string(),
@@ -1535,6 +1559,18 @@ fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_status_line_reports_the_tiers_as_they_are_set_now() {
+        let mut config = crate::config::PaneConfig::default();
+        config.helpers.enabled = true;
+        config.agents.mode = AgentsMode::Pinned;
+        // Enabled without a model runs nothing, so the status must not say on.
+        assert_eq!(tier_status(&config), (false, "pinned".to_string()));
+        config.helpers.model = Some("gpt-5.4-mini".to_string());
+        config.agents.mode = AgentsMode::Roster;
+        assert_eq!(tier_status(&config), (true, "favourites".to_string()));
+    }
 
     #[test]
     fn a_fresh_install_offers_both_subscriptions_keys_and_a_custom_endpoint() {

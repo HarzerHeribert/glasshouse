@@ -8,6 +8,7 @@ pub(super) fn assign(session: &Session<'_>, argument: &str) -> Result<String, St
     let mode = loaded.config.agents.mode.name();
     let count = loaded.config.agents.slots.len();
     session.config.borrow_mut().agents = loaded.config.agents;
+    super::publish_tiers(session);
     Ok(format!(
         "Subagents: {mode} · {count} configured favorites · next launch uses this assignment; in-flight jobs unchanged"
     ))
