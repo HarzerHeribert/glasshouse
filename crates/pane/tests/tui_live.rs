@@ -1606,7 +1606,9 @@ fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
     app.contains("SETTINGS");
     app.contains("Global");
     app.contains("Project");
-    app.contains("This project only · .pane/config.toml");
+    // The platform's own separator: `.pane\config.toml` on Windows.
+    app.contains("This project only · .pane");
+    app.contains("config.toml");
     app.contains("⟨ Off ⟩ ⟨ On ⟩");
     assert!(
         !app.screen
