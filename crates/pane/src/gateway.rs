@@ -40,23 +40,17 @@ use crate::contract::ServedBy;
 /// command: every control reports unreachable and [`Gateway::serve`] refuses.
 #[derive(Debug, Clone)]
 pub enum Gateway {
-    None,
     /// Shells out to this executable. `PathBuf::from("inference-gateway")`
     /// lets the OS resolve it from `PATH` (`Command::new` maps to `execvp` on
     /// a bare name); a test passes its own fake script's path instead.
-    Command {
-        gateway: PathBuf,
-    },
+    Command { gateway: PathBuf },
     /// Attached to a gateway Glasshouse started for this project: the serving
     /// URL was handed over in the environment. The cost readout goes to
     /// Glasshouse's own command scoped to `root`, so it describes the ledger
     /// of the project the session runs in; the account, subscription and
     /// credential controls go to the gateway binary, which is where that
     /// state lives whoever started the gateway.
-    Hosted {
-        glasshouse: PathBuf,
-        root: PathBuf,
-    },
+    Hosted { glasshouse: PathBuf, root: PathBuf },
 }
 
 impl Gateway {
@@ -73,7 +67,6 @@ impl Gateway {
     /// unreachable.
     pub(crate) fn control_command(&self, args: &[&str]) -> Option<Command> {
         let mut command = match self {
-            Self::None => return None,
             Self::Command { gateway } => Command::new(gateway),
             Self::Hosted { .. } if is_gateway_state(args) => Command::new(hosted_gateway_binary()?),
             Self::Hosted { glasshouse, root } => {

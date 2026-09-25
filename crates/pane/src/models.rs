@@ -399,7 +399,10 @@ mod tests {
 
     #[test]
     fn an_unreachable_gateway_publishes_nothing_rather_than_failing() {
-        assert!(published(&Gateway::None).is_empty());
+        let absent = Gateway::Command {
+            gateway: std::path::PathBuf::from("/nonexistent/inference-gateway"),
+        };
+        assert!(published(&absent).is_empty());
     }
 
     #[test]

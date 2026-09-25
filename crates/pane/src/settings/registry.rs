@@ -1178,9 +1178,6 @@ fn normalise_choice(key: &str, word: &str) -> String {
         // The runtime's own spelling of `build`, and `/statusline`'s alias.
         ("session.mode", "execute") => "build".to_string(),
         ("ui.statusline", "hide") => "hidden".to_string(),
-        // `config.rs` has accepted `auto` for `default` effort since before
-        // the word changed; the registry writes the current spelling.
-        ("session.effort", "auto") => "default".to_string(),
         _ => word.to_string(),
     }
 }

@@ -71,8 +71,7 @@ impl Effort {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            // Compatibility: `auto` was the original public spelling.
-            "default" | "auto" => Some(Self::Default),
+            "default" => Some(Self::Default),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
@@ -2970,9 +2969,9 @@ mod effort_tests {
     use super::*;
 
     #[test]
-    fn default_is_the_display_name_and_auto_remains_an_alias() {
+    fn default_is_the_display_name_and_the_only_spelling() {
         assert_eq!(Effort::parse("default"), Some(Effort::Default));
-        assert_eq!(Effort::parse("auto"), Some(Effort::Default));
+        assert_eq!(Effort::parse("auto"), None);
         assert_eq!(Effort::Default.name(), "default");
     }
 

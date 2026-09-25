@@ -135,7 +135,9 @@ fn a_dropped_hook_does_not_stop_the_turn() {
 
 #[test]
 fn an_unmetered_request_is_unknown_not_free() {
-    let gateway = Gateway::None;
+    let gateway = Gateway::Command {
+        gateway: std::path::PathBuf::from("/nonexistent/inference-gateway"),
+    };
 
     let served = served_by(&gateway, UNIX_EPOCH);
 

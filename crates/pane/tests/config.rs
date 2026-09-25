@@ -206,11 +206,10 @@ fn helper_effort_has_role_defaults_and_accepts_partial_hard_overrides() {
     assert_eq!(configured.for_helper("find"), Some(Effort::Medium));
     assert_eq!(configured.for_helper("unknown"), None);
 
-    for value in ["default", "auto"] {
-        let error =
-            PaneConfig::parse(&format!("[helpers.effort]\nreduce = \"{value}\"\n")).unwrap_err();
-        assert!(error.contains("hard value"), "{error}");
-    }
+    let error = PaneConfig::parse("[helpers.effort]\nreduce = \"default\"\n").unwrap_err();
+    assert!(error.contains("hard value"), "{error}");
+    // `auto` is no word at all any more, so it is refused as one.
+    assert!(PaneConfig::parse("[helpers.effort]\nreduce = \"auto\"\n").is_err());
 }
 
 #[test]
