@@ -115,6 +115,11 @@ enum Command {
         #[command(subcommand)]
         command: SubscriptionsCommand,
     },
+    /// Destinations this gateway can send requests to.
+    Providers {
+        #[command(subcommand)]
+        command: ProvidersCommand,
+    },
     /// Provider API keys this gateway stores and resolves.
     Credentials {
         #[command(subcommand)]
@@ -141,13 +146,14 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum SubscriptionsCommand {
-    /// Connect one configured account with the provider's OAuth flow.
+    /// Connect a subscription account with the provider's OAuth flow.
     Connect {
         #[arg(value_enum)]
         provider: SubscriptionProvider,
-        /// The `[accounts.<name>]` table to connect.
+        /// The `[accounts.<name>]` table to connect. Omitted: the provider's
+        /// default account, declared in the configuration if it is not there.
         #[arg(long, value_name = "NAME")]
-        entitlement: String,
+        entitlement: Option<String>,
         /// Emit each progress step as one JSON object per line.
         #[arg(long)]
         json: bool,
@@ -202,6 +208,26 @@ enum SubscriptionsCommand {
     AdoptBinary {
         /// The executable to copy in.
         path: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProvidersCommand {
+    /// Declare a custom endpoint and an account that uses it; its key is then
+    /// stored with `credentials set <name>`.
+    Add {
+        /// A short name: lower-case letters, digits and `-`.
+        name: String,
+        /// The endpoint's base URL, such as `https://api.example.com/v1`.
+        #[arg(long, value_name = "URL")]
+        base_url: String,
+        /// What the endpoint speaks: `openai-chat`, `openai-responses` or
+        /// `anthropic-messages`.
+        #[arg(long, value_name = "PROTOCOL", default_value = "openai-chat")]
+        protocol: String,
+        /// Print one JSON object instead of prose.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -275,7 +301,7 @@ fn run() -> Result<()> {
     match &cli.command {
         Command::Serve { listen } => {
             let config = load_config(&cli)?;
-            serve(listen, &config, &data_dir(&cli)?)
+            serve(listen, &config, &data_dir(&cli)?, config_path(&cli).ok())
         }
         Command::Entitlements { json, refresh } => {
             let config = load_config(&cli)?;
@@ -301,14 +327,27 @@ fn run() -> Result<()> {
                     no_browser,
                 },
         } => {
+            let entitlement = match entitlement {
+                Some(name) => name.clone(),
+                None => declare_default_subscription(&cli, *provider)?,
+            };
             let config = load_config(&cli)?;
             let how = ConnectHow {
                 json: *json,
                 device_code: *device_code,
                 no_browser: *no_browser,
             };
-            connect(&config, &data_dir(&cli)?, *provider, entitlement, how)
+            connect(&config, &data_dir(&cli)?, *provider, &entitlement, how)
         }
+        Command::Providers {
+            command:
+                ProvidersCommand::Add {
+                    name,
+                    base_url,
+                    protocol,
+                    json,
+                },
+        } => add_provider(&cli, name, base_url, protocol, *json),
         Command::Subscriptions {
             command:
                 SubscriptionsCommand::Logout {
@@ -417,6 +456,86 @@ fn load_config(cli: &Cli) -> Result<GatewayConfig> {
     Ok(loaded.config)
 }
 
+/// Where this invocation's configuration lives, whether or not it exists yet.
+fn config_path(cli: &Cli) -> Result<PathBuf> {
+    cli.config
+        .clone()
+        .or_else(config::default_config_path)
+        .context("could not determine where the gateway configuration lives; pass --config")
+}
+
+/// The account a subscription sign-in connects when none is named, declared
+/// in the configuration the first time -- so signing in needs no file edit.
+fn declare_default_subscription(cli: &Cli, provider: SubscriptionProvider) -> Result<String> {
+    let (name, body) = match provider {
+        SubscriptionProvider::Openai => (
+            "chatgpt-subscription",
+            "kind = \"chatgpt\"\nvendor = \"openai\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Anthropic => (
+            "claude-subscription",
+            "kind = \"claude\"\nvendor = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Google => {
+            bail!("name the account to connect with --entitlement")
+        }
+    };
+    config::declare_table(&config_path(cli)?, &format!("accounts.{name}"), body)?;
+    Ok(name.to_owned())
+}
+
+/// `providers add`: a custom endpoint and the account that uses it. The key
+/// is filed under `<NAME>_API_KEY`, which `credentials set <name>` stores.
+fn add_provider(cli: &Cli, name: &str, base_url: &str, protocol: &str, json: bool) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        bail!("a provider name is lower-case letters, digits and `-`");
+    }
+    if !matches!(
+        protocol,
+        "openai-chat" | "openai-responses" | "anthropic-messages"
+    ) {
+        bail!("the protocol is openai-chat, openai-responses or anthropic-messages");
+    }
+    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
+        bail!("the base URL starts with https:// or http://");
+    }
+    let variable = format!("{}_API_KEY", name.to_ascii_uppercase().replace('-', "_"));
+    let quoted = |text: &str| toml::Value::String(text.to_owned()).to_string();
+    let path = config_path(cli)?;
+    let provider = config::declare_table(
+        &path,
+        &format!("providers.{name}"),
+        &format!(
+            "base_url = {}\nprotocol = {}\ncredential_env = [{}]\n",
+            quoted(base_url),
+            quoted(protocol),
+            quoted(&variable)
+        ),
+    )?;
+    let account = config::declare_table(
+        &path,
+        &format!("accounts.{name}"),
+        &format!("provider = {}\n", quoted(name)),
+    )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"provider": name, "variable": variable, "declared": provider || account})
+        );
+    } else if provider || account {
+        println!(
+            "declared {name} ({protocol}, {base_url}); store its key with `credentials set {name}`"
+        );
+    } else {
+        println!("{name} is already declared");
+    }
+    Ok(())
+}
+
 fn data_dir(cli: &Cli) -> Result<PathBuf> {
     match &cli.data_dir {
         Some(dir) => Ok(dir.clone()),
@@ -451,7 +570,12 @@ struct Ready<'a> {
 /// library exposes. A fixed port is therefore refused by name rather than
 /// silently ignored — a caller told "listening on 41219" when it asked for
 /// 8080 would have been lied to about the one fact it needs.
-fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
+fn serve(
+    listen: &str,
+    config: &GatewayConfig,
+    data_dir: &Path,
+    config_file: Option<PathBuf>,
+) -> Result<()> {
     let address: SocketAddr = listen
         .parse()
         .with_context(|| format!("`--listen {listen}` is not a socket address"))?;
@@ -463,23 +587,32 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
         );
     }
 
-    let providers = config::providers(config);
     let secrets = secret_store(data_dir);
     eprintln!("credentials resolve through {}", secrets.describe());
     // Everything a rebuild needs, owned, so the supplier a deferred start
     // keeps can run again on a later request — see `gateway::UpstreamSlot`.
+    // **Each build reads the configuration file again**, so an account a
+    // sign-in declared, or an endpoint added, serves without a restart; the
+    // copy read at start stands in only when there is no file to read.
     let build = {
-        let accounts = config.accounts.clone();
-        let providers = providers.clone();
+        let startup = config.clone();
+        let file = config_file.clone();
         let data_dir = data_dir.to_path_buf();
         // Which accounts the person took out of their pool, read live per
         // request so a toggle needs no restart.
         let pool_state = std::sync::Arc::new(
             inference_gateway::provider::pool_state::PoolState::at(&data_dir),
         );
-        move || {
+        std::sync::Arc::new(move || {
+            let current = match &file {
+                Some(path) => config::load(Some(path))
+                    .map(|loaded| loaded.config)
+                    .map_err(|error| format!("{error:#}"))?,
+                None => startup.clone(),
+            };
+            let providers = config::providers(&current);
             pool::pool_from_catalogue(
-                &accounts,
+                &current.accounts,
                 &providers,
                 &secrets,
                 &|entitlement| config::broker_paths(&data_dir, entitlement),
@@ -495,8 +628,10 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
                     .with_exclusion(std::sync::Arc::new(move |account| state.excluded(account)));
                 built
             })
-        }
+            .map_err(|refusal| refusal.to_string())
+        })
     };
+    let rebuild = std::sync::Arc::clone(&build);
     let gateway = match build() {
         Ok(Pool { upstream, notes }) => {
             for note in notes {
@@ -547,6 +682,33 @@ fn serve(listen: &str, config: &GatewayConfig, data_dir: &Path) -> Result<()> {
             )?
         }
     };
+    // One reload per change to the file: its modification time is what moved.
+    let modified = move || {
+        config_file
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+    };
+    let seen = std::sync::Mutex::new(modified());
+    gateway.reload_when(
+        move || {
+            rebuild().map(|Pool { upstream, notes }| {
+                for note in notes {
+                    eprintln!("{note}");
+                }
+                upstream
+            })
+        },
+        move || {
+            let now = modified();
+            let mut last = seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let moved = *last != now;
+            *last = now;
+            moved
+        },
+    );
     if let Some(provider) = gateway.serving_provider() {
         eprintln!(
             "serving {provider} over {}",
@@ -1698,6 +1860,31 @@ fn credential_present(dir: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn signing_in_with_no_account_named_declares_the_providers_default_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        let cli = Cli::parse_from([
+            "inference-gateway",
+            "--config",
+            path.to_str().unwrap(),
+            "entitlements",
+        ]);
+        for (provider, name) in [
+            (SubscriptionProvider::Openai, "chatgpt-subscription"),
+            (SubscriptionProvider::Anthropic, "claude-subscription"),
+        ] {
+            assert_eq!(declare_default_subscription(&cli, provider).unwrap(), name);
+        }
+        let config = config::load(Some(&path)).unwrap().config;
+        for name in ["chatgpt-subscription", "claude-subscription"] {
+            assert!(
+                config.accounts[name].subscription_broker().is_some(),
+                "{name}"
+            );
+        }
+    }
+
     /// A login is tried against a light text model, never an image or
     /// review model, and any text model when no light one is listed.
     #[test]
@@ -1849,6 +2036,7 @@ mod tests {
             "127.0.0.1:8080",
             &GatewayConfig::default(),
             Path::new("/nonexistent"),
+            None,
         )
         .expect_err("a fixed port cannot be honoured");
         let rendered = error.to_string();

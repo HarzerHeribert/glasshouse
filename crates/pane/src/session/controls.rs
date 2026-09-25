@@ -238,6 +238,22 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
         show(session, connectable_panel(&catalogue, &api_keys(session)));
         return;
     };
+    // The three doors a person names by what they have, not by an account
+    // table: a subscription is connected whether or not the gateway had it
+    // declared -- the gateway declares it on the way in.
+    if let Some(provider) = subscription_provider(account) {
+        let declared = catalogue
+            .accounts
+            .iter()
+            .find(|entry| entry.connect_with.as_deref() == Some(provider))
+            .map(|entry| entry.account.clone());
+        stream_connect(session, provider, declared.as_deref(), device_code);
+        return;
+    }
+    if account == "custom" {
+        custom_endpoint(session);
+        return;
+    }
 
     let Some(entry) = catalogue
         .accounts
@@ -264,7 +280,130 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
         return;
     };
 
-    stream_connect(session, &provider, account, device_code);
+    stream_connect(session, &provider, Some(account), device_code);
+}
+
+/// The login flow a person's own word for a subscription names.
+fn subscription_provider(word: &str) -> Option<&'static str> {
+    match word {
+        "chatgpt" | "openai" | "codex" => Some("openai"),
+        "claude" | "anthropic" => Some("anthropic"),
+        _ => None,
+    }
+}
+
+/// `/login custom`: an endpoint's URL, what it speaks, and its key, asked one
+/// at a time. The gateway declares the endpoint and files the key; nothing
+/// here writes a configuration file or asks the person to.
+fn custom_endpoint(session: &Session<'_>) {
+    let title = "Custom endpoint";
+    let Some(url) = entered_text(
+        session,
+        "Endpoint base URL, such as https://api.example.com/v1 — Enter continues, Esc cancels",
+    )
+    .map(|url| url.trim().to_string())
+    .filter(|url| !url.is_empty()) else {
+        session_println!("no endpoint entered");
+        return;
+    };
+    let speaks = entered_text(
+        session,
+        "What it speaks — Enter for OpenAI-compatible, or type anthropic",
+    )
+    .unwrap_or_default();
+    let protocol = if speaks.trim().eq_ignore_ascii_case("anthropic") {
+        "anthropic-messages"
+    } else {
+        "openai-chat"
+    };
+    let name = endpoint_name(&url);
+    let added = session.gateway.run(
+        &[
+            "providers",
+            "add",
+            &name,
+            "--base-url",
+            &url,
+            "--protocol",
+            protocol,
+            "--json",
+        ],
+        None,
+    );
+    if added.is_none() {
+        show(
+            session,
+            Panel::text(
+                title,
+                format!(
+                    "The gateway could not add {url}; check that it starts with https:// or http://."
+                ),
+            ),
+        );
+        return;
+    }
+    let Some(key) = entered_secret(session, &name).filter(|key| !key.is_empty()) else {
+        show(
+            session,
+            Panel::text(
+                title,
+                format!("Added {name} ({url}) without a key. /key {name} stores one."),
+            ),
+        );
+        return;
+    };
+    let stored = crate::gateway::store_credential(session.gateway, &name, &key).is_some();
+    show(
+        session,
+        Panel::text(
+            title,
+            if stored {
+                format!("Connected {name} ({url}). Pick one of its models with /models.")
+            } else {
+                format!(
+                    "Added {name}, but the gateway did not store the key; /key {name} tries again."
+                )
+            },
+        ),
+    );
+}
+
+/// A short name for an endpoint, from its host: `api.together.xyz` is
+/// `together`, `localhost:8000` is `localhost`; anything with no usable
+/// label is `custom`.
+fn endpoint_name(url: &str) -> String {
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', ':', '?'])
+        .next()
+        .unwrap_or("");
+    let label = host
+        .split('.')
+        .find(|label| {
+            !matches!(*label, "api" | "www" | "") && !label.chars().all(|c| c.is_ascii_digit())
+        })
+        .unwrap_or("");
+    let name: String = label
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if name.is_empty() {
+        "custom".to_string()
+    } else {
+        name
+    }
+}
+
+/// A prompt whose answer is not a secret: shown as it is typed with a
+/// terminal, the next line of stdin without one.
+fn entered_text(session: &Session<'_>, title: &str) -> Option<String> {
+    match session.ui {
+        Some(ui) => ui.line(title),
+        None => ui::read_line().ok().flatten(),
+    }
 }
 
 /// The gateway's credential table. **Every session asks, hosted or not**: the
@@ -340,36 +479,73 @@ fn key_rows(keys: &[crate::gateway::CredentialRow]) -> Vec<tui::PanelRow> {
         .collect()
 }
 
-/// The accounts a login flow could connect, connected or not, and then the
-/// API keys the gateway holds.
+/// `/login`'s three ways in, in the order a person reaches for them: a
+/// subscription they already pay for, a provider's API key, then any
+/// endpoint of their own. A subscription row is offered whether or not the
+/// gateway has an account declared for it -- signing in declares it.
 fn connectable_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) -> Panel {
-    let mut rows: Vec<tui::PanelRow> = catalogue
-        .accounts
-        .iter()
-        .filter(|entry| entry.connect_with.is_some())
-        .map(|entry| {
+    let row = |text: String, command: Option<String>| tui::PanelRow { text, command };
+    let mut rows = vec![row("Sign in with a subscription".into(), None)];
+    // Declared accounts by name under their subscription; the generic row
+    // only where none is declared yet -- signing in declares it.
+    for (label, plans, provider, word) in [
+        ("ChatGPT", "Plus, Pro", "openai", "chatgpt"),
+        ("Claude", "Pro, Max", "anthropic", "claude"),
+    ] {
+        let declared: Vec<&Account> = catalogue
+            .accounts
+            .iter()
+            .filter(|entry| entry.connect_with.as_deref() == Some(provider))
+            .collect();
+        if declared.is_empty() {
+            rows.push(row(
+                format!("  {label} · {plans} · sign in"),
+                Some(format!("/login {word}")),
+            ));
+        }
+        for entry in declared {
             let state = if entry.authenticated == Some(true) {
                 "connected"
             } else {
-                "not connected"
+                "sign in"
             };
-            tui::PanelRow {
-                text: format!("{} · {} · {state}", entry.account, entry.scope),
-                command: Some(format!("/login {}", entry.account)),
-            }
-        })
-        .collect();
-    let keys = key_rows(keys);
-    // The filler is for a panel with nothing in it at all: a key row is
-    // something to do, so saying there is nothing would be false.
-    if rows.is_empty() && keys.is_empty() {
-        rows.push(tui::PanelRow {
-            text: "No account in this project is connected with a login flow.".into(),
-            command: None,
-        });
+            rows.push(row(
+                format!("  {label} · {} · {} · {state}", entry.account, entry.scope),
+                Some(format!("/login {}", entry.account)),
+            ));
+        }
     }
-    rows.extend(keys);
-    Panel::rows("Connect an account", rows)
+    // Any other account a login flow connects, as the gateway names it.
+    for entry in catalogue.accounts.iter().filter(|entry| {
+        entry
+            .connect_with
+            .as_deref()
+            .is_some_and(|provider| !matches!(provider, "openai" | "anthropic"))
+    }) {
+        let state = if entry.authenticated == Some(true) {
+            "connected"
+        } else {
+            "sign in"
+        };
+        rows.push(row(
+            format!("  {} · {} · {state}", entry.account, entry.scope),
+            Some(format!("/login {}", entry.account)),
+        ));
+    }
+    let keys = key_rows(keys);
+    if !keys.is_empty() {
+        rows.push(row("Sign in with a provider API key".into(), None));
+        rows.extend(keys.into_iter().map(|key| tui::PanelRow {
+            text: format!("  {}", key.text),
+            ..key
+        }));
+    }
+    rows.push(row("Custom endpoint".into(), None));
+    rows.push(row(
+        "  Any OpenAI- or Anthropic-compatible URL and key".into(),
+        Some("/login custom".into()),
+    ));
+    Panel::rows("Sign in", rows)
 }
 
 /// `/key <provider>`: takes an API key without echoing it and hands it to the
@@ -433,19 +609,28 @@ fn entered_secret(session: &Session<'_>, provider: &str) -> Option<String> {
 /// pasted into the panel's prompt goes to the gateway's stdin, which is how a
 /// machine with no browser finishes: open the link anywhere, sign in, paste
 /// where the browser landed.
-fn stream_connect(session: &Session<'_>, provider: &str, account: &str, device_code: bool) {
+fn stream_connect(
+    session: &Session<'_>,
+    provider: &str,
+    declared: Option<&str>,
+    device_code: bool,
+) {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
     use std::sync::mpsc::RecvTimeoutError;
 
-    let mut arguments = vec![
-        "subscriptions",
-        "connect",
-        provider,
-        "--entitlement",
-        account,
-        "--json",
-    ];
+    // No account named: the gateway connects, and declares, the provider's
+    // default one.
+    let mut arguments = vec!["subscriptions", "connect", provider];
+    if let Some(account) = declared {
+        arguments.extend(["--entitlement", account]);
+    }
+    arguments.push("--json");
+    let account = declared.unwrap_or(match provider {
+        "openai" => "ChatGPT",
+        "anthropic" => "Claude",
+        other => other,
+    });
     if device_code {
         arguments.push("--device-code");
     }
@@ -1149,6 +1334,36 @@ fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_fresh_install_offers_both_subscriptions_keys_and_a_custom_endpoint() {
+        // What a new machine's gateway answers: no account declared at all.
+        let catalogue: Catalogue = serde_json::from_str(r#"{"version":1,"accounts":[]}"#).unwrap();
+        let panel = connectable_panel(&catalogue, &[]);
+        let commands: Vec<&str> = panel
+            .rows
+            .iter()
+            .filter_map(|row| row.command.as_deref())
+            .collect();
+        assert_eq!(
+            commands,
+            ["/login chatgpt", "/login claude", "/login custom"]
+        );
+        let texts: Vec<&str> = panel.rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts[0], "Sign in with a subscription");
+        assert!(texts.contains(&"Custom endpoint"));
+        assert_eq!(subscription_provider("chatgpt"), Some("openai"));
+        assert_eq!(subscription_provider("claude"), Some("anthropic"));
+    }
+
+    #[test]
+    fn a_custom_endpoint_is_named_after_its_host() {
+        assert_eq!(endpoint_name("https://api.together.xyz/v1"), "together");
+        assert_eq!(endpoint_name("http://localhost:8000/v1"), "localhost");
+        assert_eq!(endpoint_name("http://127.0.0.1:4000"), "custom");
+        assert_eq!(endpoint_name("https://openrouter.ai/api/v1"), "openrouter");
+    }
+
     use super::*;
 
     /// The gateway's sign-in lines become progress; the link and code arrive

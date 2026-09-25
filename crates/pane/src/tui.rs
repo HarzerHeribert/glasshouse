@@ -324,6 +324,9 @@ pub struct ScreenState {
 pub struct SecretPrompt {
     title: String,
     entered: String,
+    /// A prompt for something that is not a secret -- an endpoint's URL --
+    /// shows what is typed instead of bullets.
+    visible: bool,
 }
 
 impl std::fmt::Debug for SecretPrompt {
@@ -341,6 +344,15 @@ impl SecretPrompt {
         Self {
             title: title.into(),
             entered: String::new(),
+            visible: false,
+        }
+    }
+    /// The same modal prompt, for an answer that is not a secret.
+    #[must_use]
+    pub fn visible(title: impl Into<String>) -> Self {
+        Self {
+            visible: true,
+            ..Self::new(title)
         }
     }
     #[must_use]
@@ -364,9 +376,13 @@ impl SecretPrompt {
     pub fn is_empty(&self) -> bool {
         self.entered.is_empty()
     }
-    /// One bullet per character -- all the renderer is ever given.
+    /// All the renderer is ever given: one bullet per character, or the text
+    /// itself for a [`visible`](Self::visible) prompt.
     #[must_use]
     pub fn mask(&self) -> String {
+        if self.visible {
+            return self.entered.clone();
+        }
         "•".repeat(self.entered.chars().count())
     }
     /// What was entered, consuming the prompt with it.

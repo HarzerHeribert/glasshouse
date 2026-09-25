@@ -178,6 +178,9 @@ pub(super) enum Update {
     /// Open a modal masked prompt with this title. The terminal thread
     /// answers it on the secret channel and on nothing else.
     SecretPrompt(String),
+    /// The same prompt for an answer that is not a secret; what is typed is
+    /// shown.
+    TextPrompt(String),
     Model(String),
     Delta(String),
     ToolDelta(String),
@@ -355,6 +358,13 @@ impl LiveUi {
         // answer a prompt for a key.
         while self.secrets.try_recv().is_ok() {}
         self.updates.send(Update::SecretPrompt(title.into())).ok()?;
+        self.secrets.recv().ok().flatten()
+    }
+    /// The same modal prompt for an answer that is not a secret: what is
+    /// typed is shown. It comes back here and goes nowhere else either.
+    pub(super) fn line(&self, title: &str) -> Option<String> {
+        while self.secrets.try_recv().is_ok() {}
+        self.updates.send(Update::TextPrompt(title.into())).ok()?;
         self.secrets.recv().ok().flatten()
     }
     /// What the person entered in a prompt the terminal opened on its own,
@@ -985,6 +995,11 @@ fn run(
                     state.landed_note();
                 }
                 Update::Behind(lane, running) => state.lane(lane, running),
+                Update::TextPrompt(title) => {
+                    state.secret_prompt = Some(tui::SecretPrompt::visible(title));
+                    state.panel = None;
+                    state.inspection = None;
+                }
                 Update::SecretPrompt(title) => {
                     state.secret_prompt = Some(tui::SecretPrompt::new(title));
                     // A panel over a modal prompt would take the Enter that

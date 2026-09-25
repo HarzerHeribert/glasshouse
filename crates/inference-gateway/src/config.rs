@@ -171,6 +171,47 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded> {
     }
 }
 
+/// Appends one `[accounts.<name>]` or `[providers.<name>]` table to the
+/// configuration at `path` unless it is already declared, answering whether
+/// it wrote. **Appended as text, never re-serialised**: a person's comments
+/// and ordering in the file stay exactly as they wrote them. The result must
+/// parse before it is written, and it replaces the file through a rename, so
+/// a refusal leaves the file untouched.
+pub fn declare_table(path: &Path, table: &str, body: &str) -> Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {path:?}"));
+        }
+    };
+    let config = parse(&text).with_context(|| format!("could not read {path:?}"))?;
+    let declared = match table.split_once('.') {
+        Some(("accounts", name)) => config.accounts.contains_key(name),
+        Some(("providers", name)) => config.providers.contains_key(name),
+        _ => anyhow::bail!("`{table}` is not an accounts or providers table"),
+    };
+    if declared {
+        return Ok(false);
+    }
+    let mut next = text;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next.push_str(&format!("[{table}]\n{body}"));
+    parse(&next).context("the new table would not parse")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("could not create {parent:?}"))?;
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, next).with_context(|| format!("could not write {temporary:?}"))?;
+    std::fs::rename(&temporary, path).with_context(|| format!("could not replace {path:?}"))?;
+    Ok(true)
+}
+
 /// `<platform config dir>/gateway.toml`, or `None` when no such directory
 /// can be determined.
 /// `INFERENCE_GATEWAY_CONFIG` names the file outright — the override a
@@ -371,6 +412,51 @@ pub fn protocol_from_slug(slug: &str) -> Option<WireProtocol> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_declared_table_is_appended_once_and_the_file_keeps_its_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        std::fs::write(&path, "# mine\n[accounts.groq]\nprovider = \"groq\"\n").unwrap();
+
+        assert!(
+            declare_table(
+                &path,
+                "accounts.chatgpt-subscription",
+                "kind = \"chatgpt\"\nvendor = \"openai\"\nsubscription_broker = \"cliproxyapi\"\n"
+            )
+            .unwrap()
+        );
+        assert!(
+            !declare_table(
+                &path,
+                "accounts.chatgpt-subscription",
+                "kind = \"chatgpt\"\n"
+            )
+            .unwrap(),
+            "declared once"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\n[accounts.groq]"), "{text}");
+        let config = parse(&text).unwrap();
+        assert!(
+            config.accounts["chatgpt-subscription"]
+                .subscription_broker()
+                .is_some()
+        );
+
+        // A body that would not parse leaves the file exactly as it was.
+        assert!(declare_table(&path, "accounts.broken", "kind = \n").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        // No file yet: the table is the whole file.
+        let fresh = dir.path().join("new/gateway.toml");
+        assert!(declare_table(&fresh, "accounts.groq", "provider = \"groq\"\n").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&fresh).unwrap(),
+            "[accounts.groq]\nprovider = \"groq\"\n"
+        );
+    }
+
     /// With no configuration at all, Anthropic's API is a provider through
     /// The broker executable follows the managed layout's release marker,
     /// and only a well-formed marker; anything else is the flat fallback.

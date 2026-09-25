@@ -1703,3 +1703,73 @@ fn a_deferred_slot_paces_rebuilds_and_fills_once_its_supplier_answers() {
         "filled once, never rebuilt"
     );
 }
+
+/// A serving slot told how to reload rebuilds once per change and keeps the
+/// running pool when the rebuild fails -- a bad configuration edit never
+/// takes a working gateway down.
+#[test]
+fn a_serving_slot_reloads_once_per_change_and_keeps_its_pool_on_a_failed_rebuild() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let upstream = |name: &str| {
+        Upstream::new(
+            name.to_owned(),
+            vec![Route::new(
+                "anthropic-messages".to_owned(),
+                &["/messages"],
+                "http://127.0.0.1:1",
+            )],
+            Secret::mint_for_test("k"),
+            crate::routing::CredentialId::new(
+                name.to_owned(),
+                crate::secret::SecretRef::Environment {
+                    var: "K".to_owned(),
+                },
+            ),
+        )
+        .unwrap()
+    };
+    let slot = UpstreamSlot::ready(upstream("before"));
+    let first = slot.current().unwrap();
+    let changed = Arc::new(AtomicBool::new(false));
+    let broken = Arc::new(AtomicBool::new(false));
+    let builds = Arc::new(AtomicUsize::new(0));
+    let _ = slot.reload.set(Reload {
+        supplier: Box::new({
+            let broken = Arc::clone(&broken);
+            let builds = Arc::clone(&builds);
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                if broken.load(Ordering::SeqCst) {
+                    return Err("does not parse".to_owned());
+                }
+                Ok(upstream("after"))
+            }
+        }),
+        changed: Box::new({
+            let changed = Arc::clone(&changed);
+            move || changed.swap(false, Ordering::SeqCst)
+        }),
+    });
+
+    assert!(
+        Arc::ptr_eq(&slot.current_or_build().unwrap(), &first),
+        "nothing changed"
+    );
+    assert_eq!(builds.load(Ordering::SeqCst), 0);
+
+    changed.store(true, Ordering::SeqCst);
+    let reloaded = slot.current_or_build().unwrap();
+    assert!(!Arc::ptr_eq(&reloaded, &first), "a change rebuilds");
+    assert!(
+        Arc::ptr_eq(&slot.current_or_build().unwrap(), &reloaded),
+        "once per change"
+    );
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+    broken.store(true, Ordering::SeqCst);
+    changed.store(true, Ordering::SeqCst);
+    assert!(
+        Arc::ptr_eq(&slot.current_or_build().unwrap(), &reloaded),
+        "a failed rebuild keeps the pool"
+    );
+}

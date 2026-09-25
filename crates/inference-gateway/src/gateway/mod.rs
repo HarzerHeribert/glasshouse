@@ -345,9 +345,15 @@ impl fmt::Debug for GatewayToken {
 /// refusal that stands.
 /// A host's gateway is never deferred: every `start_if_required_*` door
 /// fills the slot before the listener accepts.
+///
+/// A serving slot may also be told how to **reload** ([`Gateway::reload_when`]):
+/// when its `changed` check says the configuration moved, the next request
+/// rebuilds the pool from it. A rebuild that fails keeps the running pool --
+/// a bad edit never takes a working session down.
 pub struct UpstreamSlot {
     current: RwLock<Option<Arc<Upstream>>>,
     supplier: Option<Supplier>,
+    reload: std::sync::OnceLock<Reload>,
     /// The last refusal and when it was made, so a burst of requests does
     /// not rebuild the pool once each. Held across a rebuild, which
     /// serialises requests only while there is nothing to serve them with.
@@ -356,6 +362,13 @@ pub struct UpstreamSlot {
 }
 
 type Supplier = Box<dyn Fn() -> Result<Upstream, String> + Send + Sync>;
+
+/// How a serving slot rebuilds: the supplier, and a check that answers true
+/// once for each change to what the supplier reads.
+struct Reload {
+    supplier: Supplier,
+    changed: Box<dyn Fn() -> bool + Send + Sync>,
+}
 
 /// How long a refused rebuild stands before a request tries again.
 const REBUILD_INTERVAL: Duration = Duration::from_secs(1);
@@ -374,6 +387,7 @@ impl UpstreamSlot {
         Self {
             current: RwLock::new(Some(Arc::new(upstream))),
             supplier: None,
+            reload: std::sync::OnceLock::new(),
             last_refusal: Mutex::new((String::new(), None)),
             rebuild_interval: REBUILD_INTERVAL,
         }
@@ -387,6 +401,7 @@ impl UpstreamSlot {
         Self {
             current: RwLock::new(None),
             supplier: Some(supplier),
+            reload: std::sync::OnceLock::new(),
             last_refusal: Mutex::new((refusal, None)),
             rebuild_interval: REBUILD_INTERVAL,
         }
@@ -410,6 +425,27 @@ impl UpstreamSlot {
     /// refusal is older than the interval. `Err` is what the request is
     /// told.
     fn current_or_build(&self) -> Result<Arc<Upstream>, String> {
+        if let Some(reload) = self.reload.get()
+            && self.current().is_some()
+        {
+            let _one_at_a_time = self
+                .last_refusal
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if (reload.changed)() {
+                match (reload.supplier)() {
+                    Ok(upstream) => {
+                        *self.current.write().unwrap_or_else(PoisonError::into_inner) =
+                            Some(Arc::new(upstream));
+                    }
+                    Err(reason) => {
+                        eprintln!(
+                            "the configuration changed and does not serve ({reason}); the running pool stays"
+                        );
+                    }
+                }
+            }
+        }
         if let Some(upstream) = self.current() {
             return Ok(upstream);
         }
@@ -441,6 +477,23 @@ impl UpstreamSlot {
                 Err(reason)
             }
         }
+    }
+}
+
+impl Gateway {
+    /// Rebuild this gateway's pool with `supplier` whenever `changed` says
+    /// what it reads has moved -- a sign-in that declares an account, a
+    /// custom endpoint added -- with no restart. Set once; a second call is
+    /// ignored.
+    pub fn reload_when(
+        &self,
+        supplier: impl Fn() -> Result<Upstream, String> + Send + Sync + 'static,
+        changed: impl Fn() -> bool + Send + Sync + 'static,
+    ) {
+        let _ = self.upstream.reload.set(Reload {
+            supplier: Box::new(supplier),
+            changed: Box::new(changed),
+        });
     }
 }
 
