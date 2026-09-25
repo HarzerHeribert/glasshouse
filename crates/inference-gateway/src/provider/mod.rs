@@ -541,20 +541,16 @@ pub fn templates() -> Vec<Provider> {
         // History: design-decisions.md, "Trims: provider/mod.rs",
         // gemini entry.
         //
-        // Beside the native protocol, Google documents an OpenAI-compatible
-        // chat endpoint (ai.google.dev/gemini-api/docs/openai, read
-        // 2026-09-25) whose base does carry its version. Documented, not
-        // probed.
+        // Google also documents an OpenAI-compatible chat endpoint
+        // (ai.google.dev/gemini-api/docs/openai). It is deliberately not
+        // declared: an OpenAI-speaking client reaches Gemini through the
+        // gateway's own codec, and a second protocol here would relay past it.
         Provider {
             name: "gemini".to_owned(),
             protocols: vec![
                 unverified_support(
                     WireProtocol::GeminiGenerateContent,
                     "https://generativelanguage.googleapis.com",
-                ),
-                unverified_support(
-                    WireProtocol::OpenAiChat,
-                    "https://generativelanguage.googleapis.com/v1beta/openai",
                 ),
             ],
             model_list_endpoint: Declared::Unverified,
