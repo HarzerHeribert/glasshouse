@@ -1981,6 +1981,35 @@ fn workbench_final_answer_survives_the_actual_provider_and_terminal_loop() {
     assert_eq!(app.exited(), 0);
 }
 
+/// Ctrl-C over a selection copies it, the way a terminal's own copy key
+/// does: pressed twice it would otherwise have ended the session.
+#[test]
+fn ctrl_c_over_a_selection_copies_and_interrupts_nothing() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    app.send(b"select these words\r");
+    app.contains("select these words");
+    app.settle(300);
+    let y = app
+        .screen
+        .screen()
+        .rows(0, 80)
+        .position(|row| row.contains("select these words"))
+        .unwrap()
+        + 1;
+    app.send(format!("\x1b[<0;4;{y}M").as_bytes());
+    app.send(format!("\x1b[<32;30;{y}M").as_bytes());
+    app.settle(200);
+    app.send(format!("\x1b[<0;30;{y}m").as_bytes());
+    app.contains("Copied selection.");
+    app.send(b"\x03");
+    thread::sleep(Duration::from_millis(100));
+    app.send(b"\x03");
+    app.settle(300);
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
 #[test]
 fn workbench_pointer_opens_settings_only_on_release_and_wheel_stays_local() {
     let (base, _requests) = provider();

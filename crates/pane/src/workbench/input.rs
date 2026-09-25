@@ -251,6 +251,17 @@ impl Workbench {
             _ => false,
         }
     }
+    /// The text under the selection, read off the last drawn screen.
+    fn selected_text(&self, s: &ScreenState) -> String {
+        match (self.geometry.screen.as_ref(), s.selection) {
+            (Some(screen), Some(selection)) if !selection.is_empty() => {
+                let mut screen = screen.clone();
+                let area = screen.area;
+                crate::tui::draw_selection(&mut screen, area, selection)
+            }
+            _ => String::new(),
+        }
+    }
     pub fn event(&mut self, e: &Event, s: &mut ScreenState, n: &Notebook, busy: bool) -> Effect {
         match e {
             Event::Mouse(m) => {
@@ -278,14 +289,7 @@ impl Workbench {
                         let anchor = self.press.take();
                         if self.dragged {
                             self.dragged = false;
-                            let copied = match (self.geometry.screen.as_ref(), s.selection) {
-                                (Some(screen), Some(selection)) => {
-                                    let mut screen = screen.clone();
-                                    let area = screen.area;
-                                    crate::tui::draw_selection(&mut screen, area, selection)
-                                }
-                                _ => String::new(),
-                            };
+                            let copied = self.selected_text(s);
                             return if copied.is_empty() {
                                 Effect::Consumed
                             } else {
@@ -395,9 +399,17 @@ impl Workbench {
                 if k.kind == crossterm::event::KeyEventKind::Release {
                     return Effect::Consumed;
                 }
+                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                // Ctrl-C over a selection is a copy, as in any terminal with
+                // one: it never interrupts, and the selection stays.
+                if ctrl && k.code == KeyCode::Char('c') {
+                    let copied = self.selected_text(s);
+                    if !copied.is_empty() {
+                        return Effect::Copy(copied);
+                    }
+                }
                 s.selection = None;
                 self.notice.clear();
-                let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                 if ctrl && k.code == KeyCode::Char('c') {
                     self.close();
                     return Effect::Pass;
