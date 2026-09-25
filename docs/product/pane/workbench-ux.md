@@ -252,10 +252,13 @@ spinner while thinking over the prompt line is just still."*
   the words travel back to the program as the refusal's rule
   (`tools/invoke.rs`), which is where the model reads every refusal. Empty
   words ask it to propose. Deny is untouched.
-- **A cell being written is shown as the program it is becoming.** The
-  provider's `partial_json` is decoded as far as it has come; `ui.stream =
-  code | quiet | raw` chooses the program with its calls lit, one line, or the
-  raw text; the dock's fourth chip steps it.
+- **A cell being written is shown by what it will do.** The provider's
+  `partial_json` is decoded as far as it has come and, by default
+  (`ui.stream = actions`), laid out one row per acting call -- the call, its
+  first argument, and a character count that ticks as it arrives -- because
+  unformatted code arriving token by token is unpleasant to watch. `code`
+  shows the program with its calls lit, `raw` the protocol text; the dock's
+  fourth chip steps it.
 - **Inside a cell, the chain of calls is its own record.** Every call the
   cell made, in order, with how it ended (`✓ returned`, `⊘ denied` with the
   rule, `✕ failed` with the class) -- read from the call records, never off

@@ -397,7 +397,20 @@ fn tool_stream_is_not_misrepresented_as_executed_source() {
     let (c, n, mut s) = fixture();
     s.streaming_tool_input =
         Some("{\"code\":\"const guide = await read({path: \\\"AGENTS.md\\\"});\\n  bash({".into());
-    // Default: the decoded program, calls lit, with the not-executed mark.
+    // Default: one row per acting call, named by its first argument, with
+    // the characters it spans so far -- never the unformatted program.
+    assert_eq!(s.stream, pane::tui::Stream::Actions);
+    let text = words(&doc(&c, &n, &s, &Workbench::default()));
+    assert!(
+        text.contains("writing cell 002 · 2 actions · not executed"),
+        "{text}"
+    );
+    assert!(text.contains("read    AGENTS.md · "), "{text}");
+    assert!(text.contains("bash "), "{text}");
+    assert!(!text.contains("const guide"), "{text}");
+    assert!(!text.contains("{\"code"), "{text}");
+    // Code: the decoded program, calls lit, with the not-executed mark.
+    s.stream = pane::tui::Stream::Code;
     let d = doc(&c, &n, &s, &Workbench::default());
     let text = words(&d);
     assert!(
@@ -419,11 +432,6 @@ fn tool_stream_is_not_misrepresented_as_executed_source() {
             .any(|(t, tone)| t == "read" && *tone == Tone::Accent)),
         "the acting call is lit"
     );
-    // Quiet: one line, no program.
-    s.stream = pane::tui::Stream::Quiet;
-    let text = words(&doc(&c, &n, &s, &Workbench::default()));
-    assert!(text.contains("writing cell 002 · 2 lines so far"), "{text}");
-    assert!(!text.contains("const guide"), "{text}");
     // Raw: the protocol text, muted, for someone debugging the protocol.
     s.stream = pane::tui::Stream::Raw;
     let d = doc(&c, &n, &s, &Workbench::default());
@@ -1660,4 +1668,40 @@ fn motion_takes_three_levels() {
     }
     assert!(u.local_command("/motion sideways", &mut s, &n));
     assert_eq!(s.motion, pane::tui::Motion::Full);
+}
+
+/// Several things can be live at once -- reasoning, a cell being written,
+/// work behind the answer -- and a spinner on each stacked them on screen.
+/// Only the newest moves; between two frames, only its row changes.
+#[test]
+fn only_the_newest_live_row_moves() {
+    let (c, n, mut s) = fixture();
+    s.streaming_reasoning = Some("Looking at the tests first.".into());
+    s.behind = vec!["checker".into()];
+    s.streaming_tool_input = Some("{\"code\":\"await read({path: \\\"a.rs\\\"});".into());
+    s.activity = pane::tui::Activity::Streaming;
+    let rows = |s: &ScreenState| -> Vec<String> {
+        doc(&c, &n, s, &Workbench::default())
+            .rows
+            .iter()
+            .map(|r| r.text.clone())
+            .collect()
+    };
+    let mut changed = std::collections::BTreeSet::new();
+    let first = rows(&s);
+    for frame in 1..8 {
+        s.animation_frame = frame;
+        for (a, b) in first.iter().zip(rows(&s)) {
+            if *a != b {
+                changed.insert(a.clone());
+            }
+        }
+    }
+    assert!(!changed.is_empty(), "the newest live row moves");
+    assert!(
+        changed
+            .iter()
+            .all(|row| row.contains("writing cell") || row.contains("read ")),
+        "only the cell being written moves: {changed:?}"
+    );
 }

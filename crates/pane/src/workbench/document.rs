@@ -72,9 +72,28 @@ pub struct Row {
     pub key: (usize, usize),
     pub kind: RowKind,
 }
+/// The one live thing in the document that moves. Several can be live at
+/// once -- the Scout, work behind the answer, reasoning, a cell being
+/// written, the prose -- and a spinner on each stacked them on screen, so
+/// only the newest moves and the rest hold their still mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Mover {
+    #[default]
+    Nothing,
+    Preflight,
+    Behind,
+    Reasoning,
+    /// A cell running, and the helpers it is waiting on.
+    Running,
+    Cell,
+    Prose,
+}
+
 #[derive(Default)]
 pub struct Document {
     pub rows: Vec<Row>,
+    /// Which live row carries the motion this frame.
+    mover: Mover,
     /// The kind every ordinary row takes while a card is open.
     container: RowKind,
     /// Whether the last turn labelled was Pane's, so one turn of several
@@ -204,6 +223,14 @@ impl Document {
             id,
         );
     }
+    /// The busy mark, moving only on the row that carries this frame's motion.
+    fn busy(&self, s: &ScreenState, row: Mover) -> &'static str {
+        super::motion::busy_moving(s, self.mover == row)
+    }
+    /// The caret, moving only on the row that carries this frame's motion.
+    fn caret(&self, s: &ScreenState, row: Mover) -> &'static str {
+        super::motion::caret_moving(s, self.mover == row)
+    }
     fn blank(&mut self, id: usize) {
         self.row(String::new(), Tone::Normal, None, id);
     }
@@ -215,6 +242,21 @@ impl Document {
         width: usize,
     ) -> Self {
         let mut d = Self::default();
+        d.mover = if s.streaming_text.is_some() {
+            Mover::Prose
+        } else if s.streaming_tool_input.is_some() {
+            Mover::Cell
+        } else if s.streaming_reasoning.is_some() {
+            Mover::Reasoning
+        } else if s.activity == crate::tui::Activity::Executing {
+            Mover::Running
+        } else if !s.behind.is_empty() {
+            Mover::Behind
+        } else if n.preflight.is_some() {
+            Mover::Preflight
+        } else {
+            Mover::Nothing
+        };
         let mut note = 0usize;
         d.card(c, s, &mut note, width);
         // What the card drew is the session's own header, not conversation:
@@ -468,7 +510,7 @@ impl Document {
                         format!(
                             "{} PREFLIGHT · SCOUT  ",
                             if !p.outcome.ok && p.outcome.text.is_empty() {
-                                super::motion::busy(s)
+                                d.busy(s, Mover::Preflight)
                             } else {
                                 "◇"
                             }
@@ -544,7 +586,7 @@ impl Document {
             .find(|part| !part.is_empty())
             .unwrap_or("")
             .replace("**", "");
-        let head = format!("{} reasoning · {count} · ", super::motion::caret(s));
+        let head = format!("{} reasoning · {count} · ", self.caret(s, Mover::Reasoning));
         let room = width.saturating_sub(head.chars().count() + 1);
         let latest: String = if latest.chars().count() > room {
             latest
@@ -569,12 +611,12 @@ impl Document {
         let before = self.rows.len();
         self.wrapped(text, Tone::Normal, None, width, usize::MAX - 1, 2);
         let last = self.rows.len().saturating_sub(1);
+        let mark = self.caret(s, Mover::Prose);
         for (i, row) in self.rows[before..].iter_mut().enumerate() {
             let words = row.text.get(2..).unwrap_or("").to_string();
             row.spans = vec![("▎ ".into(), Tone::Accent), (words, Tone::Normal)];
             if before + i == last {
-                row.spans
-                    .push((super::motion::caret(s).into(), Tone::Accent));
+                row.spans.push((mark.into(), Tone::Accent));
             }
             row.text = row.spans.iter().map(|(t, _)| t.as_str()).collect();
         }
@@ -938,19 +980,64 @@ impl Document {
                 };
                 self.wrapped(shown, Tone::Muted, None, width, id, 2);
             }
-            (crate::tui::Stream::Quiet, Some(code)) => {
+            (crate::tui::Stream::Actions, Some(code)) => {
+                let actions = stream_actions(&code);
+                let calls = actions
+                    .iter()
+                    .filter(|action| !action.name.is_empty())
+                    .count();
                 self.line(
                     vec![(
                         format!(
-                            "  {} writing cell {cell:03} · {} lines so far · not executed",
-                            super::motion::busy(s),
-                            code.lines().count().max(1)
+                            "  {} writing cell {cell:03} · {calls} action{} · not executed",
+                            self.busy(s, Mover::Cell),
+                            if calls == 1 { "" } else { "s" }
                         ),
                         Tone::Accent,
                     )],
                     None,
                     id,
                 );
+                let skip = actions.len().saturating_sub(STREAM_ROWS);
+                if skip > 0 {
+                    self.line(
+                        vec![(format!("    … {skip} earlier"), Tone::Muted)],
+                        None,
+                        id,
+                    );
+                }
+                let last = actions.len().saturating_sub(1);
+                for (i, action) in actions.iter().enumerate().skip(skip) {
+                    let count = format!(" · {}", chars_label(action.chars));
+                    let (name, tone) = if action.name.is_empty() {
+                        ("code".to_string(), Tone::Muted)
+                    } else {
+                        (action.name.clone(), Tone::Accent)
+                    };
+                    let name = format!("{name:<7}");
+                    let room = width
+                        .saturating_sub(4 + name.chars().count() + 1 + count.chars().count() + 2);
+                    let arg: String = if action.argument.chars().count() > room {
+                        action
+                            .argument
+                            .chars()
+                            .take(room.saturating_sub(1))
+                            .chain(['…'])
+                            .collect()
+                    } else {
+                        action.argument.clone()
+                    };
+                    let mut spans = vec![
+                        ("    ".to_string(), Tone::Normal),
+                        (name, tone),
+                        (format!(" {arg}"), Tone::Normal),
+                        (count, Tone::Muted),
+                    ];
+                    if i == last {
+                        spans.push((format!(" {}", self.caret(s, Mover::Cell)), Tone::Accent));
+                    }
+                    self.line(spans, None, id);
+                }
             }
             (crate::tui::Stream::Code, Some(code)) => {
                 let lines: Vec<&str> = code.lines().collect();
@@ -958,7 +1045,7 @@ impl Document {
                     vec![(
                         format!(
                             "  {} writing cell {cell:03} · {} lines so far · not executed",
-                            super::motion::busy(s),
+                            self.busy(s, Mover::Cell),
                             lines.len().max(1)
                         ),
                         Tone::Accent,
@@ -1181,7 +1268,7 @@ impl Document {
         for lane in &s.behind {
             self.kinded(
                 vec![
-                    (format!("  {} ", super::motion::busy(s)), Tone::Helper),
+                    (format!("  {} ", self.busy(s, Mover::Behind)), Tone::Helper),
                     (
                         clip(&voice::behind(s.speaking(), lane), width.saturating_sub(5)),
                         Tone::Helper,
@@ -1458,7 +1545,7 @@ impl Document {
                     format!(
                         "     {} {}  ",
                         if waiting {
-                            super::motion::busy(s)
+                            self.busy(s, Mover::Running)
                         } else {
                             "◇"
                         },
@@ -1541,6 +1628,119 @@ const ACTING: [&str; 22] = [
     "read", "write", "edit", "bash", "fd", "grep", "glob", "fetch", "search", "ssh", "web",
     "checks", "helper", "agent", "handles", "bg", "decide", "mcp", "send", "print", "ask", "plan",
 ];
+/// Rows a streaming cell shows before the earlier ones fold into a count.
+const STREAM_ROWS: usize = 12;
+
+/// One acting call in a cell still being written, or the code before the
+/// first one (`name` empty).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreamAction {
+    pub name: String,
+    /// The call's first string argument as far as it has arrived: the path,
+    /// the command, the pattern -- what a person reads the call by.
+    pub argument: String,
+    /// Characters of the program this call spans so far.
+    pub chars: usize,
+}
+
+/// Splits a partial program at each acting call, so what is arriving can
+/// be shown by what it will do. A name inside a string literal is text, not
+/// a call.
+pub(crate) fn stream_actions(code: &str) -> Vec<StreamAction> {
+    let chars: Vec<char> = code.chars().collect();
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    let mut starts: Vec<(usize, String)> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, '"' | '\'' | '`') {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if (c.is_alphabetic() || c == '_') && (i == 0 || !ident(chars[i - 1])) {
+            let start = i;
+            while i < chars.len() && ident(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let base = word.split('.').next().unwrap_or("");
+            if chars.get(i) == Some(&'(') && ACTING.contains(&base) {
+                starts.push((start, word));
+            }
+            continue;
+        }
+        i += 1;
+    }
+    let mut out = Vec::new();
+    let first = starts.first().map_or(chars.len(), |(at, _)| *at);
+    let preamble: String = chars[..first].iter().collect();
+    if !preamble.trim().is_empty() {
+        out.push(StreamAction {
+            name: String::new(),
+            argument: String::new(),
+            chars: preamble.trim().chars().count(),
+        });
+    }
+    for (n, (at, name)) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).map_or(chars.len(), |(next, _)| *next);
+        let segment = &chars[*at..end];
+        out.push(StreamAction {
+            name: name.clone(),
+            argument: first_string(&segment[name.chars().count()..]),
+            chars: segment
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .chars()
+                .count(),
+        });
+    }
+    out
+}
+
+/// The first string literal in a call's text, whitespace folded, as far as
+/// it has arrived.
+fn first_string(call: &[char]) -> String {
+    let Some(open) = call.iter().position(|c| matches!(c, '"' | '\'' | '`')) else {
+        return String::new();
+    };
+    let q = call[open];
+    let mut text = String::new();
+    let mut i = open + 1;
+    while i < call.len() && call[i] != q {
+        if call[i] == '\\' {
+            i += 1;
+        }
+        if let Some(&c) = call.get(i) {
+            text.push(if c.is_whitespace() { ' ' } else { c });
+        }
+        i += 1;
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A character count as a person reads it at a glance.
+fn chars_label(chars: usize) -> String {
+    if chars >= 1000 {
+        format!("{:.1}k chars", chars as f64 / 1000.0)
+    } else {
+        format!("{chars} chars")
+    }
+}
+
 /// One line of a program as spans: acting calls in the accent, the three
 /// words that shape a cell quiet, everything else as code.
 pub(crate) fn highlight_calls(line: &str) -> Vec<(String, Tone)> {
@@ -1761,4 +1961,21 @@ fn explanation(m: &Message) -> String {
         }
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn a_streaming_program_splits_at_its_calls_and_not_at_their_text() {
+        let code = "const t = 1;\nawait read({path: \"src/a.rs\"});\nawait bash(\"echo edit( && cargo test\");\nawait edit({pa";
+        let actions = stream_actions(code);
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["", "read", "bash", "edit"]);
+        assert_eq!(actions[1].argument, "src/a.rs");
+        assert_eq!(actions[2].argument, "echo edit( && cargo test");
+        assert_eq!(actions[3].argument, "");
+        assert_eq!(actions[0].chars, "const t = 1;\nawait".chars().count());
+    }
 }

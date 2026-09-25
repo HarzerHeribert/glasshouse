@@ -49,7 +49,8 @@ local hour and offers chips read from the repository (last commit, uncommitted
 changes, a test command), each of which types a message. Inside an open cell
 the program's acting calls are lit and the chain of calls the cell actually
 made is listed from its record with how each ended; a cell still being
-written is shown as the decoded program (`ui.stream = code | quiet | raw`).
+written is shown one row per action with a ticking character count
+(`ui.stream = actions | code | raw`).
 An approval offers `[a]`, ask Pane for another way: the call is refused as a
 denial is and the words reach the program as the refusal's rule.
 

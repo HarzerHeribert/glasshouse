@@ -69,7 +69,7 @@ const THEMES: &[&str] = &[
 const STATUS_LINES: &[&str] = &["full", "compact", "hidden"];
 const SIDEBAR: &[&str] = &["auto", "show", "hide"];
 const VOICES: &[&str] = &["playful", "plain"];
-const STREAMS: &[&str] = &["code", "quiet", "raw"];
+const STREAMS: &[&str] = &["actions", "code", "raw"];
 const LOOKS: &[&str] = &["instrument", "bird"];
 const MOTIONS: &[&str] = &["full", "calm", "off"];
 /// The working mode a session starts in. `build` is this file's word for the
@@ -410,7 +410,7 @@ static SPECS: &[SettingSpec] = &[
     SettingSpec {
         key: "ui.stream",
         label: "Streaming cell",
-        description: "What you see while the model is still writing a cell: the code as it forms, one quiet line, or the raw protocol text.",
+        description: "What you see while the model is still writing a cell: each action on its own row with a live character count, the code as it forms, or the raw protocol text.",
         kind: Kind::Choice,
         choices: STREAMS,
         basic: true,

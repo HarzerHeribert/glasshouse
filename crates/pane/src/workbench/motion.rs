@@ -62,9 +62,10 @@ fn level(s: &ScreenState) -> &'static str {
 }
 
 /// The caret at the end of prose that is still arriving -- the model's
-/// thinking as it is written. It breathes in one cell.
-pub(super) fn caret(s: &ScreenState) -> &'static str {
-    if s.motion_live() {
+/// thinking as it is written. It breathes in one cell, and holds its still
+/// frame unless this row carries the document's one motion.
+pub(super) fn caret_moving(s: &ScreenState, moving: bool) -> &'static str {
+    if moving && s.motion_live() {
         CARET[frame(s) % CARET.len()]
     } else {
         CARET[0]
@@ -72,9 +73,10 @@ pub(super) fn caret(s: &ScreenState) -> &'static str {
 }
 
 /// The one-cell mark of something small at work: a helper waiting on its
-/// answer, a cell being written, the checker behind the answer.
-pub(super) fn busy(s: &ScreenState) -> &'static str {
-    match (s.look, s.motion_live()) {
+/// answer, a cell being written, the checker behind the answer. It holds
+/// its still frame unless this row carries the document's one motion.
+pub(super) fn busy_moving(s: &ScreenState, moving: bool) -> &'static str {
+    match (s.look, moving && s.motion_live()) {
         (Look::Instrument, true) => ORBIT[frame(s) % ORBIT.len()],
         (Look::Instrument, false) => "◌",
         (Look::Bird, true) => HOP[frame(s) % HOP.len()],
@@ -179,12 +181,20 @@ mod tests {
             Activity::Executing,
         ] {
             s.activity = activity;
-            let rest = (dock_mark(&s, true), caret(&s), busy(&s));
+            let rest = (
+                dock_mark(&s, true),
+                caret_moving(&s, true),
+                busy_moving(&s, true),
+            );
             for tick in 0..12 {
                 s.animation_frame = tick;
                 assert_eq!(
                     rest,
-                    (dock_mark(&s, true), caret(&s), busy(&s)),
+                    (
+                        dock_mark(&s, true),
+                        caret_moving(&s, true),
+                        busy_moving(&s, true)
+                    ),
                     "{activity:?}"
                 );
             }

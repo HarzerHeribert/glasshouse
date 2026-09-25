@@ -394,37 +394,40 @@ impl SecretPrompt {
 
 /// Accent-only themes inherit the terminal background and its transparency.
 /// What the screen shows while the model is still writing a cell
-/// (`ui.stream`): the program as it forms, one quiet line, or the raw
-/// protocol text the provider sends.
+/// (`ui.stream`): one row per action with a live character count, the
+/// program as it forms, or the raw protocol text the provider sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stream {
+    /// The cell laid out by what it will do -- each call on its own row,
+    /// counting its characters as they arrive -- because unformatted code
+    /// arriving token by token is unpleasant to watch.
     #[default]
+    Actions,
     Code,
-    Quiet,
     Raw,
 }
 impl Stream {
-    pub const ALL: [Self; 3] = [Self::Code, Self::Quiet, Self::Raw];
+    pub const ALL: [Self; 3] = [Self::Actions, Self::Code, Self::Raw];
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "actions" => Some(Self::Actions),
             "code" => Some(Self::Code),
-            "quiet" => Some(Self::Quiet),
             "raw" => Some(Self::Raw),
             _ => None,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
+            Self::Actions => "actions",
             Self::Code => "code",
-            Self::Quiet => "quiet",
             Self::Raw => "raw",
         }
     }
     pub fn next(self) -> Self {
         match self {
-            Self::Code => Self::Quiet,
-            Self::Quiet => Self::Raw,
-            Self::Raw => Self::Code,
+            Self::Actions => Self::Code,
+            Self::Code => Self::Raw,
+            Self::Raw => Self::Actions,
         }
     }
 }

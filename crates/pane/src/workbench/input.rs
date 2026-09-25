@@ -197,10 +197,10 @@ impl Workbench {
                 });
                 true
             }
-            ["/stream", word @ ("code" | "quiet" | "raw")] => {
+            ["/stream", word @ ("actions" | "code" | "raw")] => {
                 s.stream = crate::tui::Stream::parse(word).unwrap_or_default();
                 self.persist("ui.stream", word, s);
-                s.note(format!("Streaming cell: {word} · /stream code|quiet|raw"));
+                s.note(format!("Streaming cell: {word} · /stream actions|code|raw"));
                 true
             }
             ["/stream"] => {
@@ -827,8 +827,8 @@ impl Workbench {
                 self.notice = format!(
                     "streaming cell: {word} — {}",
                     match s.stream {
+                        crate::tui::Stream::Actions => "each action with its size as it arrives",
                         crate::tui::Stream::Code => "the program as it forms",
-                        crate::tui::Stream::Quiet => "one line while it is written",
                         crate::tui::Stream::Raw => "the raw protocol text",
                     }
                 );
