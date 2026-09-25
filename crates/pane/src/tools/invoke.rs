@@ -213,6 +213,15 @@ impl Args {
         self
     }
 
+    /// The items of a `Lines` or `Texts` argument; `None` for a string or
+    /// an absent one.
+    pub fn items(&self, name: &str) -> Option<&[String]> {
+        match self.0.get(name) {
+            Some(Argument::Lines(items)) => Some(items),
+            Some(Argument::Text(_)) | None => None,
+        }
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(String::as_str)
     }

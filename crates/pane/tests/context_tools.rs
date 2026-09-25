@@ -87,11 +87,11 @@ fn context_cannot_be_used_for_a_semantic_edit_before_it_reaches_the_model() {
 }
 
 #[test]
-fn an_incomplete_context_says_why_no_version_binds_to_it() {
+fn an_incomplete_context_binds_the_lines_it_showed_and_refuses_the_rest() {
     let root = fixture("incomplete-binding");
     let path = root.join("src/big.py");
-    // One definition past the 24,000-byte target cap: delivered short, and
-    // therefore never certified for an `expected_sha256` edit.
+    // One definition past the 24,000-byte target cap: delivered short, so no
+    // whole version binds -- but the lines it did show do.
     let body: String = (0..1_200)
         .map(|i| format!("    line_{i} = \"padding padding padding\"\n"))
         .collect();
@@ -108,10 +108,11 @@ fn an_incomplete_context_says_why_no_version_binds_to_it() {
         "an oversized definition is delivered, not thrown: {first:?}"
     );
 
+    // A line past what was delivered: refused, and the refusal says why.
     let marker = root.join("reached.txt");
-    let second = runtime.run_cell(&format!(
+    let unseen = runtime.run_cell(&format!(
         "try {{\n\
-           await edit({{path:{path:?}, old:\"line_0\", replacement:\"line_x\"}});\n\
+           await edit({{path:{path:?}, old:\"line_1199 =\", replacement:\"line_x =\"}});\n\
            throw new Error(\"the edit must not have run\");\n\
          }} catch (e) {{\n\
            const m = String(e.message ?? e);\n\
@@ -120,13 +121,63 @@ fn an_incomplete_context_says_why_no_version_binds_to_it() {
          await write({{path:{marker:?}, content:\"reached\"}});"
     ));
     assert!(
-        !matches!(second, CellOutcome::Threw { .. }),
-        "the refusal is catchable: {second:?}"
+        !matches!(unseen, CellOutcome::Threw { .. }),
+        "the refusal is catchable: {unseen:?}"
     );
     assert!(marker.exists(), "the cell ran past the refusal");
     assert!(
-        std::fs::read_to_string(&path).unwrap().contains("line_0"),
-        "nothing was written against a target nobody saw whole"
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("line_1199 =")
+    );
+
+    // A line it showed: bound line by line, and marked so in the record.
+    let seen = runtime.run_cell(&format!(
+        "await edit({{path:{path:?}, old:\"line_0 =\", replacement:\"line_zero =\"}});"
+    ));
+    assert!(!matches!(seen, CellOutcome::Threw { .. }), "{seen:?}");
+    let call = &seen.turn().record.calls[0];
+    assert_eq!(
+        call.args.get("bound").map(String::as_str),
+        Some("seen lines")
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("line_zero =")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_seen_line_is_still_editable_after_something_else_changed_the_file() {
+    let root = fixture("moved-on");
+    let path = root.join("src/value.py");
+    std::fs::write(&path, "value = 1\nother = 1\n").unwrap();
+    let profile = Profile::compile(&root, None);
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("moved-on"));
+    runtime.run_cell(&format!("await context({{path:{path:?}}});"));
+    // A formatter, a second tool: the other line moves on, this one does not.
+    std::fs::write(&path, "value = 1\nother = 2\n").unwrap();
+
+    // The changed line was never seen in its new form: refused.
+    let stale = runtime.run_cell(&format!(
+        "await edit({{path:{path:?}, old:\"other = 2\", replacement:\"other = 9\"}});"
+    ));
+    assert!(matches!(stale, CellOutcome::Threw { .. }), "{stale:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "value = 1\nother = 2\n"
+    );
+
+    // The unchanged line was seen byte for byte: bound line by line.
+    let edited = runtime.run_cell(&format!(
+        "await edit({{path:{path:?}, old:\"value = 1\", replacement:\"value = 3\"}});"
+    ));
+    assert!(!matches!(edited, CellOutcome::Threw { .. }), "{edited:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "value = 3\nother = 2\n"
     );
     let _ = std::fs::remove_dir_all(root);
 }

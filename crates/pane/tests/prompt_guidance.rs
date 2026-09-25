@@ -58,7 +58,7 @@ fn the_preamble_teaches_what_a_turn_buys() {
     //    correlated context from a previous cell; it fired 5 times in the
     //    second measured session).
     assert!(
-        text.contains("two turns for a batch of edits, rather than two turns for"),
+        text.contains("turns for the whole batch, not two per file"),
         "the preamble must price the context-then-edit rhythm: {text}"
     );
 }

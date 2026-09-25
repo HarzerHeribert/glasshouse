@@ -133,6 +133,51 @@ fn and_parts(command: &str) -> Option<Vec<&str>> {
     parts.iter().all(|part| !part.is_empty()).then_some(parts)
 }
 
+/// The project files and lines a failing check's output names, in the order
+/// they first appear, at most `limit`: `path:line` (Rust, pytest, most
+/// tools) and Python's `File "path", line N`. A path outside `root`, or one
+/// that is not a file, is not a location in this project and is skipped.
+#[must_use]
+pub fn failure_locations(output: &str, root: &Path, limit: usize) -> Vec<(PathBuf, usize)> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut found: Vec<(PathBuf, usize)> = Vec::new();
+    let mut consider = |path: &str, line: &str| {
+        let Ok(line) = line.parse::<usize>() else {
+            return;
+        };
+        let candidate = root.join(path);
+        let Ok(resolved) = std::fs::canonicalize(&candidate) else {
+            return;
+        };
+        if line > 0
+            && resolved.starts_with(&root)
+            && resolved.is_file()
+            && !found.iter().any(|(p, l)| *p == resolved && *l == line)
+        {
+            found.push((resolved, line));
+        }
+    };
+    for text_line in output.lines() {
+        if let Some(rest) = text_line.trim_start().strip_prefix("File \"")
+            && let Some((path, after)) = rest.split_once('"')
+            && let Some(number) = after.trim_start_matches(", line ").split(',').next()
+        {
+            consider(path, number.trim());
+        }
+        for token in text_line.split(|c: char| c.is_whitespace() || "()'\"`,".contains(c)) {
+            let mut parts = token.split(':');
+            if let (Some(path), Some(number)) = (parts.next(), parts.next())
+                && path.contains('.')
+                && !path.is_empty()
+            {
+                consider(path, number);
+            }
+        }
+    }
+    found.truncate(limit);
+    found
+}
+
 /// Passing plain-`bash` checks, by command line, with the tree they passed on.
 #[derive(Default)]
 pub struct ShellChecks {

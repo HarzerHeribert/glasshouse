@@ -849,13 +849,21 @@ fn tool_callback(
     } else {
         requested_tool
     };
-    if tool.name() == "edit"
-        && call_args.get("expected_sha256").is_none()
-        && let Some(hash) = state.visible_source_hash(&call_args)
-    {
+    let implicit = tool.name() == "edit" && call_args.get("expected_sha256").is_none();
+    if implicit && let Some(hash) = state.visible_source_hash(&call_args) {
         call_args = call_args.with("expected_sha256", hash);
     }
-    if tool.name() == "edit" && !state.source_version_is_visible(&call_args) {
+    // No visible version, or one the file has since moved past: the lines
+    // themselves may still be ones the model saw, byte for byte.
+    let mut bound_by_lines = false;
+    if implicit
+        && let Some(version) = state.seen_lines_cover(&call_args)
+        && call_args.get("expected_sha256") != Some(version.as_str())
+    {
+        call_args = call_args.with("expected_sha256", version);
+        bound_by_lines = true;
+    }
+    if tool.name() == "edit" && !state.source_version_is_visible(&call_args) && !bound_by_lines {
         // **The rule stands; the cell does not pay for it.** A version binds
         // when the model has actually read it, which is the next cell -- see
         // `edit_binding_gap`. Refusing the one call into the program gives
@@ -1043,6 +1051,9 @@ fn tool_callback(
             // reading the answer rather than assuming it is what keeps that
             // drop loud instead of silent.
             let queued = delivered && state.note_source_context(&evidence, packed.render());
+            if queued {
+                state.note_seen_lines(std::iter::once(&packed.target).chain(&packed.supporting));
+            }
             if !queued {
                 evidence.omissions.push(format!(
                     "not delivered to this turn's feedback: {budget} characters remained and this context renders {}; ask for it first in the next cell, or name a narrower symbol",
@@ -1051,9 +1062,23 @@ fn tool_callback(
             }
             evidence
         });
+    let mut args = traced.checked.clone();
+    if bound_by_lines {
+        args.insert("bound".into(), "seen lines".into());
+    }
+    if let (Some(_), Ok(result)) = (check, &traced.outcome)
+        && result.exit_code.is_some_and(|code| code != 0)
+    {
+        let output = format!("{}\n{}", result.stdout, result.stderr);
+        let found = crate::verification::failure_locations(&output, state.profile.root(), 3);
+        let attached = state.note_failure_locations(&found);
+        if attached > 0 {
+            args.insert("failure_locations".into(), attached.to_string());
+        }
+    }
     trace(scope).record(CallRecord {
         tool: tool.name().to_string(),
-        args: traced.checked.clone(),
+        args,
         evidence,
         lifted_from: lifted_from.clone(),
         exit_code,

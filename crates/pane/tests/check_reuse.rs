@@ -25,8 +25,9 @@ fn git(root: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
-fn crate_fixture() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("pane-check-reuse-{}", std::process::id()));
+fn crate_fixture(label: &str) -> PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("pane-check-reuse-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
@@ -58,7 +59,7 @@ fn check(runtime: &mut Runtime, command: &str) -> String {
 
 #[test]
 fn a_passing_check_is_repeated_only_while_the_files_are_byte_identical() {
-    let root = crate_fixture();
+    let root = crate_fixture("reuse");
     let profile = Profile::compile(&root, Some(ADMITS));
     let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("reuse"));
     let reused = pane::verification::REUSED_NOTE;
@@ -89,6 +90,48 @@ fn a_passing_check_is_repeated_only_while_the_files_are_byte_identical() {
     assert!(
         !failing.starts_with("0|") && !again.contains(reused),
         "{failing} / {again}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_failing_check_attaches_the_lines_it_names_and_they_can_be_edited_next() {
+    let root = crate_fixture("attach");
+    std::fs::write(root.join("src/main.rs"), "fn main(){println!(\"hi\");}\n").unwrap();
+    let profile = Profile::compile(&root, Some(ADMITS));
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("attach"));
+
+    let failed = runtime.run_cell("await bash({command: \"cargo fmt --check\"});");
+    let turn = failed.turn();
+    assert!(
+        turn.stdout_tail
+            .contains("## Failure location (attached by Pane)"),
+        "{turn:?}"
+    );
+    assert!(turn.stdout_tail.contains("fn main(){println!"), "{turn:?}");
+    assert_eq!(
+        turn.record.calls[0]
+            .args
+            .get("failure_locations")
+            .map(String::as_str),
+        Some("1")
+    );
+
+    // No context call: the attached line is one the model was shown.
+    let fixed = runtime.run_cell(
+        "await edit({path: 'src/main.rs', old: 'fn main(){println!(\"hi\");}', replacement: 'fn main() {\\n    println!(\"hi\");\\n}'});",
+    );
+    assert!(!matches!(fixed, CellOutcome::Threw { .. }), "{fixed:?}");
+    assert_eq!(
+        fixed.turn().record.calls[0]
+            .args
+            .get("bound")
+            .map(String::as_str),
+        Some("seen lines")
+    );
+    assert_eq!(
+        check(&mut runtime, "cargo fmt --check").chars().next(),
+        Some('0')
     );
     let _ = std::fs::remove_dir_all(root);
 }

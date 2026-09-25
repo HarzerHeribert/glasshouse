@@ -76,10 +76,11 @@ the byte-for-byte text below remains the compatibility contract.
     session has.
 
     Changing existing source has a rhythm worth knowing before you start: `edit`
-    writes against the version `context` delivered in a previous completed cell.
-    So fetch every symbol the step will change in one cell, and make all of those
-    edits in the next — two turns for a batch of edits, rather than two turns for
-    each one.
+    writes against lines a previous completed cell showed you — a `context`, or the
+    lines Pane attaches when a check fails. So when a change spans several files or
+    symbols, fetch all of them in one cell and make every edit in the next: two
+    turns for the whole batch, not two per file. After a failing check, edit the
+    attached lines directly and rerun it in the same cell.
 
     Every cell carries a description: one short line, in the person's language,
     saying what it is for and why — not which functions it calls. It is the only

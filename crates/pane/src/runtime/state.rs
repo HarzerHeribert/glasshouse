@@ -307,6 +307,13 @@ pub(crate) struct RuntimeState {
     /// supersedes the entry, because then enough of it has been read.
     incomplete_sources: RefCell<HashSet<PathBuf>>,
     pending_context_output: RefCell<Vec<String>>,
+    /// Every source line a delivered context showed the model, by path and
+    /// line number, with its exact text -- the ledger an `edit` may bind to
+    /// when no whole version is visible ([`Self::seen_lines_cover`]).
+    seen_lines: RefCell<HashMap<PathBuf, BTreeMap<usize, String>>>,
+    /// The same for the cell running now; they reach the model, and so the
+    /// ledger, at the next cell boundary.
+    pending_lines: RefCell<Vec<(PathBuf, usize, String)>>,
     /// Every pure observation this task has made, by tool, checked arguments
     /// and result digest, with the first call that made it.
     ///
@@ -423,6 +430,8 @@ impl RuntimeState {
             pending_sources: RefCell::new(Vec::new()),
             pending_incomplete: RefCell::new(Vec::new()),
             incomplete_sources: RefCell::new(HashSet::new()),
+            seen_lines: RefCell::default(),
+            pending_lines: RefCell::default(),
             pending_context_output: RefCell::new(Vec::new()),
             observations: RefCell::new(HashMap::new()),
             bindings: RefCell::new(HashMap::new()),
@@ -488,6 +497,12 @@ impl RuntimeState {
         self.incomplete_sources
             .borrow_mut()
             .extend(self.pending_incomplete.borrow_mut().drain(..));
+        {
+            let mut seen = self.seen_lines.borrow_mut();
+            for (path, line, text) in self.pending_lines.borrow_mut().drain(..) {
+                seen.entry(path).or_default().insert(line, text);
+            }
+        }
         let cell = self.cell.get() + u64::from(!self.handlers.running.get());
         self.cell.set(cell);
         let mut current = self.current.borrow_mut();
@@ -836,6 +851,8 @@ impl RuntimeState {
         self.pending_sources.borrow_mut().clear();
         self.pending_incomplete.borrow_mut().clear();
         self.incomplete_sources.borrow_mut().clear();
+        self.seen_lines.borrow_mut().clear();
+        self.pending_lines.borrow_mut().clear();
         self.pending_context_output.borrow_mut().clear();
         self.observations.borrow_mut().clear();
         self.bindings.borrow_mut().clear();
@@ -929,6 +946,98 @@ impl RuntimeState {
         )
     }
 
+    /// Records every line of `excerpts` -- a context just queued for this
+    /// turn's feedback, target and supporting excerpts alike -- as shown.
+    pub(crate) fn note_seen_lines<'a>(
+        &self,
+        excerpts: impl IntoIterator<Item = &'a crate::project::source_context::SourceExcerpt>,
+    ) {
+        let mut pending = self.pending_lines.borrow_mut();
+        for excerpt in excerpts {
+            let path = self.absolute_source_path(Path::new(&excerpt.path));
+            for (offset, line) in excerpt.text.lines().enumerate() {
+                pending.push((path.clone(), excerpt.range.start + offset, line.to_string()));
+            }
+        }
+    }
+
+    /// The current version of an `edit`'s file, when **every line the edit
+    /// touches is a line the model was shown and is byte-identical now** --
+    /// the same guarantee a visible version gives, held line by line.
+    /// Each `old` must occur exactly once; a line never shown, or shown and
+    /// since changed, answers `None` and the edit is refused as before.
+    pub(crate) fn seen_lines_cover(&self, args: &crate::tools::invoke::Args) -> Option<String> {
+        let path = self.absolute_source_path(Path::new(args.get("path")?));
+        let seen = self.seen_lines.borrow();
+        let seen = seen.get(&path)?;
+        let bytes = std::fs::read(&path).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        let joined = |items: &[String]| format!("{}\n", items.join("\n"));
+        let olds: Vec<String> = match (args.get("old"), args.items("oldLines"), args.items("olds"))
+        {
+            (Some(old), None, None) => vec![old.to_string()],
+            (None, Some(lines), None) => vec![joined(lines)],
+            (None, None, Some(olds)) => olds.to_vec(),
+            _ => return None,
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for old in olds.iter().filter(|old| !old.is_empty()) {
+            let mut found = text.match_indices(old.as_str());
+            let (at, _) = found.next()?;
+            if found.next().is_some() {
+                return None;
+            }
+            let first = text[..at].matches('\n').count() + 1;
+            let last = first + old.trim_end_matches('\n').matches('\n').count();
+            for number in first..=last {
+                if seen.get(&number).map(String::as_str) != lines.get(number - 1).copied() {
+                    return None;
+                }
+            }
+        }
+        use sha2::{Digest, Sha256};
+        Some(format!("{:x}", Sha256::digest(&bytes)))
+    }
+
+    /// Delivers the lines around each place a failing check named, with this
+    /// cell's feedback, and records them as shown -- so the fix can be the
+    /// next cell's edit instead of a request spent reading the failure.
+    /// Answers how many were delivered; one that does not fit the budget is
+    /// left out, never cut short.
+    pub(crate) fn note_failure_locations(&self, locations: &[(PathBuf, usize)]) -> usize {
+        const AROUND: usize = 4;
+        let mut delivered = 0;
+        for (path, line) in locations {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            let first = line.saturating_sub(AROUND).max(1);
+            let last = (line + AROUND).min(lines.len());
+            if first > last {
+                continue;
+            }
+            let shown = path.strip_prefix(self.profile.root()).unwrap_or(path);
+            let mut rendered = format!(
+                "## Failure location (attached by Pane)\n{}:{line}\n",
+                shown.display()
+            );
+            for number in first..=last {
+                rendered.push_str(&format!("{number:>5} | {}\n", lines[number - 1]));
+            }
+            if rendered.chars().count() + 1 > self.remaining_context_budget() {
+                continue;
+            }
+            self.pending_context_output.borrow_mut().push(rendered);
+            let mut pending = self.pending_lines.borrow_mut();
+            for number in first..=last {
+                pending.push((path.clone(), number, lines[number - 1].to_string()));
+            }
+            delivered += 1;
+        }
+        delivered
+    }
+
     /// Appends the complete batch after model-authored output. Contexts that
     /// did not fit were not queued or certified as visible.
     pub(crate) fn flush_source_context(&self) {
@@ -977,6 +1086,12 @@ impl RuntimeState {
         self.pending_sources
             .borrow_mut()
             .retain(|(pending, _)| pending != &path);
+        // Line numbers below the change may have moved; the new version is
+        // visible whole, so nothing is lost by forgetting them.
+        self.seen_lines.borrow_mut().remove(&path);
+        self.pending_lines
+            .borrow_mut()
+            .retain(|(pending, _, _)| pending != &path);
         self.visible_sources
             .borrow_mut()
             .insert(path, sha256.to_ascii_lowercase());
