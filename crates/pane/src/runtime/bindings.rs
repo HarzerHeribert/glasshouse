@@ -780,7 +780,15 @@ fn tool_callback(
         return;
     };
 
-    let mut call_args = match read_arguments(scope, args.get(0)) {
+    // `bash("npm test")`, `read("src/a.rs")`: a bare string is the tool's
+    // first argument, the way a model most often writes the call. Refusing
+    // it cost a whole turn to learn the object spelling.
+    let positional = requested_tool
+        .args()
+        .first()
+        .filter(|_| shape.is_none() && args.get(0).is_string())
+        .map(|arg| Args::new().with(arg.name(), args.get(0).to_rust_string_lossy(scope)));
+    let mut call_args = match positional.map_or_else(|| read_arguments(scope, args.get(0)), Ok) {
         Ok(call_args) => call_args,
         Err(refusal) => {
             throw_tool_error(scope, &refusal);
@@ -2836,7 +2844,13 @@ pub(crate) fn install_batch(scope: &mut v8::PinScope) {
 // --- console -----------------------------------------------------------
 
 fn throw_denied(scope: &mut v8::PinScope, denied: &PermissionDenied) {
-    let message = js_string(scope, &denied.to_string());
+    // The error's name already says `PermissionDenied`; a message that said
+    // it again printed it twice wherever the error is shown.
+    let text = denied.to_string();
+    let message = js_string(
+        scope,
+        text.strip_prefix("PermissionDenied: ").unwrap_or(&text),
+    );
     let tool = js_string(scope, &denied.tool);
     let path = js_string(scope, &denied.path);
     let rule = js_string(scope, &denied.rule);

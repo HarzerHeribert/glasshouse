@@ -420,3 +420,18 @@ fn a_key_that_exhausts_the_budget_does_not_descend_into_its_object_value() {
     assert!(!shown.contains("shouldNeverBeInspected"), "{shown}");
     assert!(preview::estimate_tokens(shown) <= STDOUT_TOKEN_CAP);
 }
+
+/// `read("modest.ts")` is how a model most often writes the call; the bare
+/// string is the tool's first argument, not a refusal that costs a turn.
+#[test]
+fn a_bare_string_is_the_first_argument() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("short.txt"), "one line\n").unwrap();
+    let mut runtime = fixture.runtime();
+    let outcome = runtime.run_cell(
+        "const file = await read('short.txt');\n\
+         console.log(file.excerpt().text);\n",
+    );
+    let shown = &outcome.turn().stdout_tail;
+    assert!(shown.contains("1 | one line"), "{shown}");
+}
