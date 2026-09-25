@@ -156,6 +156,27 @@ impl Snapshot {
         )
     }
 
+    /// One key for everything a check could read in this project, or `None`
+    /// when it cannot be proven: `HEAD`, plus each path that differs from it
+    /// with its content digest. Only a complete git-derived capture whose
+    /// every changed file was digested qualifies -- a walked tree or a file
+    /// too large to hash could change without changing the key.
+    #[must_use]
+    pub fn tree_key(profile: &Profile) -> Option<String> {
+        let snapshot = Self::capture(profile);
+        let hashed = snapshot.files.values().all(|observed| {
+            observed
+                .state
+                .as_ref()
+                .is_none_or(|state| state.digest.is_some())
+        });
+        if !snapshot.complete || snapshot.origin != Origin::Derived || !hashed {
+            return None;
+        }
+        let head = git::head(profile.root())?;
+        Some(format!("{head}:{}", snapshot.digest()))
+    }
+
     /// Captures by walking, whatever the project is.
     ///
     /// The tests reach for this to exercise the fallback and its limits on a

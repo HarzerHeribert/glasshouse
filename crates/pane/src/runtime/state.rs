@@ -213,6 +213,8 @@ pub(crate) struct RuntimeState {
     /// the configuration decides whether the global exists, and it arrives
     /// after the context is built.
     pub(crate) decide_bound: std::cell::Cell<bool>,
+    /// Plain `bash` checks that passed, and the tree they passed on.
+    pub(crate) shell_checks: RefCell<crate::verification::ShellChecks>,
     pub(crate) agent_templates: crate::project::agents::Catalog,
     pub(crate) effective_config: RefCell<Option<crate::config::PaneConfig>>,
     pub(crate) glasshouse: Glasshouse,
@@ -398,6 +400,7 @@ impl RuntimeState {
             decide_bound: std::cell::Cell::new(false),
             agent_templates: crate::project::agents::Catalog::load(profile),
             effective_config: RefCell::new(None),
+            shell_checks: RefCell::default(),
             glasshouse: glasshouse.clone(),
             session: session.clone(),
             cell: std::cell::Cell::new(0),

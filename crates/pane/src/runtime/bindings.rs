@@ -885,7 +885,7 @@ fn tool_callback(
     // thing this crate does, and a `RefCell` borrow held across it would
     // outlive every reason to hold it. Every clone names the same flag.
     let token = state.token.borrow().clone();
-    let traced = {
+    let run = || {
         let context = ToolContext {
             profile: &state.profile,
             glasshouse: &state.glasshouse,
@@ -919,6 +919,18 @@ fn tool_callback(
             },
             Some(&state.host_clock),
         )
+    };
+    let check = call_args.get("command").filter(|line| {
+        tool.name() == "bash" && lifted_from.is_none() && crate::verification::is_pure_check(line)
+    });
+    let traced = match check {
+        Some(line) => crate::verification::ShellChecks::run_or_reuse(
+            &state.shell_checks,
+            &state.profile,
+            line,
+            run,
+        ),
+        None => run(),
     };
 
     // The lift's exact range is applied before anything reads the result,

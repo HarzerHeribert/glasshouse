@@ -47,6 +47,13 @@ fn run(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
+/// The commit `HEAD` names, or `None` outside a repository or before its
+/// first commit.
+pub(super) fn head(root: &Path) -> Option<String> {
+    let out = run(root, &["rev-parse", "HEAD"])?;
+    Some(String::from_utf8(out).ok()?.trim_end().to_string())
+}
+
 /// The repository root, which is what porcelain paths are relative to.
 fn toplevel(root: &Path) -> Option<PathBuf> {
     let out = run(root, &["rev-parse", "--show-toplevel"])?;

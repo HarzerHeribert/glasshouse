@@ -49,9 +49,9 @@ pub struct Entry {
 /// told about this tool is that its exit code is part of its result, and a
 /// platform note may be added to that sentence but never at its expense.
 #[cfg(not(windows))]
-const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful.";
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; inspect `exit_code` before treating it as successful. A test or lint check that already passed on byte-identical files is not run again; its result comes back with a note in `stderr`.";
 #[cfg(windows)]
-const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; on this host it runs under `cmd.exe`, so write cmd syntax (`findstr`, `dir`, `&&`) rather than POSIX shell, and inspect `exit_code` before treating it as successful.";
+const BASH_SUMMARY: &str = "Run a command line under the sandbox grant; on this host it runs under `cmd.exe`, so write cmd syntax (`findstr`, `dir`, `&&`) rather than POSIX shell, and inspect `exit_code` before treating it as successful. A test or lint check that already passed on byte-identical files is not run again; its result comes back with a note in `stderr`.";
 
 pub const ENTRIES: &[Entry] = &[
     Entry {

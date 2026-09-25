@@ -1,5 +1,10 @@
 //! Named, confined verification commands. Reuse is explicit and scoped to a
 //! request and declared file inputs; a reused observation is never a fresh run.
+//!
+//! [`ShellChecks`] applies the same rule to a plain `bash` check the model
+//! writes: **a check that passed, and left the tree as it found it, is not run
+//! again while the tree is byte-identical** -- the whole project, keyed by
+//! [`crate::changes::Snapshot::tree_key`], stands in for declared inputs.
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -74,6 +79,117 @@ pub struct CheckResult {
     pub executed: bool,
     pub reused: bool,
     pub reuse_scope: String,
+}
+
+/// What a reused check's `stderr` ends with, so the model knows it was not
+/// run and how to run it anyway.
+pub const REUSED_NOTE: &str = "[pane: not run again -- this exact check passed earlier in this session on byte-identical files, so its result is repeated. Change a file, or append `&& true`, to run it anyway.]";
+
+/// Whether `command` is checks and nothing else: `&&`-joined simple commands
+/// (no pipe, redirection, substitution or environment prefix), each one a
+/// test, build, lint or format check. A formatter that writes is not a check,
+/// and a check that writes anyway is caught after it runs: it changed the
+/// tree, so its result is never kept.
+#[must_use]
+pub fn is_pure_check(command: &str) -> bool {
+    use crate::abi::lift::{self, Family};
+    let Some(parts) = and_parts(command) else {
+        return false;
+    };
+    parts.iter().all(|part| {
+        let Some(words) = lift::words::split(part) else {
+            return false;
+        };
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        matches!(lift::classify(part), Some(Family::Verification))
+            || match words.as_slice() {
+                ["cargo", "fmt", rest @ ..] => rest.contains(&"--check"),
+                ["go", "test" | "vet", ..] | ["mypy", ..] => true,
+                ["ruff", "check", rest @ ..] => !rest.iter().any(|w| w.starts_with("--fix")),
+                _ => false,
+            }
+    })
+}
+
+/// `command` split on each `&&` outside quotes; `None` for an empty part.
+fn and_parts(command: &str) -> Option<Vec<&str>> {
+    let bytes = command.as_bytes();
+    let (mut parts, mut start, mut quote) = (Vec::new(), 0, None);
+    let mut index = 0;
+    while index < bytes.len() {
+        match (quote, bytes[index]) {
+            (None, b'\'' | b'"') => quote = Some(bytes[index]),
+            (Some(open), byte) if byte == open => quote = None,
+            (None, b'&') if bytes.get(index + 1) == Some(&b'&') => {
+                parts.push(command[start..index].trim());
+                start = index + 2;
+                index += 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    parts.push(command[start..].trim());
+    parts.iter().all(|part| !part.is_empty()).then_some(parts)
+}
+
+/// Passing plain-`bash` checks, by command line, with the tree they passed on.
+#[derive(Default)]
+pub struct ShellChecks {
+    passed: BTreeMap<String, (String, invoke::ToolResult)>,
+}
+
+impl ShellChecks {
+    /// Runs `line` through `run`, or repeats its last pass when the tree is
+    /// the one it passed on. A pass is kept only when it exited 0 and the
+    /// tree before and after it had the same key; anything else forgets it.
+    /// No key -- not a repository, or a change that cannot be hashed -- means
+    /// it always runs.
+    pub(crate) fn run_or_reuse(
+        checks: &std::cell::RefCell<Self>,
+        profile: &Profile,
+        line: &str,
+        run: impl FnOnce() -> invoke::Traced,
+    ) -> invoke::Traced {
+        let before = crate::changes::Snapshot::tree_key(profile);
+        let kept = checks.borrow().passed.get(line).cloned();
+        if let (Some(tree), Some((passed_on, mut result))) = (&before, kept)
+            && *tree == passed_on
+            && profile.admits_command(line).is_ok()
+        {
+            if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+                result.stderr.push('\n');
+            }
+            result.stderr.push_str(REUSED_NOTE);
+            let checked = BTreeMap::from([
+                ("command".to_string(), line.to_string()),
+                ("reused".to_string(), "true".to_string()),
+            ]);
+            return invoke::Traced {
+                outcome: Ok(result),
+                checked,
+            };
+        }
+        let traced = run();
+        let passed = traced
+            .outcome
+            .as_ref()
+            .ok()
+            .filter(|result| result.exit_code == Some(0));
+        let after = crate::changes::Snapshot::tree_key(profile);
+        let mut checks = checks.borrow_mut();
+        match (passed, before, after) {
+            (Some(result), Some(before), Some(after)) if before == after => {
+                checks
+                    .passed
+                    .insert(line.to_string(), (after, result.clone()));
+            }
+            _ => {
+                checks.passed.remove(line);
+            }
+        }
+        traced
+    }
 }
 
 #[derive(Default)]
@@ -297,5 +413,37 @@ impl Verification {
                 .insert(name.into(), (key, observation.clone()));
         }
         Ok(observation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pure_check;
+
+    #[test]
+    fn only_a_line_of_checks_is_a_check() {
+        for line in [
+            "cargo test -p pane --test project",
+            "cargo fmt --all -- --check && cargo clippy -p pane",
+            "cargo test -p pane --test project && cargo test -p pane --test 'tui_look'",
+            "pytest -q tests/test_tally.py",
+            "ruff check src",
+        ] {
+            assert!(is_pure_check(line), "{line}");
+        }
+        for line in [
+            "cargo fmt --all",
+            "cargo fmt --all && cargo fmt --all -- --check",
+            "cargo test && true",
+            "cargo test | tail -5",
+            "cargo test > log.txt",
+            "CARGO_TARGET_DIR=/tmp/t cargo test",
+            "ruff check --fix src",
+            "git diff --check",
+            "cargo test &&",
+            "scripts/check.sh",
+        ] {
+            assert!(!is_pure_check(line), "{line}");
+        }
     }
 }
