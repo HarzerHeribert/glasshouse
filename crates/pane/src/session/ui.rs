@@ -834,6 +834,10 @@ fn run(
     let mut editor = Editor::default();
     let mut served = ServedBy::default();
     let mut busy = false;
+    // A prompt sent while idle, shown at once: the session records it only
+    // after its preflight (the decision, the Scout, the acceptance lister),
+    // and until then the snapshots it sends do not hold it yet.
+    let mut sending: Option<Sending> = None;
     // Whether the previous pass through the loop was working, so the two
     // edges -- a task starting and a task ending -- can be told from the
     // many passes that are neither.
@@ -928,6 +932,7 @@ fn run(
                     }
                     refresh_handler_panel(&mut state.panel, &notebook.handlers, &n.handlers);
                     conversation = c;
+                    keep_sending(&mut conversation, &mut sending, activity);
                     state.messages_seen = conversation.messages.len();
                     notebook = n;
                     if s.is_known() {
@@ -2128,6 +2133,14 @@ fn run(
                     task_started = Some(Instant::now());
                     state.pulse = tui::Pulse::default();
                     state.activity = Activity::Thinking;
+                    if !text.trim_start().starts_with('/') && !text.trim().is_empty() {
+                        sending = Some(Sending {
+                            text: text.clone(),
+                            recorded_at: conversation.messages.len(),
+                        });
+                        keep_sending(&mut conversation, &mut sending, Activity::Thinking);
+                        dirty = true;
+                    }
                     if answers.inputs.send(Input::Submit(text)).is_err() {
                         return Ok(());
                     }
@@ -2137,6 +2150,38 @@ fn run(
         }
     }
     Ok(())
+}
+
+/// A prompt the screen shows before the session has recorded it.
+struct Sending {
+    text: String,
+    /// The conversation's length when it was sent; a longer one holds it.
+    recorded_at: usize,
+}
+
+/// Shows a sent prompt until the session's own copy arrives: appended to a
+/// snapshot that does not hold it yet, dropped once one does or the task
+/// ends without it.
+fn keep_sending(
+    conversation: &mut Conversation,
+    sending: &mut Option<Sending>,
+    activity: Activity,
+) {
+    let Some(pending) = sending.as_ref() else {
+        return;
+    };
+    let ended = matches!(
+        activity,
+        Activity::Idle | Activity::Complete | Activity::Failed
+    );
+    if ended || conversation.messages.len() > pending.recorded_at {
+        *sending = None;
+        return;
+    }
+    conversation.messages.push(crate::contract::Message::text(
+        crate::contract::Role::User,
+        pending.text.as_str(),
+    ));
 }
 
 /// A panel shown again under the same title keeps the row a person selected:
@@ -2215,6 +2260,28 @@ mod tests {
 
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn a_sent_prompt_shows_until_the_session_records_it() {
+        use crate::contract::{Message, Role};
+        let mut sending = Some(Sending {
+            text: "build a todo app".into(),
+            recorded_at: 0,
+        });
+        // A preflight snapshot without the prompt still shows it.
+        let mut early = Conversation::default();
+        keep_sending(&mut early, &mut sending, Activity::Thinking);
+        assert_eq!(early.messages.len(), 1);
+        assert!(sending.is_some());
+        // The session's own copy arrives: shown once, not twice.
+        let mut recorded = Conversation::default();
+        recorded
+            .messages
+            .push(Message::text(Role::User, "build a todo app"));
+        keep_sending(&mut recorded, &mut sending, Activity::Thinking);
+        assert_eq!(recorded.messages.len(), 1);
+        assert!(sending.is_none());
+    }
 
     /// A panel redrawn under its title keeps the selected row; a different
     /// panel starts where it chose to.
