@@ -202,3 +202,29 @@ runs on F1 and E1. On X1 and I1 Pane was as fast or faster.
 
 The completion check held each one-task exit 15–60 s and changed no outcome
 in 24 attempts; it no longer holds a one-task run (6fc97dc7).
+
+## 10. Four request-savers, A/B (2026-09-25, gpt-6-sol)
+
+A = 776dd89e, B = d8e40360: the check memo (4fa8533a), edits bound to seen
+lines and failure locations attached (d8e40360), and the edit-rhythm
+paragraph reworded to ask for every file of a change in one cell.
+Supervision off the critical path was measured instead (≈2 looks per task
+at ≈0.3 s) and not built. Interleaved by task, shipped defaults; raw
+records: the session scratchpad's `ab-A`, `ab-B`, `ab2-A`, `ab2-B`,
+`ab-costs.jsonl`.
+
+| task | n per arm | A answer (median) · requests | B answer (median) · requests |
+|---|---|---|---|
+| F1 | 3 | 109 s · 7.0 | 110 s · 7.3 |
+| X1 | 8 | 86 s · 8.5 | 71 s · 6.9 |
+| I1 | 8 | 67 s · 6.2 | 46 s · 5.0 |
+| E1 | 3 | 272 s · 20.0 | 259 s · 20.0 |
+
+Every attempt passed. What fired in B: the memo 0 times (B re-ran an
+identical check twice, each after an edit), seen lines 0 (neither arm had
+a refused edit), failure locations 6 (F1, E1), with no measurable effect
+at n = 3. X1 and I1 fired none of the three, so their fewer requests —
+lower in both runs, both tasks — are the reworded paragraph. I1's time is
+the one clear gain (B's slowest, 69 s, is A's median); X1's times overlap.
+Uncached tokens rose slightly on X1 (56k → 63k per attempt) as requests
+grew larger.
