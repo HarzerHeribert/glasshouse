@@ -545,7 +545,13 @@ pub(crate) fn install_context_firewall_hook(
             }
             _ => match entitlement.kind() {
                 Some(
-                    EntitlementKind::Claude | EntitlementKind::ChatGpt | EntitlementKind::Gemini,
+                    EntitlementKind::Claude
+                    | EntitlementKind::ChatGpt
+                    | EntitlementKind::Gemini
+                    | EntitlementKind::Kimi
+                    | EntitlementKind::Xai
+                    | EntitlementKind::Devin
+                    | EntitlementKind::Meta,
                 ) => Some(ReductionPolicyKind::Subscription),
                 Some(EntitlementKind::ApiKey) => Some(ReductionPolicyKind::Metered),
                 None => None,
