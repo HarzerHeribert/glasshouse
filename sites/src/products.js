@@ -44,7 +44,7 @@ hits  Grep.Match[]  n=11
     ['Rollback that keeps your edits', '/rollback previews what the session changed and restores it, leaving edits you made yourself in place.', 'crates/pane/src/changes.rs'],
     ['An OS sandbox', 'Model-written code runs under Seatbelt on macOS and Landlock with seccomp on Linux, with grants compiled from your .claude/settings.json.', 'tests/sandbox_apply.rs'],
     ['Subscriptions or API keys', 'An API key, or a ChatGPT or Claude subscription connected with /login. Switch models mid-session with /models.', 'crates/pane/src/session/controls.rs'],
-    ['A daily update check', 'A release install checks for a newer release once a day and installs it beside the running one. pane update does it on demand.', 'crates/pane/src/update.rs'],
+    ['Updates itself', 'A release install checks for a newer release each time you open it and installs it beside the running one. pane update does it on demand.', 'crates/pane/src/update.rs'],
   ],
   limits: [
     ['Pre-release', 'Version 0.1.0 pre-releases. Expect rough edges and say so in an issue.'],

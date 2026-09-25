@@ -24,8 +24,10 @@ use sha2::Digest as _;
 pub const REPOSITORY: &str = "HarzerHeribert/glasshouse";
 /// Set to anything to stop the background check (`pane update` still works).
 pub const DISABLE_ENV: &str = "PANE_DISABLE_AUTOUPDATE";
-/// How often the background check may ask GitHub at all.
-const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// The background check asks GitHub on every terminal session's start, but
+/// not twice within this: GitHub answers 60 unauthenticated requests an hour
+/// per address, and several panes opened together must not spend them.
+const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
 /// The stamp the background check leaves in the install root.
 const STAMP: &str = "update-check";
 /// What the adopted broker's pin was, in the install root.
@@ -405,7 +407,8 @@ pub fn installed_notice(install: &Install) -> Option<String> {
     newer(&current, &install.tag).then(|| format!("Pane {current} installed · restart to update"))
 }
 
-/// Checks at most once a day, on a thread of its own, and installs a newer
+/// Checks at each session start (at most every [`CHECK_EVERY`]), on a thread
+/// of its own, and installs a newer
 /// release; the session shows [`take_notice`] when it finishes. Never runs
 /// for a non-release install, with [`DISABLE_ENV`] set, or on a platform
 /// with no release.
@@ -420,12 +423,11 @@ pub fn check_in_background() {
         return;
     };
     let stamp = install.root.join(STAMP);
-    let fresh = fs::metadata(&stamp)
+    let age = fs::metadata(&stamp)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|at| SystemTime::now().duration_since(at).ok())
-        .is_some_and(|age| age < CHECK_EVERY);
-    if fresh {
+        .and_then(|at| SystemTime::now().duration_since(at).ok());
+    if !due(age) {
         return;
     }
     std::thread::spawn(move || {
@@ -444,6 +446,11 @@ pub fn check_in_background() {
             *notice = Some(format!("Pane {latest} installed · restart to update"));
         }
     });
+}
+
+/// Whether a check that last ran `age` ago may ask again; never checked is due.
+fn due(age: Option<Duration>) -> bool {
+    age.is_none_or(|age| age >= CHECK_EVERY)
 }
 
 /// `pane update [--check]`: install the newest release now, or only say
@@ -507,6 +514,16 @@ mod tests {
         assert!(!newer("v0.1.0-pre.9", "v0.1.0"));
         assert!(!newer("v0.1.0-pre.2", "v0.1.0-pre.2"));
         assert!(!newer("v0.1.0-pre.2", "v0.1.0-pre.1-1316-gf96f87f0"));
+    }
+
+    #[test]
+    fn a_session_opened_ten_minutes_after_the_last_check_checks_again() {
+        assert!(due(None));
+        assert!(due(Some(Duration::from_secs(10 * 60))));
+        assert!(
+            !due(Some(Duration::from_secs(60))),
+            "panes opened together ask once"
+        );
     }
 
     #[test]
