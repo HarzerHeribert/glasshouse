@@ -25,21 +25,6 @@ pub(super) fn footer_row(
     ])
 }
 
-/// Where [`footer_row`] puts `right`, as (x, width), or `None` when the row
-/// was too narrow and collapsed to its left half alone. It repeats that
-/// function's arithmetic deliberately rather than guessing at the layout.
-pub(super) fn footer_right_span(left: &str, right: &str, width: usize) -> Option<(u16, u16)> {
-    let occupied = Line::from(left).width() + Line::from(right).width() + 2;
-    if right.is_empty() || occupied > width {
-        return None;
-    }
-    let right_width = Line::from(right).width();
-    Some((
-        (width - right_width - 1) as u16,
-        u16::try_from(right_width).unwrap_or(u16::MAX),
-    ))
-}
-
 pub(super) fn compact_tokens(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f64 / 1_000_000.0)

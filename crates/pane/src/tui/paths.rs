@@ -11,7 +11,6 @@
 //! because naming a path to a slash command is slower than the click is
 //! worth. `hit.rs`'s rule stands for every other surface.
 
-use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 
@@ -113,20 +112,12 @@ pub(crate) fn found(line: &str, root: &Path) -> Vec<(usize, usize)> {
     out
 }
 
-/// Underlines every existing file path in one drawn row and records where it
-/// was drawn, so a click reaches the file rather than the cell behind it.
+/// Underlines every existing file path in one drawn row.
 ///
 /// **Only what exists is marked** -- see `paths.rs`. A row whose spans are not
 /// one-per-grapheme is left alone rather than mis-measured; `wrap_lines`
-/// produces that shape for every transcript row, and the guard is here so a
-/// future caller that does not cannot silently record the wrong columns.
-pub(super) fn mark(
-    line: &mut Line<'static>,
-    root: &Path,
-    area: Rect,
-    offset: usize,
-    geometry: &mut super::hit::ScreenGeometry,
-) {
+/// produces that shape for every transcript row.
+pub(super) fn mark(line: &mut Line<'static>, root: &Path) {
     let text: String = line
         .spans
         .iter()
@@ -142,27 +133,11 @@ pub(super) fn mark(
     {
         return;
     }
-    let Ok(row) = u16::try_from(offset) else {
-        return;
-    };
     for (start, end) in found(&text, root) {
-        let Ok(column) = u16::try_from(start) else {
-            continue;
-        };
-        if column >= area.width {
-            continue;
-        }
-        let width = u16::try_from(end - start)
-            .unwrap_or(0)
-            .min(area.width - column);
         let last = end.min(line.spans.len());
-        for span in &mut line.spans[start..last] {
+        for span in &mut line.spans[start.min(last)..last] {
             span.style = span.style.add_modifier(Modifier::UNDERLINED);
         }
-        geometry.record_path(
-            Rect::new(area.x + column, area.y + row, width, 1),
-            text.chars().skip(start).take(end - start).collect(),
-        );
     }
 }
 
@@ -221,16 +196,11 @@ mod tests {
         )
     }
 
-    /// The decisive one: a real path in a drawn row is underlined, and the
-    /// rectangle recorded is exactly the cells it occupies -- so a click on
-    /// it reaches the file rather than the cell block behind it.
+    /// A real path in a drawn row is underlined at exactly its own columns.
     #[test]
-    fn a_drawn_path_is_underlined_and_clickable_at_its_own_columns() {
-        let mut geometry = super::super::hit::ScreenGeometry::default();
+    fn a_drawn_path_is_underlined_at_its_own_columns() {
         let mut line = row("  edited src/tui.rs today");
-        let area = Rect::new(3, 5, 60, 20);
-        mark(&mut line, &root(), area, 2, &mut geometry);
-
+        mark(&mut line, &root());
         let start = "  edited ".chars().count();
         let end = start + "src/tui.rs".chars().count();
         for (index, span) in line.spans.iter().enumerate() {
@@ -242,38 +212,19 @@ mod tests {
                 span.content
             );
         }
-
-        // The row was the third drawn, so it sits at the area's y + 2.
-        let x = area.x + u16::try_from(start).unwrap();
-        let hit = geometry.hit(x, area.y + 2);
-        assert_eq!(hit, Some(super::super::hit::Hit::Path(0)));
-        assert_eq!(geometry.path(0), Some("src/tui.rs"));
-        assert_eq!(
-            geometry.hit(x - 1, area.y + 2),
-            None,
-            "not the space before"
-        );
-        assert_eq!(
-            geometry.hit(area.x + u16::try_from(end).unwrap(), area.y + 2),
-            None,
-            "not the space after"
-        );
     }
 
     /// A row whose spans are not one-per-grapheme would be measured wrongly,
-    /// so it is left alone rather than recorded at the wrong columns.
+    /// so it is left alone.
     #[test]
     fn a_row_that_is_not_one_span_per_grapheme_is_left_alone() {
-        let mut geometry = super::super::hit::ScreenGeometry::default();
         let mut line = Line::from("edited src/tui.rs today");
-        mark(
-            &mut line,
-            &root(),
-            Rect::new(0, 0, 60, 20),
-            0,
-            &mut geometry,
+        mark(&mut line, &root());
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| !span.style.add_modifier.contains(Modifier::UNDERLINED))
         );
-        assert_eq!(geometry.path(0), None);
     }
 
     #[test]

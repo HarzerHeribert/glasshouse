@@ -14,12 +14,9 @@ pub(crate) use paths::{found as found_paths, resolve as resolve_path};
 mod poster;
 mod regions;
 mod selection;
-pub(crate) use composer::composer_offset;
 use composer::{composer_cursor, wrapped_input};
 pub use selection::Selection;
 pub(crate) use selection::draw as draw_selection;
-mod hit;
-pub(crate) use hit::{Hit, ScreenGeometry, StatusField};
 
 mod inspection;
 pub use inspection::Inspection;
@@ -39,9 +36,8 @@ pub(crate) mod status;
 use regions::{
     push_changes, push_error_region, push_folded_region, push_output_region, push_text_region,
 };
-use status::{compact_tokens, context_summary, footer_right_span, footer_row};
+use status::{compact_tokens, context_summary, footer_row};
 pub(crate) mod telemetry;
-pub(crate) use controls::PanelHit;
 pub use controls::{Assignment, Mode, ModelGroup, Panel, PanelRow, StatusLine, TierModels};
 pub(crate) use lane::helper_in_flight;
 use lane::{helper_fold, helper_lane, push_helper_lane};
@@ -1070,18 +1066,6 @@ pub fn render_screen(
     notebook: &Notebook,
     state: &ScreenState,
 ) {
-    let _ = render_screen_with_geometry(frame, conversation, served_by, handles, notebook, state);
-}
-
-pub(crate) fn render_screen_with_geometry(
-    frame: &mut Frame,
-    conversation: &Conversation,
-    served_by: &ServedBy,
-    handles: &HandleTable,
-    notebook: &Notebook,
-    state: &ScreenState,
-) -> ScreenGeometry {
-    let mut geometry = ScreenGeometry::default();
     let regions = screen_regions(frame.area(), state);
     // An explicit canvas also paints blank cells when the caller creates a
     // fresh Terminal over pre-existing stdout; default blank cells do not.
@@ -1157,7 +1141,6 @@ pub(crate) fn render_screen_with_geometry(
             handles,
             notebook,
             state,
-            &mut geometry,
         );
     }
     if regions.details.width > 0 {
@@ -1193,7 +1176,7 @@ pub(crate) fn render_screen_with_geometry(
             Block::default().style(Style::default().fg(Color::White).bg(Color::Reset)),
             regions.transcript,
         );
-        geometry.panel = controls::render_panel(frame, regions.transcript, panel, state.theme);
+        controls::render_panel(frame, regions.transcript, panel, state.theme);
     }
     ribbon::activity(frame, regions.activity, state);
     poster::notice(frame, regions.notice, state);
@@ -1269,18 +1252,6 @@ pub(crate) fn render_screen_with_geometry(
         }
     }
     if regions.input.height > 2 {
-        // Text column 0 sits two cells in, where the cursor is placed below;
-        // recorded from the same arithmetic so a click lands on the character
-        // the caret would.
-        geometry.record_composer(
-            Rect::new(
-                regions.input.x + 2,
-                regions.input.y + 1,
-                regions.input.width.saturating_sub(3),
-                regions.input.height - 2,
-            ),
-            skip,
-        );
         frame.render_widget(
             Paragraph::new(input_lines.into_iter().skip(skip).collect::<Vec<_>>())
                 .style(Style::default().bg(state.theme.dock())),
@@ -1393,25 +1364,6 @@ pub(crate) fn render_screen_with_geometry(
             matches!(state.activity, Activity::Thinking | Activity::Streaming),
         )
     });
-    // Which status row carries the mode as its right half, if any: the field
-    // is clickable only where it is actually drawn, and these three branches
-    // draw it in different places (`hit.rs`).
-    let mode_at: Option<usize> = if state.status_line == StatusLine::Compact {
-        context.is_none().then_some(0)
-    } else if width < 140 {
-        if width >= 100 {
-            Some(0)
-        } else {
-            context.is_none().then_some(1)
-        }
-    } else {
-        Some(0)
-    };
-    let identity_model = abbreviate(model, 28);
-    // Cloned before the rows consume them: the recorder below needs the same
-    // left halves the rows were laid out with.
-    let identity_for_width = identity.clone();
-    let posture_for_width = posture.clone();
     let status = if state.status_line == StatusLine::Compact {
         vec![footer_row(
             identity,
@@ -1470,37 +1422,6 @@ pub(crate) fn render_screen_with_geometry(
             ),
         ]
     };
-    // Recorded from the same strings and the same arithmetic `footer_row`
-    // lays the row out with, so what is clickable is what is on screen.
-    if regions.status.height > 0 && !identity_model.is_empty() {
-        let model_width = Line::from(identity_model.as_str())
-            .width()
-            .min(width.saturating_sub(1));
-        geometry.record_status(
-            Rect::new(
-                regions.status.x + 1,
-                regions.status.y,
-                model_width as u16,
-                1,
-            ),
-            StatusField::Model,
-        );
-    }
-    if let Some(row) =
-        mode_at.filter(|row| u16::try_from(*row).is_ok_and(|row| row < regions.status.height))
-    {
-        let left = match (state.status_line == StatusLine::Compact, width < 140, row) {
-            (true, _, _) => identity_for_width.clone(),
-            (false, true, 1) => posture_for_width.clone(),
-            _ => identity_for_width.clone(),
-        };
-        if let Some((x, span)) = footer_right_span(&left, &mode, width) {
-            geometry.record_status(
-                Rect::new(regions.status.x + x, regions.status.y + row as u16, span, 1),
-                StatusField::Mode,
-            );
-        }
-    }
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(MUTED)),
         regions.status,
@@ -1521,9 +1442,8 @@ pub(crate) fn render_screen_with_geometry(
     // cells, so what is copied is exactly what is on the screen.
     if let Some(span) = state.selection.filter(|span| !span.is_empty()) {
         let area = frame.area();
-        geometry.selected = Some(selection::draw(frame.buffer_mut(), area, span));
+        selection::draw(frame.buffer_mut(), area, span);
     }
-    geometry
 }
 
 /// Startup is caller-driven and immediately replaced by any real transcript.
@@ -1743,7 +1663,6 @@ fn render_conversation(
     handles: &HandleTable,
     notebook: &Notebook,
     state: &ScreenState,
-    geometry: &mut ScreenGeometry,
 ) {
     let mut headers = Vec::new();
     let lines = conversation_lines(
@@ -1759,18 +1678,6 @@ fn render_conversation(
         .saturating_sub(usize::from(area.height))
         .saturating_sub(state.scrollback);
     let total_rows = lines.len();
-    // The same `lines` and the same `start` the draw below uses, so a header
-    // is clickable exactly where it is drawn and nowhere else (`hit.rs`).
-    for (index, cell) in headers {
-        if let Some(offset) = index.checked_sub(start)
-            && offset < usize::from(area.height)
-        {
-            geometry.record_cell(
-                Rect::new(area.x, area.y + offset as u16, area.width, 1),
-                cell,
-            );
-        }
-    }
     // The project's own directory, for a relative path a model wrote. Read
     // once per draw, not once per token.
     let root = std::env::current_dir().unwrap_or_default();
@@ -1778,8 +1685,7 @@ fn render_conversation(
         .into_iter()
         .skip(start)
         .take(usize::from(area.height))
-        .enumerate()
-        .map(|(offset, mut line)| {
+        .map(|mut line| {
             if line.style.bg.is_some() {
                 line.spans.insert(0, Span::raw(" "));
                 let padding = usize::from(area.width).saturating_sub(line.width());
@@ -1787,9 +1693,8 @@ fn render_conversation(
             }
             // **After the padding, because the padding moves the columns.**
             // `wrap_lines` left one span per grapheme, so a column range is a
-            // span range and the rectangle recorded here is exactly the cells
-            // the path was drawn into.
-            paths::mark(&mut line, &root, area, offset, geometry);
+            // span range.
+            paths::mark(&mut line, &root);
             line
         })
         .collect();

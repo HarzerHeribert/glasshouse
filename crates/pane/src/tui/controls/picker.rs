@@ -18,11 +18,13 @@ fn take_line(area: &mut Rect) -> Rect {
     row
 }
 
-pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme) -> PanelGeometry {
-    let mut hits = PanelGeometry::default();
+pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme) {
     let Some(search) = &panel.search else {
-        return hits;
+        return;
     };
+    // Whether the mode row above the list was drawn: the list then starts
+    // below the modes rather than repeating them.
+    let mut modes_drawn = false;
     let accent = Style::default().fg(theme.accent());
     let muted = Style::default().fg(Color::DarkGray);
     let block = Block::default()
@@ -69,7 +71,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
                 );
                 let (text, style) = pill(&label, assignment.active == tier, theme);
                 line(frame, rect, &text, style);
-                hits.tiers.push((rect, tier));
             }
         }
         if inner.height > 5 {
@@ -123,9 +124,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
             let width = mode_width.min(row.right().saturating_sub(x));
             let rect = Rect::new(x, row.y, width, 1);
             line(frame, rect, &text, style);
-            if width > 0 {
-                hits.modes.push((rect, index));
-            }
+            modes_drawn |= width > 0;
             x = x.saturating_add(width + 1);
         }
         let hint = match panel.tier() {
@@ -168,9 +167,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
             let width = button_width.min(row.right().saturating_sub(x));
             let rect = Rect::new(x, row.y, width, 1);
             line(frame, rect, &text, style);
-            if width > 0 {
-                hits.orders.push((rect, order));
-            }
             x = x.saturating_add(width + 1);
         }
         line(
@@ -218,7 +214,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
             };
             let (text, style) = pill(&label, i == search.active, theme);
             line(frame, rect, &text, style);
-            hits.providers.push((rect, i));
         }
         for y in inner.y..inner.bottom() {
             line(frame, Rect::new(inner.x + width, y, 1, 1), "│", muted);
@@ -236,14 +231,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
             style,
         );
         line(frame, Rect::new(row.x, row.y, 3, 1), " ← ", style);
-        hits.providers.push((
-            Rect::new(row.x, row.y, 3, 1),
-            search.active.saturating_sub(1),
-        ));
-        hits.providers.push((
-            Rect::new(row.right() - 3, row.y, 3, 1),
-            (search.active + 1).min(search.providers.len() - 1),
-        ));
         line(frame, Rect::new(row.right() - 3, row.y, 3, 1), " → ", style);
     }
     if inner.height > 3 {
@@ -278,7 +265,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
         None
     };
     let visible = usize::from(inner.height);
-    let hidden_modes = if hits.modes.is_empty() { 0 } else { mode_count };
+    let hidden_modes = if modes_drawn { mode_count } else { 0 };
     let start = panel
         .selected
         .saturating_sub(visible.saturating_sub(1))
@@ -300,11 +287,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
         } else {
             muted
         };
-        if index < mode_count {
-            hits.modes.push((rect, index));
-        } else if search.choices.contains(&index) {
-            hits.models.push((rect, index));
-        }
         if let Some(detail) = search.details.get(&index) {
             let marker = if entry.text.contains("STAGED") {
                 "◆"
@@ -377,13 +359,34 @@ pub(super) fn render(frame: &mut Frame, area: Rect, panel: &Panel, theme: Theme)
         );
         line(frame, footer, &text, accent);
     }
-    hits
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// Walks the provider carousel to `index` the way the arrow keys do.
+    fn to_provider(panel: &mut Panel, index: usize) {
+        while panel
+            .search
+            .as_ref()
+            .is_some_and(|search| search.active < index)
+        {
+            panel.move_provider(true);
+        }
+    }
+
+    /// Tabs to `tier` the way the keyboard does.
+    fn to_tier(panel: &mut Panel, tier: Tier) -> bool {
+        for _ in 0..3 {
+            if panel.tier() == tier {
+                return true;
+            }
+            panel.cycle_tier();
+        }
+        panel.tier() == tier
+    }
 
     fn ranked() -> Panel {
         Panel::models(
@@ -424,45 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_arrows_move_providers_and_focused_modes_remain_hittable() {
-        let mut panel = ranked();
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        let mut hits = PanelGeometry::default();
-        terminal
-            .draw(|frame| hits = render(frame, frame.area(), &panel, Theme::Neon))
-            .unwrap();
-        let (right, target) = hits.providers[1];
-        assert_eq!(target, 1);
-        assert_eq!(hits.hit(right.x, right.y), Some(PanelHit::Provider(1)));
-        panel.select_provider(target);
-        assert!(
-            panel
-                .rows
-                .iter()
-                .any(|row| row.command.as_deref() == Some("/model best"))
-        );
-        panel.select_tier(Tier::Subagents);
-        panel.move_selection(true, 1);
-        for (width, height) in [(12, 8), (16, 12), (40, 5), (40, 20)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| {
-                    let hits = render(frame, frame.area(), &panel, Theme::Neon);
-                    let (rect, _) = hits
-                        .modes
-                        .iter()
-                        .find(|(_, index)| *index == panel.selected)
-                        .expect("the focused Off mode must remain visible");
-                    assert_eq!(
-                        hits.hit(rect.x, rect.y),
-                        Some(PanelHit::Mode(panel.selected))
-                    );
-                })
-                .unwrap();
-        }
-    }
-
-    #[test]
     fn sorting_keeps_duplicate_and_unavailable_route_identity() {
         let mut panel = Panel::models(
             "Models",
@@ -492,7 +456,7 @@ mod tests {
             ],
             TierModels::default(),
         );
-        panel.select_provider(2);
+        to_provider(&mut panel, 2);
         panel.move_selection(true, 1);
         assert!(panel.rows[panel.selected].command.is_none());
         panel.cycle_order();
@@ -505,7 +469,7 @@ mod tests {
     #[test]
     fn all_providers_rank_globally_and_sort_preserves_staging_and_cursor() {
         let mut panel = ranked();
-        panel.select_provider(2);
+        to_provider(&mut panel, 2);
         let ids = |panel: &Panel| {
             panel
                 .rows
@@ -535,11 +499,10 @@ mod tests {
     #[test]
     fn ranked_picker_draws_agent_tabs_before_providers_and_honest_bars() {
         let mut panel = ranked();
-        panel.select_provider(2);
+        to_provider(&mut panel, 2);
         let mut terminal = Terminal::new(TestBackend::new(110, 22)).unwrap();
-        let mut hits = PanelGeometry::default();
         terminal
-            .draw(|frame| hits = render(frame, frame.area(), &panel, Theme::Neon))
+            .draw(|frame| render(frame, frame.area(), &panel, Theme::Neon))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let screen = (0..22)
@@ -553,19 +516,13 @@ mod tests {
         assert!(screen.contains("███████░░░ AA  70"), "{screen}");
         assert!(screen.contains("— unranked"), "{screen}");
         assert!(screen.find("Main").unwrap() < screen.find("PROVIDERS").unwrap());
-        assert!(
-            hits.tiers
-                .iter()
-                .all(|(tab, _)| tab.y < hits.providers[0].0.y)
-        );
-        assert_eq!(hits.orders.len(), 2);
         println!("{screen}");
     }
 
     #[test]
     fn empty_search_keeps_modes_available_and_the_empty_message_visible() {
         let mut panel = ranked();
-        panel.select_tier(Tier::Subagents);
+        to_tier(&mut panel, Tier::Subagents);
         panel.search_insert("missing-model");
         assert_eq!(
             panel.rows[0].command.as_deref(),

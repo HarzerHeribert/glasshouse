@@ -622,7 +622,7 @@ fn the_masked_prompt_renders_bullets_and_never_the_key() {
 /// handle into text on its own.
 ///
 /// **The scan follows the file's successors.** The 2026-09-17 clickable-TUI
-/// move cut `scroll.rs`, `status.rs`, `composer.rs`, `hit.rs` and — with the
+/// move cut `scroll.rs`, `status.rs`, `composer.rs` and — with the
 /// cell descriptor, 2026-09-17 — `regions.rs` and — with the transcript's
 /// bands, 2026-09-18 — `bands.rs` and — with the question a cell puts to the
 /// person, 2026-09-19 — `ask.rs` out of `tui.rs` for the size ratchet; a rule that stopped at the original file would be a rule anything
@@ -643,7 +643,6 @@ fn the_tui_renders_no_handle_itself() {
         ("tui/scroll.rs", include_str!("../src/tui/scroll.rs")),
         ("tui/status.rs", include_str!("../src/tui/status.rs")),
         ("tui/composer.rs", include_str!("../src/tui/composer.rs")),
-        ("tui/hit.rs", include_str!("../src/tui/hit.rs")),
         ("tui/regions.rs", include_str!("../src/tui/regions.rs")),
         ("tui/bands.rs", include_str!("../src/tui/bands.rs")),
         ("tui/ask.rs", include_str!("../src/tui/ask.rs")),

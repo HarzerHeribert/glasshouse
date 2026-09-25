@@ -164,71 +164,6 @@ pub struct PanelRow {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PanelGeometry {
-    providers: Vec<(Rect, usize)>,
-    models: Vec<(Rect, usize)>,
-    tiers: Vec<(Rect, Tier)>,
-    orders: Vec<(Rect, Order)>,
-    modes: Vec<(Rect, usize)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PanelHit {
-    Provider(usize),
-    Order(Order),
-    Mode(usize),
-    Model(usize),
-    /// A row of the tier roster. Clicking one moves the assignment, which is
-    /// the direct path Tab's cycle does not give: the roster shows all three,
-    /// so the one you want is already on screen.
-    Tier(Tier),
-}
-
-impl PanelGeometry {
-    pub(crate) fn hit(&self, column: u16, row: u16) -> Option<PanelHit> {
-        self.orders
-            .iter()
-            .find(|(area, _)| contains(*area, column, row))
-            .map(|(_, order)| PanelHit::Order(*order))
-            .or_else(|| {
-                self.modes
-                    .iter()
-                    .find(|(area, _)| contains(*area, column, row))
-                    .map(|(_, index)| PanelHit::Mode(*index))
-            })
-            .or_else(|| {
-                self.tiers
-                    .iter()
-                    .find(|(area, _)| contains(*area, column, row))
-                    .map(|(_, tier)| PanelHit::Tier(*tier))
-            })
-            .or_else(|| self.hit_catalogue(column, row))
-    }
-
-    fn hit_catalogue(&self, column: u16, row: u16) -> Option<PanelHit> {
-        self.providers
-            .iter()
-            .find(|(area, _)| contains(*area, column, row))
-            .map(|(_, index)| PanelHit::Provider(*index))
-            .or_else(|| {
-                self.models
-                    .iter()
-                    .find(|(area, _)| contains(*area, column, row))
-                    .map(|(_, index)| PanelHit::Model(*index))
-            })
-    }
-}
-
-fn contains(area: Rect, column: u16, row: u16) -> bool {
-    area.width > 0
-        && area.height > 0
-        && column >= area.x
-        && column < area.right()
-        && row >= area.y
-        && row < area.bottom()
-}
-
 impl Panel {
     /// Raw catalogue facts for the native workbench; no legacy picker state.
     pub(crate) fn catalogue(&self) -> Option<(&[ModelGroup], &BTreeMap<String, f64>)> {
@@ -450,19 +385,6 @@ impl Panel {
         true
     }
 
-    /// Assigns to `tier` directly — what clicking a roster row does.
-    pub(crate) fn select_tier(&mut self, tier: Tier) -> bool {
-        let Some(assignment) = self.assignment.as_mut() else {
-            return false;
-        };
-        if assignment.active == tier {
-            return true;
-        }
-        assignment.active = tier;
-        self.provider_rows();
-        true
-    }
-
     /// Moves the assignment to the next tier, wrapping.
     ///
     /// The rows do not change -- the same catalogue serves all three tiers --
@@ -498,29 +420,6 @@ impl Panel {
             search.active.saturating_sub(1)
         };
         self.provider_rows();
-    }
-
-    pub(crate) fn select_provider(&mut self, index: usize) -> bool {
-        let Some(search) = self.search.as_mut() else {
-            return false;
-        };
-        if index >= search.providers.len() || search.active == index {
-            return index < search.providers.len();
-        }
-        search.active = index;
-        self.provider_rows();
-        true
-    }
-
-    pub(crate) fn select_model_row(&mut self, index: usize) -> bool {
-        let selectable = self
-            .search
-            .as_ref()
-            .is_some_and(|search| search.choices.contains(&index));
-        if selectable {
-            self.selected = index;
-        }
-        selectable
     }
 
     pub fn search_insert(&mut self, text: &str) -> bool {
@@ -830,16 +729,10 @@ fn pill(label: &str, focused: bool, theme: super::Theme) -> (String, Style) {
     (format!("{CAP_LEFT}{marker}{label} {CAP_RIGHT}"), style)
 }
 
-pub(super) fn render_panel(
-    frame: &mut Frame,
-    area: Rect,
-    panel: &Panel,
-    theme: super::Theme,
-) -> PanelGeometry {
+pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel, theme: super::Theme) {
     if panel.search.is_some() {
         return picker::render(frame, area, panel, theme);
     }
-    let mut geometry = PanelGeometry::default();
     // Two double rules, not a box. A closed frame was tried and boxed the
     // panel off from the session it is drawn over; the weight belongs in the
     // rules themselves.
@@ -876,18 +769,7 @@ pub(super) fn render_panel(
         .enumerate()
         .skip(start)
         .take(usize::from(inner.height))
-        .enumerate()
-        .map(|(visible_row, (i, row))| {
-            if panel
-                .search
-                .as_ref()
-                .is_some_and(|search| search.choices.contains(&i))
-            {
-                geometry.models.push((
-                    Rect::new(inner.x, inner.y + visible_row as u16, inner.width, 1),
-                    i,
-                ));
-            }
+        .map(|(i, row)| {
             let focused = i == panel.selected;
             // A row that carries a command is a button; a group heading, a
             // "no models match" note and a locked entry are prose, and
@@ -917,12 +799,22 @@ pub(super) fn render_panel(
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
-    geometry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tabs to `tier` the way the keyboard does.
+    fn to_tier(panel: &mut Panel, tier: Tier) -> bool {
+        for _ in 0..3 {
+            if panel.tier() == tier {
+                return true;
+            }
+            panel.cycle_tier();
+        }
+        panel.tier() == tier
+    }
     use ratatui::{Terminal, backend::TestBackend};
 
     fn catalogue() -> Panel {
@@ -1201,56 +1093,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provider_cards_follow_the_theme_and_show_offscreen_directions_without_overflow() {
-        for theme in super::super::Theme::ALL {
-            let panel = catalogue();
-            let mut terminal = Terminal::new(TestBackend::new(80, 22)).unwrap();
-            let mut hits = PanelGeometry::default();
-            terminal
-                .draw(|frame| hits = render_panel(frame, frame.area(), &panel, theme))
-                .unwrap();
-            for (slot, expected) in [(0, theme.accent()), (1, theme.dock())] {
-                let rect = hits.providers[slot].0;
-                assert_eq!(terminal.backend().buffer()[(rect.x, rect.y)].bg, expected);
-            }
-        }
-        for width in [1, 5, 12, 40, 80, 160] {
-            for height in [1, 4, 8, 24] {
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        let hits = render_panel(
-                            frame,
-                            frame.area(),
-                            &catalogue(),
-                            super::super::Theme::Neon,
-                        );
-                        for (area, _) in hits
-                            .providers
-                            .iter()
-                            .chain(hits.models.iter())
-                            .chain(hits.modes.iter())
-                        {
-                            assert!(area.right() <= width && area.bottom() <= height);
-                        }
-                    })
-                    .unwrap();
-            }
-        }
-    }
-
-    fn geometry(panel: &Panel, width: u16, height: u16) -> PanelGeometry {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let mut geometry = PanelGeometry::default();
-        terminal
-            .draw(|frame| {
-                geometry = render_panel(frame, frame.area(), panel, super::super::Theme::Neon);
-            })
-            .unwrap();
-        geometry
-    }
-
     /// `^O` is the answer to a 469-entry list whose alphabetical order put
     /// `claude-3-5-haiku-20241022` above `claude-opus-5`.
     #[test]
@@ -1463,11 +1305,11 @@ mod tests {
         assert!(panel.stage().is_some());
 
         // A second tier in the same visit, which is the point.
-        assert!(panel.select_tier(Tier::Helpers));
+        assert!(to_tier(&mut panel, Tier::Helpers));
         panel.move_selection(true, 1);
         assert!(panel.stage().is_some());
 
-        assert!(panel.select_tier(Tier::Subagents));
+        assert!(to_tier(&mut panel, Tier::Subagents));
         panel.move_selection(true, 1);
         assert!(panel.stage().unwrap().contains("staged subagent"));
 
@@ -1478,7 +1320,7 @@ mod tests {
 
         // A different row for a tier that already has one replaces that
         // tier's choice rather than adding a second.
-        assert!(panel.select_tier(Tier::Helpers));
+        assert!(to_tier(&mut panel, Tier::Helpers));
         panel.move_selection(true, 2);
         panel.stage();
         assert_eq!(panel.staged_commands().len(), 3, "one choice per tier");
@@ -1500,7 +1342,7 @@ mod tests {
     #[test]
     fn the_roster_shows_a_staged_tier_as_now_then_next() {
         let mut panel = catalogue();
-        panel.select_tier(Tier::Helpers);
+        to_tier(&mut panel, Tier::Helpers);
         // Past the `off` row, which is what this tier already runs.
         panel.move_selection(true, 1);
         panel.stage();
@@ -1516,83 +1358,5 @@ mod tests {
             .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
             .collect();
         assert!(screen.contains("off → "), "{screen}");
-    }
-
-    /// The roster is a click target, which is the whole of what it offers
-    /// over `Tab`: every tier is on screen, so reaching one is never a cycle.
-    #[test]
-    fn clicking_a_roster_row_assigns_to_that_tier() {
-        let panel = catalogue();
-        let drawn = geometry(&panel, 80, 22);
-        assert_eq!(
-            drawn
-                .tiers
-                .iter()
-                .map(|(_, tier)| *tier)
-                .collect::<Vec<_>>(),
-            [Tier::Parent, Tier::Subagents, Tier::Helpers],
-            "all three are drawn, so all three are reachable"
-        );
-
-        let (row, tier) = drawn.tiers[1];
-        assert_eq!(tier, Tier::Subagents);
-        assert_eq!(drawn.hit(row.x, row.y), Some(PanelHit::Tier(tier)));
-
-        let mut panel = panel;
-        assert_eq!(panel.tier(), Tier::Parent);
-        assert!(panel.select_tier(tier));
-        assert_eq!(panel.tier(), Tier::Subagents);
-        assert!(
-            panel
-                .rows
-                .iter()
-                .any(|row| row.command.as_deref() == Some("/model subagent auto")),
-            "the rows follow the tier, which is what the assignment is for"
-        );
-    }
-
-    /// A panel with no rows to spare draws no roster rather than a roster and
-    /// no models.
-    #[test]
-    fn the_roster_yields_to_the_model_list_on_a_short_panel() {
-        let panel = catalogue();
-        assert!(geometry(&panel, 80, 4).tiers.is_empty());
-        assert!(!geometry(&panel, 80, 22).tiers.is_empty());
-    }
-
-    #[test]
-    fn hit_geometry_is_the_visible_carousel_and_scrolled_model_slice() {
-        let mut panel = catalogue();
-        let visible = geometry(&panel, 90, 24);
-        assert_eq!(visible.providers.len(), 6);
-        assert_eq!(visible.orders.len(), 2);
-        for (area, index) in &visible.providers {
-            assert_eq!(
-                visible.hit(area.x, area.y),
-                Some(PanelHit::Provider(*index))
-            );
-        }
-        for (area, order) in &visible.orders {
-            assert_eq!(visible.hit(area.x, area.y), Some(PanelHit::Order(*order)));
-        }
-        panel.select_tier(Tier::Subagents);
-        let modes = geometry(&panel, 90, 24);
-        assert_eq!(modes.modes.len(), 2);
-        for (area, index) in &modes.modes {
-            assert_eq!(modes.hit(area.x, area.y), Some(PanelHit::Mode(*index)));
-        }
-        panel.select_provider(5);
-        panel.move_selection(true, 50);
-        let scrolled = geometry(&panel, 40, 12);
-        assert!(
-            scrolled
-                .models
-                .iter()
-                .any(|(_, index)| *index == panel.selected)
-        );
-        for (area, index) in &scrolled.models {
-            assert_eq!(scrolled.hit(area.x, area.y), Some(PanelHit::Model(*index)));
-        }
-        assert!(geometry(&panel, 5, 10).providers.is_empty());
     }
 }
