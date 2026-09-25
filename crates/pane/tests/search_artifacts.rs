@@ -25,6 +25,14 @@ impl Fixture {
         for (relative, contents) in [
             ("src/lib.rs", "needle source\n"),
             (".pane/rollout.jsonl", "needle model feedback\n"),
+            (
+                ".pane/sessions/tlx7uc-2sb.jsonl",
+                "needle session transcript\n",
+            ),
+            (
+                ".pane/sessions/tlx7uc-2sb.gateway.log",
+                "needle gateway log\n",
+            ),
             (".pane/config.toml", "needle pane config\n"),
             (".env", "needle environment\n"),
             (".settings/local.txt", "needle hidden config\n"),
@@ -108,6 +116,9 @@ fn broad_search_omits_generated_feedback_but_keeps_normal_hidden_files() {
     }
     assert!(!glob.contains("rollout.jsonl"), "{glob}");
     assert!(!glob.contains(".git"), "{glob}");
+    // Pane's own session transcripts and logs are generated state, not the
+    // project: reported from a fresh project whose first glob was all logs.
+    assert!(!glob.contains("sessions"), "{glob}");
 
     let grep = fixture.grep("needle", None);
     for retained in [

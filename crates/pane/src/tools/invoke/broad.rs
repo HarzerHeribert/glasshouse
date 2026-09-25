@@ -91,8 +91,9 @@ pub(super) fn contains_component(path: &Path, wanted: &str) -> bool {
         .any(|component| component.as_os_str() == wanted)
 }
 
-/// Generated paths omitted from broad discovery. `.pane` itself is not
-/// excluded: user configuration there remains searchable.
+/// Generated paths omitted from broad discovery: git's internals and Pane's
+/// own state (see [`is_pane_artifact`]). Naming `.pane` in the pattern or
+/// the path still reaches it.
 pub(super) fn is_search_artifact(relative: &Path) -> bool {
     contains_component(relative, ".git") || is_pane_artifact(relative)
 }
@@ -102,9 +103,14 @@ pub(super) fn is_pane_artifact(relative: &Path) -> bool {
         .components()
         .filter_map(|component| component.as_os_str().to_str())
         .collect();
-    components
-        .windows(2)
-        .any(|pair| pair == [".pane", "rollout.jsonl"])
+    // What Pane generates under `.pane/`: the session transcripts and logs
+    // in `sessions/`, and the older transcripts and logs written beside the
+    // configuration. What a person keeps there -- `config.toml`,
+    // `learned.md`, `scratch/` -- stays findable.
+    components.windows(2).any(|pair| {
+        pair[0] == ".pane"
+            && (pair[1] == "sessions" || pair[1].ends_with(".jsonl") || pair[1].ends_with(".log"))
+    })
 }
 
 /// The filename prefix from one `grep -r -n` result. This mirrors the
