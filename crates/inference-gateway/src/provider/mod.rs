@@ -16,6 +16,7 @@
 pub mod budget;
 pub mod cache;
 pub mod discovery;
+pub mod documented;
 /// A canned loopback provider for tests. Behind a feature so a host crate can
 /// enable it for its own tests without the library carrying it otherwise.
 #[cfg(any(test, feature = "fixtures"))]
@@ -529,6 +530,9 @@ pub fn templates() -> Vec<Provider> {
             vec![],
         ),
     ]
+    .into_iter()
+    .chain(documented::templates())
+    .collect()
 }
 
 /// The built-in template named `name`, or `None`.

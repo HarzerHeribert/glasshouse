@@ -39,6 +39,10 @@ pub fn login_flag(provider: &str, method: Method) -> Option<&'static str> {
         ("openai", Method::Browser) => Some("-codex-login"),
         ("openai", Method::DeviceCode) => Some("-codex-device-login"),
         ("google", Method::Browser) => Some("-antigravity-login"),
+        ("kimi", Method::Browser) => Some("-kimi-login"),
+        ("xai", Method::Browser) => Some("-xai-login"),
+        ("devin", Method::Browser) => Some("-devin-login"),
+        ("meta", Method::Browser) => Some("-meta-login"),
         _ => None,
     }
 }

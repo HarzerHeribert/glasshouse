@@ -274,6 +274,10 @@ enum SubscriptionProvider {
     Anthropic,
     Openai,
     Google,
+    Kimi,
+    Xai,
+    Devin,
+    Meta,
 }
 
 impl SubscriptionProvider {
@@ -285,6 +289,10 @@ impl SubscriptionProvider {
             Self::Anthropic => "anthropic",
             Self::Openai => "openai",
             Self::Google => "google",
+            Self::Kimi => "kimi",
+            Self::Xai => "xai",
+            Self::Devin => "devin",
+            Self::Meta => "meta",
         }
     }
 }
@@ -476,9 +484,26 @@ fn declare_default_subscription(cli: &Cli, provider: SubscriptionProvider) -> Re
             "claude-subscription",
             "kind = \"claude\"\nvendor = \"claude\"\nsubscription_broker = \"cliproxyapi\"\n",
         ),
-        SubscriptionProvider::Google => {
-            bail!("name the account to connect with --entitlement")
-        }
+        SubscriptionProvider::Google => (
+            "gemini-subscription",
+            "kind = \"gemini\"\nvendor = \"google\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Kimi => (
+            "kimi-subscription",
+            "kind = \"kimi\"\nvendor = \"moonshot\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Xai => (
+            "grok-subscription",
+            "kind = \"xai\"\nvendor = \"xai\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Devin => (
+            "devin-subscription",
+            "kind = \"devin\"\nvendor = \"cognition\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
+        SubscriptionProvider::Meta => (
+            "muse-subscription",
+            "kind = \"meta\"\nvendor = \"meta\"\nsubscription_broker = \"cliproxyapi\"\n",
+        ),
     };
     config::declare_table(&config_path(cli)?, &format!("accounts.{name}"), body)?;
     Ok(name.to_owned())
@@ -1463,6 +1488,14 @@ fn subscription_provider_for(
         | (None, Some(EntitlementVendor::OpenAi)) => Some(SubscriptionProvider::Openai),
         (Some(EntitlementKind::Gemini), None | Some(EntitlementVendor::Google))
         | (None, Some(EntitlementVendor::Google)) => Some(SubscriptionProvider::Google),
+        (Some(EntitlementKind::Kimi), None | Some(EntitlementVendor::Moonshot))
+        | (None, Some(EntitlementVendor::Moonshot)) => Some(SubscriptionProvider::Kimi),
+        (Some(EntitlementKind::Xai), None | Some(EntitlementVendor::Xai))
+        | (None, Some(EntitlementVendor::Xai)) => Some(SubscriptionProvider::Xai),
+        (Some(EntitlementKind::Devin), None | Some(EntitlementVendor::Cognition))
+        | (None, Some(EntitlementVendor::Cognition)) => Some(SubscriptionProvider::Devin),
+        (Some(EntitlementKind::Meta), None | Some(EntitlementVendor::Meta))
+        | (None, Some(EntitlementVendor::Meta)) => Some(SubscriptionProvider::Meta),
         _ => None,
     }
 }
@@ -1870,16 +1903,26 @@ mod tests {
             path.to_str().unwrap(),
             "entitlements",
         ]);
-        for (provider, name) in [
+        let every = [
             (SubscriptionProvider::Openai, "chatgpt-subscription"),
             (SubscriptionProvider::Anthropic, "claude-subscription"),
-        ] {
+            (SubscriptionProvider::Google, "gemini-subscription"),
+            (SubscriptionProvider::Kimi, "kimi-subscription"),
+            (SubscriptionProvider::Xai, "grok-subscription"),
+            (SubscriptionProvider::Devin, "devin-subscription"),
+            (SubscriptionProvider::Meta, "muse-subscription"),
+        ];
+        for (provider, name) in every {
             assert_eq!(declare_default_subscription(&cli, provider).unwrap(), name);
         }
         let config = config::load(Some(&path)).unwrap().config;
-        for name in ["chatgpt-subscription", "claude-subscription"] {
-            assert!(
-                config.accounts[name].subscription_broker().is_some(),
+        for (provider, name) in every {
+            let entry = &config.accounts[name];
+            assert!(entry.subscription_broker().is_some(), "{name}");
+            // Declared with the kind and vendor its own flow connects.
+            assert_eq!(
+                subscription_provider_for(entry.kind(), entry.vendor()),
+                Some(provider),
                 "{name}"
             );
         }

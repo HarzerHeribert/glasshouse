@@ -37,6 +37,14 @@ pub enum EntitlementKind {
     #[serde(rename = "chatgpt")]
     ChatGpt,
     Gemini,
+    /// A Moonshot Kimi plan, signed in through the broker's Kimi login.
+    Kimi,
+    /// An xAI Grok plan, signed in through the broker's xAI login.
+    Xai,
+    /// A Cognition Devin or Windsurf plan.
+    Devin,
+    /// A Meta Muse Code plan.
+    Meta,
     ApiKey,
 }
 impl EntitlementKind {
@@ -46,6 +54,10 @@ impl EntitlementKind {
             Self::Claude => "claude",
             Self::ChatGpt => "chatgpt",
             Self::Gemini => "gemini",
+            Self::Kimi => "kimi",
+            Self::Xai => "xai",
+            Self::Devin => "devin",
+            Self::Meta => "meta",
             Self::ApiKey => "api-key",
         }
     }
@@ -56,6 +68,10 @@ impl EntitlementKind {
             Self::Claude => "Claude plan",
             Self::ChatGpt => "ChatGPT plan",
             Self::Gemini => "Gemini plan",
+            Self::Kimi => "Kimi plan",
+            Self::Xai => "Grok plan",
+            Self::Devin => "Devin plan",
+            Self::Meta => "Muse Code plan",
             Self::ApiKey => "API key",
         }
     }
@@ -77,6 +93,10 @@ pub enum EntitlementVendor {
     Google,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    Moonshot,
+    Xai,
+    Cognition,
+    Meta,
     /// Any vendor the four names above do not cover — a self-hosted router,
     /// a reseller, an employer's own gateway.
     Custom,
@@ -89,6 +109,10 @@ impl EntitlementVendor {
             Self::OpenAi => "openai",
             Self::Google => "google",
             Self::OpenRouter => "openrouter",
+            Self::Moonshot => "moonshot",
+            Self::Xai => "xai",
+            Self::Cognition => "cognition",
+            Self::Meta => "meta",
             Self::Custom => "custom",
         }
     }

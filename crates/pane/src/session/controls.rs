@@ -217,7 +217,9 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
     // `/login <account> device` asks for a device code instead of a link.
     let mut words = argument.unwrap_or_default().split_whitespace();
     let account = words.next();
-    let device_code = words.next() == Some("device");
+    let rest: Vec<&str> = words.collect();
+    let device_code = rest.contains(&"device");
+    let accepted = rest.contains(&"anyway");
     let catalogue = session
         .gateway
         .run(&["entitlements", "--json"], None)
@@ -250,7 +252,12 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
     // The three doors a person names by what they have, not by an account
     // table: a subscription is connected whether or not the gateway had it
     // declared -- the gateway declares it on the way in.
-    if let Some(provider) = subscription_provider(account) {
+    if let Some(subscription) = subscription_named(account) {
+        if let Some(warning) = warning_before(subscription, accepted) {
+            show(session, warning_panel(subscription, warning));
+            return;
+        }
+        let provider = subscription.provider;
         let declared = catalogue
             .accounts
             .iter()
@@ -292,13 +299,121 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
     stream_connect(session, &provider, Some(account), device_code);
 }
 
+/// A subscription the broker can sign in to: how the wizard names it, the
+/// plans it covers, the login flow, the words that name it in `/login`,
+/// and -- where the provider's terms make it a risk -- what the person is
+/// told before signing in. The warnings are the providers' own terms as
+/// read 2026-09-25 (docs/product/pane/subscriptions.md has the sources).
+pub(super) struct Subscription {
+    label: &'static str,
+    plans: &'static str,
+    provider: &'static str,
+    words: &'static [&'static str],
+    warning: Option<&'static str>,
+}
+
+pub(super) const SUBSCRIPTIONS: &[Subscription] = &[
+    Subscription {
+        label: "ChatGPT",
+        plans: "Plus, Pro",
+        provider: "openai",
+        words: &["chatgpt", "openai", "codex"],
+        warning: None,
+    },
+    Subscription {
+        label: "Grok",
+        plans: "SuperGrok, X Premium+",
+        provider: "xai",
+        words: &["grok", "xai"],
+        warning: None,
+    },
+    Subscription {
+        label: "Kimi",
+        plans: "Kimi Code membership",
+        provider: "kimi",
+        words: &["kimi", "moonshot"],
+        warning: Some(
+            "Kimi allows its Kimi Code membership in third-party tools for personal use only, and its own guides use an API key rather than this sign-in.",
+        ),
+    },
+    Subscription {
+        label: "Claude",
+        plans: "Pro, Max",
+        provider: "anthropic",
+        words: &["claude", "anthropic"],
+        warning: Some(
+            "Anthropic forbids using a Claude Pro or Max subscription outside its own apps and has blocked and suspended accounts for it. Sign in only if you accept that risk to your Claude account; an Anthropic API key is the allowed route.",
+        ),
+    },
+    Subscription {
+        label: "Gemini (Antigravity)",
+        plans: "Google AI Pro, Ultra",
+        provider: "google",
+        words: &["gemini", "google", "antigravity"],
+        warning: Some(
+            "Google's terms forbid using Antigravity through third-party tools and it has suspended accounts for it, with a permanent ban on a second strike. A Google AI Studio key is the allowed route.",
+        ),
+    },
+    Subscription {
+        label: "Devin",
+        plans: "Devin, Windsurf",
+        provider: "devin",
+        words: &["devin", "windsurf"],
+        warning: Some(
+            "Cognition's terms do not say whether third-party tools may use a Devin or Windsurf subscription, so the account could be restricted without warning.",
+        ),
+    },
+    Subscription {
+        label: "Muse Code",
+        plans: "Meta",
+        provider: "meta",
+        words: &["muse", "meta"],
+        warning: Some(
+            "Meta has not said whether third-party tools may use a Muse Code plan, and on a data-sharing tier Meta may train on your code.",
+        ),
+    },
+];
+
+/// The subscription a person's own word names.
+fn subscription_named(word: &str) -> Option<&'static Subscription> {
+    SUBSCRIPTIONS
+        .iter()
+        .find(|subscription| subscription.words.contains(&word))
+}
+
 /// The login flow a person's own word for a subscription names.
+#[cfg(test)]
 fn subscription_provider(word: &str) -> Option<&'static str> {
-    match word {
-        "chatgpt" | "openai" | "codex" => Some("openai"),
-        "claude" | "anthropic" => Some("anthropic"),
-        _ => None,
-    }
+    subscription_named(word).map(|subscription| subscription.provider)
+}
+
+/// The warning a sign-in waits on: the subscription's own, until the person
+/// has chosen to sign in anyway.
+fn warning_before(subscription: &Subscription, accepted: bool) -> Option<&'static str> {
+    subscription.warning.filter(|_| !accepted)
+}
+
+/// What a person is told before signing in to a subscription whose terms
+/// make it a risk, with the choice to go on or back.
+fn warning_panel(subscription: &Subscription, warning: &str) -> Panel {
+    let word = subscription.words[0];
+    Panel::rows(
+        format!("Sign in › {}", subscription.label),
+        vec![
+            tui::PanelRow {
+                text: format!("⚠ {warning}"),
+                command: None,
+            },
+            tui::PanelRow {
+                text: "Sign in anyway".into(),
+                command: Some(format!("/login {word} anyway")),
+            },
+            tui::PanelRow {
+                text: "Back".into(),
+                command: Some("/login subscription".into()),
+            },
+        ],
+    )
 }
 
 /// `/login custom`: an endpoint's URL, what it speaks, and its key, asked one
@@ -499,15 +614,16 @@ fn sign_in_panel(catalogue: &Catalogue, keys: &[crate::gateway::CredentialRow]) 
         .accounts
         .iter()
         .filter(|entry| entry.connect_with.is_some() && entry.authenticated == Some(true))
-        .map(|entry| match entry.connect_with.as_deref() {
-            Some("openai") => "ChatGPT",
-            Some("anthropic") => "Claude",
-            _ => entry.account.as_str(),
+        .map(|entry| {
+            SUBSCRIPTIONS
+                .iter()
+                .find(|subscription| entry.connect_with.as_deref() == Some(subscription.provider))
+                .map_or(entry.account.as_str(), |subscription| subscription.label)
         })
         .collect();
     let stored = keys.iter().filter(|key| key.source.is_some()).count();
     let subscription = if connected.is_empty() {
-        "Sign in with a subscription · ChatGPT, Claude".to_string()
+        "Sign in with a subscription · ChatGPT, Grok, Claude, Gemini …".to_string()
     } else {
         format!(
             "Sign in with a subscription · {} connected",
@@ -548,22 +664,27 @@ fn subscription_panel(catalogue: &Catalogue) -> Panel {
         }
     };
     let mut rows = Vec::new();
-    for (label, plans, provider, word) in [
-        ("ChatGPT", "Plus, Pro", "openai", "chatgpt"),
-        ("Claude", "Pro, Max", "anthropic", "claude"),
-    ] {
+    for subscription in SUBSCRIPTIONS {
         let declared: Vec<&Account> = catalogue
             .accounts
             .iter()
-            .filter(|entry| entry.connect_with.as_deref() == Some(provider))
+            .filter(|entry| entry.connect_with.as_deref() == Some(subscription.provider))
             .collect();
+        let risk = match subscription.warning {
+            Some(_) => " · ⚠ read first",
+            None => "",
+        };
         if declared.is_empty() {
-            rows.push(row(format!("{label} · {plans}"), format!("/login {word}")));
+            rows.push(row(
+                format!("{} · {}{risk}", subscription.label, subscription.plans),
+                format!("/login {}", subscription.words[0]),
+            ));
         }
         for entry in declared {
             rows.push(row(
                 format!(
-                    "{label} · {} · {} · {}",
+                    "{} · {} · {} · {}",
+                    subscription.label,
                     entry.account,
                     entry.scope,
                     state(entry)
@@ -572,11 +693,12 @@ fn subscription_panel(catalogue: &Catalogue) -> Panel {
             ));
         }
     }
+    let known: Vec<&str> = SUBSCRIPTIONS.iter().map(|s| s.provider).collect();
     for entry in catalogue.accounts.iter().filter(|entry| {
         entry
             .connect_with
             .as_deref()
-            .is_some_and(|provider| !matches!(provider, "openai" | "anthropic"))
+            .is_some_and(|provider| !known.contains(&provider))
     }) {
         rows.push(row(
             format!("{} · {} · {}", entry.account, entry.scope, state(entry)),
@@ -1401,13 +1523,56 @@ mod tests {
             commands(&sign_in_panel(&catalogue, &[])),
             ["/login subscription", "/login key", "/login custom"]
         );
-        // Step two: both subscriptions, though nothing is declared.
+        // Step two: every subscription the broker signs in to, though
+        // nothing is declared.
         assert_eq!(
             commands(&subscription_panel(&catalogue)),
-            ["/login chatgpt", "/login claude"]
+            [
+                "/login chatgpt",
+                "/login grok",
+                "/login kimi",
+                "/login claude",
+                "/login gemini",
+                "/login devin",
+                "/login muse"
+            ]
         );
         assert_eq!(subscription_provider("chatgpt"), Some("openai"));
         assert_eq!(subscription_provider("claude"), Some("anthropic"));
+        assert_eq!(subscription_provider("antigravity"), Some("google"));
+    }
+
+    #[test]
+    fn a_subscription_whose_terms_forbid_it_is_warned_about_before_signing_in() {
+        let claude = subscription_named("claude").unwrap();
+        let panel = warning_panel(claude, claude.warning.unwrap());
+        assert!(
+            panel.rows[0].text.contains("Anthropic forbids"),
+            "{:?}",
+            panel.rows[0].text
+        );
+        let commands: Vec<_> = panel
+            .rows
+            .iter()
+            .filter_map(|row| row.command.as_deref())
+            .collect();
+        assert_eq!(commands, ["/login claude anyway", "/login subscription"]);
+        assert!(warning_before(claude, false).is_some(), "asked first");
+        assert!(warning_before(claude, true).is_none(), "`anyway` signs in");
+        // The ones whose providers allow third-party tools go straight to
+        // the sign-in.
+        for word in ["chatgpt", "grok"] {
+            assert!(
+                subscription_named(word).unwrap().warning.is_none(),
+                "{word}"
+            );
+        }
+        for word in ["claude", "gemini", "kimi", "devin", "muse"] {
+            assert!(
+                subscription_named(word).unwrap().warning.is_some(),
+                "{word}"
+            );
+        }
     }
 
     #[test]
