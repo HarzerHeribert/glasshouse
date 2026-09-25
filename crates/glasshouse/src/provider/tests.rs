@@ -585,7 +585,8 @@ fn every_built_in_template_ships_no_header_unless_one_was_established() {
 /// before the two generic templates — no other line moved. The 26
 /// templates of `provider/documented.rs` (2026-09-25) are a third splice,
 /// appended after the generic templates; the file before them is its
-/// unchanged prefix, checked when it was extended.
+/// unchanged prefix, checked when it was extended. `gemini-openai`
+/// (2026-09-26) is a fourth, spliced in before `vllm`.
 #[test]
 fn templates_output_is_unchanged_by_the_literal_dedup_refactor() {
     let pinned = include_str!("testdata/templates_pin.txt");

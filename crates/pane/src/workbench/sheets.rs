@@ -541,6 +541,13 @@ pub fn render_form(f: &mut Frame<'_>, form: &crate::tui::Form, theme: Theme) {
         label(f, inner, y, &line, Tone::Normal, theme);
         y += 1;
     }
+    if let Some(warning) = &form.warning {
+        y += 1;
+        for line in wrap_words(&format!("⚠ {warning}"), inner.width as usize) {
+            label(f, inner, y, &line, Tone::Warning, theme);
+            y += 1;
+        }
+    }
     y += 1;
     for (index, field) in form.fields.iter().enumerate() {
         if y + 3 >= inner.bottom() {

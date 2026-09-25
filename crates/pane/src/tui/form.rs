@@ -112,6 +112,8 @@ pub struct Form {
     /// `Some((2, 3))` for "step 2 of 3" of a flow.
     pub step: Option<(u8, u8)>,
     pub intro: String,
+    /// A risk the person should read before submitting, under the intro.
+    pub warning: Option<String>,
     pub fields: Vec<Field>,
     pub focus: usize,
     /// What went wrong with the last submit, under the field it is about.
@@ -129,6 +131,7 @@ impl Form {
             title: title.into(),
             step: None,
             intro: intro.into(),
+            warning: None,
             fields,
             focus: 0,
             error: None,
@@ -144,6 +147,11 @@ impl Form {
     #[must_use]
     pub fn help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+    #[must_use]
+    pub fn warn(mut self, warning: impl Into<String>) -> Self {
+        self.warning = Some(warning.into());
         self
     }
     #[must_use]

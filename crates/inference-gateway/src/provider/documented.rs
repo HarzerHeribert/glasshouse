@@ -212,6 +212,17 @@ const ROWS: &[Row] = &[
         "",
         "https://lmstudio.ai/docs/developer/openai-compat",
     ),
+    // Beside the native `gemini` template: this one relays OpenAI chat to
+    // Google as-is, past the gateway's Gemini codec, and Pane warns so.
+    (
+        "gemini-openai",
+        &[(
+            OpenAiChat,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        )],
+        "GEMINI_API_KEY",
+        "https://ai.google.dev/gemini-api/docs/openai",
+    ),
     (
         "vllm",
         &[

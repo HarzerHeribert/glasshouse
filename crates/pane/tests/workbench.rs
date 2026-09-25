@@ -1859,6 +1859,26 @@ fn a_key_form_shows_bullets_where_the_paste_went_and_never_the_key() {
     );
 }
 
+/// **A form's warning is on the sheet before the key goes in**, in full.
+#[test]
+fn a_key_form_carries_its_warning_on_the_sheet() {
+    use pane::tui::form::{Field, Form, Kind};
+    let form = Form::new(
+        "Sign in › API key · gemini-openai",
+        "Paste your gemini-openai key below.",
+        vec![Field::new("API key", Kind::Secret, "paste here")],
+    )
+    .warn("Google's terms do not allow a subscription here.");
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| workbench::render_form(f, &form, Theme::default()))
+        .unwrap();
+    let screen = text(t.backend().buffer());
+    assert!(
+        screen.contains("⚠ Google's terms do not allow a subscription here."),
+        "{screen}"
+    );
+}
+
 /// On the Subagents tab ←→ walks the favourite slots, wrapping, so choosing
 /// where a model goes needs no function key.
 #[test]

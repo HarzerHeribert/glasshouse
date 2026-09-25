@@ -588,6 +588,9 @@ fn fill(session: &Session<'_>, form: crate::tui::Form) -> Option<Vec<String>> {
     if let Some(ui) = session.ui {
         return ui.form(form);
     }
+    if let Some(warning) = &form.warning {
+        eprintln!("pane: {warning}");
+    }
     let mut answers = Vec::new();
     for field in &form.fields {
         answers.push(match &field.kind {
@@ -598,10 +601,17 @@ fn fill(session: &Session<'_>, form: crate::tui::Form) -> Option<Vec<String>> {
     Some(answers)
 }
 
+/// What a person is told before giving a key to a provider whose route has
+/// a catch, keyed by the gateway's provider name.
+const KEY_WARNINGS: &[(&str, &str)] = &[(
+    "gemini-openai",
+    "This is Google's OpenAI-compatible endpoint, which Google still calls beta. Requests go to it as they are, past Pane's own Gemini translation, so thinking and caching can behave differently than with `gemini`. Use a Google AI Studio key: Google's terms do not allow a Gemini or Antigravity subscription in third-party tools, and it has suspended accounts for it.",
+)];
+
 /// The form that takes one provider's API key.
 fn key_form(provider: &str) -> crate::tui::Form {
     use crate::tui::form::{Field, Form, Kind, key_shape};
-    Form::new(
+    let form = Form::new(
         format!("Sign in › API key · {provider}"),
         format!(
             "Paste your {provider} key below. It goes straight to the gateway's key store: it is never shown, logged, or written to a file."
@@ -614,7 +624,11 @@ fn key_form(provider: &str) -> crate::tui::Form {
             )
             .checked(key_shape),
         ],
-    )
+    );
+    match KEY_WARNINGS.iter().find(|(name, _)| *name == provider) {
+        Some((_, warning)) => form.warn(*warning),
+        None => form,
+    }
 }
 
 /// A short name for an endpoint, from its host: `api.together.xyz` is
@@ -1643,6 +1657,18 @@ fn permissions(session: &Session<'_>, argument: Option<&str>) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_the_gemini_relay_key_is_warned_about_and_the_warning_names_the_terms() {
+        let warned = super::key_form("gemini-openai").warning.unwrap();
+        assert!(warned.contains("subscription"), "{warned}");
+        assert!(
+            warned.contains("past Pane's own Gemini translation"),
+            "{warned}"
+        );
+        assert!(super::key_form("gemini").warning.is_none());
+        assert!(super::key_form("anthropic").warning.is_none());
+    }
 
     #[test]
     fn the_status_line_reports_the_tiers_as_they_are_set_now() {
