@@ -1,8 +1,9 @@
 import '@fontsource/barlow-condensed/latin-600.css';
 import '@fontsource/ibm-plex-mono/latin-400.css';
 import './style.css';
-import { repo, installCommand, bird, flap, pane, glasshouse, history as paneHistory, benchmark as paneBench } from './products.js';
-import { benchChart, historyTimeline } from './charts.js';
+import { repo, installCommand, bird, flap, pane, glasshouse } from './products.js';
+import './home.css';
+import { homePage, startReplay } from './home.js';
 
 const page = document.body.dataset.page || 'home';
 const root = page === 'home' ? './' : '../';
@@ -17,30 +18,16 @@ const features = (items) => `<div class="feature-list">${items.map(([name, copy,
 const flapBird = `<span class="flap" aria-hidden="true">${flap[2]}</span>`;
 const perched = `<pre class="bird" aria-hidden="true">${bird.join('\n')}</pre>`;
 
-const nav = `<a class="skip" href="#main">Skip to content</a><header><a class="wordmark" href="${root}" aria-label="Pane home">${flapBird}<span>PANE</span></a><nav aria-label="Main navigation"><a href="${root}pane/" ${page === 'pane' ? 'aria-current="page"' : ''}>Get started</a><a href="${root}#measured">Measurements</a><a class="source-link" href="${repo}">Source ${arrow}</a></nav></header>`;
+const nav = `<a class="skip" href="#main">Skip to content</a><header><a class="wordmark" href="${root}" aria-label="Pane home">${flapBird}<span>PANE</span></a><nav aria-label="Main navigation"><a href="${root}#gains">Why Pane</a><a href="${root}pane/" ${page === 'pane' ? 'aria-current="page"' : ''}>Get started</a><a class="source-link" href="${repo}">Source ${arrow}</a></nav></header>`;
 
-const howItWorks = (x) => `<section id="how" class="section how"><div class="relationship-copy"><h2>ONE TOOL:<br>A PROGRAM.</h2><p>The model gets one tool, a cell: a TypeScript program run in an embedded V8 runtime. Inside it, <code>read</code>, <code>rg</code>, <code>edit</code>, <code>bash</code> and the rest are functions. What they return stays in the runtime as a named handle; the model gets a short preview and works on the handle in the next cell.</p></div><div class="example"><figure><figcaption>A cell the model wrote (a real run, trimmed)</figcaption>${code(x.cell.split('\n'))}</figure><figure><figcaption>What came back to the model</figcaption>${code(x.back.split('\n'))}</figure></div><div class="facts">${pane.facts.map(([n, text]) => `<div class="fact"><strong>${esc(n)}</strong><p>${text}</p></div>`).join('')}</div></section>`;
 
-const steps = `<section id="start" class="section steps-section"><div class="relationship-copy"><h2>INSTALL,<br>SIGN IN, WORK.</h2><p>Install it, sign in once, and work in any repository. Nothing to configure before the first task.</p></div><ol class="steps">
-<li><span class="step-number">01</span><h3>Install</h3><p>macOS on Apple silicon, Linux on x86_64 and arm64. The installer checks the archive against the release’s checksums, installs into <code>~/.local</code>, and edits no shell profile.</p>${install()}</li>
-<li><span class="step-number">02</span><h3>Sign in</h3><p>Start Pane and type <code>/login</code>. Enter an API key, or connect a ChatGPT or Claude subscription. <a class="inline-link" href="${root}pane/#sign-in">How subscriptions work</a>.</p>${code(['$ cd your-project', '$ pane', '> /login'])}</li>
-<li><span class="step-number">03</span><h3>Work</h3><p>Pick a model the first time, then describe the task. <code>pane -p "…"</code> runs one task and exits; <code>pane --continue</code> picks up where you left off.</p>${code(['> fix the failing request_modes tests', '$ pane -p "explain how the ruler scores an attempt"'])}</li>
-</ol></section>`;
 
-const featureSection = `<section id="features" class="section detail-section"><div class="relationship-copy"><h2>WHAT SHIPS<br>TODAY.</h2><p>Each card names the test or source file that holds it.</p></div>${features(pane.features)}</section>`;
 
-// The measured comparison. The chart and its table both read products.js;
-// without script the static table below it is what a reader gets.
-const benchTable = `<table class="table"><thead><tr><th>Task</th><th>Pane</th><th>Codex</th></tr></thead><tbody>${paneBench.tasks.map((t) => `<tr><td>${t.name}</td><td data-label="Pane">${t.pane.passed}/3 · ${t.pane.time} s · ${t.pane.tokens}k (${t.pane.uncached}k uncached)</td><td data-label="Codex">${t.codex.passed}/3 · ${t.codex.time} s · ${t.codex.tokens}k (${t.codex.uncached}k)</td></tr>`).join('')}</tbody></table>`;
-const benchmark = `<section id="measured" class="section bench"><div class="relationship-copy"><h2>SAME RESULTS AS CODEX.<br>18 % FEWER TOKENS.<br><span class="outline">1.28× SLOWER.</span></h2><p>Pane against the Codex CLI on the same four tasks and the same model (GPT-6 Sol), three attempts each, 24 September 2026. ${paneBench.verdict}</p></div><div class="viz" id="bench-viz">${benchTable}</div><p class="bench-notes">${paneBench.notes}</p><p class="bench-notes">${paneBench.check}</p></section>`;
 
-// Every measured run, as a timeline to step through; the static list is the fallback.
-const history = `<section id="history" class="section history"><div class="relationship-copy"><h2>EVERY MEASURED RUN,<br>SETBACKS INCLUDED.</h2><p>From the first comparison with Claude Code, which Pane lost, to tonight’s. Tap a point for what was measured and what came out.</p></div><div class="viz" id="history-viz"><table class="table"><tbody>${paneHistory.map(([, when, what, result]) => `<tr><td>${when}</td><td>${what}</td><td>${result}</td></tr>`).join('')}</tbody></table></div></section>`;
 
 const limits = `<section id="limits" class="section limits"><div class="relationship-copy"><h2>WHAT IT DOES<br>NOT DO YET.</h2><p>Pane is a pre-release.</p></div><dl class="limit-list">${pane.limits.map(([term, text]) => `<div><dt>${term}</dt><dd>${text}</dd></div>`).join('')}</dl></section>`;
 
 
-const home = `<section class="hero"><div class="eyebrow"><span class="status-dot"></span> PANE · THE CODING HARNESS OF THE GLASSHOUSE PROJECT · PRE-RELEASE</div><h1>A CODING<br>AGENT FOR YOUR<br><span class="outline">TERMINAL.</span></h1>${scene('shell')}<div class="hero-bottom"><div class="hero-lede"><p>Pane works a task in your repository the way Claude Code or Codex does. Its tool results stay in a live runtime as named objects; the model writes TypeScript over them and reads only a preview. macOS and Linux.</p>${install()}<p class="hero-note">Then run <code>pane</code> in a repository. <a class="inline-link" href="#measured">How it measures against Codex ${down}</a></p></div></div></section>${benchmark}${howItWorks(pane.example)}${steps}${featureSection}${limits}${history}`;
 
 const paneHero = `<section class="hero detail-hero"><div class="eyebrow"><span class="status-dot"></span> INSTALL · SIGN IN · WORK</div><h1>GET<br><span class="outline">PANE.</span></h1>${scene('shell')}<div class="hero-bottom"><div class="hero-lede"><p>One line installs Pane and the inference gateway it talks through. Sign in inside Pane with <code>/login</code>.</p>${install()}<p class="hero-note">Only Pane, without the Glasshouse link: <code>… | sh -s -- --pane-only</code></p></div></div></section>`;
 
@@ -82,13 +69,10 @@ const panePage = `${paneHero}${installSection}${signInSection}${useSection}${pan
 
 const glasshousePage = `<section class="hero detail-hero"><div class="eyebrow"><span class="status-dot preview-dot"></span> PREVIEW · NOT YET AT PANE’S READINESS</div><h1>GLASSHOUSE,<br><span class="outline">A PREVIEW.</span></h1>${scene('house')}<div class="hero-bottom"><div class="hero-lede"><p>${glasshouse.intro}</p>${button('Try Pane first', `${root}pane/`, true)}</div></div></section><section id="features" class="section detail-section"><div class="relationship-copy"><h2>WHAT IT<br>IS FOR.</h2><p class="development-note">${glasshouse.status}</p></div>${features(glasshouse.features)}</section><section class="section doc-section"><div class="relationship-copy"><h2>TRY THE<br>PREVIEW.</h2><p>The installer links <code>glasshouse</code> beside <code>pane</code> unless you pass <code>--pane-only</code>. <code>glasshouse doctor</code> finds the harnesses you have installed; <code>glasshouse launch --harness pane</code> starts one as a Glasshouse session. The repository describes the rest, including what is still open.</p></div>${button('Source and status', repo, true)}</section><aside class="other-product"><span>Want one agent that works today?</span><a href="${root}pane/">Get Pane ${arrow}</a></aside>`;
 
+const home = homePage({ install, bird, repo, root, arrow });
 const main = page === 'pane' ? panePage : page === 'glasshouse' ? glasshousePage : home;
 const footer = `<footer><a class="wordmark" href="${root}">${flapBird}<span>PANE</span></a><span class="footer-note">The coding harness of the Glasshouse project · source available, all rights reserved · also in this repository: <a class="inline-link" href="${root}glasshouse/">Glasshouse, a preview</a></span><button class="motion-toggle" type="button" aria-pressed="false">Pause motion</button><a href="${repo}">GitHub ${arrow}</a></footer>`;
 document.querySelector('#app').innerHTML = `${nav}<main id="main">${main}</main>${footer}`;
-const benchRoot = document.querySelector('#bench-viz');
-if (benchRoot) benchChart(benchRoot, paneBench);
-const historyRoot = document.querySelector('#history-viz');
-if (historyRoot) historyTimeline(historyRoot, paneHistory);
 
 // Copy buttons: the clipboard can be refused (an insecure origin, a
 // permission prompt declined), and then the command stays selectable.
@@ -111,6 +95,7 @@ for (const copy of document.querySelectorAll('.copy')) {
 // The wordmark's bird flaps as the composer's does; reduced motion holds
 // it on the still frame, as Pane itself does.
 const still = matchMedia('(prefers-reduced-motion: reduce)');
+startReplay(still);
 let tick = 0;
 setInterval(() => {
   if (still.matches || document.hidden) return;
