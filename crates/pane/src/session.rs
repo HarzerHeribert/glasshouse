@@ -328,6 +328,8 @@ impl Interrupter {
         std::thread::sleep(REAP_GRACE);
         ui::restore_terminal();
         eprintln!("pane: {message}");
+        // Every way out says how to come back, Ctrl-C included.
+        eprintln!("{}", resume::resume_hint(&self.session));
         std::process::exit(exit);
     }
 }
@@ -517,7 +519,10 @@ fn helper_lane(
 /// Runs `session`, in the order the packet's OBJECTIVE fixes: load the
 /// project, resume or start the rollout, `SessionStart`, then one input (or
 /// stdin's, one per line) at a time until the input source is exhausted.
-fn run(args: SessionArgs) -> Result<(), String> {
+fn run(mut args: SessionArgs) -> Result<(), String> {
+    if !resume::choose(&mut args)? {
+        return Ok(());
+    }
     if args.images.len() > 4 {
         return Err("at most four image attachments are accepted per task".into());
     }

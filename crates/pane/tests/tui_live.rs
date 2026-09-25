@@ -59,6 +59,17 @@ impl App {
         helper_model: Option<&str>,
         flags: &[&str],
     ) -> Self {
+        Self::start_seeded(base, bare, helper_model, flags, &|_| {})
+    }
+
+    /// The same start, with `seed` writing into the project before pane runs.
+    fn start_seeded(
+        base: &str,
+        bare: bool,
+        helper_model: Option<&str>,
+        flags: &[&str],
+        seed: &dyn Fn(&std::path::Path),
+    ) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-live-{}-{}",
@@ -66,6 +77,7 @@ impl App {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&root).unwrap();
+        seed(&root);
         if let Some(model) = helper_model {
             std::fs::create_dir_all(root.join(".pane")).unwrap();
             std::fs::write(
@@ -756,6 +768,11 @@ fn live_preflight_shows_the_request_scout_and_actual_effort_before_network_retur
     app.send(b"\x03");
     assert_eq!(app.exited(), 130);
     assert!(!app.screen.screen().alternate_screen());
+    // Every way out says how to come back, Ctrl-C included.
+    assert!(
+        String::from_utf8_lossy(&app.bytes).contains("resume it with:  pane --resume"),
+        "a Ctrl-C exit printed no resume line"
+    );
 }
 
 #[test]
@@ -1841,6 +1858,45 @@ fn live_a_message_sent_while_working_is_queued_and_becomes_the_next_task() {
     thread::sleep(Duration::from_millis(100));
     app.send(b"\x03");
     assert_eq!(app.exited(), 130);
+}
+
+/// A bare `--resume` asks which session, the way a person finds one: by
+/// what they asked in it. A session's `.events.jsonl` is not a session.
+#[test]
+fn a_bare_resume_opens_a_picker_of_this_folders_sessions() {
+    let seed = |root: &std::path::Path| {
+        let sessions = root.join(".pane/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let turn = |text: &str| {
+            format!(
+                "{{\"kind\":\"turn\",\"session_id\":\"x\",\"turn\":1,\"role\":\"user\",\"text\":\"{text}\",\"blocks\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}\n"
+            )
+        };
+        std::fs::write(
+            sessions.join("tlaaaa-1.jsonl"),
+            turn("build a habit tracker"),
+        )
+        .unwrap();
+        std::fs::write(sessions.join("tlaaaa-1.events.jsonl"), "{}\n").unwrap();
+        std::fs::write(sessions.join("tlbbbb-2.jsonl"), turn("fix the flaky test")).unwrap();
+    };
+    let mut app = App::start_seeded("http://127.0.0.1:1", false, None, &["--resume"], &seed);
+    app.contains("Resume a session");
+    app.contains("build a habit tracker");
+    app.contains("fix the flaky test");
+    assert!(
+        !app.screen.screen().contents().contains(".events"),
+        "an event log is listed as a session"
+    );
+    app.send(b"habit");
+    app.wait("the search narrows the list", |screen| {
+        !screen.contents().contains("fix the flaky test")
+    });
+    app.send(b"\r");
+    app.contains("PANE /");
+    app.contains("build a habit tracker");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
 }
 
 /// An Escape whose task answered before its cell boundary was never read,

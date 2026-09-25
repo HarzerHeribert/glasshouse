@@ -131,6 +131,9 @@ fn resumable(root: &Path) -> Vec<(String, PathBuf, SystemTime)> {
             let path = entry.path();
             let id = path.file_stem()?.to_str()?.to_string();
             (path.extension()? == "jsonl").then_some(())?;
+            // `<id>.events.jsonl` sits beside every session and is not one:
+            // counted, it was the newest file and `--resume` resumed it.
+            (!id.contains('.')).then_some(())?;
             let modified = entry.metadata().ok()?.modified().ok()?;
             Some((id, path, modified))
         })
@@ -146,6 +149,207 @@ fn resumable(root: &Path) -> Vec<(String, PathBuf, SystemTime)> {
 /// The one line a person needs to get back in.
 pub(super) fn resume_hint(id: &SessionId) -> String {
     format!("session {id} — resume it with:  pane --resume {id}")
+}
+
+/// One row of the picker: a session, and what a person recognises it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pickable {
+    id: String,
+    age: String,
+    /// The first thing the person asked in it.
+    title: String,
+    prompts: usize,
+}
+
+/// This folder's sessions as the picker lists them, newest first. A person's
+/// own prompts are the turns that carry `blocks`; the synthetic ones Pane
+/// writes (a cell's result, a stop) do not.
+fn pickable(root: &Path) -> Vec<Pickable> {
+    resumable(root)
+        .into_iter()
+        .map(|(id, path, modified)| {
+            let asked: Vec<String> = fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|entry| {
+                    entry["kind"] == "turn"
+                        && entry["role"] == "user"
+                        && entry.get("blocks").is_some()
+                })
+                .filter_map(|entry| entry["text"].as_str().map(str::to_string))
+                .collect();
+            let age = SystemTime::now()
+                .duration_since(modified)
+                .map_or_else(|_| "just now".to_string(), |since| ago(since.as_secs()));
+            Pickable {
+                id,
+                age,
+                title: asked
+                    .first()
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_else(|| "(nothing asked yet)".into()),
+                prompts: asked.len(),
+            }
+        })
+        .collect()
+}
+
+/// A bare `--resume` at a terminal asks which session; anywhere else it is
+/// the newest. `false` is a person who closed the picker without choosing.
+pub(super) fn choose(args: &mut SessionArgs) -> Result<bool, String> {
+    use std::io::IsTerminal;
+    if args.resume.as_deref() != Some("")
+        || args.task.is_some()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+    {
+        return Ok(true);
+    }
+    match pick(&args.root)? {
+        Some(id) => {
+            args.resume = Some(id);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// `pane --resume` in a terminal: this folder's sessions to choose from, the
+/// way a person finds one -- by when, and by what they asked. `None` is a
+/// person who closed it without choosing.
+pub(super) fn pick(root: &Path) -> Result<Option<String>, String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
+    use ratatui::layout::Rect;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let sessions = pickable(root);
+    if sessions.is_empty() {
+        return Err("nothing to resume in this folder yet".into());
+    }
+    let folder = root
+        .canonicalize()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| ".".into());
+    enable_raw_mode().map_err(|e| format!("could not open the picker: {e}"))?;
+    let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
+    let restore = || {
+        let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    };
+    let mut terminal =
+        match ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                restore();
+                return Err(format!("could not open the picker: {error}"));
+            }
+        };
+    let mut query = String::new();
+    let mut selected = 0usize;
+    let chosen = loop {
+        let shown: Vec<&Pickable> = sessions
+            .iter()
+            .filter(|s| {
+                let q = query.to_lowercase();
+                q.is_empty() || s.title.to_lowercase().contains(&q) || s.id.contains(&q)
+            })
+            .collect();
+        selected = selected.min(shown.len().saturating_sub(1));
+        let _ = terminal.draw(|frame| {
+            let area = frame.area();
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Resume a session · {folder} "));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let width = inner.width as usize;
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(" Search  ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(format!("{query}▏")),
+                ]),
+                Line::from(""),
+            ];
+            let room = inner.height.saturating_sub(4) as usize;
+            let start = selected.saturating_sub(room.saturating_sub(1));
+            for (i, s) in shown.iter().enumerate().skip(start).take(room) {
+                let right = format!(
+                    "{} prompt{}  {}",
+                    s.prompts,
+                    if s.prompts == 1 { "" } else { "s" },
+                    s.id
+                );
+                let left = format!(" {} {:<12} ", if i == selected { "›" } else { " " }, s.age);
+                let space = width.saturating_sub(left.chars().count() + right.chars().count() + 2);
+                let title: String = if s.title.chars().count() > space {
+                    s.title
+                        .chars()
+                        .take(space.saturating_sub(1))
+                        .chain(['…'])
+                        .collect()
+                } else {
+                    s.title.clone()
+                };
+                let pad = " ".repeat(space.saturating_sub(title.chars().count()));
+                let style = if i == selected {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(left, style),
+                    Span::styled(format!("{title}{pad}  "), style),
+                    Span::styled(right, style.add_modifier(Modifier::DIM)),
+                ]));
+            }
+            if shown.is_empty() {
+                lines.push(Line::from("   nothing matches"));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+            let foot = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+            frame.render_widget(
+                Paragraph::new(" ↑↓ choose · Enter resume · type to search · Esc cancel")
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                foot,
+            );
+        });
+        let Ok(Event::Key(key)) = event::read() else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc => break None,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+            KeyCode::Enter => break shown.get(selected).map(|s| s.id.clone()),
+            KeyCode::Up => selected = selected.saturating_sub(1),
+            KeyCode::Down => selected = (selected + 1).min(shown.len().saturating_sub(1)),
+            KeyCode::PageUp => selected = selected.saturating_sub(10),
+            KeyCode::PageDown => selected = (selected + 10).min(shown.len().saturating_sub(1)),
+            KeyCode::Backspace => {
+                query.pop();
+                selected = 0;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                query.push(c);
+                selected = 0;
+            }
+            _ => {}
+        }
+    };
+    restore();
+    Ok(chosen)
 }
 
 /// Which session this run is, and where its turns go.
