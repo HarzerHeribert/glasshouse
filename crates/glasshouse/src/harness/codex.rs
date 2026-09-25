@@ -68,9 +68,10 @@ const HOOK_EVENTS: &[&str] = &[
 /// check can be driven from a tool call.
 ///
 /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `CATALOGUE_OBSERVED_VERSION`.
-/// Re-read 2026-09-12 from the installed 0.154.0 binary's `HookEventsToml`:
-/// all twelve variants above are unchanged. No hooks were installed or enabled.
-pub const CATALOGUE_OBSERVED_VERSION: &str = "0.154.0";
+/// Re-read 2026-09-25 from the installed 0.155.1 binary's `HookEventsToml`:
+/// all twelve variants above are unchanged, in the same order. No hooks were
+/// installed or enabled.
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.155.1";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool

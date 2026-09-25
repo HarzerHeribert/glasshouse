@@ -1997,7 +1997,7 @@ mod settings_tests {
         let intent = state.take_provider_probe_intent().expect("a request");
         assert_eq!(intent.kind, ProbeKind::ModelRefresh);
         assert_eq!(intent.target, ProbeTarget::ModelList);
-        assert_eq!(probe_endpoint(&intent), "http://0.0.0.0:4000/models");
+        assert_eq!(probe_endpoint(&intent), "http://localhost:4000/models");
     }
 
     /// **Phase 9D line 1's own words: "before enabling it for routing".**

@@ -468,16 +468,19 @@ fn nvidia_serves_chat_only_at_the_documented_base_url() {
 // --- Groq (PACKET-QUOTA-LIVE) -----------------------------------------
 
 #[test]
-fn groq_serves_chat_only_at_the_live_base_url() {
+fn groq_serves_chat_and_its_documented_responses_api_at_the_live_base_url() {
     let groq = template("groq").expect("groq is a built-in template");
     let chat = groq
         .serves(WireProtocol::OpenAiChat)
         .expect("groq serves openai-chat");
     assert_eq!(chat.base_url, "https://api.groq.com/openai/v1");
+    let responses = groq
+        .serves(WireProtocol::OpenAiResponses)
+        .expect("Groq documents a Responses API at the same base");
+    assert_eq!(responses.base_url, chat.base_url);
     assert!(
-        groq.serves(WireProtocol::OpenAiResponses).is_none(),
-        "no Responses endpoint was established for Groq — a provider serving only \
-         openai-chat must not answer for openai-responses"
+        !responses.streaming.is_verified(),
+        "documented, not probed: nothing about streaming is claimed"
     );
     assert!(
         groq.model_list_endpoint.is_verified(),
@@ -487,22 +490,14 @@ fn groq_serves_chat_only_at_the_live_base_url() {
     assert!(groq.headers.is_empty());
 }
 
-/// A provider serving only `openai-chat` cannot back Codex, whose
-/// `wire_api` dropped `"chat"` in 0.149.1 — the module documentation's
-/// own rule, and NVIDIA's template records the identical consequence.
-/// Groq is exactly that shape, so the honest proof is that the routing
-/// constraint itself refuses it, not a configuration that would compose
-/// today and only fail once Codex started rejecting it.
+/// Groq documents a Responses API, so a Codex-shaped (openai-responses)
+/// routing filter keeps it.
 #[test]
-fn groq_alone_cannot_satisfy_a_codex_routed_session() {
+fn groq_can_back_a_codex_routed_session_on_its_responses_api() {
     let providers = vec![template("groq").expect("groq is a built-in template")];
     let candidates =
         ProtocolCompatibleProviders::for_protocol(&providers, WireProtocol::OpenAiResponses);
-    assert!(
-        candidates.is_empty(),
-        "Groq declares no openai-responses support, so it must not survive a \
-         Codex-shaped (openai-responses) routing filter"
-    );
+    assert!(!candidates.is_empty());
 }
 
 // --- line 416: LiteLLM -------------------------------------------------
@@ -513,7 +508,15 @@ fn litellm_serves_chat_with_a_verified_model_list_and_no_credential_variable() {
     let chat = litellm
         .serves(WireProtocol::OpenAiChat)
         .expect("litellm serves openai-chat");
-    assert_eq!(chat.base_url, "http://0.0.0.0:4000");
+    // `localhost`, not the proxy's `0.0.0.0` bind address.
+    assert_eq!(chat.base_url, "http://localhost:4000");
+    assert_eq!(
+        litellm
+            .serves(WireProtocol::AnthropicMessages)
+            .expect("the proxy serves Anthropic /v1/messages")
+            .base_url,
+        "http://localhost:4000"
+    );
     assert!(
         litellm.model_list_endpoint.is_verified(),
         "LiteLLM's documented GET /models must be Verified, not Unverified"

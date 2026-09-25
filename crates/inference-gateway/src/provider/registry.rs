@@ -380,7 +380,7 @@ mod tests {
 
     /// A provider whose base URL happens to be `localhost` — a self-hosted
     /// LiteLLM proxy, which this project's own template points at
-    /// `http://0.0.0.0:4000` — must not be reclassified as local inference
+    /// `http://localhost:4000` — must not be reclassified as local inference
     /// on that basis. Locality is decided by which server this is, not by
     /// which address it answers on today.
     #[test]

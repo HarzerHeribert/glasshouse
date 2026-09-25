@@ -231,7 +231,7 @@ pub fn unverified_support(protocol: WireProtocol, base_url: &str) -> ProtocolSup
 
 /// A provider that declares exactly one protocol and nothing beyond it: no
 /// model-list endpoint, no usage telemetry, no extra headers established.
-/// The shape seven of [`templates`]'s built-ins share verbatim; the
+/// The shape several of [`templates`]'s built-ins share verbatim; the
 /// providers with a second protocol, a verified endpoint, or a header stay
 /// spelled out as full [`Provider`] literals because this helper would not
 /// save them anything true.
@@ -313,10 +313,13 @@ pub fn templates() -> Vec<Provider> {
         },
         Provider {
             name: "unorouter".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://api.unorouter.com/v1",
-            )],
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "https://api.unorouter.com/v1"),
+                // unorouter.com/en/docs/platform/quickstart, read 2026-09-25:
+                // native clients such as Claude Code use the bare host.
+                // Documented, not probed.
+                unverified_support(WireProtocol::AnthropicMessages, "https://api.unorouter.com"),
+            ],
             model_list_endpoint: Declared::verified(
                 true,
                 "GET https://api.unorouter.com/v1/models answered 200 with 374 entries under \
@@ -347,30 +350,41 @@ pub fn templates() -> Vec<Provider> {
         // nothing about `/models`. The full control run is in the module
         // documentation. Promoting this needs one authenticated request, not
         // another unauthenticated one.
-        unverified_provider(
-            "zai",
-            WireProtocol::OpenAiChat,
-            "https://api.z.ai/api/paas/v4",
-            vec!["ZAI_API_KEY".to_owned()],
-        ),
+        //
+        // Anthropic Messages at `/api/anthropic`: docs.z.ai/devpack/tool/claude,
+        // read 2026-09-25, documented and not probed. The GLM Coding Plan's
+        // chat base takes a different key class and is its own template,
+        // `zai-coding`, in `documented.rs`.
+        Provider {
+            name: "zai".to_owned(),
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "https://api.z.ai/api/paas/v4"),
+                unverified_support(WireProtocol::AnthropicMessages, "https://api.z.ai/api/anthropic"),
+            ],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec!["ZAI_API_KEY".to_owned()],
+            headers: vec![],
+        },
         // Kilo and Nous, both added 2026-08-26 from a live `GET /models` —
         // see the module documentation. Until that date both were named in
         // `DELIBERATELY_UNTEMPLATED` precisely because no endpoint had been
         // read for either.
         Provider {
             name: "kilo".to_owned(),
-            // `kilo.ai`, not `kilocode.ai`. The old host answers `308` to
-            // this one; a template pointing at it would only work for a
-            // client that follows redirects, and a POST that follows a `308`
-            // is not something to depend on.
+            // The Kilo AI Gateway, per kilo.ai/docs/gateway, read
+            // 2026-09-25; the `kilo.ai/api/openrouter` route probed on
+            // 2026-08-26 is no longer documented.
             protocols: vec![unverified_support(
                 WireProtocol::OpenAiChat,
-                "https://kilo.ai/api/openrouter",
+                "https://api.kilo.ai/api/gateway",
             )],
             model_list_endpoint: Declared::verified(
                 true,
-                "GET https://kilo.ai/api/openrouter/models answered 200 with 367 entries \
-                 under a top-level `data` array, probed 2026-08-26",
+                "GET https://api.kilo.ai/api/gateway/models answered 200 with 395 entries \
+                 under a top-level `data` array, unauthenticated, while the sibling path \
+                 /api/gateway/glasshouse-nonexistent-control answered 405 on the same host, \
+                 probed 2026-09-25",
             ),
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["KILO_API_KEY".to_owned()],
@@ -393,24 +407,52 @@ pub fn templates() -> Vec<Provider> {
         },
         // No credential environment variable was established for
         // opencode-zen — see the module documentation on guessing.
-        unverified_provider(
-            "opencode-zen",
-            WireProtocol::OpenAiChat,
-            "https://opencode.ai/zen/v1",
-            vec![],
-        ),
-        unverified_provider(
-            "ollama",
-            WireProtocol::OpenAiChat,
-            "http://localhost:11434/v1",
-            vec![],
-        ),
-        unverified_provider(
-            "llama-cpp",
-            WireProtocol::OpenAiChat,
-            "http://localhost:8080/v1",
-            vec![],
-        ),
+        //
+        // Zen serves each model family on its own protocol
+        // (opencode.ai/docs/zen/, read 2026-09-25): chat for DeepSeek,
+        // MiniMax, GLM, Kimi and the free models, Responses for GPT and
+        // Grok, Messages for Claude and Qwen. Documented, not probed.
+        Provider {
+            name: "opencode-zen".to_owned(),
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "https://opencode.ai/zen/v1"),
+                unverified_support(WireProtocol::OpenAiResponses, "https://opencode.ai/zen/v1"),
+                unverified_support(WireProtocol::AnthropicMessages, "https://opencode.ai/zen"),
+            ],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec![],
+            headers: vec![],
+        },
+        // A local Ollama also serves `/v1/responses` and Anthropic
+        // `/v1/messages` (docs.ollama.com, read 2026-09-25). Documented,
+        // not probed. Ollama's hosted service is `ollama-cloud`.
+        Provider {
+            name: "ollama".to_owned(),
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "http://localhost:11434/v1"),
+                unverified_support(WireProtocol::OpenAiResponses, "http://localhost:11434/v1"),
+                unverified_support(WireProtocol::AnthropicMessages, "http://localhost:11434"),
+            ],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec![],
+            headers: vec![],
+        },
+        // llama.cpp's server binds `127.0.0.1:8080` by default and serves
+        // `/v1/responses` beside chat (tools/server/README.md, read
+        // 2026-09-25). Documented, not probed.
+        Provider {
+            name: "llama-cpp".to_owned(),
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "http://127.0.0.1:8080/v1"),
+                unverified_support(WireProtocol::OpenAiResponses, "http://127.0.0.1:8080/v1"),
+            ],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec![],
+            headers: vec![],
+        },
         // `docs.api.nvidia.com/nim/reference/llm-apis` gives base
         // `https://integrate.api.nvidia.com` with `POST
         // /v1/chat/completions`; NVIDIA's own `build.nvidia.com` model
@@ -433,14 +475,13 @@ pub fn templates() -> Vec<Provider> {
             // (`.agent-runtime/probe-quota-headers-2026-08-27.md`):
             // `GET https://api.groq.com/openai/v1/models` answered 200 with
             // a real catalogue, and `POST .../chat/completions` answered
-            // 200 too. `openai-chat` only — no Responses endpoint was
-            // established, so this template cannot back Codex, which needs
-            // `openai-responses`, the same consequence NVIDIA's entry above
-            // records.
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://api.groq.com/openai/v1",
-            )],
+            // 200 too. Groq also documents a Responses API at the same base
+            // (console.groq.com/docs/responses-api, read 2026-09-25) --
+            // documented, not probed.
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "https://api.groq.com/openai/v1"),
+                unverified_support(WireProtocol::OpenAiResponses, "https://api.groq.com/openai/v1"),
+            ],
             model_list_endpoint: Declared::verified(
                 true,
                 "GET https://api.groq.com/openai/v1/models answered 200 with a real \
@@ -460,13 +501,15 @@ pub fn templates() -> Vec<Provider> {
         },
         Provider {
             name: "litellm".to_owned(),
-            // LiteLLM's quick-start and `proxy/user_keys` pages both use
-            // exactly `http://0.0.0.0:4000` as the client `base_url`. Written
-            // as read — not "fixed" to `localhost`. Read 2026-08-25.
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "http://0.0.0.0:4000",
-            )],
+            // `localhost:4000`: the docs' `0.0.0.0:4000` is the proxy's bind
+            // address, which a client on another OS cannot always dial. The
+            // proxy also serves Anthropic `/v1/messages` at the same root
+            // (docs.litellm.ai/docs/anthropic_unified, read 2026-09-25).
+            // Documented, not probed.
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "http://localhost:4000"),
+                unverified_support(WireProtocol::AnthropicMessages, "http://localhost:4000"),
+            ],
             model_list_endpoint: Declared::verified(
                 true,
                 "LiteLLM's proxy documentation lists `GET /models - available models on \
@@ -497,12 +540,28 @@ pub fn templates() -> Vec<Provider> {
         //
         // History: design-decisions.md, "Trims: provider/mod.rs",
         // gemini entry.
-        unverified_provider(
-            "gemini",
-            WireProtocol::GeminiGenerateContent,
-            "https://generativelanguage.googleapis.com",
-            vec!["GEMINI_API_KEY".to_owned()],
-        ),
+        //
+        // Beside the native protocol, Google documents an OpenAI-compatible
+        // chat endpoint (ai.google.dev/gemini-api/docs/openai, read
+        // 2026-09-25) whose base does carry its version. Documented, not
+        // probed.
+        Provider {
+            name: "gemini".to_owned(),
+            protocols: vec![
+                unverified_support(
+                    WireProtocol::GeminiGenerateContent,
+                    "https://generativelanguage.googleapis.com",
+                ),
+                unverified_support(
+                    WireProtocol::OpenAiChat,
+                    "https://generativelanguage.googleapis.com/v1beta/openai",
+                ),
+            ],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec!["GEMINI_API_KEY".to_owned()],
+            headers: vec![],
+        },
         // TypeSafe AI's System One decision protocol. Read 2026-09-16 from
         // docs.typesafe.ai, unverified against a live endpoint
         // (`docs/product/evidence/phase-66.md`, *Provider facts*) — no probe
