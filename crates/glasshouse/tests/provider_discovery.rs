@@ -74,6 +74,7 @@ const EXPECTED_DISCOVERY_MATRIX: &[(&str, bool)] = &[
     ("venice", false),
     ("chutes", false),
     ("lm-studio", false),
+    ("gemini-openai", false),
     ("vllm", false),
     // T3 (2026-09-02): Google AI Studio, declared through the unverified
     // generic shape -- no model-list endpoint is claimed until a live probe
@@ -208,8 +209,8 @@ fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_seven() 
 
     assert_eq!(
         all_templates.len(),
-        42,
-        "total built-in templates count changed from 42 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
+        43,
+        "total built-in templates count changed from 43 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
         all_templates.len()
     );
 
