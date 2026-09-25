@@ -579,7 +579,10 @@ fn every_built_in_template_ships_no_header_unless_one_was_established() {
 /// byte against the pre-refactor capture. Regenerating the whole file
 /// would silently retire that claim. GH-GATEWAY-SYSTEMONE-CARRIER's
 /// `typesafe` entry is a second such splice, inserted after `gemini` and
-/// before the two generic templates — no other line moved.
+/// before the two generic templates — no other line moved. The 26
+/// templates of `provider/documented.rs` (2026-09-25) are a third splice,
+/// appended after the generic templates; the file before them is its
+/// unchanged prefix, checked when it was extended.
 #[test]
 fn templates_output_is_unchanged_by_the_literal_dedup_refactor() {
     let pinned = include_str!("testdata/templates_pin.txt");

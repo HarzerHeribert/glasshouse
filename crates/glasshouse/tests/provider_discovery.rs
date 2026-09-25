@@ -48,6 +48,33 @@ const EXPECTED_DISCOVERY_MATRIX: &[(&str, bool)] = &[
     ("litellm", true),
     ("openai-compatible", false),
     ("anthropic-compatible", false),
+    // provider/documented.rs: from each provider's own docs, none probed.
+    ("openai", false),
+    ("mistral", false),
+    ("deepseek", false),
+    ("xai", false),
+    ("moonshot", false),
+    ("zai-coding", false),
+    ("minimax", false),
+    ("together", false),
+    ("fireworks", false),
+    ("cerebras", false),
+    ("perplexity", false),
+    ("cohere", false),
+    ("nebius", false),
+    ("deepinfra", false),
+    ("sambanova", false),
+    ("novita", false),
+    ("huggingface", false),
+    ("ollama-cloud", false),
+    ("vercel", false),
+    ("baseten", false),
+    ("mimo", false),
+    ("stepfun", false),
+    ("venice", false),
+    ("chutes", false),
+    ("lm-studio", false),
+    ("vllm", false),
     // T3 (2026-09-02): Google AI Studio, declared through the unverified
     // generic shape -- no model-list endpoint is claimed until a live probe
     // establishes one, so it offers no discovery.
@@ -181,8 +208,8 @@ fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_seven() 
 
     assert_eq!(
         all_templates.len(),
-        16,
-        "total built-in templates count changed from 16 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
+        42,
+        "total built-in templates count changed from 42 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
         all_templates.len()
     );
 
