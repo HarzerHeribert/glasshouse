@@ -192,7 +192,7 @@ fn load_candidates(
     candidates: impl IntoIterator<Item = PathBuf>,
     limits: &mut Limits,
 ) -> BTreeMap<(PathBuf, PathBuf), String> {
-    let mut docs = BTreeMap::new();
+    let mut docs: BTreeMap<(PathBuf, PathBuf), String> = BTreeMap::new();
     for candidate in candidates {
         if limits.docs >= MAX_DOCS {
             limits.omitted.insert("document count limit");
@@ -269,6 +269,15 @@ fn load_candidates(
             });
             continue;
         };
+        // A copy of a document already in this scope -- an AGENTS.md
+        // duplicated as CLAUDE.md for another harness -- says nothing new
+        // and would be sent with every request twice.
+        if docs
+            .iter()
+            .any(|((_, held), known)| *held == scope && known.trim() == text.trim())
+        {
+            continue;
+        }
         limits.bytes += text.len();
         limits.docs += 1;
         docs.insert((resolved, scope), text);

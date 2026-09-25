@@ -40,6 +40,17 @@ fn nested_scopes_apply_root_to_target_and_exclude_siblings() {
 }
 
 #[test]
+fn an_agents_md_copied_as_claude_md_is_sent_once() {
+    let root = fixture("copies");
+    std::fs::write(root.join("AGENTS.md"), "RUN_THE_GATE\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "RUN_THE_GATE\n\n").unwrap();
+    let profile = Profile::compile(&root, None);
+    let rendered = instructions::root(&profile);
+    assert_eq!(rendered.matches("RUN_THE_GATE").count(), 1, "{rendered}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[cfg(unix)]
 fn symlink_escape_and_denied_scope_are_never_read() {
     use std::os::unix::fs::symlink;
