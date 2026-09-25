@@ -491,6 +491,14 @@ impl Store {
             }
             (Some((path, text)), false) => {
                 let parsed = parse_document(path, text, Scope::Local)?;
+                // This file is preserved, never rewritten, so a retired choice
+                // in it is said rather than removed.
+                for (key, word) in &parsed.retired {
+                    notices.push(format!(
+                        "`{key} = {word}` in `{}` is no longer a choice; Pane uses its default.",
+                        path.display()
+                    ));
+                }
                 let mut conflicts: Vec<String> = Vec::new();
                 for (key, value) in &parsed.flat {
                     if local.flat.get(key).is_some_and(|saved| saved != value) {

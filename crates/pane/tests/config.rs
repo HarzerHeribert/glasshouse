@@ -63,6 +63,12 @@ impl Drop for NoGlobalConfig {
     }
 }
 
+fn write_project_toml(root: &Path, text: &str) {
+    let dir = root.join(".pane");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.toml"), text).unwrap();
+}
+
 fn write_pane_toml(root: &Path, text: &str) {
     let dir = root.join(".glasshouse");
     fs::create_dir_all(&dir).unwrap();
@@ -156,11 +162,31 @@ fn helper_preflight_scope_defaults_to_auto_and_parses_always() {
         PreflightScope::Always
     );
 
+    // A word that is not a choice -- what an upgrade leaves behind -- does
+    // not stop Pane: it runs on the default and names what it dropped.
     let root = scratch_dir("preflight-scope-unknown");
-    write_pane_toml(&root, "[helpers]\npreflight_scope = \"sometimes\"\n");
-    let error = PaneConfig::load(&root).unwrap_err();
-    assert!(error.contains("preflight_scope"), "{error}");
-    assert_eq!(error.lines().count(), 1);
+    write_project_toml(&root, "[helpers]\npreflight_scope = \"sometimes\"\n");
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.preflight_scope,
+        PreflightScope::default()
+    );
+    assert_retired(&root, "helpers.preflight_scope", "sometimes");
+}
+
+/// The settings store reports `key = word` as a choice it dropped.
+fn assert_retired(root: &Path, key: &str, word: &str) {
+    let loaded = pane::settings::Store::new(root)
+        .unwrap()
+        .load(None)
+        .unwrap();
+    assert!(
+        loaded
+            .retired
+            .iter()
+            .any(|retired| retired.key == key && retired.word == word),
+        "{key} = {word} was not reported: {:?}",
+        loaded.retired
+    );
 }
 
 #[test]
@@ -274,21 +300,17 @@ fn completion_parses_both_styles_and_defaults_to_silent() {
     );
 }
 
+/// A third completion style is not a choice: Pane runs on the default and
+/// names what it dropped. A value that is not even a word is still refused.
 #[test]
-fn a_third_completion_style_is_refused_with_one_sentence() {
+fn a_third_completion_style_is_dropped_and_a_non_word_refused() {
     let root = scratch_dir("completion-bogus");
-    write_pane_toml(&root, "[helpers]\ncompletion = \"chatty\"\n");
-    let err = PaneConfig::load(&root).unwrap_err();
-    assert!(err.contains("completion"), "{err}");
-    assert!(
-        err.contains("chatty"),
-        "the refusal names what was written: {err}"
+    write_project_toml(&root, "[helpers]\ncompletion = \"chatty\"\n");
+    assert_eq!(
+        PaneConfig::load(&root).unwrap().helpers.completion,
+        CompletionStyle::default()
     );
-    assert!(
-        err.contains("silent") && err.contains("recap"),
-        "and what would have been accepted: {err}"
-    );
-    assert_eq!(err.lines().count(), 1, "refused with one sentence: {err}");
+    assert_retired(&root, "helpers.completion", "chatty");
 
     let root = scratch_dir("completion-not-a-string");
     write_pane_toml(&root, "[helpers]\ncompletion = true\n");
