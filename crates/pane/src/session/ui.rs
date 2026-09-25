@@ -184,6 +184,8 @@ pub(super) enum Update {
     Model(String),
     /// Whether helpers run and what the subagents are, after a change.
     Tiers(bool, String),
+    /// A chip offered first on the opening screen: its label, and what it types.
+    Suggest(String, String),
     Delta(String),
     ToolDelta(String),
     /// Readable reasoning as it arrives (`wire::StreamDelta::Reasoning`).
@@ -447,6 +449,12 @@ impl LiveUi {
     pub(super) fn model(&self, model: &str) {
         let _ = self.updates.send(Update::Model(model.into()));
     }
+    pub(super) fn suggest(&self, label: &str, types: &str) {
+        let _ = self
+            .updates
+            .send(Update::Suggest(label.into(), types.into()));
+    }
+
     pub(super) fn tiers(&self, helpers_on: bool, subagents: &str) {
         let _ = self
             .updates
@@ -1003,6 +1011,14 @@ fn run(
                     busy = true;
                 }
                 Update::Model(model) => state.model = Some(model),
+                Update::Suggest(label, types) => {
+                    if state.suggestions.is_empty() {
+                        state.suggestions =
+                            crate::workbench::voice::suggestions(state.speaking(), None, 0, false);
+                    }
+                    state.suggestions.retain(|(_, said)| *said != types);
+                    state.suggestions.insert(0, (label, types));
+                }
                 Update::Tiers(helpers_on, subagents) => {
                     state.helpers_on = helpers_on;
                     state.subagents = Some(subagents);

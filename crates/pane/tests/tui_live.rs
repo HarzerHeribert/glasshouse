@@ -823,7 +823,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
     let (base, requests) = provider();
     let mut app = App::start(&base);
     app.contains("fixture-model");
-    app.contains("effort ");
+    app.contains("Describe the next step");
     assert!(app.screen.screen().alternate_screen());
     app.send(b"/theme amber\r");
     app.contains("Theme: amber");
@@ -884,7 +884,7 @@ fn live_composition_completion_model_selection_busy_input_resize_and_exit() {
         app.resize(width);
         app.contains_line("LIVE RESULT INTACT");
         app.wait("composer survives resize", |screen| {
-            screen.contents().contains("next draft") && screen.contents().contains("effort ")
+            screen.contents().contains("next draft") && screen.contents().contains("╰─")
         });
         if width >= 120 {
             app.contains("telemetry");
@@ -1241,13 +1241,13 @@ fn theme_picker_applies_local_palettes_without_a_request() {
 fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     let mut app = App::start("http://127.0.0.1:1");
     app.contains("PANE /");
-    app.contains("effort ");
+    app.contains("Describe the next step");
     app.send(b"a draft mid-thought");
     app.contains("a draft mid-thought");
     app.send(b"\x06");
     app.wait("header and status gone after Ctrl-F", |screen| {
         let screen = screen.contents();
-        !screen.contains("PANE /") && !screen.contains("effort ")
+        !screen.contains("PANE /") && !screen.contains("⟨ Settings ⟩")
     });
     // The composer is not part of the hide-set, and neither is what is in it.
     app.contains("a draft mid-thought");
@@ -1255,7 +1255,7 @@ fn ctrl_f_takes_the_screen_and_gives_it_back_with_the_draft_intact() {
     app.contains("a draft mid-thought still typing");
     app.send(b"\x06");
     app.contains("PANE /");
-    app.contains("effort ");
+    app.contains("⟨ Settings ⟩");
     app.contains("a draft mid-thought still typing");
     app.send(b"\x15/exit\r");
     assert_eq!(app.exited(), 0);
@@ -1605,16 +1605,24 @@ fn settings_tabs_name_their_destinations_and_escape_creates_nothing() {
     app.contains("SETTINGS");
     app.contains("Global");
     app.contains("Project");
-    app.contains(&project.display().to_string());
+    app.contains("This project only · .pane/config.toml");
+    app.contains("⟨ Off ⟩ ⟨ On ⟩");
+    assert!(
+        !app.screen
+            .screen()
+            .contents()
+            .contains(&project.display().to_string()),
+        "the full path is not on the sheet"
+    );
 
     // Tab switches scope without saving. The destination shown must switch
     // with the selected tab, so a Global label cannot conceal a Project
     // write (or vice versa).
     app.send(b"\x1b[17~");
-    app.contains(&global.display().to_string());
+    app.contains("Your settings, for every project");
     app.send(b"\x1b");
     app.wait("settings editor closes", |screen| {
-        !screen.contents().contains(&global.display().to_string())
+        !screen.contents().contains("for every project")
     });
     assert!(!project.exists(), "viewing/cancelling created {project:?}");
     assert!(!global.exists(), "viewing/cancelling created {global:?}");
@@ -1974,7 +1982,7 @@ fn workbench_settings_save_directly_and_do_not_consume_the_draft() {
 fn a_setting_chosen_on_the_panel_is_in_force_in_this_session() {
     let (base, _requests) = provider();
     let mut app = App::start(&base);
-    app.contains("effort default");
+    app.contains("fixture-model");
     app.send(b"\x1bOQ"); // F2 opens settings on the everyday category
     app.contains("SETTINGS");
     // Reasoning effort is the second row; one Down and one Right is the

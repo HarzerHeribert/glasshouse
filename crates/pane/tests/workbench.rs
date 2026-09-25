@@ -1273,10 +1273,11 @@ fn a_bare_question_mark_opens_the_key_sheet_and_escape_closes_it() {
 }
 
 /// The composer is a dock: its top edge says what the session is doing and
-/// its bottom edge carries the three everyday chips.
+/// its bottom edge carries a chip for each setting changed from Pane's own
+/// default -- and none at all for someone still on the defaults.
 #[test]
 fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
-    let (c, n, s) = fixture();
+    let (c, n, mut s) = fixture();
     let mut u = Workbench::default();
     let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
     let top = screen
@@ -1286,8 +1287,18 @@ fn the_composer_dock_carries_the_status_above_and_the_chips_below() {
     assert!(top.contains("✓ complete"), "{top}");
     let bottom = screen.lines().last().unwrap();
     assert!(bottom.starts_with("╰─"), "{bottom}");
-    assert!(bottom.contains("⟨ effort default ⟩"), "{bottom}");
-    assert!(bottom.contains("⟨ ◇ helpers off ⟩"), "{bottom}");
+    for default in ["effort", "helpers", "subagents", "stream"] {
+        assert!(
+            !bottom.contains(default),
+            "a default is not a chip: {bottom}"
+        );
+    }
+    s.effort = pane::wire::Effort::High;
+    s.helpers_on = true;
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    let bottom = screen.lines().last().unwrap();
+    assert!(bottom.contains("⟨ effort high ⟩"), "{bottom}");
+    assert!(bottom.contains("⟨ ◇ helpers on ⟩"), "{bottom}");
     assert!(
         u.geometry.hits.iter().any(|(_, a)| *a == Action::Effort),
         "the effort chip is a control"
@@ -1309,13 +1320,7 @@ fn plain_voice_keeps_every_fact_and_drops_the_remarks() {
     s.voice = pane::tui::Voice::Plain;
     let mut u = Workbench::default();
     let plain = text(&draw(&c, &n, &s, &mut u, 140, 40));
-    for fact in [
-        "THIS SESSION",
-        "⟨ effort default ⟩",
-        "✓ EXECUTED",
-        "┃ you",
-        "⟨ Settings ⟩",
-    ] {
+    for fact in ["THIS SESSION", "✓ EXECUTED", "┃ you", "⟨ Settings ⟩"] {
         assert!(playful.contains(fact), "playful lacks {fact}");
         assert!(plain.contains(fact), "plain lacks {fact}");
     }
@@ -1341,6 +1346,7 @@ fn plain_voice_keeps_every_fact_and_drops_the_remarks() {
 #[test]
 fn a_notice_fades_from_the_dock_and_takes_its_undo_with_it() {
     let (c, n, mut s) = fixture();
+    s.effort = pane::wire::Effort::Medium;
     let mut u = Workbench::default();
     draw(&c, &n, &s, &mut u, 100, 40);
     click(&mut u, &mut s, &n, Action::Effort);
@@ -1704,4 +1710,63 @@ fn only_the_newest_live_row_moves() {
             .all(|row| row.contains("writing cell") || row.contains("read ")),
         "only the cell being written moves: {changed:?}"
     );
+}
+
+/// A first screen says only what the header cannot: no model line, no
+/// tagline, no list of commands the `/` hint already leads to.
+#[test]
+fn the_opening_card_repeats_nothing_the_header_says() {
+    let (_, n, s) = fixture();
+    let empty = Conversation::default();
+    let text = words(&doc(&empty, &n, &s, &Workbench::default()));
+    for gone in [
+        "/model changes it",
+        "code · cells",
+        "/settings  ",
+        "test-project",
+    ] {
+        assert!(!text.contains(gone), "{gone:?} is on the opening: {text}");
+    }
+    assert!(text.contains("What should we build?"), "{text}");
+}
+
+/// A cell's tabs are the ones with something behind them, and the model's
+/// sentence that titles the card is not also printed above it.
+#[test]
+fn a_cell_offers_only_the_tabs_it_can_fill_and_says_its_title_once() {
+    let (c, mut n, s) = fixture();
+    let full = words(&doc(&c, &n, &s, &Workbench::default()));
+    assert!(
+        full.contains("Changes +1 −1") && full.contains("⟨ Helpers ⟩"),
+        "{full}"
+    );
+    n.cells[0].changes = None;
+    n.cells[0].helpers.clear();
+    n.cells[0].description = Some("I will inspect the motion guard before changing it.".into());
+    let text = words(&doc(&c, &n, &s, &Workbench::default()));
+    assert!(text.contains("⟨ Cell program ⟩"), "{text}");
+    for gone in ["Changes", "⟨ Helpers ⟩", "open diff"] {
+        assert!(
+            !text.contains(gone),
+            "{gone:?} with nothing behind it: {text}"
+        );
+    }
+    assert_eq!(
+        text.matches("I will inspect the motion guard").count(),
+        1,
+        "{text}"
+    );
+}
+
+/// A failure is said in the transcript and by the dock's own "failed"; it
+/// does not ride the dock a third time.
+#[test]
+fn a_failure_notice_does_not_ride_the_dock() {
+    let (c, n, mut s) = fixture();
+    s.activity = Activity::Failed;
+    s.notice = Some("ERROR: Stopped before the work was confirmed done".into());
+    let mut u = Workbench::default();
+    let screen = text(&draw(&c, &n, &s, &mut u, 100, 40));
+    let dock = screen.lines().find(|l| l.starts_with("╭─")).unwrap();
+    assert!(!dock.contains("Stopped before"), "{dock}");
 }

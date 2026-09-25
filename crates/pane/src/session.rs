@@ -612,7 +612,6 @@ fn run(args: SessionArgs) -> Result<(), String> {
     if let Some(model) = default_decisions {
         config.borrow_mut().decisions.model = Some(model.to_string());
     }
-    session_println!("{}", resume::resume_hint(&session_id));
     if !terminal {
         session_println!(
             "{}",
@@ -1864,7 +1863,7 @@ fn run_task_inner(
     }
     if incomplete {
         let reason = terminal_failure.unwrap_or_else(|| {
-            "The task stopped without confirmed completion; requested work may be unfinished."
+            "Stopped before the work was confirmed done · say what to do next, or ask it to continue."
                 .into()
         });
         task_state.salvage(&reason);

@@ -1067,7 +1067,11 @@ fn dock_top(
         Some("Mouse released · Ctrl-G captures again".to_string())
     } else {
         None
-    };
+    }
+    // A failure is already said where it is read -- the dock's own
+    // "failed" and the row in the transcript -- so it does not ride the dock
+    // a third time.
+    .filter(|notice| !notice.starts_with("ERROR:"));
     if let Some(notice) = &notice
         && used + 8 < a.width
     {
@@ -1147,26 +1151,44 @@ fn dock_bottom(
     let limit = a.right().saturating_sub(rw + 3);
     let mut x = a.x + 3;
     if s.status_line != StatusLine::Hidden {
+        // **A chip says only what differs from Pane's own default.** Four
+        // chips that read "default", "off", "off", "actions" are four words a
+        // newcomer cannot use yet; a setting someone changed is one they
+        // know, and it stays one click from changing back.
+        let effort = s.effort.sent_for(s.model.as_deref().unwrap_or("")).name();
         let items = [
             (
-                format!(
-                    "effort {}",
-                    s.effort.sent_for(s.model.as_deref().unwrap_or("")).name()
-                ),
+                if s.effort == crate::wire::Effort::Default {
+                    String::new()
+                } else {
+                    format!("effort {effort}")
+                },
                 Action::Effort,
             ),
             (
-                format!("◇ helpers {}", if s.helpers_on { "on" } else { "off" }),
+                if s.helpers_on {
+                    "◇ helpers on".to_string()
+                } else {
+                    String::new()
+                },
                 Action::SettingsAt(2),
             ),
             (
                 s.subagents
                     .as_deref()
+                    .filter(|word| *word != "off")
                     .map(|word| format!("subagents {word}"))
                     .unwrap_or_default(),
                 Action::SettingsAt(4),
             ),
-            (format!("stream {}", s.stream.name()), Action::Stream),
+            (
+                if s.stream == crate::tui::Stream::default() {
+                    String::new()
+                } else {
+                    format!("stream {}", s.stream.name())
+                },
+                Action::Stream,
+            ),
         ];
         // The chips sit on a cleared stretch of the edge, one space apart,
         // rather than on top of the rule.
@@ -1658,7 +1680,7 @@ fn draw_settings(
         f,
         a,
         y + 1,
-        &format!("{}", p.path.display()),
+        &saved_in(&p.path, p.scope),
         Tone::Muted,
         s.theme,
     );
@@ -1739,7 +1761,7 @@ fn draw_settings(
                     x,
                     y,
                     a.right(),
-                    &value,
+                    human_value(&value),
                     Action::Setting(i, Some(value.clone())),
                     value == current,
                     Tone::Normal,
@@ -1779,52 +1801,52 @@ fn draw_settings(
         s.theme,
     );
     if let Some(spec) = rows.get(p.selected) {
-        // **Which layer won, in words.** The foot used to read
-        // `session.effort · Saved: inherited · Effective: default
-        // (built-in)`: a dotted key nobody typed, and a three-valued
-        // provenance in a vocabulary the panel never defines. A person
-        // looking at a value wants one thing from this line -- where it
-        // came from, and whether it is theirs.
+        // **The selected row in full, then where its value came from.** The
+        // row itself has room for one clipped line of its description; the
+        // foot has room for the whole of it, and for the one sentence that
+        // says whose value is in force -- never the dotted key, which nobody
+        // types here.
+        let lines = wrap_words(spec.description, a.width.saturating_sub(1) as usize);
+        for (n, line) in lines.iter().take(2).enumerate() {
+            label(f, a, bottom + n as u16, line, Tone::Normal, s.theme);
+        }
         let effective = p.effective(spec.key);
+        let whose = if effective == "unset" {
+            "Not set · Pane uses its own default".to_string()
+        } else {
+            let shown = human_value(&effective);
+            match p.saved(spec.key) {
+                Some(_) => format!(
+                    "{shown} · set in {}",
+                    match p.scope {
+                        crate::settings::Scope::Global => "your global settings",
+                        _ => "this project's settings",
+                    }
+                ),
+                None => format!(
+                    "{shown} · from {}",
+                    match p.origin(spec.key) {
+                        "built-in" => "Pane's own default",
+                        "global" => "your global settings",
+                        "project" => "this project's settings",
+                        other => other,
+                    }
+                ),
+            }
+        };
+        let when = if crate::settings::applies_now(spec.key) {
+            "applies now"
+        } else {
+            "applies from the next session"
+        };
         label(
             f,
             a,
-            bottom,
-            &if effective == "unset" {
-                "Nothing has chosen this yet.".to_string()
-            } else {
-                match p.saved(spec.key) {
-                    Some(_) => format!(
-                        "{effective} — set here, in this {} file",
-                        p.scope.label().to_lowercase()
-                    ),
-                    None => format!(
-                        "{effective} — inherited from {}",
-                        match p.origin(spec.key) {
-                            "built-in" => "Pane's own default",
-                            "global" => "your global settings",
-                            "project" => "this project's settings",
-                            other => other,
-                        }
-                    ),
-                }
-            },
-            Tone::Normal,
-            s.theme,
-        );
-        label(
-            f,
-            a,
-            bottom + 1,
-            if crate::settings::applies_now(spec.key) {
-                "In force now, and saved for next time."
-            } else {
-                "Saved. This session keeps what it started with; the next one takes it."
-            },
+            bottom + 2,
+            &format!("{whose} · {when}"),
             Tone::Muted,
             s.theme,
         );
-        label(f, a, bottom + 2, spec.key, Tone::Muted, s.theme);
     }
     if let Some((key, value)) = &p.editing {
         label(
@@ -1862,6 +1884,60 @@ fn draw_settings(
         s.theme,
     );
 }
+/// A setting's value as the panel says it: a switch is On or Off.
+fn human_value(value: &str) -> &str {
+    match value {
+        "true" => "On",
+        "false" => "Off",
+        other => other,
+    }
+}
+
+/// Where a choice is saved, in the words a person uses for it -- never a
+/// temporary directory's full path.
+fn saved_in(path: &std::path::Path, scope: crate::settings::Scope) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let shown = match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path
+            .iter()
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<std::path::PathBuf>()
+            .display()
+            .to_string(),
+    };
+    match scope {
+        crate::settings::Scope::Global => format!("Your settings, for every project · {shown}"),
+        _ => format!("This project only · {shown}"),
+    }
+}
+
+/// Words laid into lines no wider than `width`.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 fn draw_models(
     f: &mut Frame<'_>,
     g: &mut Geometry,

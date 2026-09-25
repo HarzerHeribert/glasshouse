@@ -454,7 +454,19 @@ pub(super) fn at_start(session: &Session<'_>, no_model: bool) {
     }
     let done = progress.done();
     if done < STEPS {
-        session_println!("Setup: {done} of {STEPS} done · /wizard finishes it");
+        let left = STEPS - done;
+        match session.ui {
+            // On the opening screen it is the first thing to press, not a
+            // note that also rode the dock and the card.
+            Some(ui) => ui.suggest(
+                &format!(
+                    "finish setup · {left} step{} left",
+                    if left == 1 { "" } else { "s" }
+                ),
+                "/wizard",
+            ),
+            None => session_println!("Setup: {done} of {STEPS} done · /wizard finishes it"),
+        }
     }
 }
 

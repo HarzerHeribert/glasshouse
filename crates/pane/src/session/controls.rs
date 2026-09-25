@@ -99,10 +99,81 @@ pub(super) fn models(session: &Session<'_>) {
     if scores.is_empty() {
         scores = crate::glasshouse::intelligence(session.glasshouse);
     }
+    if catalogue.is_none() {
+        show(session, unreachable_panel(session, "Models", "/model"));
+        return;
+    }
     show(
         session,
         model_panel(catalogue, tier_models(session)).with_intelligence(scores),
     );
+}
+
+/// Words laid into lines no wider than `width`, continuation lines indented
+/// under a `Why:`/`Fix:` label.
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    let indent = if text.starts_with("Why:") || text.starts_with("Fix:") {
+        "     "
+    } else {
+        ""
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::replace(&mut line, indent.into()));
+        }
+        if !line.trim().is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.trim().is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// What a sign-in or model sheet says when the gateway gave no answer: what
+/// the gateway is for, why it did not answer, what fixes it, and the one
+/// thing to press after. A sheet with only "not reachable" on it was a dead
+/// end on a fresh install.
+fn unreachable_panel(session: &Session<'_>, title: &str, retry: &str) -> Panel {
+    let why = session.gateway.why_unreachable();
+    let fix = if why.contains("not installed") {
+        "The Pane installer puts it beside `pane`; run the installer again, then try again."
+    } else {
+        "Fix what it said, then try again."
+    };
+    // A sheet row is one line; the reason and the fix are laid into as
+    // many as they need rather than clipped mid-word at the edge.
+    let mut rows = Vec::new();
+    for paragraph in [
+        "Pane signs in and lists models through its inference gateway, and the gateway did not answer.".to_string(),
+        String::new(),
+        format!("Why: {why}"),
+        format!("Fix: {fix}"),
+        String::new(),
+    ] {
+        let lines = wrap_line(&paragraph, 70);
+        if lines.is_empty() {
+            rows.push(tui::PanelRow {
+                text: String::new(),
+                command: None,
+            });
+        }
+        rows.extend(lines.into_iter().map(|text| tui::PanelRow {
+            text,
+            command: None,
+        }));
+    }
+    rows.push(tui::PanelRow {
+        text: "Try again".into(),
+        command: Some(retry.to_string()),
+    });
+    let mut panel = Panel::rows(title, rows);
+    panel.selected = panel.rows.len() - 1;
+    panel
 }
 
 /// What each tier of this session runs on right now.
@@ -250,13 +321,7 @@ pub(super) fn login(session: &Session<'_>, argument: Option<&str>) {
         .and_then(|bytes| serde_json::from_slice::<Catalogue>(&bytes).ok());
 
     let Some(catalogue) = catalogue else {
-        show(
-            session,
-            Panel::text(
-                "Connect an account",
-                "The inference gateway is not reachable.",
-            ),
-        );
+        show(session, unreachable_panel(session, "Sign in", "/login"));
         return;
     };
 

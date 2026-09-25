@@ -59,8 +59,10 @@ pub(crate) fn context_summary(
     moving: bool,
 ) -> String {
     let Some(cap) = tokens.cap else {
+        // No window known: the count alone. A `?` where a size belongs
+        // reads as something broken.
         return format!(
-            "ctx {} / window ? · {}",
+            "ctx {} · {}",
             compact_tokens(tokens.used),
             tokens.counted.as_str()
         );
@@ -167,7 +169,7 @@ mod tests {
     #[test]
     fn no_window_at_all_says_so_rather_than_drawing_a_bar() {
         let shown = meter(None, WindowSource::Unknown);
-        assert!(shown.contains("window ?"), "{shown}");
+        assert!(shown.starts_with("ctx ") && !shown.contains('?'), "{shown}");
         assert!(!shown.contains('%'), "{shown}");
     }
 }

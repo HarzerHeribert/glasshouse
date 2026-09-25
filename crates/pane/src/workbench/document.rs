@@ -241,8 +241,7 @@ impl Document {
         ui: &Workbench,
         width: usize,
     ) -> Self {
-        let mut d = Self::default();
-        d.mover = if s.streaming_text.is_some() {
+        let mover = if s.streaming_text.is_some() {
             Mover::Prose
         } else if s.streaming_tool_input.is_some() {
             Mover::Cell
@@ -256,6 +255,10 @@ impl Document {
             Mover::Preflight
         } else {
             Mover::Nothing
+        };
+        let mut d = Self {
+            mover,
+            ..Self::default()
         };
         let mut note = 0usize;
         d.card(c, s, &mut note, width);
@@ -322,7 +325,13 @@ impl Document {
             feedback = v.is_some_and(|v| v.answered);
             after_return = v.is_some_and(|v| v.returned.is_some());
             let explanation = explanation(m);
-            if !explanation.trim().is_empty() {
+            // The card's title is the cell's description, which is most
+            // often this same sentence; said above the card too, it is read
+            // twice.
+            let titled = v
+                .and_then(|v| v.description.as_deref())
+                .is_some_and(|d| d.trim() == explanation.trim());
+            if !explanation.trim().is_empty() && !titled {
                 d.wrapped(explanation, Tone::Normal, None, width, id, 2);
                 d.blank(id);
             }
@@ -401,7 +410,14 @@ impl Document {
             if open {
                 d.container = RowKind::CardBody;
                 let tab = ui.tabs.get(&cell).copied().unwrap_or(CellTab::Code);
-                d.tabstrip(cell, tab, v.and_then(|v| v.changes.as_deref()), inner, id);
+                d.tabstrip(
+                    cell,
+                    tab,
+                    v.and_then(|v| v.changes.as_deref()),
+                    v.is_some_and(|v| !v.helpers.is_empty()),
+                    inner,
+                    id,
+                );
                 if v.is_some_and(|v| v.origin != crate::abi::Origin::AuthoredCell) {
                     d.push(
                         if s.speaking().playful() {
@@ -1111,25 +1127,12 @@ impl Document {
             marks.resize(voice::FACE_ROWS, " ".into());
             (marks, 1)
         };
-        // **The affordance beside the fact.** A card that states what the
-        // session is and says nothing about how to change it makes a reader
-        // go looking; naming the control on the same line is the cheapest
-        // teaching this screen can do.
-        let model = match s.model.as_deref() {
-            Some(model) => format!("{model}   /model changes it"),
-            None => "no model chosen   /models picks one".to_string(),
-        };
-        let second = startup
-            .first()
-            .copied()
-            .map(str::to_string)
-            .unwrap_or_else(|| model.clone());
-        let project = s.project.as_deref().unwrap_or("no project");
+        // The header already names the project and the model, so the card
+        // says only what the header cannot: a greeting, and what happened
+        // at start that is worth reading.
+        let second = startup.first().copied().unwrap_or("").to_string();
         let facts = [
-            (
-                voice::greeting(s.speaking(), s.local_hour, project),
-                Tone::Strong,
-            ),
+            (voice::greeting(s.speaking(), s.local_hour), Tone::Strong),
             (
                 clip(&second, width.saturating_sub(art_width + 4)),
                 Tone::Muted,
@@ -1137,22 +1140,12 @@ impl Document {
             (
                 if startup.len() > 1 {
                     format!("+{} more · /activity", startup.len() - 1)
-                } else if s.speaking().playful() {
-                    "code · cells · little helpers · one small bird".to_string()
                 } else {
-                    "code · cells · little helpers".to_string()
+                    String::new()
                 },
                 Tone::Line,
             ),
-            (
-                // The model line, when the startup note took its place.
-                if startup.is_empty() {
-                    String::new()
-                } else {
-                    clip(&model, width.saturating_sub(art_width + 4))
-                },
-                Tone::Muted,
-            ),
+            (String::new(), Tone::Muted),
         ];
         for (glyph, (text, tone)) in art.iter().zip(facts) {
             // The instrument draws no row it has nothing to say on.
@@ -1192,25 +1185,6 @@ impl Document {
         .map(|(label, message)| (label, Action::Insert(message), false))
         .collect();
         self.chips(chips, 0);
-        self.blank(0);
-        for (key, what) in [
-            (
-                "/settings",
-                "everything about this session, applied as you choose it",
-            ),
-            ("/models", "which model answers, and at what effort"),
-            ("/diff", "what the last cell actually changed"),
-            ("/help", "every command"),
-        ] {
-            self.line(
-                vec![
-                    (format!("  {key:<11}"), Tone::Accent),
-                    (what.to_string(), Tone::Muted),
-                ],
-                Some(Action::Insert(key.to_string())),
-                0,
-            );
-        }
         self.blank(0);
         self.wrapped(
             if s.speaking().playful() {
@@ -1296,35 +1270,39 @@ impl Document {
         cell: usize,
         current: CellTab,
         changes: Option<&str>,
+        helpers: bool,
         width: usize,
         id: usize,
     ) {
+        // A tab is offered only when it has something behind it: a cell
+        // that changed nothing has no Changes tab and no diff to open, and
+        // one no helper looked at has no Helpers tab.
         let (added, removed) = changes.map_or((0, 0), count_changes);
-        let changed = if added + removed > 0 {
-            format!("Changes +{added} −{removed}")
-        } else {
-            "Changes".to_string()
-        };
-        let tabs = vec![
-            (changed, CellTab::Diff),
-            ("Cell program".to_string(), CellTab::Code),
-            ("Full output".to_string(), CellTab::Output),
-            ("Helpers".to_string(), CellTab::Helpers),
-        ];
+        let changed = added + removed > 0;
+        let mut tabs = Vec::new();
+        if changed {
+            tabs.push((format!("Changes +{added} −{removed}"), CellTab::Diff));
+        }
+        tabs.push(("Cell program".to_string(), CellTab::Code));
+        tabs.push(("Full output".to_string(), CellTab::Output));
+        if helpers {
+            tabs.push(("Helpers".to_string(), CellTab::Helpers));
+        }
+        let open_diff = if changed { OPEN_DIFF } else { "" };
         let text = tabs
             .iter()
             .map(|(label, _)| format!("⟨ {label} ⟩ "))
             .collect::<String>();
         let pad = width
             .saturating_sub(span_width(&text))
-            .saturating_sub(OPEN_DIFF.chars().count() + 1);
+            .saturating_sub(open_diff.chars().count() + 1);
         self.emit(
             Row {
-                text: format!("{text}{}{OPEN_DIFF}", " ".repeat(pad)),
+                text: format!("{text}{}{open_diff}", " ".repeat(pad)),
                 tone: Tone::Normal,
                 spans: vec![
                     (" ".repeat(pad), Tone::Normal),
-                    (OPEN_DIFF.into(), Tone::Muted),
+                    (open_diff.into(), Tone::Muted),
                 ],
                 tabs,
                 chips: Vec::new(),

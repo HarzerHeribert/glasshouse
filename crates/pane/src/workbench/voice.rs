@@ -111,18 +111,26 @@ pub const YOU: &str = "you";
 pub const PANE: &str = "pane";
 
 /// The opening's first line: who it is talking to, and when.
-pub fn greeting(voice: Voice, hour: Option<u8>, project: &str) -> String {
-    if !voice.playful() {
-        return project.to_string();
-    }
+/// The card's first line. The header already names the project, so the
+/// greeting does not.
+pub fn greeting(voice: Voice, hour: Option<u8>) -> String {
     let time = match hour {
-        Some(5..=11) => "Morning",
-        Some(12..=17) => "Afternoon",
-        Some(18..=22) => "Evening",
-        Some(_) => "Late one",
-        None => "Hello",
+        Some(5..=11) => "morning",
+        Some(12..=17) => "afternoon",
+        Some(18..=22) => "evening",
+        Some(_) => "late one",
+        None => "",
     };
-    format!("{time}! Back in the nest: {project}.")
+    match (voice.playful(), time) {
+        (true, "") => "Hello! Back in the nest.".into(),
+        (true, time) => format!(
+            "{}{}! Back in the nest.",
+            time[..1].to_uppercase(),
+            &time[1..]
+        ),
+        (false, "" | "late one") => "What should we build?".into(),
+        (false, time) => format!("Good {time}. What should we build?"),
+    }
 }
 /// The line under the greeting on an empty conversation.
 pub fn invitation(voice: Voice) -> &'static str {
@@ -523,10 +531,13 @@ mod tests {
         }
         assert!(status(Voice::Playful, Activity::Executing, Some(7), None, false).contains("007"));
         assert!(status(Voice::Plain, Activity::Streaming, Some(4), None, true).contains("004"));
-        assert!(greeting(Voice::Plain, Some(9), "nest").contains("nest"));
-        assert!(!greeting(Voice::Plain, Some(9), "nest").contains("Morning"));
-        assert!(greeting(Voice::Playful, Some(9), "nest").starts_with("Morning"));
-        assert!(greeting(Voice::Playful, None, "nest").starts_with("Hello"));
+        assert_eq!(
+            greeting(Voice::Plain, Some(14)),
+            "Good afternoon. What should we build?"
+        );
+        assert_eq!(greeting(Voice::Plain, None), "What should we build?");
+        assert!(greeting(Voice::Playful, Some(9)).starts_with("Morning"));
+        assert!(greeting(Voice::Playful, None).starts_with("Hello"));
     }
 
     #[test]

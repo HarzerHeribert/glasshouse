@@ -112,6 +112,38 @@ impl Gateway {
         }
     }
 
+    /// Why the gateway gave no answer, in one sentence a person can act on:
+    /// not installed, not startable, or ran and stopped with its own words.
+    pub(crate) fn why_unreachable(&self) -> String {
+        let Some(mut command) = self.control_command(&["entitlements", "--json"]) else {
+            return "`inference-gateway` is not installed, or not on your PATH.".into();
+        };
+        // Its name, not its path: a path into a build or temp directory is
+        // noise on a sheet meant to be read.
+        let program = Path::new(command.get_program()).file_name().map_or_else(
+            || "inference-gateway".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match command.output() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("`{program}` is not installed, or not on your PATH.")
+            }
+            Err(error) => format!("`{program}` could not be started: {error}."),
+            Ok(output) if !output.status.success() => {
+                let said = String::from_utf8_lossy(&output.stderr);
+                match said.lines().map(str::trim).find(|line| !line.is_empty()) {
+                    Some(line) => format!("It ran and stopped: {line}"),
+                    None => "It ran and stopped without saying why.".into(),
+                }
+            }
+            Ok(_) => "It answered, but not with a list of accounts.".into(),
+        }
+    }
+
     /// Spawns `inference-gateway serve` and waits for its one ready line.
     ///
     /// **The read is blocking and on the caller's thread, deliberately.** The

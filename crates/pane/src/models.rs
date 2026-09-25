@@ -235,7 +235,7 @@ impl WindowSource {
 /// `--context-window-tokens`; then what a provider was watched enforcing on
 /// this route; then what the subscription account's provider lists for its
 /// plan; then what a catalogue published for the model; then nothing,
-/// which is printed as `window ?` rather than filled in.
+/// which is printed as the count alone rather than filled in.
 ///
 /// The person's own figure wins because they may be running behind a proxy
 /// that narrows it, and no other source can know that. An observation beats a

@@ -6932,8 +6932,10 @@ fn a_hosted_session_with_no_gateway_anywhere_says_it_is_not_reachable() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("The inference gateway is not reachable."),
-        "no gateway resolves anywhere, and the panel must say so:\n{stdout}"
+        stdout.contains("did not answer")
+            && stdout.contains("not installed, or not on your PATH")
+            && stdout.contains("Try again"),
+        "no gateway resolves anywhere, and the sheet must say why and what next:\n{stdout}"
     );
 }
 

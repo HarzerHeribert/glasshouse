@@ -612,7 +612,10 @@ fn statusline_separates_request_context_from_cumulative_spend() {
         ..notebook
     };
     let shown = text(&draw(200, 30, &state(), &conversation(), &unknown));
-    assert!(shown.contains("ctx 44.6k / window ?"), "{shown}");
+    assert!(
+        shown.contains("ctx 44.6k ·") && !shown.contains("window ?"),
+        "{shown}"
+    );
     assert!(!shown.contains("44.6k/400.0k"), "{shown}");
 }
 
