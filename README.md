@@ -375,6 +375,12 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 </details>
 <!-- progress:end -->
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md)
+says how, and what a contribution grants under this licence. Report a security
+problem privately ([SECURITY.md](SECURITY.md)).
+
 ## License
 
 Copyright (c) 2026 HarzerHeribert. **All rights reserved** — see

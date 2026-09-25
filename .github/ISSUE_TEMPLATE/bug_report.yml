@@ -1,0 +1,58 @@
+name: Bug report
+description: Something does not work the way it should.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Never paste an API key, token or login file**, not even a revoked one.
+        Security problems go to a [private advisory](https://github.com/HarzerHeribert/glasshouse/security/advisories/new) instead.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Pane (the terminal app)
+        - Sign-in, keys or models
+        - Inference gateway
+        - Glasshouse
+        - Install or update
+        - Website or docs
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Exact messages or a screenshot help most.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can it be reproduced?
+      placeholder: |
+        1. pane
+        2. /login …
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `pane --version`, and how you installed (install script, pane update, from source).
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and terminal
+      placeholder: macOS 15 · Ghostty
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything printed or logged around the problem. Check it for keys first.
+      render: text

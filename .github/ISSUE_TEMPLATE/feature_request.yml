@@ -1,0 +1,23 @@
+name: Feature request
+description: A concrete improvement you can say in a sentence. Open ideas fit better in Discussions.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: What you would like to happen. Rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else?
+      description: Workarounds you tried, other tools that do it well, screenshots.
