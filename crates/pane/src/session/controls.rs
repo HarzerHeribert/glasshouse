@@ -1251,14 +1251,6 @@ pub(super) fn command(
         "effort" => {
             if let Some(value) = argument {
                 if let Some(effort) = wire::Effort::parse(value) {
-                    if !session.model.borrow().contains("claude")
-                        && matches!(effort, wire::Effort::Xhigh | wire::Effort::Max)
-                    {
-                        session_println!(
-                            "This route supports default|low|medium|high; xhigh/max need a compatible Claude model."
-                        );
-                        return true;
-                    }
                     session.effort.set(effort);
                     if let Some(ui) = session.ui {
                         ui.effort(effort);

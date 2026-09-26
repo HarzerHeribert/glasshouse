@@ -868,7 +868,7 @@ fn run(mut args: SessionArgs) -> Result<(), String> {
     // own shutdown, and a job of that task must not outlive the session
     // either.
     bg::shutdown(&session_id);
-    session_println!("{}", resume::resume_hint(&session_id));
+    ui::farewell(resume::resume_hint(&session_id));
 
     glasshouse::emit_lifecycle(
         &glasshouse,

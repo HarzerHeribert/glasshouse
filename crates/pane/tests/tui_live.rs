@@ -2273,3 +2273,34 @@ fn the_instrument_moves_where_attention_is_and_the_check_lands_behind_the_answer
 fn the_bird_look_walks_the_same_turn() {
     walk_a_turn(true);
 }
+
+/// **Every effort level is open on any model**: the word rides the request
+/// and the gateway carries it, so `xhigh` and `max` are not refused for a
+/// model that is not Claude -- a refusal there left the strip's effort chip
+/// stuck and printing one refusal per click.
+#[test]
+fn xhigh_and_max_are_taken_on_a_model_that_is_not_claude() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    app.send(b"/effort xhigh\r");
+    app.contains("Effort: xhigh");
+    app.send(b"/effort max\r");
+    app.contains("Effort: max");
+}
+
+/// **Leaving with Ctrl-D says how to come back**, after the screen is gone:
+/// the line used to go to the stopped screen and was lost.
+#[test]
+fn ctrl_d_leaves_the_resume_line_in_the_terminal() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    app.send(b"\x04");
+    assert_eq!(app.exited(), 0);
+    assert!(!app.screen.screen().alternate_screen());
+    let bytes = String::from_utf8_lossy(&app.bytes).into_owned();
+    let after = bytes.rsplit("\x1b[?1049l").next().unwrap_or_default();
+    assert!(
+        after.contains("resume it with:  pane --resume"),
+        "no resume line after the screen closed:\n{after}"
+    );
+}

@@ -483,12 +483,30 @@ pub(super) fn test_publisher() -> (Publisher, mpsc::Receiver<Update>) {
     (Publisher { updates }, receiver)
 }
 
+/// The line a live session leaves in the terminal once its screen is gone.
+static FAREWELL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Prints `line` where the person will see it after the session: at once
+/// without a live screen, and otherwise once [`LiveUi`] has restored the
+/// terminal -- sent to the screen it would land on the alternate screen, or
+/// on a screen that already stopped reading, and be lost either way.
+pub(super) fn farewell(line: String) {
+    if OUTPUT.with(|slot| slot.borrow().is_some()) {
+        *super::lock(&FAREWELL) = Some(line);
+    } else {
+        output(line);
+    }
+}
+
 impl Drop for LiveUi {
     fn drop(&mut self) {
         OUTPUT.with(|slot| *slot.borrow_mut() = None);
         let _ = self.updates.send(Update::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        if let Some(line) = super::lock(&FAREWELL).take() {
+            eprintln!("{line}");
         }
     }
 }
