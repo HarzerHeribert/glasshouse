@@ -485,6 +485,13 @@ pub(super) fn test_publisher() -> (Publisher, mpsc::Receiver<Update>) {
 
 /// The line a live session leaves in the terminal once its screen is gone.
 static FAREWELL: Mutex<Option<String>> = Mutex::new(None);
+/// What ended the live session, said with the farewell: a session that
+/// ends the moment it starts must say what ended it.
+static ENDED_BY: Mutex<Option<&'static str>> = Mutex::new(None);
+
+fn ended_by(reason: &'static str) {
+    *super::lock(&ENDED_BY) = Some(reason);
+}
 
 /// Prints `line` where the person will see it after the session: at once
 /// without a live screen, and otherwise once [`LiveUi`] has restored the
@@ -506,6 +513,9 @@ impl Drop for LiveUi {
             let _ = thread.join();
         }
         if let Some(line) = super::lock(&FAREWELL).take() {
+            if let Some(reason) = super::lock(&ENDED_BY).take() {
+                eprintln!("pane: ended by {reason}");
+            }
             eprintln!("{line}");
         }
     }
@@ -1760,6 +1770,7 @@ fn run(
                             continue;
                         }
                         KeyCode::Char('d') if !busy && editor.text.is_empty() => {
+                            ended_by("Ctrl-D on an empty prompt");
                             let _ = answers.inputs.send(Input::Exit);
                             return Ok(());
                         }
@@ -1962,6 +1973,7 @@ fn run(
                     state.scrollback = 0;
                     state.notice = None;
                     if text.trim() == "/exit" {
+                        ended_by("/exit");
                         let _ = answers.inputs.send(Input::Exit);
                         return Ok(());
                     }

@@ -70,6 +70,20 @@ impl App {
         flags: &[&str],
         seed: &dyn Fn(&std::path::Path),
     ) -> Self {
+        Self::start_in(base, bare, helper_model, flags, seed, &[])
+    }
+
+    /// The same start in a terminal that says `colours` of itself. Every
+    /// other start is a terminal that claims no true colour, whatever the
+    /// developer's own says, so the theme nobody chose is the same for all.
+    fn start_in(
+        base: &str,
+        bare: bool,
+        helper_model: Option<&str>,
+        flags: &[&str],
+        seed: &dyn Fn(&std::path::Path),
+        colours: &[(&str, &str)],
+    ) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "pane-live-{}-{}",
@@ -121,6 +135,10 @@ impl App {
             command.env("INFERENCE_GATEWAY_BIN", root.join("no-gateway"));
         }
         command.args(flags.iter().copied());
+        command.env_remove("COLORTERM");
+        for (name, value) in colours {
+            command.env(name, value);
+        }
         command.env("ANTHROPIC_BASE_URL", base);
         // Every live session gets an isolated user-settings root. Besides
         // keeping these tests away from the developer's real HOME, this
@@ -2303,4 +2321,27 @@ fn ctrl_d_leaves_the_resume_line_in_the_terminal() {
         after.contains("resume it with:  pane --resume"),
         "no resume line after the screen closed:\n{after}"
     );
+    assert!(
+        after.contains("pane: ended by Ctrl-D on an empty prompt"),
+        "the exit did not say what ended it:\n{after}"
+    );
+}
+
+/// **A true-colour terminal starts with a parrot** when no theme was chosen:
+/// the plumage is the palette and the bird perches on the card in colour.
+#[test]
+fn a_true_colour_terminal_starts_with_a_parrot_perched_on_the_card() {
+    let mut app = App::start_in(
+        "http://127.0.0.1:1",
+        false,
+        None,
+        &[],
+        &|_| {},
+        &[("COLORTERM", "truecolor")],
+    );
+    app.contains("fixture-model");
+    app.wait("the parrot's half-block sprite on the card", |screen| {
+        let text = screen.contents();
+        text.contains('▀') || text.contains('▄')
+    });
 }

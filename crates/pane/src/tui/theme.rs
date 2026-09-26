@@ -22,6 +22,16 @@ pub enum Theme {
     Bird(crate::workbench::plumage::Bird),
 }
 impl Theme {
+    /// The theme nobody chose: a parrot wherever the terminal can draw its
+    /// plumage in colour, neon where it cannot.
+    #[must_use]
+    pub fn natural() -> Self {
+        if crate::workbench::plumage::truecolor() {
+            Self::Bird(Bird::Amazon)
+        } else {
+            Self::default()
+        }
+    }
     pub const ALL: [Self; 16] = [
         Self::Neon,
         Self::Amber,

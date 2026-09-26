@@ -20,7 +20,7 @@ pub(crate) fn presentation(state: &mut tui::ScreenState, values: &toml::Value) {
     let word = |key| value(values, key).and_then(toml::Value::as_str);
     state.theme = word("ui.theme")
         .and_then(tui::Theme::parse)
-        .unwrap_or_default();
+        .unwrap_or_else(tui::Theme::natural);
     state.status_line = match word("ui.statusline") {
         Some("compact") => tui::StatusLine::Compact,
         Some("hide" | "hidden") => tui::StatusLine::Hidden,

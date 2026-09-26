@@ -260,7 +260,7 @@ fn global_defaults_are_overridden_by_the_project_with_visible_origins() {
     assert_eq!(loaded.origins["ui.theme"], "built-in");
     assert_eq!(
         string(&loaded.values, "ui.theme").as_deref(),
-        Some(pane::tui::Theme::default().name())
+        Some(pane::tui::Theme::natural().name())
     );
     assert_eq!(
         string(&loaded.values, "ui.statusline").as_deref(),

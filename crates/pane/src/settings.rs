@@ -1284,7 +1284,7 @@ fn defaults() -> Vec<(&'static str, toml::Value)> {
     let count = |value: u64| toml::Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
     let word = |value: &str| toml::Value::String(value.to_string());
     vec![
-        ("ui.theme", word(crate::tui::Theme::default().name())),
+        ("ui.theme", word(crate::tui::Theme::natural().name())),
         ("ui.statusline", word("full")),
         ("ui.sidebar", word("auto")),
         ("ui.reduced_motion", toml::Value::Boolean(false)),
